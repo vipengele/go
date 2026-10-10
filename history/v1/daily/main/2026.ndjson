@@ -1,0 +1,1 @@
+{"day":"2026-10-10","branch":"main","at":"2026-10-10T21:22:13Z","commit":"d2232b4d88c9f0faababba17af1708b679de5409","components":{"cli":{"findings":{"gosec":0,"govulncheck":0,"licence":0}}},"root_findings":{"gitleaks":0,"semgrep":0},"entries":1}
