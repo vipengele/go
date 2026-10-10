@@ -15,3 +15,7 @@ components:
     dir: source/cli
     runner: go-test
     args: ["-race", "./..."]
+  - name: update
+    dir: source/update
+    runner: go-test
+    args: ["-race", "./..."]
