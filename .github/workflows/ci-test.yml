@@ -1,0 +1,62 @@
+# ci-test — this file is yours.
+#
+# gt created it once and will never modify or delete it again. Put this
+# repository's test suite here; the orchestration around it stays gt's.
+#
+# lydite gates coverage on its own: it runs each `.lydite/components.yml`
+# component's suite itself, instrumented, rather than reading a report this
+# stage produced. This stage exists to be the required correctness gate —
+# every affected project's suite has to pass — independent of that gate.
+#
+# Each project under source/ is its own Go module (ADR-0001), so the suite runs
+# once per affected project, in that project's directory, with `GOWORK=off` so it
+# resolves siblings at the released versions its go.mod names (ADR-0002).
+name: ci-test
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  GOWORK: "off"
+
+jobs:
+  detect:
+    name: detect
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.projects.outputs.projects }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: projects
+        uses: ./.github/actions/changed-projects
+
+  test:
+    name: test (${{ matrix.project }})
+    needs: detect
+    # An empty matrix is a workflow error, so a run with no affected project
+    # skips the job instead.
+    if: needs.detect.outputs.projects != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.detect.outputs.projects) }}
+    defaults:
+      run:
+        working-directory: source/${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/${{ matrix.project }}/go.mod
+          cache-dependency-path: source/${{ matrix.project }}/go.sum
+      - run: go test -race -shuffle=on ./...

@@ -1,0 +1,13 @@
+platforms: [claude, codex]
+memory:
+  root: .memory
+  agent: claudecode
+stacks:
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/default.yaml
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/plannotator.yaml
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/serena.yaml
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/rtk.yaml
+
+# Repo definitions live under the default ./agentic root and are picked up by
+# convention scanning.
+context: ./agentic/vipengele-go.md

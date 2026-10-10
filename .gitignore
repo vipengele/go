@@ -1,0 +1,30 @@
+# Go build and test output
+*.exe
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+/dist/
+/bin/
+
+# Go workspace file local to one checkout
+go.work.sum
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS
+.idea/
+.vscode/
+.DS_Store
+
+# Agentic toolkit generated config
+/.claude/
+/CLAUDE.md
+/.mcp.json
+/.codex/
+/AGENTS.md
+/.agents/

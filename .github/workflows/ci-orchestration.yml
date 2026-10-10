@@ -1,0 +1,242 @@
+# Managed by gt — edit .gt-repo.yaml, then run `gt repo sync`.
+#
+# gt owns the orchestration; the ci-* stages it calls are yours. Because every
+# stage is a job in this one workflow, `ci-gate` aggregates them with
+# `needs:` rather than polling the checks API — no timeout, and no way to
+# confuse "absent" with "not started yet".
+#
+# Branch protection requires exactly one check: "ci-gate".
+#
+# Named "gt CI" rather than "CI" for the same reason the file is not ci.yml:
+# every repository already has a workflow called CI, and the stages move into
+# this one a few at a time, so the two coexist for a long while. Two workflows
+# sharing a display name make the Actions list ambiguous and every check read
+# as "CI / …" from one of two places. The `gt ` prefix matches the reusable
+# workflows this calls — gt attest, gt lydite, gt sync.
+name: gt CI
+
+on:
+  # No `branches:` filter: a PR stacked onto a feature branch must run CI too.
+  pull_request:
+    # `edited` is load-bearing: without it, correcting a rejected title leaves
+    # the check red until an unrelated push.
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  # On the default branch an already-validated tree skips every stage.
+  push:
+    branches: [main]
+  # Unconditional, and load-bearing. A queued pull request reports its required
+  # check from this event and no other, so a repository whose orchestrator lacks
+  # it would sit in the queue forever waiting on a check nothing can report —
+  # and the governance stage that would have said so is inside that same check.
+  #
+  # Rendered even where there is no queue — most repositories cannot have one,
+  # since GitHub offers them only on organization-owned public repositories —
+  # so the file is ready before the rule that needs it. `gt repo settings apply`
+  # withholds the queue rule until this trigger is on the default branch, which
+  # is what makes that ordering a guarantee rather than a habit. An unused
+  # trigger costs nothing.
+  merge_group:
+  workflow_dispatch:
+
+# Superseded pushes to the same PR are cancelled; runs on the default branch and
+# in a merge queue are not. Cancelling a PR run costs nothing — a newer commit
+# is about to be validated anyway — whereas cancelling a default-branch run
+# discards the attestation it was about to record, and cancelling a queued
+# merge would drop it from the queue.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Reports whether this exact tree already passed the gate, so a push that
+  # merely squashed an already-validated PR does not run everything again.
+  attest:
+    uses: pedromvgomes/gt/.github/workflows/reusable-attest.yml@v2
+    # A called workflow may only narrow these. Granting less than
+    # reusable-attest declares fails the run at parse time, before any job
+    # starts — so ci-gate never reports and every PR blocks.
+    #
+    # pull-requests: write is for the note attest leaves when it skips the
+    # pipeline. A skipped job is indistinguishable from a broken one at a
+    # glance, so the reason is said out loud on the pull request and withdrawn
+    # when it stops being true.
+    permissions:
+      contents: read
+      statuses: read
+      pull-requests: write
+
+  preflight:
+    needs: [attest]
+    if: needs.attest.outputs.validated != 'true'
+    uses: ./.github/workflows/ci-preflight.yml
+    # `inherit` rather than an enumerated `secrets:` block, and semgrep's
+    # secrets-inherit rule is answered rather than silenced: gt renders this
+    # orchestrator for every repository and cannot know their secret names, so
+    # there is no list to write. The callee is this same repository's own
+    # workflow, so no secret crosses a trust boundary that `inherit` did not
+    # already sit inside.
+    # nosemgrep: yaml.github-actions.security.secrets-inherit.secrets-inherit
+    secrets: inherit
+    # packages: read because several repositories resolve private @scope
+    # dependencies from GitHub Packages during install, and a called workflow
+    # can only narrow what the caller grants — a stage cannot ask for it back.
+    # Read-only, so granting it where it is unused costs nothing. A stage
+    # needing more says so in pipeline.ci.stage_permissions.
+    permissions:
+      contents: read
+      packages: read
+
+  build:
+    needs: [attest, preflight]
+    if: needs.attest.outputs.validated != 'true' && needs.preflight.outputs.run-build != 'false'
+    uses: ./.github/workflows/ci-build.yml
+    # `inherit` rather than an enumerated `secrets:` block, and semgrep's
+    # secrets-inherit rule is answered rather than silenced: gt renders this
+    # orchestrator for every repository and cannot know their secret names, so
+    # there is no list to write. The callee is this same repository's own
+    # workflow, so no secret crosses a trust boundary that `inherit` did not
+    # already sit inside.
+    # nosemgrep: yaml.github-actions.security.secrets-inherit.secrets-inherit
+    secrets: inherit
+    # packages: read because several repositories resolve private @scope
+    # dependencies from GitHub Packages during install, and a called workflow
+    # can only narrow what the caller grants — a stage cannot ask for it back.
+    # Read-only, so granting it where it is unused costs nothing. A stage
+    # needing more says so in pipeline.ci.stage_permissions.
+    permissions:
+      contents: read
+      packages: read
+
+  test:
+    needs: [attest, build, preflight]
+    if: needs.attest.outputs.validated != 'true' && needs.preflight.outputs.run-test != 'false'
+    uses: ./.github/workflows/ci-test.yml
+    # `inherit` rather than an enumerated `secrets:` block, and semgrep's
+    # secrets-inherit rule is answered rather than silenced: gt renders this
+    # orchestrator for every repository and cannot know their secret names, so
+    # there is no list to write. The callee is this same repository's own
+    # workflow, so no secret crosses a trust boundary that `inherit` did not
+    # already sit inside.
+    # nosemgrep: yaml.github-actions.security.secrets-inherit.secrets-inherit
+    secrets: inherit
+    # packages: read because several repositories resolve private @scope
+    # dependencies from GitHub Packages during install, and a called workflow
+    # can only narrow what the caller grants — a stage cannot ask for it back.
+    # Read-only, so granting it where it is unused costs nothing. A stage
+    # needing more says so in pipeline.ci.stage_permissions.
+    permissions:
+      contents: read
+      packages: read
+
+  conventional-commits:
+    needs: [attest]
+    if: needs.attest.outputs.validated != 'true'
+    uses: pedromvgomes/gt/.github/workflows/reusable-conventional-commits.yml@v2
+    permissions:
+      contents: read
+      pull-requests: read
+
+  governance:
+    needs: [attest]
+    if: needs.attest.outputs.validated != 'true'
+    uses: pedromvgomes/gt/.github/workflows/reusable-governance.yml@v2
+
+  lydite:
+    needs: [attest]
+    # No skip guard, unlike the stages above: this job is the only publisher
+    # of the required lydite/referral status, and that status has to be fresh
+    # for whatever SHA branch protection is evaluating. reusable-attest.yml
+    # walks a merge_group ref back to its queued PR's head, so an
+    # already-validated PR tree can report `validated` true on the queue's own
+    # commit too — skipping on that would leave lydite/referral unpublished
+    # for a SHA no earlier run ever reported it under, stalling the queue
+    # entry on a check nothing can report. `!cancelled()` alone: still runs
+    # when a dependency fails, since a real referral verdict on a failing tree
+    # is more useful than none.
+    if: "!cancelled()"
+    uses: pedromvgomes/gt/.github/workflows/reusable-lydite.yml@v2
+    permissions:
+      contents: read
+      statuses: write
+      id-token: write
+      pull-requests: write
+
+  # Records the coverage baseline the pull-request gate compares against.
+  # Without it the gate has nothing to measure a PR's coverage against. Gated
+  # on coverage, not only on lydite being enabled: a repo with nothing lydite
+  # can measure has no gate this would feed, and would otherwise hold
+  # contents: write to record a baseline for a comparison that never runs.
+  lydite-baseline:
+    # attest, not lydite: a referral verdict on the merged tree has no bearing
+    # on what the baseline should say, and gating the record on it would leave
+    # the default branch without one exactly when a referral is outstanding.
+    needs: [attest]
+    # `push:` above is filtered to the default branch, and no other trigger of
+    # this workflow reports as a push — so this is "on the default branch, and
+    # only there" without a second condition on github.ref to keep in step.
+    if: github.event_name == 'push'
+    uses: pedromvgomes/gt/.github/workflows/reusable-lydite-baseline.yml@v2
+    # Deliberately absent from ci-gate's needs. A push to the default
+    # branch has nothing left to merge, so the gate there is informational; a
+    # baseline that failed to record is worth a red job, not a red gate on a
+    # commit already on main.
+    permissions:
+      contents: write
+
+  # The single required check. `if: always()` so it still reports when a stage
+  # was skipped, and a skipped stage passes — that is the point of preflight.
+  ci-gate:
+    name: ci-gate
+    needs: [attest, preflight, build, test, conventional-commits, governance, lydite]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Verify every stage succeeded or was legitimately skipped
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          set -euo pipefail
+          echo "stage results: ${RESULTS}"
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "::error::a required stage failed"
+            exit 1
+          fi
+          if [[ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "::error::a required stage was cancelled"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Records the tree this run validated, so a later push or tag can prove
+      # the same content already passed rather than re-running to find out.
+      - name: Attest the validated tree
+        # Read-only GITHUB_TOKEN (fork PRs, and every Dependabot event) cannot
+        # POST a status. Losing the attestation only costs a re-run on the
+        # default branch; failing the gate would block the PR entirely.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # For a pull_request event HEAD is refs/pull/N/merge, so this is the
+          # tree of the merged result — which is exactly what a squash merge
+          # puts on the default branch.
+          tree=$(git rev-parse "HEAD^{tree}")
+          # target_url so a later run can link back to the one that did the
+          # work, rather than asserting an earlier run exists somewhere.
+          gh api "repos/${REPO}/statuses/${SHA}" \
+            -f state=success \
+            -f context=gt/validated-tree \
+            -f description="$tree" \
+            -f target_url="${{ github.server_url }}/${REPO}/actions/runs/${{ github.run_id }}" >/dev/null
+          echo "attested tree ${tree} on ${SHA}"

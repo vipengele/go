@@ -1,0 +1,9 @@
+version: 2
+sources:
+- url: github.com/pedromvgomes/agentic-toolkit.git
+  ref: main
+  sha: 209148661bfe01c6c62d4d750af3ecdaccc14a8b
+- url: github.com/anthropics/skills.git
+  ref: main
+  sha: dbd4588f9e1033efb41dad4bef2f7947c8993d44
+config_digest: sha256:38f6619e79d51cd7b82a5fc525d4e3c21b59b216e7ca53f63ccccd02e902ab55

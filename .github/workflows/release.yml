@@ -1,0 +1,164 @@
+# release — validates and announces one project's release.
+#
+# A human pushes the tag; nothing else starts this. The tag is the decision and
+# the only input: `source/<project>/vX.Y.Z` releases the Go module under
+# `source/<project>` at that version, and no other project (ADR-0001). The tag
+# is the publication — the Go module proxy serves a module from the tag itself,
+# so there is no registry to upload to and no credential in this repository.
+#
+# Three jobs, and the seams between them are safety properties. `tag` reads the
+# repository and decides whether this is a release at all. `test` runs the
+# module's suite exactly as a consumer of the tag would build it. `announce`
+# asks the module proxy to fetch the version, which both makes it immediately
+# resolvable and proves the tag is a valid module version, then creates the
+# GitHub Release.
+name: release
+
+on:
+  push:
+    # A tag filter is a glob, not a regex: it is the coarse gate. The `tag` job
+    # below applies the real pattern and fails a tag that only looks like a
+    # release.
+    tags: ['source/*/v[0-9]*.[0-9]*.[0-9]*']
+
+permissions:
+  contents: read
+
+# One release at a time, and never cancel one in flight: a cancelled run leaves
+# a version tagged but unannounced.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  GOWORK: "off"
+
+jobs:
+  tag:
+    name: tag
+    runs-on: ubuntu-latest
+    outputs:
+      project: ${{ steps.parse.outputs.project }}
+      version: ${{ steps.parse.outputs.version }}
+      module: ${{ steps.parse.outputs.module }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Everything that can fail without leaving anything half-released fails
+      # here: a tag that is not a project version, a project that does not
+      # exist, a tag off the default branch, and missing release notes. The
+      # GitHub Release body is a file a human wrote and reviewed.
+      - name: The tag is a project version and carries its notes
+        id: parse
+        run: |
+          set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^source/([a-z0-9-]+)/(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::${GITHUB_REF_NAME} is not source/<project>/vX.Y.Z"
+            exit 1
+          fi
+          project="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+
+          if [[ ! -f "source/${project}/go.mod" ]]; then
+            echo "::error::source/${project}/go.mod does not exist"
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} does not point at a commit on main"
+            exit 1
+          fi
+
+          notes="docs/release-notes/${project}/${version}.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "::error::$notes is missing — write the notes for ${GITHUB_REF_NAME} before tagging"
+            exit 1
+          fi
+
+          echo "project=${project}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "module=github.com/${GITHUB_REPOSITORY}/source/${project}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/${{ steps.parse.outputs.project }}/go.mod
+          cache: false
+
+      - uses: ./.github/actions/verify-sibling-deps
+        with:
+          expect-tag: ${{ github.ref_name }}
+
+  test:
+    name: test
+    needs: tag
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: source/${{ needs.tag.outputs.project }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/${{ needs.tag.outputs.project }}/go.mod
+          cache: false
+      - run: go vet ./...
+      - run: go test -race -shuffle=on ./...
+
+  announce:
+    name: announce
+    needs: [tag, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      # Asking the proxy for the version makes it fetch the tag now, so the
+      # first consumer does not wait for it, and proves the module path and the
+      # tag agree. The proxy can lag the push by a moment, hence the retries.
+      - name: The module proxy serves the version
+        env:
+          MODULE: ${{ needs.tag.outputs.module }}
+          VERSION: ${{ needs.tag.outputs.version }}
+          GOPROXY: https://proxy.golang.org
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if go list -m "${MODULE}@${VERSION}"; then exit 0; fi
+            echo "attempt ${attempt} failed; retrying in 10s"
+            sleep 10
+          done
+          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy"
+          exit 1
+
+      # A release is idempotent: re-running the workflow after a partial run
+      # finishes the announcement instead of failing on what already exists.
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT: ${{ needs.tag.outputs.project }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists"
+            exit 0
+          fi
+          prerelease=()
+          if [[ "$VERSION" == *-* || "$VERSION" == v0.* ]]; then prerelease=(--prerelease); fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --title "${PROJECT} ${VERSION}" \
+            --notes-file "docs/release-notes/${PROJECT}/${VERSION}.md" \
+            "${prerelease[@]}"

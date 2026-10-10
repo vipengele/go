@@ -1,0 +1,71 @@
+# verify-sibling-deps — every dependency between projects is a released version.
+#
+# A project that requires another project's module (ADR-0002) must name a
+# version the Go module proxy can serve: a tagged release, never a pseudo-version
+# and never a `replace` that points at a sibling directory. A `replace` is a
+# local-development device that go.work provides without touching go.mod, and
+# one that reaches a published go.mod makes every consumer of the module fail to
+# build.
+#
+# With `expect-tag` set (the release workflow), the check also confirms that the
+# tag being released matches the module it names, and that each sibling version
+# it requires has a tag in this repository.
+name: verify-sibling-deps
+description: Fail when a project requires a sibling by anything but a released version.
+
+inputs:
+  expect-tag:
+    description: 'The tag being released, e.g. source/cli/v0.2.0. Empty outside a release.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        EXPECT_TAG: ${{ inputs.expect-tag }}
+      run: |
+        set -euo pipefail
+        prefix="github.com/vipengele/go/source/"
+        status=0
+
+        shopt -s nullglob
+        for gomod in source/*/go.mod; do
+          project="$(cut -d/ -f2 <<< "$gomod")"
+          json="$(go mod edit -json "$gomod")"
+
+          want="${prefix}${project}"
+          have="$(jq -r .Module.Path <<< "$json")"
+          if [[ "$have" != "$want" ]]; then
+            echo "::error file=${gomod}::module path is ${have}, expected ${want}"
+            status=1
+          fi
+
+          while read -r path target; do
+            echo "::error file=${gomod}::replace of ${path} -> ${target}: a sibling is reached through go.work, not a replace"
+            status=1
+          done < <(jq -r '(.Replace // [])[] | select(.Old.Path | startswith("'"$prefix"'")) | "\(.Old.Path) \(.New.Path)"' <<< "$json")
+
+          while read -r path version; do
+            sibling="${path#"$prefix"}"
+            if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-.*[0-9]{14}-[0-9a-f]{12}$ ]]; then
+              echo "::error file=${gomod}::${path} is required at the pseudo-version ${version}; require a tagged release"
+              status=1
+            elif ! git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/source/${sibling}/${version}" >/dev/null 2>&1; then
+              echo "::error file=${gomod}::${path} ${version} has no tag source/${sibling}/${version} in ${GITHUB_REPOSITORY}"
+              status=1
+            fi
+          done < <(jq -r '(.Require // [])[] | select(.Path | startswith("'"$prefix"'")) | "\(.Path) \(.Version)"' <<< "$json")
+        done
+
+        if [[ -n "$EXPECT_TAG" ]]; then
+          if [[ ! "$EXPECT_TAG" =~ ^source/([a-z0-9-]+)/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::${EXPECT_TAG} is not source/<project>/vX.Y.Z"
+            status=1
+          elif [[ ! -f "source/${BASH_REMATCH[1]}/go.mod" ]]; then
+            echo "::error::${EXPECT_TAG} names a project with no source/${BASH_REMATCH[1]}/go.mod"
+            status=1
+          fi
+        fi
+        exit "$status"
