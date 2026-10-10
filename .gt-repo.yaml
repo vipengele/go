@@ -21,6 +21,8 @@ dependabot:
     directory: /
   - ecosystem: gomod
     directory: /source/cli
+  - ecosystem: gomod
+    directory: /source/update
 pipeline:
   ci:
     stages:
