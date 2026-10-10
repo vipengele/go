@@ -104,6 +104,14 @@ stand as written for this decision.
   what it describes: no project exists only to hold identity. `Identity` goes into `cli/spec`, a
   project that exists for the CLI contracts as a whole, and `commons` exists for generic code and
   holds no identity. Neither is a module whose release is paid for by identity alone.
+- **The rule `all-code-lives-under-source`.** The repository root also holds `tools/`: repository
+  tooling that is not a Go project. It has no `go.mod`, is not released by tag and is deployed from
+  CI. Go code that builds, tests or ships as a project lives under `source/`; `tools/` is the one
+  other root directory, for tooling that is not a Go project.
+- **The module-path formula in rules and the glossary.** `agentic/rules/module-path-matches-its-directory.md`,
+  `agentic/rules/a-sibling-is-required-at-a-released-version.md` and the Project, Package and
+  Prefixed tag entries of `CONTEXT.md` give a module path as `github.com/vipengele/go/source/<project>`.
+  Where they do, this ADR governs: the module path is `vipengele.org/go/<path>`.
 
 ## Considered options
 
