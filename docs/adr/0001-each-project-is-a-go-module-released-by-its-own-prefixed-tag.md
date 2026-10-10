@@ -1,5 +1,8 @@
 # Each project is a Go module, released by its own path-prefixed tag
 
+Status: amended by ADR-0004, which replaces the rule that a module path equals its directory and
+the rule that a project sits one level under `source/`.
+
 The repo is `vipengele/go`: the Go libraries of the vipengele platform. Inside it, each **project**
 lives in `source/<project>/` as its own Go module — its own `go.mod`, `go.sum`, linter config and
 tests. The module path is the repository path plus the directory:

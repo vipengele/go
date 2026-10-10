@@ -1,5 +1,8 @@
 # The library is three projects: `cli`, `update` and `daemon`
 
+Status: amended by ADR-0004, which replaces the project inventory and narrows the rejection of a
+shared project.
+
 The library serves two shapes of tool: one-shot command-line tools and long-running daemons.
 Self-update serves both. Each project is a module released alone (ADR-0001), so the split decides
 which dependencies a consumer inherits. The library is three projects:
