@@ -99,5 +99,5 @@ package, so the boundary is checked rather than remembered.
   (ADR-0002).
 - Releasing a feature that spans `update` and `daemon` is two changes in order: `update` first, then
   `daemon` with its `require` raised.
-- `update` and `daemon` need the project scaffolding of the README (`go.mod`, `.lydite` component,
-  `.gt-repo.yaml` entry, `go.work` line) before their first story lands.
+- Each project has a `go.mod`, a `.lydite` component, a `.gt-repo.yaml` `gomod` entry and a
+  `go.work` line (see "CI" in `CLAUDE.md`).
