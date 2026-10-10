@@ -109,8 +109,8 @@ stand as written for this decision.
   CI. Go code that builds, tests or ships as a project lives under `source/`; `tools/` is the one
   other root directory, for tooling that is not a Go project.
 - **The module-path formula in rules and the glossary.** `agentic/rules/module-path-matches-its-directory.md`,
-  `agentic/rules/a-sibling-is-required-at-a-released-version.md` and the Project, Package and
-  Prefixed tag entries of `CONTEXT.md` give a module path as `github.com/vipengele/go/source/<project>`.
+  `agentic/rules/a-sibling-is-required-at-a-released-version.md` and the Project and Package
+  entries of `CONTEXT.md` give a module path as `github.com/vipengele/go/source/<project>`.
   Where they do, this ADR governs: the module path is `vipengele.org/go/<path>`.
 
 ## Considered options
