@@ -13,7 +13,8 @@ Prefixed tag, Workspace, Sibling) before naming things.
 - `source/<project>/` — one Go module per project, with its own `go.mod`, `go.sum` and, where it
   differs from the repo default, `.golangci.yml`. The module path is
   `github.com/vipengele/go/source/<project>` and must match the directory
-  (`agentic/rules/module-path-matches-its-directory.md`). Public packages are subdirectories;
+  (`agentic/rules/module-path-matches-its-directory.md`). The `go` directive names a full patch release
+  (`agentic/rules/go-directive-names-a-patched-release.md`). Public packages are subdirectories;
   everything not meant for consumers lives under `internal/`.
 - `go.work` — lists every project for local development. CI never reads it (ADR-0002).
 - A dependency on a sibling project is a `require` at a released tag. Never a `replace`, never a
