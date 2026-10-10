@@ -20,3 +20,7 @@ components:
     dir: source/update
     runner: go-test
     args: ["-race", "./..."]
+  - name: daemon
+    dir: source/daemon
+    runner: go-test
+    args: ["-race", "./..."]

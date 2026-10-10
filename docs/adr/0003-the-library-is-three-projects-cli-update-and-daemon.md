@@ -10,8 +10,8 @@ which dependencies a consumer inherits. The library is three projects:
 | Project | Owns |
 |---------|------|
 | `cli` | The app shell: `App`, root command, output (text and `--json`), exit codes, config loading, platform paths, a state store with a file lock, logging, shell completion, the version command. |
-| `update` | Self-update: release source, version comparison, asset selection, download and verification, archive extraction, atomic replacement, check throttling and its state, the notice and the `update` command, install script and release templates. |
-| `daemon` | The long-running runtime: runners and supervisor, lifecycle, health, the HTTP server kit, service managers (systemd, launchd, Windows), the single-instance guard, and the daemon's own update flow (pending, confirm, rollback, scheduled runner). |
+| `update` | Self-update: release source, version comparison, asset selection, download and verification, archive extraction, atomic replacement of the managed binary, check throttling and its state, the notice and the `update` command, install script and release templates. |
+| `daemon` | The long-running runtime: runners and supervisor, lifecycle, health, the HTTP server kit, service managers (systemd, launchd, Windows) that register the daemon as a service, the single-instance guard, and the daemon's own update flow (pending, confirm, rollback, scheduled runner). |
 
 ## Dependency direction
 
@@ -41,7 +41,7 @@ type Config struct {
 	Name      string // binary name, used in asset names and messages
 	EnvPrefix string // prefix of the opt-out variable, <PREFIX>_NO_UPDATE_CHECK
 	Version   string // the running version; "dev" for a local build
-	Source    Source // where releases come from
+	Source    Source // the release source
 	StateDir  string // directory for update state; empty selects the platform default
 	Token     func(ctx context.Context) (string, error) // optional API credential
 }
