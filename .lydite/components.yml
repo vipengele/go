@@ -5,14 +5,13 @@
 # is a `go-test` component rooted at the module's directory, run with the race
 # detector.
 #
-# Add a component when a project is added:
-#
-#   - name: cli
-#     dir: source/cli
-#     runner: go-test
-#     args: ["-race", "./..."]
-#
 # A component that requires a sibling project's module resolves it at the
 # released version its go.mod names, never through go.work (ADR-0002), so it
 # needs no `setup` and no `depends_on` to build the sibling first.
-components: []
+#
+# A new project adds a component of the same shape.
+components:
+  - name: cli
+    dir: source/cli
+    runner: go-test
+    args: ["-race", "./..."]

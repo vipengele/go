@@ -19,6 +19,8 @@ gt_version: 2.1.1
 dependabot:
   - ecosystem: github-actions
     directory: /
+  - ecosystem: gomod
+    directory: /source/cli
 pipeline:
   ci:
     stages:
