@@ -12,7 +12,7 @@ saw:
 walks `source/` for `go.mod` at any depth and exports the directories relative to `source/`
 (`cli`, `update`, later `cli/core`). It is gitignored, and `pretest`, `pretypecheck` and `prebuild`
 in `package.json` regenerate it, so a clean checkout builds without a committed copy.
-`src/index.ts` builds the `go-import` tag from the directory (`vipengele.org/go/<dir>`), never from
+`src/index.ts` builds the `go-import` tag from the directory (`go.vipengele.org/<dir>`), never from
 the `go.mod` module line.
 
 The generator throws, naming both directories, when one `go.mod` directory lies inside another
@@ -20,5 +20,5 @@ The generator throws, naming both directories, when one `go.mod` directory lies 
 `source/` changes the Worker, which is why `deploy-vanity-worker.yml` also triggers on
 `source/**/go.mod`.
 
-The deploy workflow's first step tests the two Cloudflare secrets for presence through step
-outputs, because a step `if:` cannot read `secrets`. Only the Deploy step carries them in its env.
+The deploy workflow's first step tests the Cloudflare token (a secret) and account ID (a variable) for
+presence through step outputs, because a step `if:` cannot read `secrets`. Only the Deploy step carries them in its env.
