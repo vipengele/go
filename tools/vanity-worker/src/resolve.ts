@@ -4,7 +4,7 @@
  * segments. `cli/core` answers for `cli/core` and `cli/core/internal/x`, never
  * for `cli/corex`. A grouping directory or unknown path yields `undefined`.
  *
- * `requestPath` is the part of the URL path after `/go/`. Leading and trailing
+ * `requestPath` is the URL path without its leading slash. Leading and trailing
  * slashes are ignored, and an empty segment anywhere makes the path match no
  * module.
  */

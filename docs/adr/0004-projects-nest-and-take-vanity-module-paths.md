@@ -1,14 +1,14 @@
 # Projects nest under `source/` and take vanity module paths
 
-A project's module path is a vanity path on `vipengele.org`, built from its directory under
-`source/`:
+A project's module path is a vanity path on the host `go.vipengele.org`, built from its directory
+under `source/`:
 
 ```
-vipengele.org/go/<path>
+go.vipengele.org/<path>
 ```
 
 `<path>` is the project's directory relative to `source/`. `source/cli/core` is the module
-`vipengele.org/go/cli/core`, and its packages are imported as `vipengele.org/go/cli/core/<package>`.
+`go.vipengele.org/cli/core`, and its packages are imported as `go.vipengele.org/cli/core/<package>`.
 `source/` organises the repository; it is not part of the namespace a consumer reads.
 
 Projects may nest. A directory under `source/` is either a project, holding a `go.mod`, or a
@@ -17,11 +17,11 @@ grouping directory, holding projects and no `go.mod`. A project directory contai
 
 | Directory | Module path | Holds |
 |-----------|-------------|-------|
-| `source/cli/core` | `vipengele.org/go/cli/core` | The app shell that ADR-0003 assigns to `cli`. |
-| `source/cli/spec` | `vipengele.org/go/cli/spec` | The contracts a CLI tool and the libraries it assembles agree on, including `Identity`. |
-| `source/update` | `vipengele.org/go/update` | Self-update, as ADR-0003 assigns it. |
-| `source/daemon` | `vipengele.org/go/daemon` | The long-running runtime, as ADR-0003 assigns it. |
-| `source/commons` | `vipengele.org/go/commons` | Generic building blocks any project may require. |
+| `source/cli/core` | `go.vipengele.org/cli/core` | The app shell that ADR-0003 assigns to `cli`. |
+| `source/cli/spec` | `go.vipengele.org/cli/spec` | The contracts a CLI tool and the libraries it assembles agree on, including `Identity`. |
+| `source/update` | `go.vipengele.org/update` | Self-update, as ADR-0003 assigns it. |
+| `source/daemon` | `go.vipengele.org/daemon` | The long-running runtime, as ADR-0003 assigns it. |
+| `source/commons` | `go.vipengele.org/commons` | Generic building blocks any project may require. |
 
 `source/cli` is a grouping directory. `update` and `daemon` stay one level under `source/`.
 
@@ -38,18 +38,18 @@ though the module path does not.
 A consumer never types a tag. It names the module path and the version:
 
 ```
-go get vipengele.org/go/cli/core@v1.2.3
+go get go.vipengele.org/cli/core@v1.2.3
 ```
 
 Each module path has exactly one tag series, `source/<path>/v*`.
 
-## How `vipengele.org/go/...` resolves
+## How `go.vipengele.org/...` resolves
 
-`https://vipengele.org/go/<path>?go-get=1` answers with the four-field `go-import` meta tag that
+`https://go.vipengele.org/<path>?go-get=1` answers with the four-field `go-import` meta tag that
 Go 1.25 introduced, whose fourth field names the module's subdirectory in the repository:
 
 ```html
-<meta name="go-import" content="vipengele.org/go/cli/core git https://github.com/vipengele/go source/cli/core">
+<meta name="go-import" content="go.vipengele.org/cli/core git https://github.com/vipengele/go source/cli/core">
 ```
 
 The Go command clones `github.com/vipengele/go`, finds the module in `source/cli/core` and reads
@@ -57,9 +57,15 @@ its versions from the `source/cli/core/v*` tags. The module proxy and the checks
 same on a consumer's behalf.
 
 The host is a Cloudflare Worker written in TypeScript, in `tools/vanity-worker`. It is versioned in
-this repository and deployed from this repository's CI. Its list of modules is generated from
-`source/**/go.mod`, so the Worker answers for exactly the projects that exist; a path that is not a
-project gets no `go-import` tag.
+this repository and deployed from this repository's CI. It owns the whole hostname
+`go.vipengele.org`, attached as a Cloudflare custom domain, so no other site shares the host and no
+route has to out-rank another. Its list of modules is generated from `source/**/go.mod`, so the
+Worker answers for exactly the projects that exist; a path that is not a project gets no
+`go-import` tag.
+
+The `go.` subdomain is a Go-only arrangement. The platform's other ecosystems (npm, TypeScript,
+React) name their packages by registry scope, not by hostname, so they keep their registry scopes
+and no `ts.`, `react.` or similar hostname is reserved for imports.
 
 `tools/` holds the repository's own tooling. `source/` holds the Go framework and nothing else.
 
@@ -91,13 +97,13 @@ stand as written for this decision.
 ## What this changes in earlier ADRs
 
 - **ADR-0001.** A module path is not the repository path plus the directory; it is
-  `vipengele.org/go/` plus the directory under `source/`. A project is not necessarily one level
+  `go.vipengele.org/` plus the directory under `source/`. A project is not necessarily one level
   under `source/`; it may sit inside a grouping directory. The tag form, the release workflow and
   the rule that every project releases alone are unchanged. ADR-0001's reason for `source/` in the
   module path — Go requires a nested module's path to end with its directory — holds only for a
   module served from its repository path; a vanity path with a subdirectory field removes it.
 - **ADR-0002.** Unchanged in substance: a sibling is required at a released version, now under its
-  vanity path (`require vipengele.org/go/cli/core v0.3.0`).
+  vanity path (`require go.vipengele.org/cli/core v0.3.0`).
 - **ADR-0003.** The project inventory is `cli/core`, `cli/spec`, `update`, `daemon` and `commons`;
   ADR-0003's `cli` is `cli/core`. ADR-0003 rejected "a fourth project for the shared identity and
   paths" because it added a module to release for a handful of lines. That rejection stands for
@@ -111,7 +117,7 @@ stand as written for this decision.
 - **The module-path formula in rules and the glossary.** `agentic/rules/module-path-matches-its-directory.md`,
   `agentic/rules/a-sibling-is-required-at-a-released-version.md` and the Project and Package
   entries of `CONTEXT.md` give a module path as `github.com/vipengele/go/source/<project>`.
-  Where they do, this ADR governs: the module path is `vipengele.org/go/<path>`.
+  Where they do, this ADR governs: the module path is `go.vipengele.org/<path>`.
 
 ## Considered options
 
@@ -119,13 +125,18 @@ stand as written for this decision.
   would then match without a vanity host, but code would live at the root, which
   `all-code-lives-under-source` rejects, and CI's change detection selects projects by their
   `source/` directory.
-- **`source/` kept in the module path (`vipengele.org/go/source/cli/core`).** Needs only the
+- **`source/` kept in the module path (`go.vipengele.org/source/cli/core`).** Needs only the
   three-field `go-import` tag and works on any Go release, but puts a repository-layout word into
   every import a consumer writes, which is the cost a vanity path exists to remove.
-- **The `mod` vcs in `go-import`: `vipengele.org` as a self-hosted `GOPROXY` endpoint.** Makes tag
-  names irrelevant, since the server would serve versions however it chooses, but it needs a server
-  that builds and serves module zips rather than one static answer per path, and how the checksum
-  database treats modules served that way is unconfirmed.
+- **A path form on the apex: module paths under `/go/` on `vipengele.org`.** Couples Go module
+  resolution to the apex host, which the marketing site also serves: the Worker needs a route for
+  the `/go/` path that must out-rank the site's own, and the apex needs a placeholder origin behind
+  it. Every module path is also longer by a `go` segment that says nothing a consumer needs. A
+  subdomain lets the Worker own its host outright through a Cloudflare custom domain.
+- **The `mod` vcs in `go-import`: `go.vipengele.org` as a self-hosted `GOPROXY` endpoint.** Makes
+  tag names irrelevant, since the server would serve versions however it chooses, but it needs a
+  server that builds and serves module zips rather than one static answer per path, and how the
+  checksum database treats modules served that way is unconfirmed.
 - **The Worker under `source/`.** `source/` holds Go projects that CI builds, tests and releases by
   tag; a TypeScript deployment is none of these, and every rule that selects projects from
   `source/` would have to learn to skip it.
@@ -137,10 +148,10 @@ stand as written for this decision.
 
 ## Consequences
 
-- **A Worker outage breaks resolution.** While `vipengele.org` does not answer, every `go get` of a
-  version not already in a consumer's module cache or the public proxy fails, and every release's
-  `announce` step, which asks the module proxy to fetch the new version, fails with it. Re-running
-  the release finishes it once the Worker answers.
+- **A Worker outage breaks resolution.** While `go.vipengele.org` does not answer, every `go get`
+  of a version not already in a consumer's module cache or the public proxy fails, and every
+  release's `announce` step, which asks the module proxy to fetch the new version, fails with it.
+  Re-running the release finishes it once the Worker answers.
 - **A pushed tag is permanent.** The module proxy and checksum database keep what they fetched; a
   wrong tag is answered by a new version, never by moving the tag.
 - **A new project needs a Worker deploy before its first tag.** The Worker's module list is
@@ -150,7 +161,7 @@ stand as written for this decision.
   for the module at the repository root and fail to resolve it.
 - **A module path does not equal its directory.** The rule "a module path matches its directory"
   becomes "a module path matches the vanity map": the `module` line of `source/<path>/go.mod` is
-  `vipengele.org/go/<path>`, which is what the Worker serves and what `verify-sibling-deps` checks.
+  `go.vipengele.org/<path>`, which is what the Worker serves and what `verify-sibling-deps` checks.
 - **A renamed or moved project starts a new version history.** Its module path, its tag prefix and
   the Worker's entry change together, and tags under the old directory stay where they are.
 - **A new project** needs a `.lydite` component, a `.gt-repo.yaml` `gomod` entry and a

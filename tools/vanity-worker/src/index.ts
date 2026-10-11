@@ -1,8 +1,8 @@
 import { modules } from "./modules.generated";
 import { resolve } from "./resolve";
 
-const PREFIX = "/go/";
-const MODULE_ROOT = "vipengele.org/go/";
+const HOST = "go.vipengele.org";
+const MODULE_ROOT = `${HOST}/`;
 const REPOSITORY = "https://github.com/vipengele/go";
 const REPOSITORY_DIR = "source/";
 
@@ -17,7 +17,7 @@ function escapeHtml(value: string): string {
 
 /**
  * The page the Go command reads. The module path is always the directory
- * under `source/` behind `vipengele.org/go/`, and the fourth `go-import`
+ * under `source/` behind `go.vipengele.org/`, and the fourth `go-import`
  * field is that directory in the repository.
  */
 function goImportPage(module: string): string {
@@ -37,17 +37,23 @@ function goImportPage(module: string): string {
 `;
 }
 
+/**
+ * The Worker owns the whole host, so the request path is the URL path without
+ * its leading slash. A request without `go-get=1` is a person following an
+ * import path and is redirected to the package's pkg.go.dev page; the root
+ * path redirects to the module root's page.
+ */
 export default {
   fetch(request: Request): Response {
     const url = new URL(request.url);
-    if (!url.pathname.startsWith(PREFIX)) {
-      return new Response("Not Found\n", { status: 404 });
-    }
-    const requestPath = url.pathname.slice(PREFIX.length);
+    const requestPath = url.pathname.replace(/^\/+/, "");
 
     if (url.searchParams.get("go-get") !== "1") {
+      const path = requestPath.replace(/\/+$/, "");
       const target = new URL(
-        `https://pkg.go.dev/${MODULE_ROOT}${requestPath.replace(/\/+$/, "")}`,
+        path === ""
+          ? `https://pkg.go.dev/${HOST}`
+          : `https://pkg.go.dev/${MODULE_ROOT}${path}`,
       );
       return Response.redirect(target.toString(), 302);
     }

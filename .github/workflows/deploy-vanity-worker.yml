@@ -1,6 +1,6 @@
 # deploy-vanity-worker — deploys tools/vanity-worker to Cloudflare.
 #
-# The Worker answers `go get` for vipengele.org/go/<path> (ADR-0004). Its module
+# The Worker answers `go get` for go.vipengele.org/<path> (ADR-0004). Its module
 # list is generated at build time from every source/**/go.mod, so a change that
 # adds, moves or removes a project's go.mod redeploys it as much as a change to
 # the Worker itself does.
