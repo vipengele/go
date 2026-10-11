@@ -32,7 +32,7 @@ describe("renderModules", () => {
   });
 });
 
-describe("findGoModDirs", () => {
+describe("find go.mod directories", () => {
   let root: string;
 
   beforeEach(() => {

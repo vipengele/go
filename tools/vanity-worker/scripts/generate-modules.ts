@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const skippedDirs = new Set(["node_modules", ".git", "vendor", "testdata"]);
