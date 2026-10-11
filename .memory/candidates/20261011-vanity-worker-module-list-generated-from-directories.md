@@ -17,8 +17,9 @@ the `go.mod` module line.
 
 The generator throws, naming both directories, when one `go.mod` directory lies inside another
 (`moduleDirs`). The generator walks the real `source/` tree, so a `go.mod` added or moved under
-`source/` changes the Worker, which is why `deploy-vanity-worker.yml` also triggers on
-`source/**/go.mod`.
+`source/` changes the Worker's module list, and the deployed Worker serves the list of the commit its
+tag (`tools/vanity-worker/vX.Y.Z`) points at, so a project added, moved or removed is served only
+after a new Worker tag is deployed by `deploy-vanity-worker.yml`.
 
 The deploy workflow's first step tests the Cloudflare token (a secret) and account ID (a variable) for
 presence through step outputs, because a step `if:` cannot read `secrets`. Only the Deploy step carries them in its env.
