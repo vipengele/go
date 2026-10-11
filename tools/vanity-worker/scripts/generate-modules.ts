@@ -1,7 +1,11 @@
 /// <reference types="node" />
+// biome-ignore lint/correctness/noNodejsModules: the generator runs in Node at build time, never in the Worker
 import { readdirSync, writeFileSync } from "node:fs";
+// biome-ignore lint/correctness/noNodejsModules: the generator runs in Node at build time, never in the Worker
 import { dirname, join, relative, resolve, sep } from "node:path";
+// biome-ignore lint/correctness/noNodejsModules: the generator runs in Node at build time, never in the Worker
 import process from "node:process";
+// biome-ignore lint/correctness/noNodejsModules: the generator runs in Node at build time, never in the Worker
 import { fileURLToPath } from "node:url";
 
 const skippedDirs = new Set(["node_modules", ".git", "vendor", "testdata"]);

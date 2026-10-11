@@ -1,6 +1,9 @@
 /// <reference types="node" />
+// biome-ignore lint/correctness/noNodejsModules: the test runs in Node, never in the Worker
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+// biome-ignore lint/correctness/noNodejsModules: the test runs in Node, never in the Worker
 import { tmpdir } from "node:os";
+// biome-ignore lint/correctness/noNodejsModules: the test runs in Node, never in the Worker
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { findGoModDirs, moduleDirs, renderModules } from "./generate-modules";
