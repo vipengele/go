@@ -1,0 +1,46 @@
+# ci-tools — checks the repository tooling under tools/.
+#
+# tools/ holds repository tooling, not Go projects (ADR-0004), so
+# changed-projects selects nothing for a change there and the gt CI stages skip
+# it. This workflow is what checks it instead.
+#
+# tools/vanity-worker is a TypeScript Cloudflare Worker. Every npm script that
+# reads the module list regenerates it from source/**/go.mod first, so the
+# checkout is the whole repository rather than the tool's directory alone.
+name: ci-tools
+
+on:
+  pull_request:
+    paths:
+      - 'tools/**'
+      - '.github/workflows/ci-tools.yml'
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request supersedes the run in flight.
+concurrency:
+  group: ci-tools-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  vanity-worker:
+    name: vanity-worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/vanity-worker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # vitest requires Node ^22.12 or >=24; `22` resolves to the latest 22.x.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/vanity-worker/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
