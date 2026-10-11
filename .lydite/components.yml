@@ -11,6 +11,10 @@
 #
 # Every project under source/ has one component with `name` (the project), `dir` (its directory),
 # `runner: go-test` and `args: ["-race", "./..."]`.
+#
+# tools/ holds repository tooling rather than projects (ADR-0004); each tool under it is a component
+# of its own, run by the runner of its language. vanity-worker is a TypeScript Worker tested with
+# vitest, and its coverage provider is a pinned devDependency of the tool.
 components:
   - name: cli
     dir: source/cli
@@ -24,3 +28,6 @@ components:
     dir: source/daemon
     runner: go-test
     args: ["-race", "./..."]
+  - name: vanity-worker
+    dir: tools/vanity-worker
+    runner: vitest
