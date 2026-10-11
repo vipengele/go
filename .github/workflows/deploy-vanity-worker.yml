@@ -77,8 +77,11 @@ jobs:
           cache: npm
           cache-dependency-path: tools/vanity-worker/package-lock.json
 
-      # Dependency install scripts and the build run without the credentials;
-      # only the deploy step holds them.
+      # The credentials are absent from the environment of the install and
+      # build steps and present only in the deploy step. The job shares one
+      # runner and filesystem, so this narrows where the token is visible
+      # without isolating the deploy from the installed dependencies; the
+      # lockfile and exact version pins are what constrain those.
       - name: Install and build
         if: steps.credentials.outputs.present == 'true'
         run: |
