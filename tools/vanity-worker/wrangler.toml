@@ -1,4 +1,4 @@
-name = "vanity-worker"
+name = "vipengele-go-vanity"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
 workers_dev = false
