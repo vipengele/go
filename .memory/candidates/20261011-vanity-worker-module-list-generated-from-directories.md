@@ -20,5 +20,5 @@ The generator throws, naming both directories, when one `go.mod` directory lies 
 `source/` changes the Worker, which is why `deploy-vanity-worker.yml` also triggers on
 `source/**/go.mod`.
 
-The deploy workflow's first step tests the two Cloudflare secrets for presence through step
-outputs, because a step `if:` cannot read `secrets`. Only the Deploy step carries them in its env.
+The deploy workflow's first step tests the Cloudflare token (a secret) and account ID (a variable) for
+presence through step outputs, because a step `if:` cannot read `secrets`. Only the Deploy step carries them in its env.
