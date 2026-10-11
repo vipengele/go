@@ -4,5 +4,5 @@ compatibility_date = "2026-10-01"
 workers_dev = false
 
 routes = [
-  { pattern = "vipengele.org/go/*", zone_name = "vipengele.org" },
+  { pattern = "go.vipengele.org", custom_domain = true },
 ]

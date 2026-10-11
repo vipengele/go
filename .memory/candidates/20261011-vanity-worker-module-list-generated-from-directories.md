@@ -12,7 +12,7 @@ saw:
 walks `source/` for `go.mod` at any depth and exports the directories relative to `source/`
 (`cli`, `update`, later `cli/core`). It is gitignored, and `pretest`, `pretypecheck` and `prebuild`
 in `package.json` regenerate it, so a clean checkout builds without a committed copy.
-`src/index.ts` builds the `go-import` tag from the directory (`vipengele.org/go/<dir>`), never from
+`src/index.ts` builds the `go-import` tag from the directory (`go.vipengele.org/<dir>`), never from
 the `go.mod` module line.
 
 The generator throws, naming both directories, when one `go.mod` directory lies inside another
