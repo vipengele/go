@@ -31,7 +31,3 @@ components:
   - name: vanity-worker
     dir: tools/vanity-worker
     runner: vitest
-  - name: spike-probe
-    dir: source/spike/probe
-    runner: go-test
-    args: ["-race", "./..."]
