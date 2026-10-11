@@ -1,47 +1,107 @@
 # deploy-vanity-worker — deploys tools/vanity-worker to Cloudflare.
 #
 # The Worker answers `go get` for go.vipengele.org/<path> (ADR-0004). Its module
-# list is generated at build time from every source/**/go.mod, so a change that
-# adds, moves or removes a project's go.mod redeploys it as much as a change to
-# the Worker itself does.
+# list is generated at build time from every source/**/go.mod at the tagged
+# commit, so a project added, moved or removed is served only once a new Worker
+# tag is deployed.
 #
-# A push to main deploys main. `workflow_dispatch` deploys the ref it is given,
-# which lets a branch be served before it merges; with no ref it deploys the
-# ref the run was started from.
+# A deploy runs only from a tag `tools/vanity-worker/vX.Y.Z` that points at a
+# commit on main; no branch is ever deployed. Pushing the tag deploys it. A
+# redeploy or a rollback is a `workflow_dispatch` naming an existing tag of that
+# form, which deploys the Worker exactly as that tag built it.
 #
-# The credentials are the repository secret CLOUDFLARE_API_TOKEN and the
-# repository variable CLOUDFLARE_ACCOUNT_ID. Without both, the run logs a notice and
-# succeeds without deploying, so a repository that has not configured Cloudflare sees a
-# green run rather than a failure on every push to main.
+# Three jobs, and the seams between them are safety properties. `tag` decides
+# whether the ref is a deployable Worker version and holds no credential.
+# `deploy` runs in the GitHub Environment `cloudflare-production`, which holds
+# the secret CLOUDFLARE_API_TOKEN and the variable CLOUDFLARE_ACCOUNT_ID, and
+# records the deployment against it. `announce` creates the GitHub Release for
+# the tag and is the only job that can write to the repository.
+#
+# Without both credentials, `deploy` logs a notice and succeeds without
+# deploying, and `announce` does not run, so a repository that has not
+# configured Cloudflare sees a green run rather than a failure on every tag.
 name: deploy-vanity-worker
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'tools/vanity-worker/**'
-      - 'source/**/go.mod'
+    # A tag filter is a glob, not a regex: it is the coarse gate. The `tag` job
+    # below applies the real pattern and fails a tag that only looks like a
+    # Worker version.
+    tags: ['tools/vanity-worker/v*']
   workflow_dispatch:
     inputs:
-      ref:
-        description: Branch, tag or commit to deploy. Empty deploys the ref the run is started from.
+      tag:
+        description: Existing tag to deploy, tools/vanity-worker/vX.Y.Z.
         type: string
-        required: false
-        default: ''
+        required: true
 
-permissions:
-  contents: read
-
-# One deploy at a time, and never cancel one in flight: the later run deploys
-# afterwards, so the last one started is the one left serving.
-concurrency:
-  group: deploy-vanity-worker
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
+  tag:
+    name: tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      # The tag is untrusted text on dispatch, so it reaches the script through
+      # the environment and is matched before anything uses it as a ref.
+      - name: The tag is a Worker version
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          if [[ ! "$tag" =~ ^tools/vanity-worker/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::${tag} is not tools/vanity-worker/vX.Y.Z"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag##*/}" >> "$GITHUB_OUTPUT"
+
+      # Fails when the tag does not exist, which is what makes a dispatch
+      # naming an unknown tag stop here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.resolve.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag points at a commit on main
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::${TAG} does not point at a commit on main"
+            exit 1
+          fi
+
   deploy:
     name: deploy
+    needs: tag
     runs-on: ubuntu-latest
+    environment:
+      name: cloudflare-production
+      url: https://go.vipengele.org
+    permissions:
+      contents: read
+    # One deploy at a time, and never cancel one in flight: the later run
+    # deploys afterwards, so the last one started is the one left serving.
+    concurrency:
+      group: deploy-vanity-worker
+      cancel-in-progress: false
+    outputs:
+      deployed: ${{ steps.deploy.outcome == 'success' }}
     defaults:
       run:
         working-directory: tools/vanity-worker
@@ -66,8 +126,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.credentials.outputs.present == 'true'
         with:
-          # Empty on push, which checks out the commit that triggered the run.
-          ref: ${{ inputs.ref }}
+          ref: refs/tags/${{ needs.tag.outputs.tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -89,9 +148,47 @@ jobs:
           npm ci
           npm run build
 
+      # The Worker version carries the tag's version and the tag with its
+      # commit, so the Cloudflare dashboard names what each deployment serves.
       - name: Deploy
+        id: deploy
         if: steps.credentials.outputs.present == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx wrangler deploy
+          TAG: ${{ needs.tag.outputs.tag }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse --short HEAD)"
+          npx wrangler deploy --tag "$VERSION" --message "${TAG} (${sha})"
+
+  announce:
+    name: announce
+    needs: [tag, deploy]
+    if: needs.deploy.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # A release is idempotent: a redeploy or rollback of a tag that already
+      # has a release leaves it as it is.
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists"
+            exit 0
+          fi
+          prerelease=()
+          if [[ "$VERSION" == *-* || "$VERSION" == v0.* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "$TAG" \
+            --generate-notes \
+            "${prerelease[@]}"
