@@ -1,6 +1,20 @@
 licence:
   policy:
-    allow: [Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0]
+    # LGPL-3.0-or-later, MPL-2.0, 0BSD and CC0-1.0 arrive only through wrangler (sharp) and
+    # vitest/vite (lightningcss); they are dev tooling and nothing ships in the Worker bundle.
+    allow:
+      [
+        Apache-2.0,
+        BSD-2-Clause,
+        BSD-3-Clause,
+        ISC,
+        MIT,
+        Unicode-3.0,
+        LGPL-3.0-or-later,
+        MPL-2.0,
+        0BSD,
+        CC0-1.0,
+      ]
 
 go:
   enabled: true
