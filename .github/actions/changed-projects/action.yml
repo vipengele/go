@@ -1,12 +1,22 @@
 # changed-projects — the projects under source/ whose CI has something to check.
 #
-# A project is a directory under source/ holding a go.mod (ADR-0001). It is
-# selected when a file inside it changed, or when its go.mod requires, directly
-# or transitively, a module owned by a selected project (ADR-0002): a change
-# reaches every project that consumes it. A change to a file every project's CI
-# depends on (the CI stages, this action, the coverage config) selects all of
-# them, since those can alter any project's result. Anything else — docs,
-# agentic instructions — selects none.
+# A project is a directory under source/, at any depth, holding a go.mod
+# (ADR-0001, ADR-0004). Its identifier is its path relative to source/, so
+# source/cli is `cli` and source/spike/probe is `spike/probe`; the workflows run
+# in source/<identifier>. A changed file belongs to the project whose directory
+# is its longest prefix — source/spike/probe/x is `spike/probe`, never a project
+# at source/spike — and a file under source/ inside no project selects nothing.
+#
+# A project is also selected when its go.mod requires, directly or
+# transitively, a module owned by a selected project (ADR-0002): a change
+# reaches every project that consumes it. A require of
+# github.com/vipengele/go/source/<path> is owned by the project whose identifier
+# is the longest prefix of <path>, so a major-version suffix (`cli/v2`) resolves
+# to `cli`. A require of a vanity module path is not a cross-project edge.
+#
+# A change to a file every project's CI depends on (the CI stages, this action,
+# the coverage config) selects all of them, since those can alter any project's
+# result. Anything else — docs, agentic instructions — selects none.
 #
 # The diff is against the base of the event: the PR base, the merge-group base or
 # the pushed range. When no base can be determined (a manual run, a first push, a
@@ -17,7 +27,7 @@ description: JSON array of the source/ projects a change affects.
 
 outputs:
   projects:
-    description: 'JSON array of project directory names, e.g. ["cli"].'
+    description: 'JSON array of project paths relative to source/, e.g. ["cli", "spike/probe"].'
     value: ${{ steps.detect.outputs.projects }}
 
 runs:
@@ -33,15 +43,13 @@ runs:
       run: |
         set -euo pipefail
 
-        shopt -s nullglob
-        gomods=(source/*/go.mod)
-        shopt -u nullglob
+        mapfile -t gomods < <(find source -name go.mod -type f 2>/dev/null | sort)
         if ((${#gomods[@]} == 0)); then
           echo "no project under source/ yet"
           echo "projects=[]" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        all="$(printf '%s\n' "${gomods[@]}" | cut -d/ -f2 | sort -u | jq -R . | jq -sc .)"
+        all="$(printf '%s\n' "${gomods[@]}" | sed -e 's|^source/||' -e 's|/go\.mod$||' | sort -u | jq -R . | jq -sc .)"
 
         case "$EVENT" in
           pull_request*) base="$PR_BASE" ;;
@@ -66,21 +74,29 @@ runs:
           exit 0
         fi
 
-        selected="$(grep -oE '^source/[^/]+' <<< "$changed" | cut -d/ -f2 | sort -u | jq -R . | jq -sc . || true)"
-        # A project directory that no longer exists has nothing to build.
-        selected="$(jq -c --argjson all "$all" '[.[]? | select(. as $p | $all | index($p))]' <<< "${selected:-[]}")"
+        # owner($path): the project whose identifier is the longest prefix of
+        # $path at a `/` boundary, or null. Only existing projects are
+        # candidates, so a file of a project directory that no longer exists
+        # selects nothing.
+        owner='def owner($path):
+          [$all[] as $p | select($path == $p or ($path | startswith($p + "/"))) | $p]
+          | max_by(length);'
 
-        # A project's module path is github.com/vipengele/go/source/<project>
-        # (ADR-0002). A require of another project's module path is a
-        # cross-project edge; the closure selects every consumer of a selected
-        # project.
+        selected="$(grep -E '^source/' <<< "$changed" | jq -R . | jq -sc --argjson all "$all" "${owner}"'
+          [.[] | ltrimstr("source/") as $f | owner($f) | select(. != null)] | unique' || true)"
+        selected="${selected:-[]}"
+
+        # A require of github.com/vipengele/go/source/<path> is a cross-project
+        # edge to the project owning <path> (ADR-0002); the closure selects every
+        # consumer of a selected project.
         edges="$(for gomod in "${gomods[@]}"; do
-          project="$(cut -d/ -f2 <<< "$gomod")"
-          go mod edit -json "$gomod" | jq -c --arg project "$project" '
+          project="$(sed -e 's|^source/||' -e 's|/go\.mod$||' <<< "$gomod")"
+          go mod edit -json "$gomod" | jq -c --arg project "$project" --argjson all "$all" "${owner}"'
             {project: $project,
              deps: [(.Require // [])[].Path
                     | select(startswith("github.com/vipengele/go/source/"))
-                    | split("/")[4]]}'
+                    | owner(ltrimstr("github.com/vipengele/go/source/"))
+                    | select(. != null)] | unique}'
         done | jq -sc .)"
 
         selected="$(jq -nc --argjson selected "$selected" --argjson edges "$edges" '
