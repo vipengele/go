@@ -3,3 +3,4 @@ go 1.27.2
 use ./source/cli
 use ./source/update
 use ./source/daemon
+use ./source/spike/probe

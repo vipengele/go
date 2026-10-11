@@ -20,7 +20,10 @@ Prefixed tag, Workspace, Sibling) before naming things.
 - A dependency on a sibling project is a `require` at a released tag. Never a `replace`, never a
   pseudo-version (`agentic/rules/a-sibling-is-required-at-a-released-version.md`, ADR-0002).
 - `.github/actions/changed-projects` — the projects a change affects, dependents included; CI
-  builds only those.
+  builds only those. A project may sit at any depth under `source/` (ADR-0004): its identifier is
+  its path relative to `source/` (`spike/probe`), a file belongs to the project with the longest
+  matching directory, and a require of either `github.com/vipengele/go/source/<path>` or
+  `go.vipengele.org/<path>` is an edge to the project owning `<path>`.
 - `.github/actions/verify-sibling-deps` — fails a `replace` of a sibling, a sibling at a
   pseudo-version, a sibling version with no tag, and a module path that differs from its directory.
 - `docs/adr/` — architecture decision records. Read before revisiting a decision recorded there.
