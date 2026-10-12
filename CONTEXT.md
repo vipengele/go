@@ -6,10 +6,10 @@ command-line tools, each versioned and released on its own.
 ## Language
 
 **Project**:
-A self-contained Go module in a directory at any depth under `source/`, with the module path
-`github.com/vipengele/go/source/<project>`. Its identifier is its path relative to `source/`
-(`update`, `cli/core`). A project is released alone, by the tag `source/<project>/vX.Y.Z`
-(ADR-0001). A project's directory contains no other `go.mod`.
+A self-contained Go module in a directory at any depth under `source/`, with the **Vanity path**
+`go.vipengele.org/<path>` as its module path. Its identifier is its `<path>`, its directory
+relative to `source/` (`update`, `cli/core`). A project is released alone, by the tag
+`source/<path>/vX.Y.Z` (ADR-0001, ADR-0004). A project's directory contains no other `go.mod`.
 _Avoid_: module in prose about the repo's layout (the Go toolchain's word, used when talking about
 `go.mod` itself), repo, package
 
@@ -20,9 +20,16 @@ project selects nothing.
 _Avoid_: parent project, namespace
 
 **Package**:
-One Go package inside a project, imported as `github.com/vipengele/go/source/<project>/<package>`.
+One Go package inside a project, imported as `go.vipengele.org/<project>/<package>`.
 Code a project does not export lives in `internal/`.
 _Avoid_: library (ambiguous between package and project)
+
+**Vanity path**:
+The module path `go.vipengele.org/<path>` of a project, where `<path>` is its directory relative
+to `source/` (`go.vipengele.org/cli/core` for `source/cli/core`). It differs from the repository
+path, `github.com/vipengele/go/source/<path>`, which is where the code lives and which no
+consumer writes. The Worker in the **Tools directory** serves it (ADR-0004).
+_Avoid_: import path (also names a package's path inside the module), repository path, short path
 
 **Release**:
 One project at one version, identified by its tag. The tag is the publication: the module proxy
@@ -30,8 +37,10 @@ serves the version from it, and the `release` workflow only validates, tests and
 _Avoid_: publish (nothing is uploaded)
 
 **Prefixed tag**:
-The tag form `source/<project>/vX.Y.Z`. Go resolves a module in a subdirectory only from a tag
-that starts with its directory path, so a nested project's tag is `source/cli/core/vX.Y.Z`.
+The tag form `source/<path>/vX.Y.Z`. Go resolves a module in a subdirectory only from a tag
+that starts with its directory path, so the tag names the repository directory, `source/`
+included, and not the **Vanity path**: the project `go.vipengele.org/cli/core` is tagged
+`source/cli/core/vX.Y.Z`. A consumer names the module path and a version, never the tag.
 _Avoid_: version tag (a bare `vX.Y.Z` is not a release here)
 
 **Workspace**:
@@ -43,6 +52,12 @@ _Avoid_: monorepo module
 Another project in this repo that a project requires. A sibling is always required at a released
 version, never through `replace` (ADR-0002).
 _Avoid_: local dependency
+
+**Tools directory**:
+`tools/` at the repo root: the repository's own tooling that is not part of the framework, such as
+the Worker in `tools/vanity-worker` that serves the **Vanity path**s. It has no `go.mod`, is not a
+project and is not released by tag; CI deploys it (ADR-0004).
+_Avoid_: scripts, utilities
 
 ## Library vocabulary
 
