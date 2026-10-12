@@ -6,11 +6,11 @@ saw:
   - .github/workflows/ci-test.yml
 ---
 
-`.github/actions/changed-projects/action.yml:47` lists every `go.mod` under `source/` with `find`, so
-`source/spike/probe` is the project `spike/probe` and a `go.mod` in a `testdata/` or `vendor/`
+`.github/actions/changed-projects/action.yml:47` lists every `go.mod` under `source/` with `find`, so a
+`go.mod` at `source/<dir>/<sub>` makes the project `<dir>/<sub>`, and a `go.mod` in a `testdata/` or `vendor/`
 directory would be taken for a project too. The jq function `owner` (`:82`) returns the identifier
 that is the longest prefix of a path at a `/` boundary; a changed file selects its owner (`:87`), so
-`source/spike/probe/x.go` selects `spike/probe`, never a project at `source/spike`.
+`source/<dir>/<sub>/x.go` selects `<dir>/<sub>`, never a project at `source/<dir>`.
 
 The dependency edges (`:99-100`) strip either `github.com/vipengele/go/source/` or `go.vipengele.org/`
 from a require path and resolve the rest with `owner`, so a `/vN` suffix still resolves to its
