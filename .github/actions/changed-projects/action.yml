@@ -7,6 +7,13 @@
 # is its longest prefix — source/spike/probe/x is `spike/probe`, never a project
 # at source/spike — and a file under source/ inside no project selects nothing.
 #
+# A project directory contains no other go.mod: source/cli and source/cli/core
+# cannot both be projects. Go excludes a nested module from the enclosing
+# module's ./..., while the longest-prefix rule above gives the nested
+# directory's files to the nested project alone, so the two would be selected
+# and checked inconsistently. The action fails on any such pair before it
+# selects anything, whether or not the diff base is known.
+#
 # A project is also selected when its go.mod requires, directly or
 # transitively, a module owned by a selected project (ADR-0002): a change
 # reaches every project that consumes it. A require of
@@ -50,6 +57,21 @@ runs:
           echo "projects=[]" >> "$GITHUB_OUTPUT"
           exit 0
         fi
+
+        # A project directory must not contain another go.mod.
+        nested=0
+        for outer in "${gomods[@]}"; do
+          for inner in "${gomods[@]}"; do
+            if [[ "$inner" != "$outer" && "$inner" == "${outer%/go.mod}/"* ]]; then
+              echo "::error file=${inner}::${inner} is inside the project directory of ${outer}; a project directory must not contain another go.mod (Go excludes a nested module from the parent's ./..., so the two projects would be selected inconsistently)"
+              nested=1
+            fi
+          done
+        done
+        if ((nested)); then
+          exit 1
+        fi
+
         all="$(printf '%s\n' "${gomods[@]}" | sed -e 's|^source/||' -e 's|/go\.mod$||' | sort -u | jq -R . | jq -sc .)"
 
         case "$EVENT" in
