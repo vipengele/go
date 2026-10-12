@@ -16,11 +16,10 @@
 #
 # A project is also selected when its go.mod requires, directly or
 # transitively, a module owned by a selected project (ADR-0002): a change
-# reaches every project that consumes it. A require of
-# github.com/vipengele/go/source/<path> or of go.vipengele.org/<path> (the vanity
-# form, ADR-0004) is owned by the project whose identifier is the longest prefix
-# of <path>, so a major-version suffix (`cli/v2`) resolves to `cli`. Both forms
-# are cross-project edges.
+# reaches every project that consumes it. A require of go.vipengele.org/<path>
+# (the project's module path, ADR-0004) is owned by the project whose identifier
+# is the longest prefix of <path>, so a major-version suffix (`cli/v2`) resolves
+# to `cli`. Every such require is a cross-project edge.
 #
 # A change to a file every project's CI depends on (the CI stages, this action,
 # the coverage config) selects all of them, since those can alter any project's
@@ -109,17 +108,16 @@ runs:
           [.[] | ltrimstr("source/") as $f | owner($f) | select(. != null)] | unique' || true)"
         selected="${selected:-[]}"
 
-        # A require of github.com/vipengele/go/source/<path> or of
-        # go.vipengele.org/<path> is a cross-project edge to the project owning
-        # <path> (ADR-0002, ADR-0004); the closure selects every consumer of a
-        # selected project.
+        # A require of go.vipengele.org/<path> is a cross-project edge to the
+        # project owning <path> (ADR-0002, ADR-0004); the closure selects every
+        # consumer of a selected project.
         edges="$(for gomod in "${gomods[@]}"; do
           project="$(sed -e 's|^source/||' -e 's|/go\.mod$||' <<< "$gomod")"
           go mod edit -json "$gomod" | jq -c --arg project "$project" --argjson all "$all" "${owner}"'
             {project: $project,
              deps: [(.Require // [])[].Path
-                    | select(startswith("github.com/vipengele/go/source/") or startswith("go.vipengele.org/"))
-                    | owner(ltrimstr("github.com/vipengele/go/source/") | ltrimstr("go.vipengele.org/"))
+                    | select(startswith("go.vipengele.org/"))
+                    | owner(ltrimstr("go.vipengele.org/"))
                     | select(. != null)] | unique}'
         done | jq -sc .)"
 

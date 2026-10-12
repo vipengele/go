@@ -100,7 +100,7 @@ jobs:
 
           echo "project=${project}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "module=github.com/${GITHUB_REPOSITORY}/source/${project}" >> "$GITHUB_OUTPUT"
+          echo "module=go.vipengele.org/${project}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -146,7 +146,9 @@ jobs:
 
       # Asking the proxy for the version makes it fetch the tag now, so the
       # first consumer does not wait for it, and proves the module path and the
-      # tag agree. The proxy can lag the push by a moment, hence the retries.
+      # tag agree. The proxy resolves go.vipengele.org/<project> through the
+      # vanity Worker, which answers only for the projects it was deployed with
+      # (ADR-0004). The proxy can lag the push by a moment, hence the retries.
       - name: The module proxy serves the version
         env:
           MODULE: ${{ needs.tag.outputs.module }}
@@ -159,7 +161,7 @@ jobs:
             echo "attempt ${attempt} failed; retrying in 10s"
             sleep 10
           done
-          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy"
+          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy. go.vipengele.org must answer for ${MODULE} before its tag is pushed: deploy the vanity Worker with this project's go.mod, then re-run this workflow (ADR-0004)"
           exit 1
 
       # A release is idempotent: re-running the workflow after a partial run
