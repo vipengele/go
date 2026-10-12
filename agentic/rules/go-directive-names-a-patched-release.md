@@ -15,5 +15,6 @@ latest patch; check it against `https://go.dev/dl/?mode=json` before committing.
 
 ## Applies to
 
-- The `go` directive of every `source/<project>/go.mod` and of the root `go.work`.
+- The `go` directive of every project's `go.mod`, at any depth (`source/<path>/go.mod`), and of the
+  root `go.work`.
 - A `govulncheck` finding on `stdlib`: the fix is the version it names, in the directive.
