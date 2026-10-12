@@ -16,10 +16,11 @@ name: release
 
 on:
   push:
-    # A tag filter is a glob, not a regex: it is the coarse gate. The `tag` job
-    # below applies the real pattern and fails a tag that only looks like a
+    # A tag filter is a glob, not a regex: it is the coarse gate. `**` matches
+    # across `/`, so a project at any depth under `source/` passes it. The `tag`
+    # job below applies the real pattern and fails a tag that only looks like a
     # release.
-    tags: ['source/*/v[0-9]*.[0-9]*.[0-9]*']
+    tags: ['source/**/v[0-9]*.[0-9]*.[0-9]*']
 
 permissions:
   contents: read
@@ -49,21 +50,40 @@ jobs:
 
       # Everything that can fail without leaving anything half-released fails
       # here: a tag that is not a project version, a project that does not
-      # exist, a tag off the default branch, and missing release notes. The
-      # GitHub Release body is a file a human wrote and reviewed.
+      # exist or is nested in or around another module, a tag off the default
+      # branch, and missing release notes. The GitHub Release body is a file a
+      # human wrote and reviewed.
       - name: The tag is a project version and carries its notes
         id: parse
         run: |
           set -euo pipefail
-          if [[ ! "${GITHUB_REF_NAME}" =~ ^source/([a-z0-9-]+)/(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^source/([a-z0-9-]+(/[a-z0-9-]+)*)/(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
             echo "::error::${GITHUB_REF_NAME} is not source/<project>/vX.Y.Z"
             exit 1
           fi
           project="${BASH_REMATCH[1]}"
-          version="${BASH_REMATCH[2]}"
+          version="${BASH_REMATCH[3]}"
 
           if [[ ! -f "source/${project}/go.mod" ]]; then
             echo "::error::source/${project}/go.mod does not exist"
+            exit 1
+          fi
+
+          # A project is exactly one module. A go.mod in an enclosing directory
+          # makes source/${project} a nested module of another project, and a
+          # go.mod below it carves packages out of the module being released.
+          parent="${project%/*}"
+          while [[ "$parent" != "$project" && -n "$parent" ]]; do
+            if [[ -f "source/${parent}/go.mod" ]]; then
+              echo "::error::source/${project} is nested inside the module at source/${parent}; a project may not sit inside another project"
+              exit 1
+            fi
+            [[ "$parent" == */* ]] || break
+            parent="${parent%/*}"
+          done
+          nested="$(find "source/${project}" -mindepth 2 -name go.mod -print -quit)"
+          if [[ -n "$nested" ]]; then
+            echo "::error::source/${project} contains another module at ${nested%/go.mod}; a project may not contain another project"
             exit 1
           fi
 
