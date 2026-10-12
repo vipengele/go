@@ -25,7 +25,7 @@ updates:
     open-pull-requests-limit: 25
 
   - package-ecosystem: "gomod"
-    directory: "/source/cli"
+    directory: "/source/cli/core"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
