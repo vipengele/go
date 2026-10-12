@@ -159,6 +159,11 @@ stand as written for this decision.
   project's path does not resolve and its release cannot be announced.
 - **Consumers need Go 1.25 or later.** Earlier releases ignore the fourth `go-import` field, look
   for the module at the repository root and fail to resolve it.
+- **pkg.go.dev needs its own first request.** For a module `go.vipengele.org/<dir>` in the
+  repository directory `source/<dir>`, pkg.go.dev renders the package with source links under
+  `.../blob/source/<dir>/<version>/source/<dir>/`. Its first request for a new module answers 404
+  until the module has been requested once, which a visit to
+  `https://pkg.go.dev/go.vipengele.org/<dir>@<version>` does.
 - **A module path does not equal its directory.** The rule "a module path matches its directory"
   becomes "a module path matches the vanity map": the `module` line of `source/<path>/go.mod` is
   `go.vipengele.org/<path>`, which is what the Worker serves and what `verify-sibling-deps` checks.
