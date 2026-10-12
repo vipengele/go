@@ -161,7 +161,7 @@ jobs:
             echo "attempt ${attempt} failed; retrying in 10s"
             sleep 10
           done
-          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy. go.vipengele.org must answer for ${MODULE} before its tag is pushed: deploy the vanity Worker with this project's go.mod, then re-run this workflow (ADR-0004)"
+          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy. go.vipengele.org must answer for ${MODULE} before its tag is pushed: push a tools/vanity-worker/vX.Y.Z tag at a commit on main that contains this project's go.mod (it runs deploy-vanity-worker.yml), then re-run this workflow (ADR-0004)"
           exit 1
 
       # A release is idempotent: re-running the workflow after a partial run

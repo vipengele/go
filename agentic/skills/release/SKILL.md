@@ -57,9 +57,13 @@ the subject. Nothing is released on merge.
 
 `go.vipengele.org` is a Cloudflare Worker whose module list is generated from `source/**/go.mod`. A
 project resolves only after the Worker deploy that includes its `go.mod`, so the deploy comes before
-the tag:
+the tag. The deploy is a tag of its own: push the next `tools/vanity-worker/vX.Y.Z` at a commit on
+`main` that contains the project's `go.mod`, which runs `deploy-vanity-worker.yml`. Then check what
+the Worker answers:
 
 ```bash
+git tag tools/vanity-worker/v<version> origin/main
+git push origin tools/vanity-worker/v<version>
 curl -s 'https://go.vipengele.org/<project>?go-get=1'
 ```
 
