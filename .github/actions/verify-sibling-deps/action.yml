@@ -1,21 +1,27 @@
 # verify-sibling-deps — every dependency between projects is a released version.
 #
+# A project is a directory under source/, at any depth, holding a go.mod; its
+# identifier is that directory relative to source/ (`cli`, `cli/core`), and its
+# module path is github.com/vipengele/go/source/<project>. A project directory
+# contains no other go.mod: Go excludes a nested module from the parent's ./...,
+# and a tag source/<outer>/vX.Y.Z would publish a module missing the inner tree.
+#
 # A project that requires another project's module (ADR-0002) must name a
 # version the Go module proxy can serve: a tagged release, never a pseudo-version
 # and never a `replace` that points at a sibling directory. A `replace` is a
 # local-development device that go.work provides without touching go.mod, and
 # one that reaches a published go.mod makes every consumer of the module fail to
-# build.
+# build. Each sibling version required must have the tag
+# source/<sibling>/<version> in this repository.
 #
 # With `expect-tag` set (the release workflow), the check also confirms that the
-# tag being released matches the module it names, and that each sibling version
-# it requires has a tag in this repository.
+# tag being released has the form source/<project>/vX.Y.Z and names a project.
 name: verify-sibling-deps
 description: Fail when a project requires a sibling by anything but a released version.
 
 inputs:
   expect-tag:
-    description: 'The tag being released, e.g. source/cli/v0.2.0. Empty outside a release.'
+    description: 'The tag being released, e.g. source/cli/core/v0.2.0. Empty outside a release.'
     required: false
     default: ''
 
@@ -30,9 +36,21 @@ runs:
         prefix="github.com/vipengele/go/source/"
         status=0
 
-        shopt -s nullglob
-        for gomod in source/*/go.mod; do
-          project="$(cut -d/ -f2 <<< "$gomod")"
+        mapfile -t gomods < <(find source -name go.mod -type f 2>/dev/null | sort)
+
+        # A project directory must not contain another go.mod.
+        for outer in "${gomods[@]}"; do
+          for inner in "${gomods[@]}"; do
+            if [[ "$inner" != "$outer" && "$inner" == "${outer%/go.mod}/"* ]]; then
+              echo "::error file=${inner}::${inner} is inside the project directory of ${outer}; a project directory must not contain another go.mod"
+              status=1
+            fi
+          done
+        done
+
+        for gomod in "${gomods[@]}"; do
+          project="${gomod#source/}"
+          project="${project%/go.mod}"
           json="$(go mod edit -json "$gomod")"
 
           want="${prefix}${project}"
@@ -59,8 +77,10 @@ runs:
           done < <(jq -r '(.Require // [])[] | select(.Path | startswith("'"$prefix"'")) | "\(.Path) \(.Version)"' <<< "$json")
         done
 
+        # The tagged project's go.mod is checked after the nested check above,
+        # which already fails a tag naming either member of a nested pair.
         if [[ -n "$EXPECT_TAG" ]]; then
-          if [[ ! "$EXPECT_TAG" =~ ^source/([a-z0-9-]+)/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          if [[ ! "$EXPECT_TAG" =~ ^source/([a-z0-9-]+(/[a-z0-9-]+)*)/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             echo "::error::${EXPECT_TAG} is not source/<project>/vX.Y.Z"
             status=1
           elif [[ ! -f "source/${BASH_REMATCH[1]}/go.mod" ]]; then

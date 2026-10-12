@@ -6,11 +6,18 @@ command-line tools, each versioned and released on its own.
 ## Language
 
 **Project**:
-A self-contained Go module under `source/<project>/`, with the module path
-`github.com/vipengele/go/source/<project>`. A project is released alone, by the tag
-`source/<project>/vX.Y.Z` (ADR-0001).
+A self-contained Go module in a directory at any depth under `source/`, with the module path
+`github.com/vipengele/go/source/<project>`. Its identifier is its path relative to `source/`
+(`update`, `cli/core`). A project is released alone, by the tag `source/<project>/vX.Y.Z`
+(ADR-0001). A project's directory contains no other `go.mod`.
 _Avoid_: module in prose about the repo's layout (the Go toolchain's word, used when talking about
 `go.mod` itself), repo, package
+
+**Grouping directory**:
+A directory under `source/` that holds projects and has no `go.mod` of its own (`source/cli`). It is
+not a project: it is never built, tested or released, and a change inside it but outside every
+project selects nothing.
+_Avoid_: parent project, namespace
 
 **Package**:
 One Go package inside a project, imported as `github.com/vipengele/go/source/<project>/<package>`.
@@ -24,7 +31,7 @@ _Avoid_: publish (nothing is uploaded)
 
 **Prefixed tag**:
 The tag form `source/<project>/vX.Y.Z`. Go resolves a module in a subdirectory only from a tag
-that starts with its directory path.
+that starts with its directory path, so a nested project's tag is `source/cli/core/vX.Y.Z`.
 _Avoid_: version tag (a bare `vX.Y.Z` is not a release here)
 
 **Workspace**:
@@ -39,12 +46,12 @@ _Avoid_: local dependency
 
 ## Library vocabulary
 
-These name what the `cli`, `update` and `daemon` projects build (ADR-0003). They describe the tools
+These name what the `cli/core`, `update` and `daemon` projects build (ADR-0003). They describe the tools
 a consumer writes with the library, not this repo; **Release** above is a version of a project here,
 and a tool's own releases are reached through a **Release source**.
 
 **App**:
-The identity and shell of one tool, built in its `main` from the `cli` project: its binary name,
+The identity and shell of one tool, built in its `main` from the `cli/core` project: its binary name,
 environment-variable prefix, version, root command, output mode and exit codes. The tool declares
 the identity once and hands the same values to `update` and `daemon`.
 _Avoid_: application, program, tool (the word for the consumer's whole product)

@@ -20,7 +20,7 @@ dependabot:
   - ecosystem: github-actions
     directory: /
   - ecosystem: gomod
-    directory: /source/cli
+    directory: /source/cli/core
   - ecosystem: gomod
     directory: /source/update
   - ecosystem: gomod

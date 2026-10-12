@@ -16,8 +16,8 @@
 # of its own, run by the runner of its language. vanity-worker is a TypeScript Worker tested with
 # vitest, and its coverage provider is a pinned devDependency of the tool.
 components:
-  - name: cli
-    dir: source/cli
+  - name: cli-core
+    dir: source/cli/core
     runner: go-test
     args: ["-race", "./..."]
   - name: update

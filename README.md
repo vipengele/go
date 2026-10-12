@@ -7,7 +7,7 @@ command-line tools. The repo holds **projects**, each a self-contained Go module
 
 | Project | Module path |
 |---------|-------------|
-| [`source/cli`](source/cli) | `github.com/vipengele/go/source/cli` |
+| [`source/cli/core`](source/cli/core) | `github.com/vipengele/go/source/cli/core` |
 | [`source/update`](source/update) | `github.com/vipengele/go/source/update` |
 | [`source/daemon`](source/daemon) | `github.com/vipengele/go/source/daemon` |
 
