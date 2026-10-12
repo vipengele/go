@@ -46,12 +46,12 @@ _Avoid_: local dependency
 
 ## Library vocabulary
 
-These name what the `cli`, `update` and `daemon` projects build (ADR-0003). They describe the tools
+These name what the `cli/core`, `update` and `daemon` projects build (ADR-0003). They describe the tools
 a consumer writes with the library, not this repo; **Release** above is a version of a project here,
 and a tool's own releases are reached through a **Release source**.
 
 **App**:
-The identity and shell of one tool, built in its `main` from the `cli` project: its binary name,
+The identity and shell of one tool, built in its `main` from the `cli/core` project: its binary name,
 environment-variable prefix, version, root command, output mode and exit codes. The tool declares
 the identity once and hands the same values to `update` and `daemon`.
 _Avoid_: application, program, tool (the word for the consumer's whole product)
