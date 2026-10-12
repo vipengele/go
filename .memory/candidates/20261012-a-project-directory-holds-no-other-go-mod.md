@@ -8,7 +8,7 @@ saw:
 
 Go leaves a nested module out of the enclosing module's `./...`, while `changed-projects` gives a
 changed file to the project with the longest matching directory, so two modules in one tree would be
-selected and tested inconsistently. `changed-projects/action.yml:62-70` and
+selected and tested inconsistently. `changed-projects/action.yml:61-69` and
 `verify-sibling-deps/action.yml:42-49` compare every pair of `go.mod` paths with
 `[[ "$inner" != "$outer" && "$inner" == "${outer%/go.mod}/"* ]]` (the trailing `/` keeps `source/ab`
 out of `source/a`) and fail with an `::error file=<inner>::`; `release.yml:72-88` checks the one
