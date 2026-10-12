@@ -2,7 +2,8 @@
 #
 # A project is a directory under source/, at any depth, holding a go.mod; its
 # identifier is that directory relative to source/ (`cli`, `cli/core`), and its
-# module path is github.com/vipengele/go/source/<project>. A project directory
+# module path is go.vipengele.org/<project> (ADR-0004). A require of a path with
+# that prefix is a require of a sibling. A project directory
 # contains no other go.mod: Go excludes a nested module from the parent's ./...,
 # and a tag source/<outer>/vX.Y.Z would publish a module missing the inner tree.
 #
@@ -33,7 +34,7 @@ runs:
         EXPECT_TAG: ${{ inputs.expect-tag }}
       run: |
         set -euo pipefail
-        prefix="github.com/vipengele/go/source/"
+        prefix="go.vipengele.org/"
         status=0
 
         mapfile -t gomods < <(find source -name go.mod -type f 2>/dev/null | sort)

@@ -1,5 +1,5 @@
 ---
-about: "release.yml releases a project at any depth from a tag source/<path>/vX.Y.Z but derives the module path from the repository, so a project whose module line is a vanity path cannot pass its proxy step"
+about: "release.yml releases a project at any depth from a tag source/<path>/vX.Y.Z and takes go.vipengele.org/<path> as its module path, so its announce step fails until the vanity Worker answers for that path"
 saw:
   - .github/workflows/release.yml
   - docs/adr/0004-projects-nest-and-take-vanity-module-paths.md
@@ -9,9 +9,9 @@ saw:
 segments, so `source/<dir>/<sub>/v0.0.1` is a release of the project `<dir>/<sub>` and its notes are
 read from `docs/release-notes/<dir>/<sub>/v0.0.1.md`. `:67` requires `source/${project}/go.mod`, and
 `:72-88` reject a tag whose project directory has a `go.mod` in a parent directory or below it.
-`:103` sets the module to `github.com/${GITHUB_REPOSITORY}/source/${project}`, which is the module
-line of a project that keeps the repository path and not of one with a vanity path
-(`go.vipengele.org/<dir>`, ADR-0004): the `announce` job's `go list -m ${MODULE}@${VERSION}` against
-the proxy fails for such a project until that line is derived from the `go.mod` instead. Pushing the
-tag of a vanity-path project by hand still resolves through the proxy and the checksum database
-without any workflow.
+`:103` sets the module to `go.vipengele.org/${project}`, and the `announce` job runs
+`go list -m ${MODULE}@${VERSION}` through the module proxy. The proxy resolves that path through the
+vanity Worker, which answers only for the directories it was deployed with, so the step fails for a
+project whose `go.mod` the deployed Worker does not yet list; the failure message says to deploy the
+Worker and re-run. Pushing the tag first is allowed (the workflow is re-runnable), but until the
+Worker knows the path nothing can resolve the version.

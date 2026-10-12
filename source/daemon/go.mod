@@ -1,3 +1,3 @@
-module github.com/vipengele/go/source/daemon
+module go.vipengele.org/daemon
 
 go 1.27.2
