@@ -4,7 +4,7 @@ saw:
   - docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md
   - docs/adr/0004-projects-nest-and-take-vanity-module-paths.md
   - CONTEXT.md
-  - source/cli/doc.go
+  - source/cli/core/doc.go
 ---
 
 Read from ADR-0003 (lines 13-60, 89-93): `cli` and `update` require no sibling; `daemon` requires both.
@@ -25,4 +25,4 @@ EnvPrefix strings for as long as `update` does not import `cli/spec`.
 
 Not specified anywhere (grep of docs/, CONTEXT.md for XDG, EnvPrefix, App, state dir): OS directory
 rules (only "platform paths" and "platform default"), and any glossary term for App/Tool/Prefix.
-`source/cli` holds only doc.go and go.mod (no requires) at this commit.
+`source/cli/core` holds only doc.go and go.mod (no requires) at this commit; `source/cli` is a directory with no go.mod.
