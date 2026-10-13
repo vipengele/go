@@ -28,6 +28,10 @@ components:
     dir: source/daemon
     runner: go-test
     args: ["-race", "./..."]
+  - name: commons
+    dir: source/commons
+    runner: go-test
+    args: ["-race", "./..."]
   - name: vanity-worker
     dir: tools/vanity-worker
     runner: vitest
