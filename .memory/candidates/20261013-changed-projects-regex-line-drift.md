@@ -1,5 +1,5 @@
 ---
-about: "select-all regex is now at changed-projects/action.yml:93 and still excludes go.work and release.yml; edges come only from go.mod Require (:114-122)"
+about: "select-all regex is now at changed-projects/action.yml:93 and still excludes go.work and release.yml; edges come only from go.mod Require (:113-122)"
 saw:
   - .github/actions/changed-projects/action.yml
 targets: changed-projects-select-all-regex
