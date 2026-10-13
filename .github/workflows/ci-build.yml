@@ -8,8 +8,9 @@
 # does not reach is not built.
 #
 # `GOWORK=off` builds each module exactly as a consumer of its tag sees it: from
-# its own go.mod and go.sum, with every sibling at the released version it
-# requires (ADR-0002). go.work is a local-development convenience and never
+# its own go.mod and go.sum, with every sibling as that go.mod names it: a
+# directory `replace` while they are developed together, a released version in
+# strict mode (ADR-0006). go.work is a local-development convenience and never
 # decides whether CI passes.
 #
 # Running the suite is ci-test's job. The lydite stage gates coverage
