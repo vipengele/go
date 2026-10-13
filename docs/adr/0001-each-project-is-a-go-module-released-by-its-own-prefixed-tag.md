@@ -44,7 +44,7 @@ the repo root; the alternative is modules at the root (`cli/`, `core/`), which t
 Go's compatibility promise is per module: a module on `v1` and above keeps its API, and a consumer
 selects the minimum version satisfying all requirements. Releasing every project at every tag would
 publish versions that carry no change and make a consumer's `go.sum` churn for nothing. Where one
-project depends on another, ADR-0002 fixes how the pair is released.
+project depends on another, ADR-0006 fixes how the pair is developed and released.
 
 ## Considered options
 
