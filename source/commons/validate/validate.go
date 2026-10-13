@@ -138,12 +138,12 @@ func EnvVar(field, value string) error {
 	if !isUpper(value[0]) {
 		return invalid(field, value, "must start with an uppercase letter")
 	}
-	for i := 0; i < len(value); i++ {
+	for i := 1; i < len(value); i++ {
 		c := value[i]
 		if !isUpper(c) && !isDigit(c) && c != '_' {
 			return invalid(field, value, "must contain only A-Z, 0-9 and '_'")
 		}
-		if c == '_' && i > 0 && value[i-1] == '_' {
+		if c == '_' && value[i-1] == '_' {
 			return invalid(field, value, "must not contain '__'")
 		}
 	}

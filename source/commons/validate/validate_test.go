@@ -126,6 +126,7 @@ func TestGitHubOwner(t *testing.T) {
 		{"single digit", "7", accepted},
 		{"mixed case letters digits and hyphens", "Vipengele-Org-9", accepted},
 		{"uppercase only", "ABC", accepted},
+		{"last letter of the alphabet in uppercase", "Z", accepted},
 		{"starts with digit", "1abc", accepted},
 		{"starts with hyphen", "-abc", rejectedInvalid},
 		{"ends with hyphen", "abc-", rejectedInvalid},
@@ -144,6 +145,7 @@ func TestRepoName(t *testing.T) {
 		{"empty", "", rejectedEmpty},
 		{"single letter", "a", accepted},
 		{"mixed case with separators", "My_Repo-1.x", accepted},
+		{"last letter of the alphabet in uppercase", "Z", accepted},
 		{"starts with hyphen", "-repo", accepted},
 		{"starts with underscore", "_repo", accepted},
 		{"starts with dot", ".github", accepted},
@@ -172,6 +174,7 @@ func TestEnvVar(t *testing.T) {
 	cases := []checkCase{
 		{"empty", "", rejectedEmpty},
 		{"single letter", "A", accepted},
+		{"last letter of the alphabet", "Z", accepted},
 		{"letters digits and underscores", "MY_APP_2", accepted},
 		{"underscore then digit", "A_1", accepted},
 		{"starts with digit", "1ABC", rejectedInvalid},
