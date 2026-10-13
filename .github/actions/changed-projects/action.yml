@@ -15,7 +15,7 @@
 # selects anything, whether or not the diff base is known.
 #
 # A project is also selected when its go.mod requires, directly or
-# transitively, a module owned by a selected project (ADR-0002): a change
+# transitively, a module owned by a selected project (ADR-0006): a change
 # reaches every project that consumes it. A require of go.vipengele.org/<path>
 # (the project's module path, ADR-0004) is owned by the project whose identifier
 # is the longest prefix of <path>, so a major-version suffix (`cli/v2`) resolves
@@ -109,7 +109,7 @@ runs:
         selected="${selected:-[]}"
 
         # A require of go.vipengele.org/<path> is a cross-project edge to the
-        # project owning <path> (ADR-0002, ADR-0004); the closure selects every
+        # project owning <path> (ADR-0006, ADR-0004); the closure selects every
         # consumer of a selected project.
         edges="$(for gomod in "${gomods[@]}"; do
           project="$(sed -e 's|^source/||' -e 's|/go\.mod$||' <<< "$gomod")"

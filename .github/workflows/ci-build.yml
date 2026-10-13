@@ -7,10 +7,13 @@
 # once per affected project, in that project's directory. A project the change
 # does not reach is not built.
 #
-# `GOWORK=off` builds each module exactly as a consumer of its tag sees it: from
-# its own go.mod and go.sum, with every sibling at the released version it
-# requires (ADR-0002). go.work is a local-development convenience and never
-# decides whether CI passes.
+# `GOWORK=off` builds each module from its own go.mod and go.sum, without the
+# workspace: a sibling resolves through its directory `replace` while they are
+# developed together, or at its tagged release in strict mode (ADR-0006). Only
+# strict mode matches what a consumer of the tag gets, because a consumer ignores
+# a `replace`; verify-sibling-deps is what keeps one out of a tagged go.mod.
+# go.work is a local-development convenience and never decides whether CI
+# passes.
 #
 # Running the suite is ci-test's job. The lydite stage gates coverage
 # separately, running each `.lydite/components.yml` component's suite itself.

@@ -28,19 +28,14 @@ patch. Before `v1.0.0` a breaking change is a minor bump.
 A major version of `v2` or above changes the module path (`agentic/rules/module-path-matches-the-vanity-map.md`).
 Stop and confirm with the user before releasing one.
 
-## 2 — Release dependencies first
+## 2 — Release dependencies first, at release time only
 
-If the project requires siblings (`go list -m all | grep go.vipengele.org/`), and
-those siblings have changes the project needs, release each sibling first, then raise this
-project's requirement in a change of its own:
-
-```bash
-cd source/<project>
-go get go.vipengele.org/<sibling>@v<sibling-version>
-go mod tidy
-```
-
-`verify-sibling-deps` refuses a sibling version that has no tag, so the order is enforced.
+If the project requires siblings (`go list -m all | grep go.vipengele.org/`), its release needs each
+of them released at a version that contains what the project uses. Release first, with this same
+skill, every sibling whose latest release lacks something the project uses. The order matters only
+here: no sibling is ever released so that a dependent can be developed, and a project nothing
+unreleased feeds — a patch, or a project no sibling uses — is released on its own whenever it is
+ready.
 
 ## 3 — Write the release notes
 
@@ -48,12 +43,45 @@ go mod tidy
 announces anything. Say what changed and what a consumer has to do about it. A breaking change names
 the old and new spelling; "various fixes" is not release notes.
 
-## 4 — Open it as a pull request, and merge it
+The notes put the project into strict mode until its tag exists: `verify-sibling-deps` then fails
+any `replace` of a sibling in its `go.mod` and any sibling version with no tag, on every change.
 
-The notes and any `require` raise are an ordinary change: `chore(<project>): release <version>` as
-the subject. Nothing is released on merge.
+## 4 — Require the released siblings in the same change
 
-## 5 — Deploy the Worker with the project's path
+A sibling developed together with the project is replaced by its directory
+(`agentic/rules/a-sibling-is-developed-by-a-directory-replace.md`). Drop each `replace` and require
+the sibling at its tag:
+
+```bash
+cd source/<project>
+go mod edit -dropreplace=go.vipengele.org/<sibling>
+go get go.vipengele.org/<sibling>@v<sibling-version>
+go mod tidy
+```
+
+The notes, the dropped `replace`s, the raised `require`s and the tidied `go.sum` are one release
+pull request, `chore(<project>): release <version>`. Its `GOWORK=off` CI compiles the project
+against the released siblings, as a consumer of the tag will. Nothing is released on merge.
+
+## 5 — Check it locally, merge it, and check the merge commit again
+
+This check is mandatory, on the release branch before merging and on the merge commit before the
+tag. A `GOWORK=off` build honours the project's own `replace`, so only reading `go.mod` catches a
+leftover one, and a pushed tag is permanent:
+
+```bash
+cd source/<project>
+export GOWORK=off
+go mod edit -json | jq -e '(.Replace // []) | length == 0'   # no replace left
+go mod tidy && test -z "$(git status --porcelain -- go.mod go.sum)"   # tidy leaves no diff
+go build ./...
+go vet ./...
+go test -race -shuffle=on ./...
+```
+
+Every command must pass. Then merge the pull request.
+
+## 6 — Deploy the Worker with the project's path
 
 `go.vipengele.org` is a Cloudflare Worker whose module list is generated from `source/**/go.mod`. A
 project resolves only after the Worker deploy that includes its `go.mod`, so the deploy comes before
@@ -71,32 +99,36 @@ The answer must carry a `go-import` meta tag naming the project
 (`go.vipengele.org/<project> git https://github.com/vipengele/go source/<project>`). Until it does,
 push no tag.
 
-## 6 — Tag the merged commit
+## 7 — Tag the merged commit
 
 ```bash
 git fetch origin
-git tag source/<project>/v<version> origin/main
+git checkout --detach <merge-commit>   # run the step 5 checks here
+git tag source/<project>/v<version> <merge-commit>
 git push origin source/<project>/v<version>
 ```
 
-The tag must point at the merged commit on `main`, not at the branch. A pushed tag is final: the
-module proxy and the checksum database keep it permanently, so a wrong tag is superseded by a new
-version, never moved. A tag pushed while the Worker does not answer is permanent too: `announce`
-fails, and once the Worker answers, re-running the workflow finishes the release. If the tag itself
-was wrong, the next attempt is a new version.
+The tag must point at the release pull request's merge commit on `main`, not at the branch, and
+only after the step 5 checks pass there. A pushed tag is final: the module proxy and the checksum
+database keep it permanently, so a wrong tag is superseded by a new version, never moved. A tag
+pushed while the Worker does not answer is permanent too: `announce` fails, and once the Worker
+answers, re-running the workflow finishes the release. If the tag itself was wrong, the next attempt
+is a new version.
 
-## 7 — Watch it
+## 8 — Watch it
 
 ```bash
 gh run list --workflow release --limit 3
 gh run watch <run-id>
 ```
 
-The jobs are `tag` (validates the tag, the project, the commit and the notes), `test` (the module's
-suite with `GOWORK=off`) and `announce` (asks the module proxy for the version, then creates the
-GitHub Release). Re-running finishes a partial release.
+The jobs are `tag` (validates the tag, the project, the commit and the notes, and that the tagged
+project's `go.mod` carries no `replace` and requires only tagged siblings), `test` (with
+`GOWORK=off`, `go mod tidy` with no diff, `go build`, `go vet` and the module's suite) and
+`announce` (asks the module proxy for the version, then creates the GitHub Release). Re-running
+finishes a partial release.
 
-## 8 — Verify
+## 9 — Verify
 
 ```bash
 GOWORK=off GOFLAGS=-mod=mod go list -m go.vipengele.org/<project>@v<version>

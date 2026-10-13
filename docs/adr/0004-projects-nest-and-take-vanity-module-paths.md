@@ -102,8 +102,10 @@ stand as written for this decision.
   the rule that every project releases alone are unchanged. ADR-0001's reason for `source/` in the
   module path — Go requires a nested module's path to end with its directory — holds only for a
   module served from its repository path; a vanity path with a subdirectory field removes it.
-- **ADR-0002.** Unchanged in substance: a sibling is required at a released version, now under its
-  vanity path (`require go.vipengele.org/cli/core v0.3.0`).
+- **ADR-0002.** A sibling is required under its vanity path:
+  `require go.vipengele.org/cli/core v0.3.0`. How a sibling is required while two projects are
+  developed together, and when it must be a released version, is ADR-0006, which supersedes
+  ADR-0002.
 - **ADR-0003.** The project inventory is `cli/core`, `cli/spec`, `update`, `daemon` and `commons`;
   ADR-0003's `cli` is `cli/core`. ADR-0003 rejected "a fourth project for the shared identity and
   paths" because it added a module to release for a handful of lines. That rejection stands for
@@ -114,9 +116,9 @@ stand as written for this decision.
   tooling that is not a Go project. It has no `go.mod`, is not released by tag and is deployed from
   CI. Go code that builds, tests or ships as a project lives under `source/`; `tools/` is the one
   other root directory, for tooling that is not a Go project.
-- **The module-path formula in rules and the glossary.** `agentic/rules/module-path-matches-its-directory.md`,
-  `agentic/rules/a-sibling-is-required-at-a-released-version.md` and the Project and Package
-  entries of `CONTEXT.md` give a module path as `github.com/vipengele/go/source/<project>`.
+- **The module-path formula in rules and the glossary.** The rules on module paths and on sibling
+  dependencies, and the Project and Package entries of `CONTEXT.md`, give a module path as
+  `github.com/vipengele/go/source/<project>`.
   Where they do, this ADR governs: the module path is `go.vipengele.org/<path>`.
 
 ## Considered options

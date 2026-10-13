@@ -30,9 +30,13 @@ go test -race ./...
 golangci-lint run
 ```
 
-To work on a project and a sibling it requires together, list both in the root `go.work`
-([ADR-0002](docs/adr/0002-a-cross-project-dependency-is-a-released-version-linked-locally-by-go-work.md)).
-CI builds each project with `GOWORK=off`.
+To work on a project and a sibling it requires together, require the sibling and replace it with
+the sibling's own directory (`replace go.vipengele.org/commons => ../commons`), in the same pull
+request as the sibling's change. The project's release drops the `replace` and requires the
+sibling at its tag
+([ADR-0006](docs/adr/0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md)).
+CI builds each project with `GOWORK=off`; the root `go.work` lists every project for local
+development.
 
 ## Add a project
 

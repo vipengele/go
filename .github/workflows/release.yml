@@ -7,11 +7,12 @@
 # so there is no registry to upload to and no credential in this repository.
 #
 # Three jobs, and the seams between them are safety properties. `tag` reads the
-# repository and decides whether this is a release at all. `test` runs the
-# module's suite exactly as a consumer of the tag would build it. `announce`
-# asks the module proxy to fetch the version, which both makes it immediately
-# resolvable and proves the tag is a valid module version, then creates the
-# GitHub Release.
+# repository and decides whether this is a release at all, judging the tagged
+# project alone: what another project does with its siblings never blocks it.
+# `test` builds and runs the module's suite exactly as a consumer of the tag
+# would, with go.mod and go.sum already tidy. `announce` asks the module proxy
+# to fetch the version, which both makes it immediately resolvable and proves
+# the tag is a valid module version, then creates the GitHub Release.
 name: release
 
 on:
@@ -107,9 +108,79 @@ jobs:
           go-version-file: source/${{ steps.parse.outputs.project }}/go.mod
           cache: false
 
-      - uses: ./.github/actions/verify-sibling-deps
-        with:
-          expect-tag: ${{ github.ref_name }}
+      # The tagged go.mod is what every consumer reads, and a pushed tag is
+      # permanent (ADR-0006). A consumer ignores a replace, while a GOWORK=off
+      # build here honours it, so no build catches a leftover one: this check
+      # does. The go.mod replaces no sibling, requires every sibling at a
+      # version tagged source/<sibling>/<version>, and declares the module path
+      # the vanity Worker serves for the project (ADR-0004). Only the tagged
+      # project is read, so a sibling under development elsewhere in the
+      # repository does not block its release. A prerelease suffix fails, and
+      # tags are listed with an unauthenticated `git ls-remote`, which answers
+      # only while the repository is public.
+      - name: The tagged go.mod is what a consumer gets
+        env:
+          PROJECT: ${{ steps.parse.outputs.project }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="go.vipengele.org/"
+          gomod="source/${PROJECT}/go.mod"
+          status=0
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::${GITHUB_REF_NAME} carries a prerelease suffix; only source/<project>/vX.Y.Z is released"
+            exit 1
+          fi
+
+          if ! json="$(go mod edit -json "$gomod" 2>&1)"; then
+            echo "::error file=${gomod}::${gomod} does not parse: ${json//$'\n'/ }"
+            exit 1
+          fi
+
+          want="${prefix}${PROJECT}"
+          have="$(jq -r .Module.Path <<< "$json")"
+          if [[ "$have" != "$want" ]]; then
+            echo "::error file=${gomod}::module path is ${have}, expected ${want}"
+            status=1
+          fi
+
+          while IFS=$'\x1f' read -r old oldv new newv; do
+            if [[ "$old" == "$prefix"* ]]; then
+              echo "::error file=${gomod}::replace of ${old}${oldv:+ $oldv} -> ${new}${newv:+ $newv}: a consumer of ${GITHUB_REF_NAME} ignores it; drop it (go mod edit -dropreplace=${old}) and require the sibling at a tagged release"
+            else
+              echo "::error file=${gomod}::replace of ${old}${oldv:+ $oldv} -> ${new}${newv:+ $newv}: only a sibling may be replaced, and a released go.mod replaces none"
+            fi
+            status=1
+          done < <(jq -r '(.Replace // [])[] | [.Old.Path, (.Old.Version // ""), .New.Path, (.New.Version // "")] | join("\u001f")' <<< "$json")
+
+          mapfile -t requires < <(jq -r '(.Require // [])[] | select(.Path | startswith("'"$prefix"'")) | "\(.Path) \(.Version)"' <<< "$json")
+          if (( ${#requires[@]} > 0 )); then
+            remote="https://github.com/${GITHUB_REPOSITORY}.git"
+            if ! listing="$(git ls-remote --tags --refs "$remote" 2>/dev/null)"; then
+              echo "::error::git ls-remote --tags ${remote} failed; the tag lookup is unauthenticated and needs a public repository"
+              exit 1
+            fi
+            declare -A tags=()
+            while read -r _ ref; do
+              if [[ -n "$ref" ]]; then
+                tags["${ref#refs/tags/}"]=1
+              fi
+            done <<< "$listing"
+
+            for entry in "${requires[@]}"; do
+              read -r path version <<< "$entry"
+              sibling="${path#"$prefix"}"
+              if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-.*[0-9]{14}-[0-9a-f]{12}$ ]]; then
+                echo "::error file=${gomod}::${path} is required at the pseudo-version ${version}; a released go.mod requires every sibling at a tagged release"
+                status=1
+              elif [[ -z "${tags["source/${sibling}/${version}"]:-}" ]]; then
+                echo "::error file=${gomod}::${path} ${version} has no tag source/${sibling}/${version} in ${GITHUB_REPOSITORY}; release ${sibling} first, then require that tag"
+                status=1
+              fi
+            done
+          fi
+          exit "$status"
 
   test:
     name: test
@@ -126,6 +197,21 @@ jobs:
         with:
           go-version-file: source/${{ needs.tag.outputs.project }}/go.mod
           cache: false
+      # go mod tidy resolves every requirement through the module proxy, as a
+      # consumer's build does. A go.mod or go.sum that tidy changes, or a
+      # go.sum it creates, is not the module that was reviewed.
+      - name: go.mod and go.sum are tidy
+        env:
+          PROJECT: ${{ needs.tag.outputs.project }}
+        run: |
+          set -euo pipefail
+          go mod tidy
+          if [[ -n "$(git status --porcelain -- go.mod go.sum)" ]]; then
+            git --no-pager diff -- go.mod go.sum
+            echo "::error file=source/${PROJECT}/go.mod::go mod tidy changes go.mod or go.sum of ${PROJECT}; the tagged module is not tidy"
+            exit 1
+          fi
+      - run: go build ./...
       - run: go vet ./...
       - run: go test -race -shuffle=on ./...
 

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "notes": {
+    "changed-projects-select-all-regex": {
+      "count": 1,
+      "first": "2026-10-13T05:05:56.103596967Z",
+      "last": "2026-10-13T05:05:56.103596967Z"
+    },
+    "release-prerelease-tags-always-fail": {
+      "count": 1,
+      "first": "2026-10-13T05:05:56.066257738Z",
+      "last": "2026-10-13T05:05:56.066257738Z"
+    },
+    "release-tag-exists-before-validation": {
+      "count": 1,
+      "first": "2026-10-13T05:05:56.092217031Z",
+      "last": "2026-10-13T05:05:56.092217031Z"
+    },
+    "release-v2-tags-fail-announce": {
+      "count": 1,
+      "first": "2026-10-13T05:05:56.076195509Z",
+      "last": "2026-10-13T05:05:56.076195509Z"
+    },
+    "verify-sibling-deps-tag-check-unauthenticated": {
+      "count": 1,
+      "first": "2026-10-13T05:05:56.085415367Z",
+      "last": "2026-10-13T05:05:56.085415367Z"
+    }
+  }
+}

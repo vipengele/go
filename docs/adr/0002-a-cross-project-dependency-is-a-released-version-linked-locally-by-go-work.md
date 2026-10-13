@@ -1,5 +1,7 @@
 # A cross-project dependency is a released version, linked locally by `go.work`
 
+Status: superseded by ADR-0006.
+
 A project that uses another project's packages names the module in its `go.mod` at a tagged
 release, and nothing else:
 

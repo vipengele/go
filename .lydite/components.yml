@@ -5,9 +5,10 @@
 # is a `go-test` component rooted at the module's directory, run with the race
 # detector.
 #
-# A component that requires a sibling project's module resolves it at the
-# released version its go.mod names, never through go.work (ADR-0002), so it
-# needs no `setup` and no `depends_on` to build the sibling first.
+# A component that requires a sibling project's module resolves it from its
+# own go.mod (a directory `replace` while they are developed together, a
+# released version in strict mode, ADR-0006), so it needs no `setup` and no
+# `depends_on` to build the sibling first.
 #
 # Every project under source/ has one component with `name` (the project), `dir` (its directory),
 # `runner: go-test` and `args: ["-race", "./..."]`.

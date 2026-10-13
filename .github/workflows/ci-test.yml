@@ -10,7 +10,8 @@
 #
 # Each project under source/ is its own Go module (ADR-0001), so the suite runs
 # once per affected project, in that project's directory, with `GOWORK=off` so it
-# resolves siblings at the released versions its go.mod names (ADR-0002).
+# resolves siblings as its go.mod names them: a directory `replace` while they
+# are developed together, a released version in strict mode (ADR-0006).
 name: ci-test
 
 on:

@@ -1,7 +1,8 @@
 # The library is three projects: `cli`, `update` and `daemon`
 
 Status: amended by ADR-0004, which replaces the project inventory and narrows the rejection of a
-shared project.
+shared project, and by ADR-0006, which replaces how `daemon` requires its siblings and the order a
+feature spanning two projects is released in.
 
 The library serves two shapes of tool: one-shot command-line tools and long-running daemons.
 Self-update serves both. Each project is a module released alone (ADR-0001), so the split decides
@@ -23,7 +24,7 @@ cli, update ──► (no sibling)
 
 - `cli` requires no sibling.
 - `update` requires no sibling. A tool that wants only self-update takes nothing else of this repo.
-- `daemon` requires `cli` and `update`, each at a released version (ADR-0002).
+- `daemon` requires `cli` and `update` (ADR-0006).
 - No project requires `daemon`. A cycle between projects is not allowed; if two projects need the
   same code, it moves to the one that is lower in the graph.
 
@@ -99,8 +100,8 @@ package, so the boundary is checked rather than remembered.
 ## Consequences
 
 - A change to `cli` or `update` selects `daemon` in CI, because `daemon`'s `go.mod` requires them
-  (ADR-0002).
-- Releasing a feature that spans `update` and `daemon` is two changes in order: `update` first, then
-  `daemon` with its `require` raised.
+  (ADR-0006).
+- A feature that spans `update` and `daemon` is one change. Their releases are ordered: `update`
+  first, then `daemon` with its `require` raised to `update`'s tag (ADR-0006).
 - Each project has a `go.mod`, a `.lydite` component, a `.gt-repo.yaml` `gomod` entry and a
   `go.work` line (see "CI" in `CLAUDE.md`).
