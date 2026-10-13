@@ -44,13 +44,16 @@ included, and not the **Vanity path**: the project `go.vipengele.org/cli/core` i
 _Avoid_: version tag (a bare `vX.Y.Z` is not a release here)
 
 **Workspace**:
-The root `go.work`, which lists every project so local development resolves siblings from disk
-(ADR-0002). CI never uses it.
+The root `go.work`, which lists every project for local development (ADR-0006). CI never uses it,
+and a project never depends on it: a sibling developed alongside is reached through its directory
+`replace`.
 _Avoid_: monorepo module
 
 **Sibling**:
-Another project in this repo that a project requires. A sibling is always required at a released
-version, never through `replace` (ADR-0002).
+Another project in this repo that a project requires. While the two are developed together, the
+project's `go.mod` also replaces the sibling with the sibling's own directory; from its release
+notes to its tag, the project requires every sibling at a tagged release and replaces none
+(ADR-0006).
 _Avoid_: local dependency
 
 **Tools directory**:

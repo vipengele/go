@@ -28,16 +28,23 @@ under `source/`; the repository's own tooling that is not a Go project lives und
 - `tools/vanity-worker` — the Cloudflare Worker that serves `go.vipengele.org`. Its module list is
   generated from `source/**/go.mod`, so a new project resolves only after the deploy that includes
   it. Repo tooling, not part of the framework: no `go.mod`, no tag, deployed from CI.
-- `go.work` — lists every project for local development. CI never reads it (ADR-0002).
-- A dependency on a sibling project is a `require` of `go.vipengele.org/<path>` at a released tag.
-  Never a `replace`, never a pseudo-version
-  (`agentic/rules/a-sibling-is-required-at-a-released-version.md`, ADR-0002).
+- `go.work` — lists every project for local development. CI never reads it (ADR-0006).
+- A dependency on a sibling project is a `require` of `go.vipengele.org/<path>`. While the two are
+  developed together it also carries a `replace` with the sibling's own directory, relative to the
+  dependent (`../commons` from `source/update`, `../../commons` from `source/cli/spec`), and the
+  required version is a `v0` placeholder or the last release. Otherwise it is a tagged release, never
+  a pseudo-version (`agentic/rules/a-sibling-is-developed-by-a-directory-replace.md`, ADR-0006).
 - `.github/actions/changed-projects` — the projects a change affects, dependents included; CI
   builds only those. A project's identifier is its path relative to `source/` (`cli/core`), a file
   belongs to the project with the longest matching directory, and a require of
   `go.vipengele.org/<path>` is an edge to the project owning `<path>`.
-- `.github/actions/verify-sibling-deps` — fails a `replace` of a sibling, a sibling at a
-  pseudo-version, a sibling version with no tag, and a module path other than
+- `.github/actions/verify-sibling-deps` — checks every project's `go.mod`. A project is in strict
+  mode while some `docs/release-notes/<path>/v<version>.md` has no tag `source/<path>/v<version>`:
+  it then fails any `replace` of a sibling and any sibling version with no tag. Otherwise it accepts
+  a version-less `replace` of a sibling by that sibling's own project directory, and fails a
+  `replace` naming a version or another directory and a sibling with no `replace` at a version with
+  no tag. In both modes it fails a sibling at a pseudo-version, a `replace` of a non-sibling, a
+  project directory holding another `go.mod`, and a module path other than
   `go.vipengele.org/<path>` for its directory `source/<path>`.
 - `docs/adr/` — architecture decision records. Read before revisiting a decision recorded there.
 - `docs/release-notes/<path>/vX.Y.Z.md` — one file per release tag. The release workflow refuses
@@ -58,6 +65,8 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
 
 - `ci-build.yml` runs, per affected project with `GOWORK=off`: `go mod tidy` cleanliness, `gofmt`,
   `golangci-lint`, `go vet`, `go build`. It first runs `verify-sibling-deps` across the repo.
+  `GOWORK=off` resolves each sibling as the project's `go.mod` names it: through its directory
+  `replace` while they are developed together, at its tag in strict mode.
 - `ci-test.yml` runs `go test -race -shuffle=on ./...` per affected project with `GOWORK=off`. The
   `lydite` stage gates coverage separately, running each `.lydite/components.yml` component's suite
   itself.
@@ -71,9 +80,14 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
 
 A release is one project, one tag, pushed by a human (ADR-0001). The tag is
 `source/<path>/vX.Y.Z`; a consumer never types it and runs `go get go.vipengele.org/<path>@vX.Y.Z`.
-The `release` skill walks the whole sequence. `release.yml`: `tag` validates the tag form, that the
-project exists, that the commit is on `main`, that `docs/release-notes/<path>/<version>.md` exists
-and that sibling requirements are released versions; `test` runs the module's suite with
-`GOWORK=off`; `announce` asks the module proxy to fetch the version, which resolves through
+The release pull request carries the notes, drops the sibling `replace`s and requires each sibling
+at its tag, and the tag goes on its merge commit; release order is dependency-first at release time
+only. The `release` skill walks the whole sequence. `release.yml`: `tag` validates the tag form,
+that the project exists, that the commit is on `main`, that
+`docs/release-notes/<path>/<version>.md` exists, and that the tagged project's `go.mod` carries no
+`replace` and requires every sibling at a tagged version — no other project's `go.mod` is read, so
+a sibling under development elsewhere never blocks the release; `test` runs, with `GOWORK=off`,
+`go mod tidy` failing on any change to `go.mod` or `go.sum`, `go build`, `go vet` and the module's
+suite; `announce` asks the module proxy to fetch the version, which resolves through
 `go.vipengele.org`, and creates the GitHub Release. Re-running finishes a partial release, including
 one whose `announce` failed while the Worker did not answer.
