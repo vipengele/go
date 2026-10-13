@@ -25,27 +25,16 @@
 # In both modes a sibling at a pseudo-version fails, as does a replace of any
 # module that is not a sibling. Tags are listed once with an unauthenticated
 # `git ls-remote`, which answers only while the repository is public.
-#
-# With `expect-tag` set (the release workflow), the check also confirms that the
-# tag being released has the form source/<project>/vX.Y.Z and names a project.
 name: verify-sibling-deps
 description: >-
   Fail when a project reaches a sibling by anything but a version-less replace of the
   sibling's own directory or a tagged release, or replaces a sibling or requires an untagged
   one while its release notes have no tag.
 
-inputs:
-  expect-tag:
-    description: 'The tag being released, e.g. source/cli/core/v0.2.0. Empty outside a release.'
-    required: false
-    default: ''
-
 runs:
   using: composite
   steps:
     - shell: bash
-      env:
-        EXPECT_TAG: ${{ inputs.expect-tag }}
       run: |
         set -euo pipefail
         prefix="go.vipengele.org/"
@@ -173,15 +162,4 @@ runs:
           unset replaced
         done
 
-        # The tagged project's go.mod is checked after the nested check above,
-        # which already fails a tag naming either member of a nested pair.
-        if [[ -n "$EXPECT_TAG" ]]; then
-          if [[ ! "$EXPECT_TAG" =~ ^source/([a-z0-9-]+(/[a-z0-9-]+)*)/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "::error::${EXPECT_TAG} is not source/<project>/vX.Y.Z"
-            status=1
-          elif [[ ! -f "source/${BASH_REMATCH[1]}/go.mod" ]]; then
-            echo "::error::${EXPECT_TAG} names a project with no source/${BASH_REMATCH[1]}/go.mod"
-            status=1
-          fi
-        fi
         exit "$status"

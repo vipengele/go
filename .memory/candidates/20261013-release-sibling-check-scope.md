@@ -6,7 +6,7 @@ saw:
   - .github/workflows/ci-build.yml
 ---
 
-`verify-sibling-deps/action.yml` loops `find source -name go.mod` (`:76`) and decides per project: strict while a release-notes file has no tag, otherwise development (a version-less replace to the sibling's own directory is allowed). It is called by `ci-build.yml:48` (detect job, every PR, whole repo) only. `expect-tag` (`:178-185`) validates the tag form and that the project exists.
+`verify-sibling-deps/action.yml` loops `find source -name go.mod` (`:65`) and decides per project: strict while a release-notes file has no tag, otherwise development (a version-less replace to the sibling's own directory is allowed). It is called by `ci-build.yml:48` (detect job, every PR, whole repo) only.
 
 `release.yml` `tag` job does NOT call the action. Its step "The tagged go.mod is what a consumer gets" reads only `source/<tagged project>/go.mod`: it fails any replace (sibling or not), a sibling pseudo-version, a sibling version with no tag, a module path other than `go.vipengele.org/<project>`, and a prerelease suffix, using one unauthenticated `git ls-remote` (`:160`) made only when the project requires a sibling. Other projects' go.mod files are never read, so an unreleased sibling or a replace elsewhere does not block the release.
 

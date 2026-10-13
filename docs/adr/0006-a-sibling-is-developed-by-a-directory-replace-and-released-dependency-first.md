@@ -39,9 +39,10 @@ In development mode the check:
 
 - accepts a `replace` of a sibling whose target, resolved against the `go.mod`'s directory and
   compared by real path, is exactly `source/<sibling>`, and which names no version;
-- fails a `replace` that names a version (`=> ../commons v0.1.0`), a `replace` of a sibling to any
-  other directory, a sibling required without a `replace` at a version that has no tag, and a
-  sibling at a pseudo-version, with or without a `replace`;
+- fails a `replace` that names a version on either side (`=> ../commons v0.1.0` and
+  `go.vipengele.org/commons v0.1.0 => ../commons`), a `replace` of a sibling to any other directory,
+  a sibling required without a `replace` at a version that has no tag, and a sibling at a
+  pseudo-version, with or without a `replace`;
 - fails a `replace` of a module that is not a sibling, a module path other than
   `go.vipengele.org/<path>` for `source/<path>`, and a project directory holding another `go.mod`.
 
@@ -131,8 +132,8 @@ change to the library still selects the dependent in CI.
   nothing that only builds the module notices it.
 - **The tag lookup is unauthenticated.** `git ls-remote` against `https://github.com/<repository>`
   works while the repository is public and fails on a private one.
-- **Prerelease and major-version tags fail the `tag` job.** `verify-sibling-deps` accepts only
-  `source/<path>/vX.Y.Z`, so a `-rc.N` suffix fails, and it expects the module path
+- **Prerelease and major-version tags fail the `tag` job.** Its inline check accepts only a version
+  of the form `vX.Y.Z`, so a `-rc.N` suffix fails, and its module-path check expects
   `go.vipengele.org/<path>`, so a `/v2` module fails.
 - **A `/v2` sibling path does not resolve to a directory.** The check maps
   `go.vipengele.org/<path>/v2` to `source/<path>/v2`, which is not a project, and the check has no

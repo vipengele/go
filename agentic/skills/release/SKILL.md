@@ -33,9 +33,9 @@ Stop and confirm with the user before releasing one.
 If the project requires siblings (`go list -m all | grep go.vipengele.org/`), its release needs each
 of them released at a version that contains what the project uses. Release first, with this same
 skill, every sibling whose latest release lacks something the project uses. The order matters only
-here: no sibling is ever released so that a
-dependent can be developed, and a project nothing unreleased feeds — a patch, or a project no
-sibling uses — is released on its own whenever it is ready.
+here: no sibling is ever released so that a dependent can be developed, and a project nothing
+unreleased feeds — a patch, or a project no sibling uses — is released on its own whenever it is
+ready.
 
 ## 3 — Write the release notes
 
@@ -110,9 +110,10 @@ git push origin source/<project>/v<version>
 
 The tag must point at the release pull request's merge commit on `main`, not at the branch, and
 only after the step 5 checks pass there. A pushed tag is final: the module proxy and the checksum
-database keep it permanently, so a wrong tag is superseded by a new version, never moved. A tag pushed while the Worker does not answer is permanent too: `announce`
-fails, and once the Worker answers, re-running the workflow finishes the release. If the tag itself
-was wrong, the next attempt is a new version.
+database keep it permanently, so a wrong tag is superseded by a new version, never moved. A tag
+pushed while the Worker does not answer is permanent too: `announce` fails, and once the Worker
+answers, re-running the workflow finishes the release. If the tag itself was wrong, the next attempt
+is a new version.
 
 ## 8 — Watch it
 
@@ -123,8 +124,9 @@ gh run watch <run-id>
 
 The jobs are `tag` (validates the tag, the project, the commit and the notes, and that the tagged
 project's `go.mod` carries no `replace` and requires only tagged siblings), `test` (with
-`GOWORK=off`, `go mod tidy` with no diff, `go build`, `go vet` and the module's suite) and `announce` (asks the module proxy for the version, then creates the
-GitHub Release). Re-running finishes a partial release.
+`GOWORK=off`, `go mod tidy` with no diff, `go build`, `go vet` and the module's suite) and
+`announce` (asks the module proxy for the version, then creates the GitHub Release). Re-running
+finishes a partial release.
 
 ## 9 — Verify
 
