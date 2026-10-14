@@ -51,3 +51,10 @@ func TestNewInvocationCopiesArgsAndValues(t *testing.T) {
 		t.Errorf("Get = %q after the caller changed its map, want %q", got, "first")
 	}
 }
+
+func TestNewInvocationLeavesTheDefaultOutput(t *testing.T) {
+	inv := spec.NewInvocation(nil, nil, nil)
+	if inv.Output != (spec.Output{}) {
+		t.Errorf("Output = %+v, want the zero Output", inv.Output)
+	}
+}
