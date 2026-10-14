@@ -1,0 +1,21 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - depguard
+    - gochecknoglobals
+  settings:
+    depguard:
+      rules:
+        core-stays-out:
+          files:
+            - "**"
+          deny:
+            - pkg: "go.vipengele.org/cli/core/**"
+              desc: update does not depend on cli/core
+        cobra-stays-in-updatecmd:
+          files:
+            - "!**/updatecmd/**"
+          deny:
+            - pkg: github.com/spf13/cobra
+              desc: cobra stays inside updatecmd
