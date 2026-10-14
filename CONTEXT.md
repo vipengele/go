@@ -74,6 +74,12 @@ environment-variable prefix, version, root command, output mode and exit codes. 
 the identity once and hands the same values to `update` and `daemon`.
 _Avoid_: application, program, tool (the word for the consumer's whole product)
 
+**Identity**:
+The fixed values that name one tool: its binary name, the owner and repository its releases are
+published from, its environment-variable prefix and its directory name. The tool declares them once
+in its `main` and hands the same values to each library it assembles, so they cannot disagree.
+_Avoid_: config (values a user supplies), name (one of its values), metadata
+
 **Build info**:
 What a tool's binary reports about its own build: its version, commit and build date, and the Go
 toolchain, operating system and architecture it was built for. The `version` command prints it, and

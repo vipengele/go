@@ -83,9 +83,8 @@ the directory name — describes a command-line tool and how it is updated. It i
 concept, not a generic building block, so it belongs in `cli/spec` and not in `commons`.
 
 This is the type ADR-0003 has the tool's `main` spell out twice, once for `cli`'s `App` and once for
-`update.Config`. `App` and the rest of the shell remain in `cli/core`. Which projects require
-`cli/spec`, and so whether `update` takes `Identity` from it, is a dependency-direction question
-that belongs to the command abstraction below.
+`update.Config`. `App` and the rest of the shell remain in `cli/core`. `update` takes `Identity` from `cli/spec`
+(ADR-0008).
 
 ## Out of scope: the command abstraction
 
