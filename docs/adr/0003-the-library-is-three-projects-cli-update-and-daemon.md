@@ -3,7 +3,9 @@
 Status: amended by ADR-0004, which replaces the project inventory and narrows the rejection of a
 shared project, by ADR-0006, which replaces how `daemon` requires its siblings and the order a
 feature spanning two projects is released in, and by ADR-0007, which makes `cli` the owner of the
-`version --json` contract.
+`version --json` contract. Partially superseded by ADR-0005, which replaces the rule on where cobra
+is allowed ("The CLI framework dependency") and the rule that `update` requires no sibling
+("Dependency direction").
 
 The library serves two shapes of tool: one-shot command-line tools and long-running daemons.
 Self-update serves both. Each project is a module released alone (ADR-0001), so the split decides

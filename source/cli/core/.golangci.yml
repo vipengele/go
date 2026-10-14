@@ -7,9 +7,9 @@ linters:
   settings:
     depguard:
       rules:
-        cobra-stays-in-versioncmd:
+        cobra-stays-in-internal-cobra:
           files:
-            - "!**/versioncmd/**"
+            - "!**/internal/cobra/**"
           deny:
             - pkg: github.com/spf13/cobra
-              desc: cobra stays inside versioncmd
+              desc: cobra stays inside internal/cobra (ADR-0005)
