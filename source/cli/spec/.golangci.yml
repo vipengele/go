@@ -2,4 +2,14 @@ version: "2"
 linters:
   default: standard
   enable:
+    - depguard
     - gochecknoglobals
+  settings:
+    depguard:
+      rules:
+        no-cli-framework:
+          files:
+            - $all
+          deny:
+            - pkg: github.com/spf13/cobra
+              desc: cli/spec imports no command-line framework; cobra belongs in cli/core/internal/cobra (ADR-0005)
