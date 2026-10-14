@@ -1,0 +1,15 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - depguard
+    - gochecknoglobals
+  settings:
+    depguard:
+      rules:
+        cobra-stays-in-versioncmd:
+          files:
+            - "!**/versioncmd/**"
+          deny:
+            - pkg: github.com/spf13/cobra
+              desc: cobra stays inside versioncmd

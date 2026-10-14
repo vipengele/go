@@ -1,8 +1,9 @@
 # The library is three projects: `cli`, `update` and `daemon`
 
 Status: amended by ADR-0004, which replaces the project inventory and narrows the rejection of a
-shared project, and by ADR-0006, which replaces how `daemon` requires its siblings and the order a
-feature spanning two projects is released in.
+shared project, by ADR-0006, which replaces how `daemon` requires its siblings and the order a
+feature spanning two projects is released in, and by ADR-0007, which makes `cli` the owner of the
+`version --json` contract.
 
 The library serves two shapes of tool: one-shot command-line tools and long-running daemons.
 Self-update serves both. Each project is a module released alone (ADR-0001), so the split decides
@@ -60,8 +61,9 @@ Consequences of this choice:
 - `update` writes its state with its own atomic writer. It does not use `cli`'s store, so the two
   stores do not share a lock or a file format.
 - The staged-binary preflight runs `<staged> version --json`. The JSON shape it reads is defined and
-  documented by `update`; `cli`'s version command is written to emit it. The two projects agree
-  through that documented contract, not through a shared type.
+  documented by `update` (amended by ADR-0007: `cli` defines and documents it, and `update` reads
+  it); `cli`'s version command is written to emit it. The two projects agree through that documented
+  contract, not through a shared type.
 
 ## The CLI framework dependency
 
