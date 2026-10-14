@@ -15,9 +15,10 @@ golangci-lint run
 ## Structure
 
 - `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries every
-  seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user config
+  seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user home
   dir). `Validate` reports problems; `resolve` returns a copy with each zero field set to its
-  production default and never mutates the receiver.
+  production default and never mutates the receiver. The default state dir comes from
+  `go.vipengele.org/cli/spec/paths`, resolved through the GOOS, env lookup and user home dir seams.
 - `source.go` — `Source`, `Release` and `Asset`. The library ships no `Source` implementation; a nil
   `Source` is the one thing a zero `Config` cannot default (`ErrNoSource`).
 

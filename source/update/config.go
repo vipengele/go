@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"time"
 
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/commons/validate"
 )
 
@@ -53,8 +53,10 @@ type Config struct {
 	// ChecksumsAsset is the name of the release asset that lists every asset's checksum. Empty
 	// means "checksums.txt".
 	ChecksumsAsset string
-	// StateDir is the directory the library keeps its state in. Empty means Identity.DirName
-	// under the directory UserConfigDir returns.
+	// StateDir is the directory the library keeps its state in. Empty means the state directory
+	// [paths.New] resolves for the Identity, through the GOOS, Getenv and UserHomeDir seams: on
+	// Linux $XDG_STATE_HOME/<DirName> or ~/.local/state/<DirName>, and <PREFIX>_HOME/state when
+	// that variable is set. An explicit StateDir is used as given.
 	StateDir string
 	// Source reports the releases the tool can update to. It is required.
 	Source Source
@@ -64,17 +66,19 @@ type Config struct {
 	HTTPClient *http.Client
 	// Now returns the current time. Nil means [time.Now].
 	Now func() time.Time
-	// GOOS is the target operating system. Empty means [runtime.GOOS].
+	// GOOS is the target operating system. Empty means [runtime.GOOS]. It also selects the
+	// directory layout the default StateDir is resolved for.
 	GOOS string
 	// GOARCH is the target architecture. Empty means [runtime.GOARCH].
 	GOARCH string
 	// Executable returns the path of the running binary. Nil means [os.Executable].
 	Executable func() (string, error)
-	// Getenv reads an environment variable. Nil means [os.Getenv].
+	// Getenv reads an environment variable. Nil means [os.Getenv]. The directory resolver reads
+	// the environment through it too, and counts a variable whose value is "" as unset.
 	Getenv func(string) string
-	// UserConfigDir returns the platform's per-user configuration root. Nil means
-	// [os.UserConfigDir].
-	UserConfigDir func() (string, error)
+	// UserHomeDir returns the user's home directory. Nil means [os.UserHomeDir]. It is consulted
+	// only to resolve a default StateDir, and only when the layout needs the home directory.
+	UserHomeDir func() (string, error)
 }
 
 // Validate returns nil when the Config can be used. Otherwise it returns one error listing every
@@ -90,8 +94,10 @@ func (c Config) Validate() error {
 }
 
 // resolve validates c and returns a copy with every zero field set to its production default.
-// It never modifies c. StateDir is derived through the resolved UserConfigDir, so a substituted
-// UserConfigDir decides it too; resolve fails when StateDir is empty and UserConfigDir fails.
+// It never modifies c. An empty StateDir is the state directory [paths.New] resolves for the
+// Identity with the resolved GOOS, Getenv and UserHomeDir, so a substituted seam decides it too;
+// resolve fails when StateDir is empty and the resolver cannot find the home directory it needs.
+// An explicit StateDir is kept without consulting the resolver.
 func (c Config) resolve() (Config, error) {
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -127,15 +133,23 @@ func (c Config) resolve() (Config, error) {
 	if r.Getenv == nil {
 		r.Getenv = os.Getenv
 	}
-	if r.UserConfigDir == nil {
-		r.UserConfigDir = os.UserConfigDir
+	if r.UserHomeDir == nil {
+		r.UserHomeDir = os.UserHomeDir
 	}
 	if r.StateDir == "" {
-		root, err := r.UserConfigDir()
+		getenv := r.Getenv
+		dirs, err := paths.New(r.Identity, paths.Options{
+			GOOS: r.GOOS,
+			LookupEnv: func(key string) (string, bool) {
+				v := getenv(key)
+				return v, v != ""
+			},
+			UserHomeDir: r.UserHomeDir,
+		})
 		if err != nil {
 			return Config{}, fmt.Errorf("update: resolving StateDir: %w", err)
 		}
-		r.StateDir = filepath.Join(root, r.DirName)
+		r.StateDir = dirs.State()
 	}
 	return r, nil
 }
