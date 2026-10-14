@@ -21,7 +21,7 @@ func run(t *testing.T, root *spec.Command, args ...string) (stdout, stderr strin
 	if verr := root.Validate(); verr != nil {
 		t.Fatalf("invalid tree: %v", verr)
 	}
-	err = cobra.Run(context.Background(), env, root, args)
+	err = cobra.Run(context.Background(), env, root, args, cobra.Config{})
 	return out.String(), errOut.String(), err
 }
 
@@ -72,7 +72,7 @@ func TestRunNilArgsIsNoArguments(t *testing.T) {
 		},
 	}
 	env := (&spec.Env{}).Resolved()
-	if err := cobra.Run(context.Background(), env, root, nil); err != nil {
+	if err := cobra.Run(context.Background(), env, root, nil, cobra.Config{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(got) != 0 {
@@ -91,7 +91,7 @@ func TestRunPassesContext(t *testing.T) {
 		},
 	}
 	env := (&spec.Env{}).Resolved()
-	if err := cobra.Run(ctx, env, root, []string{}); err != nil {
+	if err := cobra.Run(ctx, env, root, []string{}, cobra.Config{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got != "marker" {
@@ -225,5 +225,79 @@ func TestRunCommandWithRunAndSubcommands(t *testing.T) {
 		case tt.wantErr != "" && (!errors.As(err, &usage) || err.Error() != tt.wantErr):
 			t.Errorf("Run(%q) = %v, want the usage error %q", tt.args, err, tt.wantErr)
 		}
+	}
+}
+
+func TestRunConfigOutput(t *testing.T) {
+	quiet := spec.BoolFlag("quiet", "say less", spec.Inherited())
+	tests := []struct {
+		name      string
+		args      []string
+		output    func(inv *spec.Invocation) (spec.Output, error)
+		wantQuiet bool
+		wantColor bool
+		wantErr   string
+		wantRun   bool
+	}{
+		{
+			name:      "nil resolver leaves the zero output",
+			args:      []string{"leaf", "--quiet"},
+			wantColor: true,
+			wantRun:   true,
+		},
+		{
+			name: "resolver sees the parsed flags",
+			args: []string{"leaf", "--quiet"},
+			output: func(inv *spec.Invocation) (spec.Output, error) {
+				return spec.NewOutput(spec.OutputOptions{Quiet: quiet.Get(inv), NoColor: true}), nil
+			},
+			wantQuiet: true,
+			wantRun:   true,
+		},
+		{
+			name: "resolver error is a usage error of the command",
+			args: []string{"leaf"},
+			output: func(*spec.Invocation) (spec.Output, error) {
+				return spec.Output{}, errors.New("conflict")
+			},
+			wantColor: true,
+			wantErr:   "leaf: conflict",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				ran bool
+				got spec.Output
+			)
+			root := &spec.Command{
+				Name:  "tool",
+				Flags: []spec.Flag{quiet},
+				Commands: []*spec.Command{{
+					Name: "leaf",
+					Run: func(_ context.Context, inv *spec.Invocation) error {
+						ran, got = true, inv.Output
+						return nil
+					},
+				}},
+			}
+			env := (&spec.Env{}).Resolved()
+			err := cobra.Run(context.Background(), env, root, tt.args, cobra.Config{Output: tt.output})
+			if tt.wantErr != "" {
+				var usage *cobra.UsageError
+				if !errors.As(err, &usage) || err.Error() != tt.wantErr {
+					t.Fatalf("Run(%q) = %v, want the usage error %q", tt.args, err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("Run(%q) = %v, want nil", tt.args, err)
+			}
+			if ran != tt.wantRun {
+				t.Fatalf("run function ran: %t, want %t", ran, tt.wantRun)
+			}
+			if got.Quiet() != tt.wantQuiet || got.Color() != tt.wantColor {
+				t.Errorf("Output quiet=%t color=%t, want quiet=%t color=%t",
+					got.Quiet(), got.Color(), tt.wantQuiet, tt.wantColor)
+			}
+		})
 	}
 }

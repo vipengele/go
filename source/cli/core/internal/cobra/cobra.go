@@ -43,7 +43,18 @@ func (e *UsageError) Unwrap() error {
 	return e.Err
 }
 
-// Run executes root with args against env and returns the error of the command line or of the
+// Config is what an execution needs beyond the tree, the environment and the arguments. The
+// zero value runs every command with the zero [spec.Output].
+type Config struct {
+	// Output returns the [spec.Output] of the invocation a run function is about to receive,
+	// which [Run] sets as the invocation's Output. It is called once per run, after the command
+	// line is parsed and before the run function, with the invocation holding the parsed flag
+	// values. An error it returns is a problem of the command line: Run returns it as a
+	// [*UsageError] and calls no run function. Nil leaves the zero Output.
+	Output func(inv *spec.Invocation) (spec.Output, error)
+}
+
+// Run executes root with args against env, configured by cfg, and returns the error of the command line or of the
 // run function it selects. root must be valid as [spec.Command.Validate] reports it, and env
 // resolved as [spec.Env.Resolved] returns it. A nil args is no arguments; it never falls back
 // to the arguments of the process.
@@ -53,8 +64,8 @@ func (e *UsageError) Unwrap() error {
 // declares a flag named help. A command with subcommands and no Run writes its help to
 // env.Stdout and returns nil when it is given no positional argument, and returns a
 // [*UsageError] naming the first one when it is.
-func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string) error {
-	cmd, err := build(env, root, nil)
+func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string, cfg Config) error {
+	cmd, err := build(env, cfg, root, nil)
 	if err != nil {
 		return err
 	}
@@ -75,7 +86,7 @@ func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string) 
 
 // build returns the cobra command for c and, recursively, its subcommands. inherited are the
 // inherited flags of c's ancestors, which c reads along with its own.
-func build(env *spec.Env, c *spec.Command, inherited []spec.Flag) (*spf.Command, error) {
+func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag) (*spf.Command, error) {
 	cmd := &spf.Command{
 		Use:           c.Name,
 		Short:         c.Summary,
@@ -110,7 +121,7 @@ func build(env *spec.Env, c *spec.Command, inherited []spec.Flag) (*spf.Command,
 	}
 
 	for _, sub := range c.Commands {
-		child, err := build(env, sub, children)
+		child, err := build(env, cfg, sub, children)
 		if err != nil {
 			return nil, err
 		}
@@ -144,7 +155,15 @@ func build(env *spec.Env, c *spec.Command, inherited []spec.Flag) (*spf.Command,
 		if err != nil {
 			return err
 		}
-		return run(cmd.Context(), spec.NewInvocation(env, args, values))
+		inv := spec.NewInvocation(env, args, values)
+		if cfg.Output != nil {
+			out, err := cfg.Output(inv)
+			if err != nil {
+				return &UsageError{Path: relPath(cmd), Err: err}
+			}
+			inv.Output = out
+		}
+		return run(cmd.Context(), inv)
 	}
 	return cmd, nil
 }

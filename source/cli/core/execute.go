@@ -80,14 +80,22 @@ func processEnv() (*spec.Env, error) {
 // [ExitOK]. A command with subcommands and no Run, given no positional argument, does the same.
 // There is no help or completion subcommand.
 //
+// Every run function receives a [spec.Invocation] whose Output forbids colour when the
+// environment variable NO_COLOR is set and not empty, or when env.Stdout is not a terminal.
+//
 // One tree may be run any number of times, concurrently: each call parses its own flag values.
 func ExecuteArgs(env *spec.Env, root *spec.Command, args []string) int {
+	return executeArgs(env, root, args, cobra.Config{Output: outputResolver{}.resolve})
+}
+
+// executeArgs is [ExecuteArgs] with the adapter configured by cfg.
+func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Config) int {
 	env = env.Resolved()
 	if err := root.Validate(); err != nil {
 		_, _ = fmt.Fprintf(env.Stderr, "%sinvalid command tree: %v\n", prefix(root), err)
 		return ExitError
 	}
-	err := cobra.Run(context.Background(), env, root, args)
+	err := cobra.Run(context.Background(), env, root, args, cfg)
 	if err == nil {
 		return ExitOK
 	}

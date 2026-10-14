@@ -1,6 +1,9 @@
 package cli
 
-import "go.vipengele.org/cli/spec"
+import (
+	"go.vipengele.org/cli/core/internal/cobra"
+	"go.vipengele.org/cli/spec"
+)
 
 // App is the shell of one tool: its [spec.Identity] and the commands it runs. A tool builds one
 // in its main with [New], adds its commands with [App.Add] and runs them with [App.Execute]:
@@ -21,7 +24,13 @@ type App struct {
 }
 
 // settings holds what the [Option]s given to [New] set.
-type settings struct{}
+type settings struct {
+	// verbose, quiet, noColor and json opt the App into the standard flag of the same name.
+	verbose bool
+	quiet   bool
+	noColor bool
+	json    bool
+}
 
 // Option configures an [App] when [New] builds it.
 type Option func(*settings)
@@ -49,25 +58,37 @@ func (a *App) Add(cmd *spec.Command) {
 // does, and returns [ExitError] after writing "<name>: <error>" to os.Stderr when the working
 // directory cannot be determined.
 func (a *App) Execute() int {
-	return executeProcess(prefix(a.root()), a.ExecuteArgs)
+	return executeProcess(prefix(a.root(standardFlags{})), a.ExecuteArgs)
 }
 
 // ExecuteArgs runs the App with args against env, and returns the exit code, as the
 // package-level [ExecuteArgs] runs the App's root command: a root named by the identity's Name,
 // with no run function of its own and the added commands, in the order they were added, as its
-// subcommands. Given no argument, the root writes its help to env.Stdout and returns [ExitOK].
+// subcommands, and the standard flags the App's options opt into as its inherited flags. Given
+// no argument, the root writes its help to env.Stdout and returns [ExitOK].
 // The root is checked on every call, so an App with no command, or with two commands of one
 // name, returns [ExitError] after writing "<name>: invalid command tree: <error>" to
-// env.Stderr.
+// env.Stderr. So does a command that declares a flag with the name or the shorthand of a
+// standard flag the App takes.
+//
+// Every run function receives a [spec.Invocation] whose Output reports the standard flags the
+// command line sets; a standard flag the App does not take reads as unset. --verbose with
+// --quiet returns [ExitUsage] and calls no run function. The Output forbids colour when
+// --no-color is set, when the environment variable NO_COLOR or <EnvPrefix>_NO_COLOR, named by
+// the identity, is set and not empty, or when env.Stdout is not a terminal.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
-	return ExecuteArgs(env, a.root(), args)
+	flags := newStandardFlags(a.settings)
+	resolver := outputResolver{identity: &a.identity, flags: flags}
+	return executeArgs(env, a.root(flags), args, cobra.Config{Output: resolver.resolve})
 }
 
-// root returns a fresh root command for one execution. Its Commands is a copy of the added
-// commands, so no execution shares a slice the App appends to.
-func (a *App) root() *spec.Command {
+// root returns a fresh root command for one execution, declaring flags as its inherited flags.
+// Its Commands is a copy of the added commands, so no execution shares a slice the App appends
+// to.
+func (a *App) root(flags standardFlags) *spec.Command {
 	return &spec.Command{
 		Name:     a.identity.Name,
+		Flags:    flags.list(),
 		Commands: append([]*spec.Command(nil), a.commands...),
 	}
 }
