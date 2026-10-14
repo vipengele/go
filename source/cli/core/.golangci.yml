@@ -10,7 +10,6 @@ linters:
         cobra-stays-in-internal-cobra:
           files:
             - "!**/internal/cobra/**"
-            - "!**/versioncmd/**"
           deny:
             - pkg: github.com/spf13/cobra
               desc: cobra stays inside internal/cobra (ADR-0005)
