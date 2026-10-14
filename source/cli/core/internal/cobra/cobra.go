@@ -10,6 +10,7 @@ package cobra
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	spf "github.com/spf13/cobra"
@@ -52,6 +53,28 @@ type Config struct {
 	// values. An error it returns is a problem of the command line: Run returns it as a
 	// [*UsageError] and calls no run function. Nil leaves the zero Output.
 	Output func(inv *spec.Invocation) (spec.Output, error)
+	// PreRun are called in order before the run function, after Output, with the invocation the
+	// run function is about to receive and the command that runs. The first error stops the
+	// run: Run returns it as it is and calls neither the run function nor any PostRun.
+	PreRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error
+	// PostRun are called in reverse order after the run function returns, every one of them,
+	// with the error the run function returned. When the run function returned an error, Run
+	// returns that error and ignores theirs. Otherwise Run returns the first error a PostRun
+	// returns, as a [*HookError], so the error is never taken for a [*UsageError].
+	PostRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo, runErr error) error
+}
+
+// HookError reports an error a [Config] PostRun returned after the run function succeeded. It
+// prints as that error and deliberately has no Unwrap: errors.As finds no [*UsageError] through
+// it, so a hook's error is never a problem of the command line.
+type HookError struct {
+	// Err is the error the hook returned.
+	Err error
+}
+
+// Error returns the hook's error text.
+func (e *HookError) Error() string {
+	return e.Err.Error()
 }
 
 // Run executes root with args against env, configured by cfg, and returns the error of the command line or of the
@@ -59,13 +82,16 @@ type Config struct {
 // resolved as [spec.Env.Resolved] returns it. A nil args is no arguments; it never falls back
 // to the arguments of the process.
 //
+// The functions of cfg run only around a run function the command line reaches: not for
+// --help, not for a command without Run, and not for a command line the tree rejects.
+//
 // The tree answers --help, on every command, by writing the command's help to env.Stdout and
 // returning nil. It has no help or completion subcommand, and refuses a tree in which a command
 // declares a flag named help. A command with subcommands and no Run writes its help to
 // env.Stdout and returns nil when it is given no positional argument, and returns a
 // [*UsageError] naming the first one when it is.
 func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string, cfg Config) error {
-	cmd, err := build(env, cfg, root, nil)
+	cmd, err := build(env, cfg, root, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -85,8 +111,10 @@ func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string, 
 }
 
 // build returns the cobra command for c and, recursively, its subcommands. inherited are the
-// inherited flags of c's ancestors, which c reads along with its own.
-func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag) (*spf.Command, error) {
+// inherited flags of c's ancestors, which c reads along with its own, and parents the names from
+// the root to c's parent.
+func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, parents []string) (*spf.Command, error) {
+	path := append(slices.Clone(parents), c.Name)
 	cmd := &spf.Command{
 		Use:           c.Name,
 		Short:         c.Summary,
@@ -121,7 +149,7 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag) (*
 	}
 
 	for _, sub := range c.Commands {
-		child, err := build(env, cfg, sub, children)
+		child, err := build(env, cfg, sub, children, path)
 		if err != nil {
 			return nil, err
 		}
@@ -139,7 +167,7 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag) (*
 		return cmd, nil
 	}
 
-	policy, hasCommands, run := c.Args, len(c.Commands) > 0, c.Run
+	policy, hasCommands, run, annotations := c.Args, len(c.Commands) > 0, c.Run, c.Annotations
 	cmd.Args = func(cmd *spf.Command, args []string) error {
 		err := policy.Check(args)
 		if err == nil {
@@ -163,9 +191,32 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag) (*
 			}
 			inv.Output = out
 		}
-		return run(cmd.Context(), inv)
+		return runHooked(cmd.Context(), cfg, inv, spec.NewCommandInfo(path, annotations), run)
 	}
 	return cmd, nil
+}
+
+// runHooked calls run with ctx and inv between the PreRun and the PostRun of cfg, which receive
+// info, and returns the error [Config] describes.
+func runHooked(ctx context.Context, cfg Config, inv *spec.Invocation, info spec.CommandInfo,
+	run func(context.Context, *spec.Invocation) error,
+) error {
+	for _, pre := range cfg.PreRun {
+		if err := pre(ctx, inv, info); err != nil {
+			return err
+		}
+	}
+	runErr := run(ctx, inv)
+	var hookErr error
+	for _, post := range slices.Backward(cfg.PostRun) {
+		if err := post(ctx, inv, info, runErr); err != nil && hookErr == nil {
+			hookErr = err
+		}
+	}
+	if runErr != nil || hookErr == nil {
+		return runErr
+	}
+	return &HookError{Err: hookErr}
 }
 
 // unknownCommand rejects any positional argument of a command that has subcommands: cobra

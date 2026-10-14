@@ -301,3 +301,214 @@ func TestRunConfigOutput(t *testing.T) {
 		})
 	}
 }
+
+// hookRoot returns a tree whose command "remote add" records its run in *log, as "run", and
+// returns runErr. Its parent "remote" has no Run.
+func hookRoot(log *[]string, runErr error) *spec.Command {
+	return &spec.Command{
+		Name: "tool",
+		Commands: []*spec.Command{{
+			Name:        "remote",
+			Annotations: map[string]string{"parent": "yes"},
+			Commands: []*spec.Command{{
+				Name:        "add",
+				Args:        spec.ExactArgs(1),
+				Annotations: map[string]string{"k": "v"},
+				Run: func(context.Context, *spec.Invocation) error {
+					*log = append(*log, "run")
+					return runErr
+				},
+			}},
+		}},
+	}
+}
+
+// hooks returns a Config whose PreRun and PostRun record their calls in *log, as "pre<i>" and
+// "post<i>", and return the errors of preErrs and postErrs at the same index.
+func hooks(log *[]string, preErrs, postErrs []error) cobra.Config {
+	var cfg cobra.Config
+	for i, e := range preErrs {
+		cfg.PreRun = append(cfg.PreRun, func(context.Context, *spec.Invocation, spec.CommandInfo) error {
+			*log = append(*log, fmt.Sprintf("pre%d", i))
+			return e
+		})
+	}
+	for i, e := range postErrs {
+		cfg.PostRun = append(cfg.PostRun, func(_ context.Context, _ *spec.Invocation, _ spec.CommandInfo, runErr error) error {
+			*log = append(*log, fmt.Sprintf("post%d(%v)", i, runErr))
+			return e
+		})
+	}
+	return cfg
+}
+
+func TestRunConfigHooks(t *testing.T) {
+	errBoom, errPre, errPost0, errPost1 := errors.New("boom"), errors.New("pre"), errors.New("post0"), errors.New("post1")
+	tests := []struct {
+		name     string
+		args     []string
+		runErr   error
+		preErrs  []error
+		postErrs []error
+		wantLog  string
+		wantErr  error
+		wantHook bool
+	}{
+		{
+			name:     "pre in order, post in reverse",
+			args:     []string{"remote", "add", "x"},
+			preErrs:  []error{nil, nil},
+			postErrs: []error{nil, nil},
+			wantLog:  "pre0 pre1 run post1(<nil>) post0(<nil>)",
+		},
+		{
+			name:     "pre error stops the run and every post",
+			args:     []string{"remote", "add", "x"},
+			preErrs:  []error{errPre, nil},
+			postErrs: []error{nil},
+			wantLog:  "pre0",
+			wantErr:  errPre,
+		},
+		{
+			name:     "run error reaches every post and is returned",
+			args:     []string{"remote", "add", "x"},
+			runErr:   errBoom,
+			postErrs: []error{errPost0, nil},
+			wantLog:  "run post1(boom) post0(boom)",
+			wantErr:  errBoom,
+		},
+		{
+			name:     "first post error after a successful run, the rest still run",
+			args:     []string{"remote", "add", "x"},
+			postErrs: []error{errPost0, errPost1},
+			wantLog:  "run post1(<nil>) post0(<nil>)",
+			wantErr:  errPost1,
+			wantHook: true,
+		},
+		{
+			name:     "no hooks on --help",
+			args:     []string{"remote", "add", "--help"},
+			preErrs:  []error{nil},
+			postErrs: []error{nil},
+		},
+		{
+			name:     "no hooks on a command without Run",
+			args:     []string{"remote"},
+			preErrs:  []error{nil},
+			postErrs: []error{nil},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var log []string
+			env := (&spec.Env{}).Resolved()
+			err := cobra.Run(context.Background(), env, hookRoot(&log, tt.runErr), tt.args,
+				hooks(&log, tt.preErrs, tt.postErrs))
+			if got := strings.Join(log, " "); got != tt.wantLog {
+				t.Errorf("calls %q, want %q", got, tt.wantLog)
+			}
+			var hookErr *cobra.HookError
+			switch {
+			case errors.As(err, &hookErr) != tt.wantHook:
+				t.Errorf("Run(%q) = %#v, want a HookError: %t", tt.args, err, tt.wantHook)
+			case tt.wantHook && hookErr.Err != tt.wantErr:
+				t.Errorf("Run(%q) = a HookError holding %v, want %v", tt.args, hookErr.Err, tt.wantErr)
+			case !tt.wantHook && !errors.Is(err, tt.wantErr):
+				t.Errorf("Run(%q) = %v, want %v", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunConfigHooksSkipUsageErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		output func(*spec.Invocation) (spec.Output, error)
+	}{
+		{name: "argument count", args: []string{"remote", "add"}},
+		{name: "unknown flag", args: []string{"remote", "add", "x", "--bogus"}},
+		{name: "unknown command", args: []string{"remote", "bogus"}},
+		{
+			name: "output error",
+			args: []string{"remote", "add", "x"},
+			output: func(*spec.Invocation) (spec.Output, error) {
+				return spec.Output{}, errors.New("conflict")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var log []string
+			cfg := hooks(&log, []error{nil}, []error{nil})
+			cfg.Output = tc.output
+			env := (&spec.Env{}).Resolved()
+			err := cobra.Run(context.Background(), env, hookRoot(&log, nil), tc.args, cfg)
+			var usage *cobra.UsageError
+			if !errors.As(err, &usage) {
+				t.Errorf("Run(%q) = %v, want a usage error", tc.args, err)
+			}
+			if len(log) != 0 {
+				t.Errorf("calls %q, want none", log)
+			}
+		})
+	}
+}
+
+func TestRunConfigPostRunUsageErrorIsAHookError(t *testing.T) {
+	var log []string
+	usage := &cobra.UsageError{Err: errors.New("bad")}
+	env := (&spec.Env{}).Resolved()
+	err := cobra.Run(context.Background(), env, hookRoot(&log, nil), []string{"remote", "add", "x"},
+		hooks(&log, nil, []error{usage}))
+	var gotUsage *cobra.UsageError
+	if errors.As(err, &gotUsage) {
+		t.Errorf("Run = %#v, found a usage error through it", err)
+	}
+	var hookErr *cobra.HookError
+	if !errors.As(err, &hookErr) || hookErr.Err != usage || err.Error() != "bad" {
+		t.Errorf("Run = %#v, want a HookError holding %v", err, usage)
+	}
+}
+
+func TestRunConfigHooksReceiveTheCommand(t *testing.T) {
+	var log []string
+	root := hookRoot(&log, nil)
+	var pre, post spec.CommandInfo
+	var preOutput spec.Output
+	cfg := cobra.Config{
+		Output: func(*spec.Invocation) (spec.Output, error) {
+			return spec.NewOutput(spec.OutputOptions{Quiet: true}), nil
+		},
+		PreRun: []func(context.Context, *spec.Invocation, spec.CommandInfo) error{
+			func(_ context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error {
+				pre, preOutput = cmd, inv.Output
+				return nil
+			},
+		},
+		PostRun: []func(context.Context, *spec.Invocation, spec.CommandInfo, error) error{
+			func(_ context.Context, _ *spec.Invocation, cmd spec.CommandInfo, _ error) error {
+				post = cmd
+				return nil
+			},
+		},
+	}
+	env := (&spec.Env{}).Resolved()
+	if err := cobra.Run(context.Background(), env, root, []string{"remote", "add", "x"}, cfg); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	for _, info := range []spec.CommandInfo{pre, post} {
+		if got := info.String(); got != "tool remote add" {
+			t.Errorf("path %q, want %q", got, "tool remote add")
+		}
+		if got := info.Annotations(); len(got) != 1 || got["k"] != "v" {
+			t.Errorf("annotations %v, want only k=v", got)
+		}
+	}
+	if !preOutput.Quiet() {
+		t.Error("pre-run hook saw an invocation without its Output")
+	}
+	pre.Annotations()["k"] = "changed"
+	if v := root.Commands[0].Commands[0].Annotations["k"]; v != "v" {
+		t.Errorf("command annotation %q after a hook changed its copy, want %q", v, "v")
+	}
+}

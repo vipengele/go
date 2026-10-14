@@ -30,6 +30,10 @@ type settings struct {
 	quiet   bool
 	noColor bool
 	json    bool
+	// preRun and postRun are the hooks [WithPreRun] and [WithPostRun] add, in the order they
+	// were added. Nothing changes them after [New], so concurrent executions share them.
+	preRun  []PreRunHook
+	postRun []PostRunHook
 }
 
 // Option configures an [App] when [New] builds it.
@@ -76,10 +80,15 @@ func (a *App) Execute() int {
 // --quiet returns [ExitUsage] and calls no run function. The Output forbids colour when
 // --no-color is set, when the environment variable NO_COLOR or <EnvPrefix>_NO_COLOR, named by
 // the identity, is set and not empty, or when env.Stdout is not a terminal.
+//
+// The hooks [WithPreRun] and [WithPostRun] add run around every run function it calls, as they
+// describe.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	flags := newStandardFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
-	return executeArgs(env, a.root(flags), args, cobra.Config{Output: resolver.resolve})
+	pre, post := a.settings.hookFuncs()
+	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
+	return executeArgs(env, a.root(flags), args, cfg)
 }
 
 // root returns a fresh root command for one execution, declaring flags as its inherited flags.
