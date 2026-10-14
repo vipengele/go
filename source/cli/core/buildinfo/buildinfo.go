@@ -107,11 +107,7 @@ func (i Info) String() string {
 	if i.Commit == "" {
 		return s
 	}
-	c := i.Commit
-	if len(c) > shortCommitLen {
-		c = c[:shortCommitLen]
-	}
-	return s + " build " + c
+	return s + " build " + i.Commit[:min(len(i.Commit), shortCommitLen)]
 }
 
 // jsonInfo is the JSON encoding of an Info. Its keys are the package's JSON contract.
