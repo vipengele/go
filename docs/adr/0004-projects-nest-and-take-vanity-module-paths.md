@@ -90,7 +90,8 @@ that belongs to the command abstraction below.
 ## Out of scope: the command abstraction
 
 Confining cobra behind a framework-neutral `Command` declared in `cli/spec` is a separate decision,
-ADR-0005. That ADR supersedes ADR-0003's rule on where cobra is allowed and its rule that `update`
+ADR-0005 (`0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md`).
+That ADR supersedes ADR-0003's rule on where cobra is allowed and its rule that `update`
 requires no sibling. This ADR decides neither, and ADR-0003's dependency direction and cobra rule
 stand as written for this decision.
 

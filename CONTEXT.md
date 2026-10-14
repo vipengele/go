@@ -95,6 +95,22 @@ streams, the working directory and the platform paths. Code takes an `Env`, neve
 _Avoid_: environment (also means a deployment such as staging), context (`context.Context`), config
 (values loaded from a file or flags)
 
+**Command**:
+One named action of a tool (`version`, `update`), described as data in `cli/spec`: its name,
+descriptions, **Flag**s, subcommands and what it does when run. Any project contributes Commands
+and the **App** runs them; a Command names no CLI framework (ADR-0005).
+_Avoid_: subcommand (a Command nested under another), handler, action
+
+**Flag**:
+One named option of a **Command**, with a type, a default and a usage string. A Command declares
+its Flags and reads their values from the **Invocation** (ADR-0005).
+_Avoid_: option, switch, argument (a positional value, not a Flag)
+
+**Invocation**:
+One execution of a **Command**: the Flag values parsed, the positional arguments and the **Env** it
+was run with. A Command is reusable and an Invocation is not (ADR-0005).
+_Avoid_: call, run, context (`context.Context`)
+
 **Release source**:
 Where a tool's own published releases come from, behind the `update` project's `Source` interface:
 it lists releases and serves the assets of one. It does not choose among them; version comparison
