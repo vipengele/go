@@ -9,8 +9,9 @@ import (
 	"testing"
 )
 
-// The package directory is the test's working directory, so every file of the package is
-// checked for cobra, tests included. Only the package's own files are held to importing no os.
+// The package directory is the test's working directory, so every file of the root package is
+// checked for cobra, tests included. Only the root package's own files are held to importing no os;
+// the paths subpackage is outside this check.
 func TestPackageImportsNoCLIFramework(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -34,7 +35,7 @@ func TestPackageImportsNoCLIFramework(t *testing.T) {
 				t.Errorf("%s imports %s", name, path)
 			}
 			if path == "os" && !strings.HasSuffix(name, "_test.go") {
-				t.Errorf("%s imports os; the package performs no I/O", name)
+				t.Errorf("%s imports os; the root package performs no I/O", name)
 			}
 		}
 	}

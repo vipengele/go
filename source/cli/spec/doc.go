@@ -1,5 +1,8 @@
 // Package spec holds the framework-neutral pieces of a command-line tool that cli/core, update
-// and daemon share. It depends on no command-line framework and performs no I/O.
+// and daemon share. It depends on no command-line framework. This package performs no I/O: it
+// imports no os and touches neither the environment nor the file system. The subpackage
+// [go.vipengele.org/cli/spec/paths] resolves the platform directories a tool keeps its files in,
+// and does touch the file system.
 //
 // [Identity] is the set of values fixed per tool.
 //

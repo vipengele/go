@@ -1,7 +1,8 @@
 # Commands are a framework-neutral model in `cli/spec`; cobra is an internal adapter in `cli/core`
 
 Status: partially supersedes ADR-0003, which it replaces in two rules: where cobra is allowed, and
-that `update` requires no sibling.
+that `update` requires no sibling. Amended by ADR-0009, which
+places the platform-directory resolver in `cli/spec/paths`, a subpackage that does file-system I/O.
 
 A tool built on the library is assembled from commands contributed by several projects: the app
 shell's `version`, `update`'s `update`, `daemon`'s service commands, and the tool's own. If a command
