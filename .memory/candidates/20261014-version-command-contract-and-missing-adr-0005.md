@@ -1,5 +1,5 @@
 ---
-about: "the cli version command's --json shape is a contract owned by cli/core (ADR-0007, amending ADR-0003) and ADR-0005 (command abstraction) is referenced but does not exist"
+about: "the cli version command's --json shape is a contract owned by cli/core (ADR-0007, amending ADR-0003); cobra is allowed only in cli/core/internal/cobra (ADR-0005)"
 saw:
   - docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md
   - docs/adr/0004-projects-nest-and-take-vanity-module-paths.md
@@ -13,10 +13,8 @@ document that shape, in the package documentation of `source/cli/core/buildinfo/
 a `schema` field (1; adding a key keeps it, renaming, removing or retyping a key increments it);
 `update` only reads it. ADR-0003 carries the amendment in its Status line and an inline pointer.
 
-ADR-0004 ("Out of scope: the command abstraction") defers a framework-neutral `Command` in cli/spec
-to ADR-0005; `ls docs/adr` shows no 0005, so the number is reserved, cobra-in-cli (ADR-0003) stands
-and the abstraction is undecided. The next free ADR number is therefore 0007 and above.
-
-`source/cli/core/.golangci.yml` enables `gochecknoglobals` and a `depguard` rule that denies
-`github.com/spf13/cobra` outside `versioncmd`. That is narrower than ADR-0003 allows (root, wiring,
-completion); widening it belongs with the root command builder.
+ADR-0005 (`docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md`)
+supersedes ADR-0003's rule on where cobra is allowed: commands are `cli/spec` data and cobra is
+imported only by `source/cli/core/internal/cobra`, enforced by the `cobra-stays-in-internal-cobra`
+depguard rule in `source/cli/core/.golangci.yml` and a `github.com/spf13/cobra` deny in
+`source/cli/spec/.golangci.yml`. `versioncmd.New` returns a `*spec.Command`.
