@@ -74,6 +74,20 @@ environment-variable prefix, version, root command, output mode and exit codes. 
 the identity once and hands the same values to `update` and `daemon`.
 _Avoid_: application, program, tool (the word for the consumer's whole product)
 
+**Build info**:
+What a tool's binary reports about its own build: its version, commit and build date, and the Go
+toolchain, operating system and architecture it was built for. The `version` command prints it, and
+its JSON form, versioned by a `schema` number, is a contract the `cli/core` project owns and
+`update` reads (ADR-0007).
+_Avoid_: version info (the version is one field of it), metadata, build metadata (a `+suffix` on a
+version)
+
+**Dev build**:
+A binary whose version is not a release: anything but `vMAJOR.MINOR.PATCH`, optionally with a
+prerelease, that is not a Go pseudo-version. An unknown version, a pseudo-version and a version
+carrying build metadata are all dev builds (ADR-0007).
+_Avoid_: debug build, snapshot, local build (a tagged release built locally is not a dev build)
+
 **Env**:
 The surroundings a command reads, passed in explicitly: environment variables, the standard
 streams, the working directory and the platform paths. Code takes an `Env`, never `os.Getenv` or
