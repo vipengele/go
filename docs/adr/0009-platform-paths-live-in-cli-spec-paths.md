@@ -37,6 +37,11 @@ drawn inside the module:
   kind without its own option is a subdirectory.
 - The layouts are the XDG layout for Linux and every system other than macOS and Windows, the
   Library layout for macOS, and the AppData layout for Windows.
+- `Resolve` resolves only the kinds a caller asks for, plus the kind a requested kind derives from
+  (log from state on the XDG layout, state and data from config on macOS), and `New` resolves all
+  five. A kind not asked for is left empty and nothing is looked up for it, so its failure cannot
+  fail the caller: a tool that needs only state resolves it from an absolute `XDG_STATE_HOME` with
+  no home directory, although config, cache and data would fall back to it.
 - `Ensure` is lazy: resolving creates nothing, and a directory is created when a caller asks for it.
   It creates missing directories with mode 0700, clears the bits beyond 0700 of a pre-existing
   directory and keeps a narrower mode, and never changes a parent that already exists. It skips the
@@ -44,7 +49,8 @@ drawn inside the module:
 - Container detection is a heuristic that reports and changes no path.
 - `update`'s default `StateDir` is the state directory, not the configuration directory: state is
   what a tool records between runs and a user does not edit, and configuration is what a user edits.
-  `update` is unreleased, so the default moves without a migration.
+  `update` is unreleased, so the default moves without a migration. `update` resolves the state
+  kind alone.
 
 ## Considered options
 
@@ -66,6 +72,9 @@ drawn inside the module:
 - **Eager creation at resolve time.** Resolving would create up to five directories in every
   process, including a tool that never writes, and a failure to create one would fail a command that
   needs none. Creation belongs to the caller that writes.
+- **Resolving every kind on every call.** A caller that needs one kind would fail on a home
+  directory only the others need: `update`, which needs only state, would refuse to start where
+  `XDG_STATE_HOME` is set and no home directory can be found.
 - **Tightening the mode of existing ancestors.** An ancestor such as `~/.config` belongs to the user
   and to other tools, and narrowing it breaks them. Only the directory a tool owns is narrowed.
 
@@ -76,4 +85,5 @@ drawn inside the module:
 - `cli/spec` imports the standard library's `os` in a subpackage. A consumer that requires `cli/spec`
   only for the model imports the root package and takes no file-system code with it.
 - ADR-0003 had `update` keep a small platform-directory resolver that overlaps with `cli`'s paths.
-  `update` keeps none: it calls `paths.New`, and there is one resolver for `cli/core` to share.
+  `update` keeps none: it calls `paths.Resolve` for the state kind, and there is one resolver for
+  `cli/core` to share.

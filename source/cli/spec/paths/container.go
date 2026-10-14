@@ -62,10 +62,7 @@ func InContainer(p Probes) bool {
 	}
 	exists := p.Exists
 	if exists == nil {
-		exists = func(path string) bool {
-			_, err := os.Stat(path)
-			return err == nil
-		}
+		exists = statExists
 	}
 	read := p.ReadFile
 	if read == nil {
@@ -90,4 +87,10 @@ func InContainer(p Probes) bool {
 		}
 	}
 	return false
+}
+
+// statExists reports whether os.Stat succeeds on path, the default [Probes.Exists].
+func statExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

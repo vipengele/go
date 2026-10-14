@@ -1,9 +1,11 @@
 // Package paths resolves the directories a command-line tool keeps its files in: one directory
 // for each [Kind], configuration, state, cache, data and logs.
 //
-// [New] resolves them from the tool's [spec.Identity] and an [Options] value, and returns them as
-// a [Dirs]. Resolving reads only the environment and the user's home directory, through the
-// seams Options carries; it creates, stats and opens nothing on the file system.
+// [Resolve] resolves the kinds a caller names from the tool's [spec.Identity] and an [Options]
+// value, and returns them as a [Dirs]; [New] resolves every kind. Resolving reads only the
+// environment and the user's home directory, through the seams Options carries; it creates,
+// stats and opens nothing on the file system. A kind Resolve is not asked for is left
+// unresolved: its accessor returns "" and [Dirs.Ensure] reports it.
 //
 // # Precedence
 //
@@ -58,12 +60,17 @@
 // resolved: an explicit Options.StateDir moves the default log directory with it. An explicit
 // option for the derived kind itself takes precedence over the derivation.
 //
-// No two kinds share a directory in any default layout. New does not check explicit options for
-// collisions: two explicit options naming one directory resolve to that directory twice.
+// Resolve follows a derivation only for a kind it is asked for: resolving log alone on the XDG
+// layout reads state to derive it, and leaves state itself unresolved.
 //
-// The home directory is looked up only when some kind needs it, so a tool whose every kind is
-// set by an option or the environment resolves without one. When a kind needs it and it cannot be
-// found, New returns an error.
+// No two kinds share a directory in any default layout. Resolving does not check explicit options
+// for collisions: two explicit options naming one directory resolve to that directory twice.
+//
+// The home directory is looked up at most once, and only when a requested kind, or the kind it
+// derives from, needs it. A tool whose requested kinds are set by an option or the environment
+// therefore resolves without one: state alone resolves from an absolute XDG_STATE_HOME even when
+// config, cache and data would fall back to the home directory. When a requested kind needs the
+// home directory and it cannot be found, Resolve and New return an error.
 //
 // # Containers
 //

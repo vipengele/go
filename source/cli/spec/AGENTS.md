@@ -18,10 +18,14 @@ golangci-lint run
 
 - Root package `spec` — performs no I/O: it imports no `os` and touches neither the environment nor the
   file system. Anything that does belongs in a subpackage.
-- `paths/` — `paths.New(spec.Identity, paths.Options)` resolves the config, state, cache, data and log
-  directories per OS layout (XDG, darwin, windows), honouring `<PREFIX>_HOME`, `Options.Home` and
-  explicit per-kind options. `New` creates and stats nothing; `Dirs.Ensure` creates directories 0700
-  on demand. `InContainer` is a heuristic over injectable `Probes` and changes no path.
+- `paths/` — `paths.Resolve(spec.Identity, paths.Options, kinds...)` resolves the requested config,
+  state, cache, data and log directories per OS layout (XDG, darwin, windows), honouring
+  `<PREFIX>_HOME`, `Options.Home` and explicit per-kind options, and `paths.New` resolves all five.
+  A kind not requested stays "" and nothing is looked up for it, so a caller that needs only state
+  does not fail on a home directory only the other kinds need; a requested kind still resolves the
+  kind it derives from (log from state on XDG, state and data from config on darwin). Resolving
+  creates and stats nothing; `Dirs.Ensure` creates directories 0700 on demand and reports a kind
+  that was not resolved. `InContainer` is a heuristic over injectable `Probes` and changes no path.
 
 ## Conventions
 

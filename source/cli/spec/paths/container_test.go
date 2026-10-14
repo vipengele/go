@@ -3,6 +3,8 @@ package paths
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -124,4 +126,28 @@ func TestInContainerProbesOnlyTheDocumentedPaths(t *testing.T) {
 func TestInContainerZeroProbes(t *testing.T) {
 	// The answer depends on where the test runs; the zero value must only work.
 	_ = InContainer(Probes{})
+}
+
+func TestStatExists(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"existing file", file, true},
+		{"existing directory", dir, true},
+		{"missing path", filepath.Join(dir, "missing"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := statExists(tt.path); got != tt.want {
+				t.Errorf("statExists(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
 }

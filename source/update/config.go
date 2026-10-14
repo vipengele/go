@@ -54,9 +54,10 @@ type Config struct {
 	// means "checksums.txt".
 	ChecksumsAsset string
 	// StateDir is the directory the library keeps its state in. Empty means the state directory
-	// [paths.New] resolves for the Identity, through the GOOS, Getenv and UserHomeDir seams: on
+	// [paths.Resolve] resolves for the Identity, through the GOOS, Getenv and UserHomeDir seams: on
 	// Linux $XDG_STATE_HOME/<DirName> or ~/.local/state/<DirName>, and <PREFIX>_HOME/state when
-	// that variable is set. An explicit StateDir is used as given.
+	// that variable is set. Only the state directory is resolved, so the home directory is needed
+	// only when the state directory itself falls back to it. An explicit StateDir is used as given.
 	StateDir string
 	// Source reports the releases the tool can update to. It is required.
 	Source Source
@@ -77,7 +78,9 @@ type Config struct {
 	// the environment through it too, and counts a variable whose value is "" as unset.
 	Getenv func(string) string
 	// UserHomeDir returns the user's home directory. Nil means [os.UserHomeDir]. It is consulted
-	// only to resolve a default StateDir, and only when the layout needs the home directory.
+	// only to resolve a default StateDir, and only when the layout's state directory falls back to
+	// the home directory: never when <PREFIX>_HOME is set, on Linux when XDG_STATE_HOME is an
+	// absolute path, or on Windows when LocalAppData is set.
 	UserHomeDir func() (string, error)
 }
 
@@ -94,9 +97,10 @@ func (c Config) Validate() error {
 }
 
 // resolve validates c and returns a copy with every zero field set to its production default.
-// It never modifies c. An empty StateDir is the state directory [paths.New] resolves for the
-// Identity with the resolved GOOS, Getenv and UserHomeDir, so a substituted seam decides it too;
-// resolve fails when StateDir is empty and the resolver cannot find the home directory it needs.
+// It never modifies c. An empty StateDir is the state directory [paths.Resolve] resolves, for the
+// [paths.State] kind alone, for the Identity with the resolved GOOS, Getenv and UserHomeDir, so a
+// substituted seam decides it too; resolve fails when StateDir is empty and the state directory
+// needs a home directory the resolver cannot find.
 // An explicit StateDir is kept without consulting the resolver.
 func (c Config) resolve() (Config, error) {
 	if err := c.Validate(); err != nil {
@@ -138,14 +142,14 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.StateDir == "" {
 		getenv := r.Getenv
-		dirs, err := paths.New(r.Identity, paths.Options{
+		dirs, err := paths.Resolve(r.Identity, paths.Options{
 			GOOS: r.GOOS,
 			LookupEnv: func(key string) (string, bool) {
 				v := getenv(key)
-				return v, v != ""
+				return v, v != "" // [lydite:exclude_from_mutation][paths counts a variable set to "" as unset and reads only the value, so the flag is unobservable]
 			},
 			UserHomeDir: r.UserHomeDir,
-		})
+		}, paths.State)
 		if err != nil {
 			return Config{}, fmt.Errorf("update: resolving StateDir: %w", err)
 		}

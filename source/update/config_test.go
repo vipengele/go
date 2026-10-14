@@ -345,6 +345,46 @@ func TestResolveKeepsExplicitStateDir(t *testing.T) {
 	}
 }
 
+func TestResolveDefaultStateDirNeedsNoHomeDirWhenTheStateDirectoryIsSet(t *testing.T) {
+	t.Parallel()
+	stateHome := filepath.Join(t.TempDir(), "state-home")
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want string
+	}{
+		{"linux with XDG_STATE_HOME", "linux", map[string]string{"XDG_STATE_HOME": stateHome},
+			filepath.Join(stateHome, "agentic-toolkit")},
+		{"windows with LocalAppData", "windows", map[string]string{"LocalAppData": stateHome},
+			filepath.Join(stateHome, "agentic-toolkit", "state")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.GOOS = tc.goos
+			c.Getenv = envOf(tc.env)
+			calls := 0
+			c.UserHomeDir = func() (string, error) {
+				calls++
+				return "", errors.New("no home directory")
+			}
+
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if r.StateDir != tc.want {
+				t.Errorf("StateDir = %q, want %q", r.StateDir, tc.want)
+			}
+			if calls != 0 {
+				t.Errorf("UserHomeDir called %d times, want the state directory resolved without it", calls)
+			}
+		})
+	}
+}
+
 func TestResolveReportsHomeDirError(t *testing.T) {
 	t.Parallel()
 	errNoHome := errors.New("no home directory")

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"go.vipengele.org/cli/spec"
@@ -512,5 +513,240 @@ func TestKindString(t *testing.T) {
 func TestZeroDirsHoldsNoDirectory(t *testing.T) {
 	if got := dirsOf(paths.Dirs{}); got != (want{}) {
 		t.Errorf("zero Dirs = %+v, want every directory empty", got)
+	}
+}
+
+// only returns w with every kind but k emptied, as Resolve leaves a kind it was not asked for.
+func only(w want, k paths.Kind) want {
+	var out want
+	switch k {
+	case paths.Config:
+		out.config = w.config
+	case paths.State:
+		out.state = w.state
+	case paths.Cache:
+		out.cache = w.cache
+	case paths.Data:
+		out.data = w.data
+	case paths.Log:
+		out.log = w.log
+	}
+	return out
+}
+
+func allKinds() []paths.Kind {
+	return []paths.Kind{paths.Config, paths.State, paths.Cache, paths.Data, paths.Log}
+}
+
+func TestResolveOneKindMatchesNew(t *testing.T) {
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		opts paths.Options
+	}{
+		{"linux defaults", "linux", nil, paths.Options{}},
+		{"linux XDG base directories", "linux", xdgEnv(), paths.Options{}},
+		{"linux explicit state directory", "linux", nil, paths.Options{StateDir: "/x/state"}},
+		{"freebsd defaults", "freebsd", nil, paths.Options{}},
+		{"darwin defaults", "darwin", nil, paths.Options{}},
+		{"darwin explicit config directory", "darwin", nil, paths.Options{ConfigDir: "/x/config"}},
+		{"windows defaults", "windows", windowsEnv(), paths.Options{}},
+		{"windows home fallback", "windows", nil, paths.Options{}},
+		{"<PREFIX>_HOME", "linux", map[string]string{homeVar: "/env/home"}, paths.Options{}},
+		{"Options.Home with one explicit option", "darwin", nil, paths.Options{Home: "/opt/home", LogDir: "/x/log"}},
+		{"every kind explicit", "windows", nil, explicitOptions()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := tc.opts
+			opts.GOOS = tc.goos
+			opts.LookupEnv = lookup(tc.env)
+			opts.UserHomeDir = homeDir(fakeHome)
+			all, err := paths.New(identity(), opts)
+			if err != nil {
+				t.Fatalf("New() = %v, want nil", err)
+			}
+			for _, k := range allKinds() {
+				d, err := paths.Resolve(identity(), opts, k)
+				if err != nil {
+					t.Fatalf("Resolve(%v) = %v, want nil", k, err)
+				}
+				if got, w := dirsOf(d), only(dirsOf(all), k); got != w {
+					t.Errorf("Resolve(%v) =\n  %+v\nwant\n  %+v", k, got, w)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveWithNoKindsEqualsNew(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			opts := paths.Options{GOOS: goos, LookupEnv: lookup(nil), UserHomeDir: homeDir(fakeHome)}
+			got, err := paths.Resolve(identity(), opts)
+			if err != nil {
+				t.Fatalf("Resolve() = %v, want nil", err)
+			}
+			want, err := paths.New(identity(), opts)
+			if err != nil {
+				t.Fatalf("New() = %v, want nil", err)
+			}
+			if got != want {
+				t.Errorf("Resolve() =\n  %+v\nwant, as New,\n  %+v", dirsOf(got), dirsOf(want))
+			}
+			all, err := paths.Resolve(identity(), opts, allKinds()...)
+			if err != nil {
+				t.Fatalf("Resolve(every kind) = %v, want nil", err)
+			}
+			if all != want {
+				t.Errorf("Resolve(every kind) =\n  %+v\nwant, as New,\n  %+v", dirsOf(all), dirsOf(want))
+			}
+		})
+	}
+}
+
+func TestResolveStateAloneNeedsNoHomeDirectory(t *testing.T) {
+	d, err := paths.Resolve(identity(), paths.Options{
+		GOOS:        "linux",
+		LookupEnv:   lookup(map[string]string{"XDG_STATE_HOME": "/xdg/state"}),
+		UserHomeDir: noHomeDir(t),
+	}, paths.State)
+	if err != nil {
+		t.Fatalf("Resolve(State) = %v, want nil", err)
+	}
+	if got, w := dirsOf(d), (want{state: j("/xdg/state", app)}); got != w {
+		t.Errorf("Resolve(State) =\n  %+v\nwant\n  %+v", got, w)
+	}
+}
+
+func TestResolveFailsOnlyForARequestedKind(t *testing.T) {
+	cause := errors.New("no home")
+	tests := []struct {
+		name  string
+		goos  string
+		env   map[string]string
+		opts  paths.Options
+		kinds []paths.Kind
+	}{
+		{"linux config with only XDG_STATE_HOME set", "linux",
+			map[string]string{"XDG_STATE_HOME": "/xdg/state"}, paths.Options{}, []paths.Kind{paths.Config}},
+		{"linux state and cache with only XDG_STATE_HOME set", "linux",
+			map[string]string{"XDG_STATE_HOME": "/xdg/state"}, paths.Options{}, []paths.Kind{paths.State, paths.Cache}},
+		{"linux log whose state needs the home directory", "linux",
+			map[string]string{"XDG_CONFIG_HOME": "/xdg/config"}, paths.Options{}, []paths.Kind{paths.Log}},
+		{"darwin state whose config needs the home directory", "darwin", nil, paths.Options{},
+			[]paths.Kind{paths.State}},
+		{"darwin data whose config needs the home directory", "darwin", nil, paths.Options{CacheDir: "/x/cache"},
+			[]paths.Kind{paths.Data}},
+		{"windows state without LocalAppData", "windows", map[string]string{"AppData": "/w/roaming"},
+			paths.Options{}, []paths.Kind{paths.State}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			opts := tc.opts
+			opts.GOOS = tc.goos
+			opts.LookupEnv = lookup(tc.env)
+			opts.UserHomeDir = func() (string, error) {
+				calls++
+				return "", cause
+			}
+			d, err := paths.Resolve(identity(), opts, tc.kinds...)
+			if !errors.Is(err, paths.ErrNoHomeDir) || !errors.Is(err, cause) {
+				t.Fatalf("Resolve(%v) = %v, want ErrNoHomeDir wrapping the UserHomeDir error", tc.kinds, err)
+			}
+			if d != (paths.Dirs{}) {
+				t.Errorf("Resolve(%v) returned %+v with its error, want the zero Dirs", tc.kinds, dirsOf(d))
+			}
+			if calls != 1 {
+				t.Errorf("UserHomeDir called %d times, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestResolveDerivesFromAParentItLeavesUnresolved(t *testing.T) {
+	darwinConfig := j(fakeHome, "Library", "Application Support", app)
+	// home is whether the case needs the home directory; one that does not fails if it is
+	// looked up.
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		opts paths.Options
+		kind paths.Kind
+		home bool
+		want want
+	}{
+		{"linux log from XDG_STATE_HOME", "linux", map[string]string{"XDG_STATE_HOME": "/xdg/state"},
+			paths.Options{}, paths.Log, false, want{log: j("/xdg/state", app, "log")}},
+		{"linux log from an explicit state directory", "linux", nil,
+			paths.Options{StateDir: "/x/state"}, paths.Log, false, want{log: j("/x/state", "log")}},
+		{"linux explicit log directory needs no state", "linux", nil,
+			paths.Options{LogDir: "/x/log"}, paths.Log, false, want{log: "/x/log"}},
+		{"darwin state from the default config directory", "darwin", nil,
+			paths.Options{}, paths.State, true, want{state: j(darwinConfig, "state")}},
+		{"darwin data from the default config directory", "darwin", nil,
+			paths.Options{}, paths.Data, true, want{data: j(darwinConfig, "data")}},
+		{"darwin state from an explicit config directory", "darwin", nil,
+			paths.Options{ConfigDir: "/x/config"}, paths.State, false, want{state: j("/x/config", "state")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := tc.opts
+			opts.GOOS = tc.goos
+			opts.LookupEnv = lookup(tc.env)
+			opts.UserHomeDir = noHomeDir(t)
+			if tc.home {
+				opts.UserHomeDir = homeDir(fakeHome)
+			}
+			d, err := paths.Resolve(identity(), opts, tc.kind)
+			if err != nil {
+				t.Fatalf("Resolve(%v) = %v, want nil", tc.kind, err)
+			}
+			if got := dirsOf(d); got != tc.want {
+				t.Errorf("Resolve(%v) =\n  %+v\nwant\n  %+v", tc.kind, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveRepeatedKindIsHarmless(t *testing.T) {
+	opts := paths.Options{GOOS: "linux", Home: "/opt/home", LookupEnv: lookup(nil), UserHomeDir: noHomeDir(t)}
+	d, err := paths.Resolve(identity(), opts, paths.Cache, paths.Cache, paths.Data)
+	if err != nil {
+		t.Fatalf("Resolve() = %v, want nil", err)
+	}
+	if got, w := dirsOf(d), (want{cache: j("/opt/home", "cache"), data: j("/opt/home", "data")}); got != w {
+		t.Errorf("Resolve() =\n  %+v\nwant\n  %+v", got, w)
+	}
+}
+
+func TestResolveRejectsInvalidKind(t *testing.T) {
+	tests := []struct {
+		kinds []paths.Kind
+		name  string
+	}{
+		{[]paths.Kind{paths.Kind(0)}, "Kind(0)"},
+		{[]paths.Kind{paths.Kind(6)}, "Kind(6)"},
+		{[]paths.Kind{paths.Kind(-1)}, "Kind(-1)"},
+		{[]paths.Kind{paths.State, paths.Kind(0)}, "Kind(0)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := paths.Resolve(identity(), paths.Options{
+				GOOS:        "linux",
+				Home:        "/opt/home",
+				LookupEnv:   lookup(nil),
+				UserHomeDir: noHomeDir(t),
+			}, tc.kinds...)
+			if err == nil || !strings.Contains(err.Error(), tc.name) {
+				t.Fatalf("Resolve(%v) = %v, want an error naming %s", tc.kinds, err, tc.name)
+			}
+			if d != (paths.Dirs{}) {
+				t.Errorf("Resolve(%v) returned %+v with its error, want the zero Dirs", tc.kinds, dirsOf(d))
+			}
+		})
 	}
 }

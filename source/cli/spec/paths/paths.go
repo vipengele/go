@@ -47,7 +47,7 @@ func (k Kind) valid() bool {
 	return k >= Config && k <= Log
 }
 
-// Options adjusts how [New] resolves the directories. The zero value resolves the platform
+// Options adjusts how [Resolve] and [New] resolve the directories. The zero value resolves the platform
 // defaults from the real environment and home directory.
 type Options struct {
 	// ConfigDir, StateDir, CacheDir, DataDir and LogDir set their kind's directory, used as
@@ -67,26 +67,28 @@ type Options struct {
 	UserHomeDir func() (string, error)
 }
 
-// Dirs is the resolved directory of every [Kind] and the layout they were resolved for. It is
-// created by [New]; the zero value holds no directory.
+// Dirs is the resolved directory of each [Kind] and the layout they were resolved for. It is
+// created by [Resolve] or [New]. A kind that was not resolved, as every kind in the zero value
+// and each kind [Resolve] was not asked for, holds no directory: its accessor returns "" and
+// [Dirs.Ensure] reports it.
 type Dirs struct {
 	goos string
 	dirs [numKinds]string
 }
 
-// Config returns the directory of the [Config] kind.
+// Config returns the directory of the [Config] kind, and "" when it was not resolved.
 func (d Dirs) Config() string { return d.dir(Config) }
 
-// State returns the directory of the [State] kind.
+// State returns the directory of the [State] kind, and "" when it was not resolved.
 func (d Dirs) State() string { return d.dir(State) }
 
-// Cache returns the directory of the [Cache] kind.
+// Cache returns the directory of the [Cache] kind, and "" when it was not resolved.
 func (d Dirs) Cache() string { return d.dir(Cache) }
 
-// Data returns the directory of the [Data] kind.
+// Data returns the directory of the [Data] kind, and "" when it was not resolved.
 func (d Dirs) Data() string { return d.dir(Data) }
 
-// Log returns the directory of the [Log] kind.
+// Log returns the directory of the [Log] kind, and "" when it was not resolved.
 func (d Dirs) Log() string { return d.dir(Log) }
 
 func (d Dirs) dir(k Kind) string {
@@ -97,16 +99,32 @@ func (d Dirs) dir(k Kind) string {
 var ErrNoHomeDir = errors.New("paths: no home directory")
 
 // New resolves the directory of every [Kind] for the tool id, in the order the package
-// documentation gives. It returns an error wrapping id's [spec.Identity.Validate] error for an
-// invalid id, and one wrapping [ErrNoHomeDir] when a kind needs the home directory and
-// Options.UserHomeDir fails or returns "". It touches nothing on the file system.
+// documentation gives. It is [Resolve] with no kinds, and fails as Resolve does.
 func New(id spec.Identity, opts Options) (Dirs, error) {
+	return Resolve(id, opts)
+}
+
+// Resolve resolves the directory of each of kinds for the tool id, in the order the package
+// documentation gives, and of every [Kind] when kinds is empty. A kind kinds does not name is
+// left unresolved in the returned Dirs, and nothing is looked up for it, unless a requested kind
+// derives from it, as log does from state on the XDG layout; such a parent is resolved to derive
+// its child and is left unresolved itself. Repeating a kind is harmless.
+//
+// Resolve returns an error wrapping id's [spec.Identity.Validate] error for an invalid id, an
+// error naming a value of kinds that is not a Kind, and one wrapping [ErrNoHomeDir] when a
+// requested kind, or a kind it derives from, needs the home directory and Options.UserHomeDir
+// fails or returns "". It touches nothing on the file system.
+func Resolve(id spec.Identity, opts Options, kinds ...Kind) (Dirs, error) {
 	if err := id.Validate(); err != nil {
 		return Dirs{}, fmt.Errorf("paths: invalid identity: %w", err)
 	}
 	homeVar, err := id.EnvVar("HOME")
 	if err != nil {
 		return Dirs{}, fmt.Errorf("paths: invalid identity: %w", err)
+	}
+	want, err := requested(kinds)
+	if err != nil {
+		return Dirs{}, err
 	}
 
 	r := newResolver(id.DirName, opts)
@@ -120,6 +138,9 @@ func New(id spec.Identity, opts Options) (Dirs, error) {
 	d.goos = r.goos
 	if root != "" {
 		for i, sub := range homeSubdirs() {
+			if !want[i] {
+				continue
+			}
 			d.dirs[i] = explicit[i]
 			if d.dirs[i] == "" {
 				d.dirs[i] = filepath.Join(root, sub)
@@ -128,11 +149,30 @@ func New(id spec.Identity, opts Options) (Dirs, error) {
 		return d, nil
 	}
 
-	d.dirs, err = r.layout(explicit)
+	d.dirs, err = r.layout(explicit, want)
 	if err != nil {
 		return Dirs{}, err
 	}
 	return d, nil
+}
+
+// requested returns which kinds kinds names, indexed by Kind - 1, and every kind when kinds is
+// empty. It fails on a value that is not a [Kind].
+func requested(kinds []Kind) ([numKinds]bool, error) {
+	var want [numKinds]bool
+	if len(kinds) == 0 {
+		for i := range want {
+			want[i] = true
+		}
+		return want, nil
+	}
+	for _, k := range kinds {
+		if !k.valid() {
+			return [numKinds]bool{}, fmt.Errorf("paths: invalid kind %v", k)
+		}
+		want[k-1] = true
+	}
+	return want, nil
 }
 
 // resolver carries what the layouts read: the environment, the home directory, looked up once
@@ -192,7 +232,7 @@ func (r *resolver) homeDir() (string, error) {
 func (r *resolver) underHome(elem ...string) (string, error) {
 	home, err := r.homeDir()
 	if err != nil {
-		return "", err
+		return "", err // [lydite:exclude_from_mutation][every caller discards the path when the error is set, so the value returned with ErrNoHomeDir is unobservable]
 	}
 	return filepath.Join(append([]string{home}, elem...)...), nil
 }

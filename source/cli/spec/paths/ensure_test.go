@@ -354,3 +354,18 @@ func TestEnsureZeroDirsCreatesNothing(t *testing.T) {
 		t.Errorf("working directory holds %d entries, want none", len(entries))
 	}
 }
+
+func TestEnsureReportsAKindResolveWasNotAskedFor(t *testing.T) {
+	root := t.TempDir()
+	d, err := Resolve(ensureIdentity(), Options{Home: root, GOOS: "linux"}, State)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	err = d.Ensure(State, Config)
+	if err == nil || !strings.Contains(err.Error(), "config: no directory resolved") {
+		t.Fatalf("Ensure(State, Config) = %v, want an error naming the unresolved config kind", err)
+	}
+	assertDir(t, d.State())
+	assertMissing(t, filepath.Join(root, "config"))
+}
