@@ -4,3 +4,4 @@ use ./source/cli/core
 use ./source/update
 use ./source/daemon
 use ./source/commons
+use ./source/cli/spec
