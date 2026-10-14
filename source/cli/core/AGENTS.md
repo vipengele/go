@@ -5,20 +5,37 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 
 ## Packages
 
-- `cli` (the root package) — `Execute(root)` runs a `*spec.Command` tree for a tool's `main` against
+- `cli` (the root package) — `New(identity, opts...)` builds an `App`; `Add(cmd)` adds a command
+  tree; `Execute()` / `ExecuteArgs(env, args)` run it, each execution building a fresh root named by
+  `identity.Name`. Options: `WithVerbose`, `WithQuiet`, `WithNoColor`, `WithJSON` opt into the
+  standard flags, declared as inherited flags on the root (`flags.go`); `WithPreRun` / `WithPostRun`
+  add `PreRunHook` / `PostRunHook`s (`hooks.go`), which receive the `Invocation` and a
+  `spec.CommandInfo` (path and `Annotations`); `WithBuildInfo` fixes what `version` prints (tests),
+  otherwise `buildinfo.Read()`. A run function reads the standard flags and colour from
+  `inv.Output` (`spec.Output`, resolved in `output.go`), never from a handle. The App owns `version`
+  (ADR-0009): every root holds `versioncmd.New(...)` after the added commands, with a local `--json`
+  unless `WithJSON` is given, then `versioncmd.WithOutputJSON()`; a tool's own `version` is a
+  duplicate name. `cli/core` never imports `update`: the tool's `main` wires the update check as a
+  hook, and `spec.SkipUpdateCheck` is the opt-out annotation.
+  The package-level `Execute(root)` runs a `*spec.Command` tree for a tool's `main` against
   the process (`os.Args[1:]`, standard streams, working directory, environment) and returns the exit
   code; `ExecuteArgs(env, root, args)` is the same against a given `*spec.Env`, for tests. Both
   validate the tree on every call. Exit codes: 0 success and `--help`, 1 a run error or an invalid
   tree, 2 a command line the tree does not accept. Every error is written to stderr as
   `<root name>: <error>`.
-- `internal/cobra` — the only code that imports cobra. Builds a fresh cobra tree per execution from a
-  validated `*spec.Command`, so one tree may run any number of times, concurrently.
+- `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
+  fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
+  times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`
+  hooks as plain funcs; a post-run error after a successful run is a `*HookError`, never a
+  `*UsageError`.
 - `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). Standard
   library only. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
   schema-versioned JSON form (`schema` is 1). Adding a key keeps `schema`; renaming, removing or
   retyping a key increments it.
-- `versioncmd` — `New(info)` returns the `*spec.Command` for `version`, with a local (not
-  persistent) `--json` flag.
+- `versioncmd` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated
+  `spec.SkipUpdateCheck`. By default it has a local (not inherited) `--json` flag;
+  `WithOutputJSON()` declares none and reads `inv.Output.JSON()`, for a root with an inherited
+  `--json` (a descendant flag of the same name makes the tree invalid).
 
 ## Gotchas
 

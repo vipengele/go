@@ -3,13 +3,16 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	cli "go.vipengele.org/cli/core"
+	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/spec"
 )
 
@@ -164,9 +167,13 @@ func TestAppExecuteArgsInvalidTree(t *testing.T) {
 			want: "tool: invalid command tree: ",
 		},
 		{
-			name:  "no command",
-			build: func() *cli.App { return cli.New(identity()) },
-			want:  "tool: invalid command tree: ",
+			name: "added command named version",
+			build: func() *cli.App {
+				app := cli.New(identity())
+				app.Add(&spec.Command{Name: "version", Run: ok})
+				return app
+			},
+			want: "tool: invalid command tree: ",
 		},
 		{
 			name: "identity without a name",
@@ -260,5 +267,103 @@ func TestAppExecuteUsesTheProcess(t *testing.T) {
 	}
 	if want := "hello ada\n"; code != cli.ExitOK || string(written) != want {
 		t.Errorf("Execute = %d, stdout %q; want 0 and %q", code, written, want)
+	}
+}
+
+// versionInfo is the build information the App of a version test prints.
+func versionInfo() buildinfo.Info {
+	return buildinfo.Info{
+		Version:   "v1.2.3",
+		Commit:    "0123abcdef0123abcdef",
+		Date:      "2026-01-02T03:04:05Z",
+		GoVersion: "go1.27.2",
+		OS:        "linux",
+		Arch:      "amd64",
+	}
+}
+
+func TestAppVersion(t *testing.T) {
+	const text = "v1.2.3 build 0123abcdef01\n"
+	const asJSON = `{"schema":1,"version":"v1.2.3","commit":"0123abcdef0123abcdef",` +
+		`"date":"2026-01-02T03:04:05Z","go":"go1.27.2","os":"linux","arch":"amd64","dev":false}` + "\n"
+	tests := []struct {
+		name string
+		opts []cli.Option
+		args []string
+		want result
+	}{
+		{name: "text", args: []string{"version"}, want: result{code: cli.ExitOK, stdout: text}},
+		{name: "local --json", args: []string{"version", "--json"}, want: result{code: cli.ExitOK, stdout: asJSON}},
+		{
+			name: "local --json is not the root's",
+			args: []string{"--json", "version"},
+			want: result{code: cli.ExitUsage, stderr: "tool: unknown flag: --json\n"},
+		},
+		{
+			name: "text with the standard --json",
+			opts: []cli.Option{cli.WithJSON()},
+			args: []string{"version"},
+			want: result{code: cli.ExitOK, stdout: text},
+		},
+		{
+			name: "standard --json after version",
+			opts: []cli.Option{cli.WithJSON()},
+			args: []string{"version", "--json"},
+			want: result{code: cli.ExitOK, stdout: asJSON},
+		},
+		{
+			name: "standard --json before version",
+			opts: []cli.Option{cli.WithJSON()},
+			args: []string{"--json", "version"},
+			want: result{code: cli.ExitOK, stdout: asJSON},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := cli.New(identity(), append([]cli.Option{cli.WithBuildInfo(versionInfo())}, tt.opts...)...)
+			if got := runApp(t, app, tt.args...); got != tt.want {
+				t.Errorf("ExecuteArgs(%q)\n got: %+v\nwant: %+v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppVersionWithoutAddedCommands(t *testing.T) {
+	app := cli.New(identity(), cli.WithBuildInfo(versionInfo()))
+	help := runApp(t, app, "--help")
+	if help.code != cli.ExitOK || !strings.Contains(help.stdout, "version") {
+		t.Errorf("--help = %+v, want 0 and a listing of version", help)
+	}
+	if got := runApp(t, app, "version"); got.code != cli.ExitOK || got.stdout != "v1.2.3 build 0123abcdef01\n" {
+		t.Errorf("version = %+v, want 0 and the build information", got)
+	}
+}
+
+func TestAppVersionSkipsUpdateCheck(t *testing.T) {
+	var annotated bool
+	app := cli.New(identity(), cli.WithBuildInfo(versionInfo()),
+		cli.WithPreRun(func(_ context.Context, _ *spec.Invocation, cmd spec.CommandInfo) error {
+			_, annotated = cmd.Annotation(spec.SkipUpdateCheck)
+			return nil
+		}))
+	if got := runApp(t, app, "version"); got.code != cli.ExitOK {
+		t.Fatalf("version = %+v, want 0", got)
+	}
+	if !annotated {
+		t.Errorf("version lacks the %q annotation", spec.SkipUpdateCheck)
+	}
+}
+
+func TestAppVersionReadsTheBinary(t *testing.T) {
+	got := runApp(t, cli.New(identity()), "version", "--json")
+	if got.code != cli.ExitOK {
+		t.Fatalf("version --json = %+v, want 0", got)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(got.stdout), &m); err != nil {
+		t.Fatalf("output %q is not JSON: %v", got.stdout, err)
+	}
+	if m["go"] != runtime.Version() {
+		t.Errorf("go = %v, want %q", m["go"], runtime.Version())
 	}
 }

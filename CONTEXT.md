@@ -117,6 +117,24 @@ One execution of a **Command**: the Flag values parsed, the positional arguments
 was run with. A Command is reusable and an Invocation is not (ADR-0005).
 _Avoid_: call, run, context (`context.Context`)
 
+**Output mode**:
+How one **Invocation** presents its output: more or less detail than the default, JSON or text, and
+whether colour is allowed. It is decided once per Invocation from the standard flags the **App**
+takes and the **Env**, and a **Command** reads it rather than parsing those flags itself.
+_Avoid_: format (JSON or text is one part of it), verbosity, log level
+
+**Hook**:
+A function the **App** runs before or after every **Command** it runs, given the **Invocation** and
+the Command's path and **Annotation**s. It belongs to the tool, not to the Command, so a Command
+shared by several tools carries none; an update check is one (ADR-0009).
+_Avoid_: middleware, callback, interceptor
+
+**Annotation**:
+A key-value note on one **Command**, read by the **App** and its **Hook**s, never by the Command's
+own run: one key exempts a Command from the update check. It applies to the Command that carries it,
+not to its subcommands.
+_Avoid_: tag (a **Prefixed tag** is a release), label, metadata
+
 **Release source**:
 Where a tool's own published releases come from, behind the `update` project's `Source` interface:
 it lists releases and serves the assets of one. It does not choose among them; version comparison
