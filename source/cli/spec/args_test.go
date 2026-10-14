@@ -84,7 +84,7 @@ func TestArgPolicyBounds(t *testing.T) {
 				t.Errorf("Min() = %d, want %d", got, tc.wantMin)
 			}
 			gotMax, bounded := tc.policy.Max()
-			if bounded != tc.wantBounded || (bounded && gotMax != tc.wantMax) {
+			if bounded != tc.wantBounded || gotMax != tc.wantMax {
 				t.Errorf("Max() = %d, %t, want %d, %t", gotMax, bounded, tc.wantMax, tc.wantBounded)
 			}
 		})

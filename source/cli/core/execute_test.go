@@ -508,3 +508,40 @@ func TestExecuteWithoutWorkingDirectory(t *testing.T) {
 		t.Errorf("child: %+v; want code 1, no stdout and a stderr starting %q", got, "tool: ")
 	}
 }
+
+func TestExecuteArgsHelpFlagShorthand(t *testing.T) {
+	t.Run("help takes -h by default", func(t *testing.T) {
+		got := run(t, "greet", "--help")
+		if got.code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", got.code, got.stderr)
+		}
+		if !strings.Contains(got.stdout, "-h, --help") {
+			t.Errorf("help does not list -h, --help:\n%s", got.stdout)
+		}
+	})
+
+	t.Run("a flag holding -h keeps it", func(t *testing.T) {
+		host := spec.StringFlag("host", "the host to use", spec.Shorthand("h"))
+		root := &spec.Command{
+			Name:  "tool",
+			Flags: []spec.Flag{host},
+			Run: func(_ context.Context, inv *spec.Invocation) error {
+				_, _ = fmt.Fprintf(inv.Env.Stdout, "host=%s\n", host.Get(inv))
+				return nil
+			},
+		}
+
+		got := runTree(t, root, "-h", "example.org")
+		if got.code != 0 || got.stdout != "host=example.org\n" {
+			t.Errorf("-h example.org: code %d, stdout %q, stderr %q; want the flag set", got.code, got.stdout, got.stderr)
+		}
+
+		got = runTree(t, root, "--help")
+		if got.code != 0 {
+			t.Fatalf("--help: exit code = %d, want 0 (stderr %q)", got.code, got.stderr)
+		}
+		if !strings.Contains(got.stdout, "--host string") || strings.Contains(got.stdout, "-h, --help") {
+			t.Errorf("--help output lists the help flag with -h or omits --host:\n%s", got.stdout)
+		}
+	})
+}

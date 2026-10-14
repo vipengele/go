@@ -63,9 +63,9 @@ func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string) 
 	cmd.SetFlagErrorFunc(func(c *spf.Command, err error) error {
 		return &UsageError{Path: relPath(c), Err: err}
 	})
-	cmd.SetIn(env.Stdin)
+	cmd.SetIn(env.Stdin) // [lydite:exclude_from_mutation][cobra reads no input and the adapter hands Run the Env directly, so the setting only keeps a stray read inside the Env]
 	cmd.SetOut(env.Stdout)
-	cmd.SetErr(env.Stderr)
+	cmd.SetErr(env.Stderr) // [lydite:exclude_from_mutation][errors and usage are silenced, so cobra writes nothing to its error stream; the setting only keeps a stray write inside the Env]
 	if args == nil {
 		args = []string{}
 	}
@@ -103,11 +103,10 @@ func build(env *spec.Env, c *spec.Command, inherited []spec.Flag) (*spf.Command,
 	}
 
 	// Cobra's own --help flag takes the shorthand -h unconditionally, and pflag panics when a
-	// flag of the command already holds it, so the help flag is declared here and gives up -h.
+	// flag of the command already holds it, so a command with such a flag declares --help here
+	// and gives up -h. Every other command takes cobra's help flag.
 	if hasShorthand(visible, "h") {
 		cmd.Flags().Bool("help", false, "help for "+c.Name)
-	} else {
-		cmd.Flags().BoolP("help", "h", false, "help for "+c.Name)
 	}
 
 	for _, sub := range c.Commands {
@@ -135,7 +134,7 @@ func build(env *spec.Env, c *spec.Command, inherited []spec.Flag) (*spf.Command,
 		if err == nil {
 			return nil
 		}
-		if limit, bounded := policy.Max(); hasCommands && bounded && len(args) > limit {
+		if limit, bounded := policy.Max(); hasCommands && bounded && len(args) > limit { // [lydite:exclude_from_mutation][Check accepts len(args) == limit, so the boundary is unreachable]
 			return unknownCommand(cmd, args)
 		}
 		return &UsageError{Path: relPath(cmd), Err: err}

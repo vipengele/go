@@ -1,6 +1,7 @@
 package spec_test
 
 import (
+	"context"
 	"testing"
 
 	"go.vipengele.org/cli/spec"
@@ -172,5 +173,37 @@ func TestFlagGetSetValueEqualToZeroOverridesDefault(t *testing.T) {
 	inv := spec.NewInvocation(nil, nil, map[string]any{"verbose": false})
 	if got := verbose.Get(inv); got {
 		t.Errorf("Get = %t, want false", got)
+	}
+}
+
+func TestShorthandAcceptsOnlyASCIILettersAndDigits(t *testing.T) {
+	tests := []struct {
+		shorthand string
+		valid     bool
+	}{
+		{"a", true}, {"m", true}, {"z", true},
+		{"A", true}, {"M", true}, {"Z", true},
+		{"0", true}, {"5", true}, {"9", true},
+		{"`", false}, {"{", false},
+		{"@", false}, {"[", false},
+		{"/", false}, {":", false},
+		{"-", false}, {"_", false}, {" ", false},
+		{"é", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.shorthand, func(t *testing.T) {
+			cmd := &spec.Command{
+				Name:  "tool",
+				Run:   func(context.Context, *spec.Invocation) error { return nil },
+				Flags: []spec.Flag{spec.BoolFlag("all", "", spec.Shorthand(tc.shorthand))},
+			}
+			err := cmd.Validate()
+			if tc.valid && err != nil {
+				t.Errorf("Validate() = %v, want nil for shorthand %q", err, tc.shorthand)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("Validate() = nil, want an error for shorthand %q", tc.shorthand)
+			}
+		})
 	}
 }
