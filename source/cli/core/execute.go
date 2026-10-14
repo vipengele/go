@@ -34,12 +34,21 @@ const (
 // It behaves as [ExecuteArgs] does, and returns [ExitError] after writing "<name>: <error>" to
 // os.Stderr when the working directory cannot be determined.
 func Execute(root *spec.Command) int {
+	return executeProcess(prefix(root), func(env *spec.Env, args []string) int {
+		return ExecuteArgs(env, root, args)
+	})
+}
+
+// executeProcess calls run with the environment and the arguments of the process, and returns
+// its exit code. It returns [ExitError] without calling run after writing the error, preceded
+// by errPrefix, to os.Stderr when the working directory cannot be determined.
+func executeProcess(errPrefix string, run func(env *spec.Env, args []string) int) int {
 	env, err := processEnv()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "%s%v\n", prefix(root), err)
+		_, _ = fmt.Fprintf(os.Stderr, "%s%v\n", errPrefix, err)
 		return ExitError
 	}
-	return ExecuteArgs(env, root, os.Args[1:])
+	return run(env, os.Args[1:])
 }
 
 // processEnv returns the environment of the process.
