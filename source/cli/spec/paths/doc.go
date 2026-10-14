@@ -64,4 +64,12 @@
 // The home directory is looked up only when some kind needs it, so a tool whose every kind is
 // set by an option or the environment resolves without one. When a kind needs it and it cannot be
 // found, New returns an error.
+//
+// # Containers
+//
+// [InContainer] reports whether the process appears to run inside a container, so a caller can
+// choose a different location or policy there. It is a heuristic and changes no path. It looks
+// for /.dockerenv, /run/.containerenv, the container and KUBERNETES_SERVICE_HOST variables and
+// a mention of docker, kubepods or containerd in /proc/1/cgroup. Under cgroup v2 a container
+// sees "0::/", so the cgroup signal is not reliable there. It is always false off Linux.
 package paths
