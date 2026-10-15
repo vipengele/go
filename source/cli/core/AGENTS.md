@@ -22,7 +22,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   code; `ExecuteArgs(env, root, args)` is the same against a given `*spec.Env`, for tests. Both
   validate the tree on every call. Exit codes: 0 success and `--help`, 1 a run error or an invalid
   tree, 2 a command line the tree does not accept, 130 interrupted (root context cancelled and
-  `context.Canceled`, nothing printed); 3-125 are registrable. Order, first match wins: 130,
+  `context.Canceled`, nothing printed; the public entry points run with a context that is never
+  cancelled, so none returns it); 3-125 are registrable. Order, first match wins: 130,
   `spec.Coded` (1 or 3-125), `WithExitCode(code, sentinel)` / `WithExitCodeAs(fn)` in option order,
   usage 2, else 1. The registry is per-`App`, read-only after `New` (a bad code panics there); the
   package-level `Execute` / `ExecuteArgs` have none. Every error is written to stderr as

@@ -6,7 +6,8 @@ import (
 )
 
 // ExitInterrupted is the exit code of a run that the process was interrupted out of. It is the
-// conventional 128 plus SIGINT, and no option can give it to an error.
+// conventional 128 plus SIGINT, and no option can give it to an error. The entry points of this
+// package run with a context that is never cancelled and so never return it.
 const ExitInterrupted = 130
 
 // maxExitCode is the highest exit code an option can register: a shell reports 126 and above for

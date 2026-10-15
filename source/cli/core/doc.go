@@ -70,6 +70,9 @@
 //  4. 2 for a usage error;
 //  5. 1 otherwise.
 //
+// The context an [App] and the package-level [Execute] run with is never cancelled, so rule 1
+// does not apply to them and no execution through this package's API returns 130.
+//
 // The registrations belong to the [App] and are read-only after [New]. The package-level
 // [Execute] and [ExecuteArgs] have none, so for them rules 1, 2, 4 and 5 apply.
 //
