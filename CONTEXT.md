@@ -116,6 +116,30 @@ The single root under which every **Directory kind** is a subdirectory (`config`
 is used as given, without the directory name appended (ADR-0009).
 _Avoid_: home directory (the user's own, `~`), root, base directory
 
+**Configuration**:
+The values a user supplies to a tool, read into one struct whose fields are its **Key**s and whose
+initial values are the defaults. Each **Provider** is a layer above the defaults, and the value of a
+**Key** is the one from the highest layer that sets it (ADR-0012).
+_Avoid_: settings, options, **Identity** (values the tool fixes in its `main`)
+
+**Provider**:
+One layer of **Configuration**: a source of values for **Key**s, such as a YAML file, environment
+variables or the **Flag**s a command line set. Providers are applied in order and a later one
+overrides an earlier one (ADR-0012).
+_Avoid_: source (also the **Release source**), loader, backend
+
+**Key**:
+The name of one value of a **Configuration**: a dotted path with one segment per level of nesting
+(`server.max_retries`), in snake_case. Matching ignores case, `-` and `_` within a segment, so every
+**Provider** may spell it in its own convention (ADR-0012).
+_Avoid_: name, path (also a directory), property
+
+**Origin**:
+Where the value of a **Key** was read: a file and line, an environment variable, a **Flag**, or
+`default` when no **Provider** set it. Error messages and the report of a loaded **Configuration**
+name it (ADR-0012).
+_Avoid_: source, location, provenance
+
 **Command**:
 One named action of a tool (`version`, `update`), described as data in `cli/spec`: its name,
 descriptions, **Flag**s, subcommands and what it does when run. Any project contributes Commands
