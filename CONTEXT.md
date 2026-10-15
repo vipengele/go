@@ -134,8 +134,9 @@ _Avoid_: call, run, context (`context.Context`)
 
 **Output mode**:
 How one **Invocation** presents its output: more or less detail than the default, JSON or text, and
-whether colour is allowed. It is decided once per Invocation from the standard flags the **App**
-takes and the **Env**, and a **Command** reads it rather than parsing those flags itself.
+whether colour is allowed, which is decided for the standard output and the standard error
+separately. It is decided for the Invocation from the standard flags the **App** takes and the
+**Env**, and a **Command** reads it rather than parsing those flags itself.
 _Avoid_: format (JSON or text is one part of it), verbosity, log level
 
 **Hook**:

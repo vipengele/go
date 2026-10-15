@@ -11,8 +11,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   standard flags, declared as inherited flags on the root (`flags.go`); `WithPreRun` / `WithPostRun`
   add `PreRunHook` / `PostRunHook`s (`hooks.go`), which receive the `Invocation` and a
   `spec.CommandInfo` (path and `Annotations`); `WithBuildInfo` fixes what `version` prints (tests),
-  otherwise `buildinfo.Read()`. A run function reads the standard flags and colour from
-  `inv.Output` (`spec.Output`, resolved in `output.go`), never from a handle. The App owns `version`
+  otherwise `buildinfo.Read()`. A run function reads the standard flags and colour (per stream,
+  `Output.Color(stream)`) from `inv.Output` (`spec.Output`, resolved in `output.go`), never from a
+  handle. The App owns `version`
   (ADR-0009): every root holds `versioncmd.New(...)` after the added commands, with a local `--json`
   unless `WithJSON` is given, then `versioncmd.WithOutputJSON()`; a tool's own `version` is a
   duplicate name. `cli/core` never imports `update`: the tool's `main` wires the update check as a
@@ -88,4 +89,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 - `ExecuteArgs` fills a nil `Env.Terminal` on its own copy with `terminal.Detect` over the `Env`
   streams; a supplied `Terminal` is kept and the caller's `Env` is not mutated. A real file is
   probed and buffers are not terminals, so a test that needs a terminal sets `Env.Terminal`.
-  Colour asks `env.IsTerminal(spec.Stdout)`.
+  Colour is decided per stream, stdout and stderr each by `spec.ColorAllowed` (`output.go`); the
+  first rule that applies wins: `--no-color` off; `NO_COLOR` or `<EnvPrefix>_NO_COLOR` non-empty
+  off; `FORCE_COLOR` non-empty and not `"0"` on; `TERM=dumb` off; otherwise on exactly when
+  `env.IsTerminal` of that stream is true. Package-level `Execute` / `ExecuteArgs` have no flag and
+  no identity, so they read no prefixed variable.
