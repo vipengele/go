@@ -374,7 +374,12 @@ type exitErr struct{ code int }
 
 func (e exitErr) Error() string { return fmt.Sprintf("exit %d", e.code) }
 
-var errExitSentinel = errors.New("sentinel") //nolint:gochecknoglobals // a sentinel is the identity the tests register.
+// exitSentinel is an error whose identity is its text, so a constant of it is a sentinel.
+type exitSentinel string
+
+func (e exitSentinel) Error() string { return string(e) }
+
+const errExitSentinel = exitSentinel("sentinel")
 
 // exitApp builds an App with opts whose command "do" returns err.
 func exitApp(err error, opts ...cli.Option) *cli.App {
