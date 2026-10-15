@@ -8,6 +8,7 @@ import (
 
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/terminal"
 )
 
 // The exit codes [Execute] and [ExecuteArgs] return.
@@ -80,8 +81,13 @@ func processEnv() (*spec.Env, error) {
 // [ExitOK]. A command with subcommands and no Run, given no positional argument, does the same.
 // There is no help or completion subcommand.
 //
+// A nil env.Terminal is filled with [terminal.Detect] of the resolved env's Stdin, Stdout and
+// Stderr, so [spec.Env.IsTerminal] answers for a real file instead of panicking; a non-nil
+// env.Terminal is used as is. The Terminal is set on the resolved copy, and env is not modified.
+//
 // Every run function receives a [spec.Invocation] whose Output forbids colour when the
-// environment variable NO_COLOR is set and not empty, or when env.Stdout is not a terminal.
+// environment variable NO_COLOR is set and not empty, or when env.Stdout is not a terminal as
+// [spec.Env.IsTerminal] reports it for [spec.Stdout].
 //
 // One tree may be run any number of times, concurrently: each call parses its own flag values.
 func ExecuteArgs(env *spec.Env, root *spec.Command, args []string) int {
@@ -91,6 +97,9 @@ func ExecuteArgs(env *spec.Env, root *spec.Command, args []string) int {
 // executeArgs is [ExecuteArgs] with the adapter configured by cfg.
 func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Config) int {
 	env = env.Resolved()
+	if env.Terminal == nil {
+		env.Terminal = terminal.Detect(env.Stdin, env.Stdout, env.Stderr)
+	}
 	if err := root.Validate(); err != nil {
 		_, _ = fmt.Fprintf(env.Stderr, "%sinvalid command tree: %v\n", prefix(root), err)
 		return ExitError

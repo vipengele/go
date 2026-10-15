@@ -97,8 +97,9 @@ _Avoid_: debug build, snapshot, local build (a tagged release built locally is n
 **Env**:
 The surroundings a command reads, passed in explicitly: environment variables, the standard
 streams and the working directory. Code takes an `Env`, never `os.Getenv` or `os.Stdout`, so tests
-substitute it. An `Env` does not carry the platform directories: `cli/spec/paths` resolves them
-(ADR-0009).
+substitute it. An `Env` also answers, per standard stream, whether that stream is a terminal;
+anything that is not a terminal file, such as a buffer in a test, is not one. An `Env` does not
+carry the platform directories: `cli/spec/paths` resolves them (ADR-0009).
 _Avoid_: environment (also means a deployment such as staging), context (`context.Context`), config
 (values loaded from a file or flags)
 

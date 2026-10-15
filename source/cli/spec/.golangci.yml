@@ -13,3 +13,9 @@ linters:
           deny:
             - pkg: github.com/spf13/cobra
               desc: cli/spec imports no command-line framework; cobra belongs in cli/core/internal/cobra (ADR-0005)
+        x-term-stays-in-terminal:
+          files:
+            - "!**/terminal/**"
+          deny:
+            - pkg: golang.org/x/term
+              desc: golang.org/x/term stays inside cli/spec/terminal, the one terminal check every module shares

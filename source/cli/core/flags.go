@@ -20,7 +20,7 @@ func WithQuiet() Option {
 // WithNoColor gives the App the standard flag --no-color, which forbids colour:
 // [spec.Output.Color] reports false. It is inherited as [WithVerbose] describes. Colour is also
 // forbidden, with or without the flag, by the environment variables NO_COLOR and
-// <EnvPrefix>_NO_COLOR, and when the standard output is not a terminal.
+// <EnvPrefix>_NO_COLOR, and when the Env reports that the standard output is not a terminal.
 func WithNoColor() Option {
 	return func(s *settings) { s.noColor = true }
 }
