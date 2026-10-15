@@ -2,6 +2,9 @@ module go.vipengele.org/cli/spec
 
 go 1.27.2
 
-require go.vipengele.org/commons v0.0.0
+require (
+	go.vipengele.org/commons v0.0.0
+	golang.org/x/mod v0.42.0
+)
 
 replace go.vipengele.org/commons => ../../commons
