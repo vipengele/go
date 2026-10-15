@@ -119,10 +119,10 @@ func processEnv() (*spec.Env, error) {
 // handler of its own.
 //
 // Every run function and hook receives one context, cancelled when ExecuteArgs returns. The
-// first value env.Interrupts delivers cancels it; a run that then returns an error, a PostRun
-// hook's included, returns [ExitInterrupted] instead of [ExitError], a usage error still returns
-// [ExitUsage], and a run that returns nil returns [ExitOK]. An interrupt pending in
-// env.Interrupts when the run returns counts as one that reached it. The second value returns
+// first value env.Interrupts delivers cancels it and does nothing else: the run goes on, and what
+// it returns decides the exit code as it does without an interrupt, except that
+// [context.Canceled] then returns [ExitInterrupted] and is written nowhere. A run that returns nil
+// returns [ExitOK], and any other error is written and keeps its code. The second value returns
 // [ExitInterrupted] at once, without waiting for the run: the abandoned run goes on in the
 // background until its run function returns, and may still call its PostRun hooks and write to
 // env's streams, though ExecuteArgs writes nothing more for it. A nil env.Interrupts watches
@@ -157,6 +157,8 @@ func processEnv() (*spec.Env, error) {
 // neither wraps nor joins, and a usage error, print on the first line alone, as "<name>: <error>".
 // An [App] can render an error of its own type in its own way with [WithErrorRenderer]. The exit
 // code of an error is, first match wins:
+//   - [ExitInterrupted], written nowhere, when an interrupt cancelled the run's context and the
+//     error is [context.Canceled];
 //   - the code of a [spec.CodedError] the error carries, when it is 1 or 3 through 125; a code
 //     outside that range is ignored;
 //   - [ExitUsage] for a command line the tree does not accept;
@@ -181,12 +183,12 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 }
 
 // executeArgsCtx is [ExecuteArgs] with the adapter configured by cfg, every run function
-// receiving a context derived from ctx that the first value of env.Interrupts cancels, the
-// matchers of registry giving exit codes to errors, and renderers offered each error of the tree
-// it writes, in order. The exit code of an error is, first match wins:
-//  1. [ExitInterrupted], written nowhere, when ctx is done and the error is
-//     [context.Canceled]. A run function that cancels or times out a context of its own while
-//     ctx is not done is not interrupted;
+// receiving the run's context, derived from ctx, which the first value of env.Interrupts
+// cancels, the matchers of registry giving exit codes to errors, and renderers offered each error
+// of the tree it writes, in order. The exit code of an error is, first match wins:
+//  1. [ExitInterrupted], written nowhere, when the run's context is done, because ctx is done or
+//     an interrupt cancelled it, and the error is [context.Canceled]. A run function that cancels
+//     or times out a context of its own while the run's context is not done is not interrupted;
 //  2. the code of a [spec.CodedError] the error carries, when [registrableExitCode] accepts it;
 //  3. the code of the first matcher of registry that matches the error;
 //  4. [ExitUsage] for a [*cobra.UsageError];
@@ -195,8 +197,7 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 // Outside rule 1, the error is written to env.Stderr by [errrender.Render] unless it carries a
 // [spec.ReportedError], which changes no exit code. The invalid-tree error is written whatever it
 // carries. An error a PostRun returns after the run function succeeds reaches rules 2 to 4 as a
-// [*cobra.HookError], which unwraps to nothing, so its code is [ExitError]. After an interrupt
-// reaches the run, an error whose code is [ExitError] gets [ExitInterrupted] instead.
+// [*cobra.HookError], which unwraps to nothing, so its code is [ExitError], interrupted or not.
 func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args []string,
 	cfg cobra.Config, registry exitMatchers, renderers ...errrender.Renderer,
 ) int {
@@ -211,7 +212,7 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if env.Interrupts == nil {
-		return report(ctx, env, root, cobra.Run(runCtx, env, root, args, cfg), false, registry, renderers)
+		return report(runCtx, env, root, cobra.Run(runCtx, env, root, args, cfg), registry, renderers)
 	}
 
 	second, stop := watchInterrupts(env.Interrupts, cancel)
@@ -226,11 +227,11 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 	}()
 	select {
 	case out := <-done:
-		interrupted := stop()
+		stop()
 		if out.panicked {
 			panic(out.value)
 		}
-		return report(ctx, env, root, out.err, interrupted, registry, renderers)
+		return report(runCtx, env, root, out.err, registry, renderers)
 	case <-second:
 		return ExitInterrupted
 	}
@@ -244,26 +245,22 @@ type outcome struct {
 }
 
 // report writes err to env.Stderr and returns its exit code by the rules of [executeArgsCtx],
-// ctx being the context executeArgsCtx was given. An error whose code would be [ExitError] gets
-// [ExitInterrupted] instead when interrupted.
-func report(ctx context.Context, env *spec.Env, root *spec.Command, err error, interrupted bool,
+// runCtx being the run's context. Rule 1 reads runCtx rather than the context executeArgsCtx was
+// given, so a run an interrupt cancelled is interrupted as one whose parent context is done is.
+func report(runCtx context.Context, env *spec.Env, root *spec.Command, err error,
 	registry exitMatchers, renderers []errrender.Renderer,
 ) int {
 	if err == nil {
 		return ExitOK
 	}
-	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+	if runCtx.Err() != nil && errors.Is(err, context.Canceled) {
 		return ExitInterrupted
 	}
 	var reported *spec.ReportedError
 	if !errors.As(err, &reported) {
 		errrender.Render(env.Stderr, name(root), err, renderers)
 	}
-	code := exitCode(err, registry)
-	if interrupted && code == ExitError {
-		return ExitInterrupted
-	}
-	return code
+	return exitCode(err, registry)
 }
 
 // exitCode returns the exit code of err, which is not an interruption, by rules 2 to 5 of
@@ -284,19 +281,18 @@ func exitCode(err error, registry exitMatchers) int {
 }
 
 // watchInterrupts starts the goroutine that watches interrupts for one run. It calls cancel on
-// the first value and closes second on the next one, then exits. stop asks it to exit, waits
-// until it has, and reports whether it received a value; a value pending in interrupts when
-// stop is called counts as received. stop is called at most once. A closed interrupts delivers
-// no more values.
+// the first value and closes second on the next one, then exits. stop asks it to exit and waits
+// until it has, so every cancel it makes happens before stop returns. stop is called at most
+// once. A closed interrupts delivers no more values.
 func watchInterrupts(interrupts <-chan struct{}, cancel context.CancelFunc) (
-	second <-chan struct{}, stop func() bool,
+	second <-chan struct{}, stop func(),
 ) {
 	secondc := make(chan struct{})
 	stopc := make(chan struct{})
-	seenc := make(chan bool, 1)
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		seen := false
-		defer func() { seenc <- seen }()
 		for {
 			select {
 			case _, ok := <-interrupts:
@@ -311,18 +307,13 @@ func watchInterrupts(interrupts <-chan struct{}, cancel context.CancelFunc) (
 				seen = true
 				cancel()
 			case <-stopc:
-				select {
-				case _, ok := <-interrupts:
-					seen = seen || ok
-				default:
-				}
 				return
 			}
 		}
 	}()
-	return secondc, func() bool {
+	return secondc, func() {
 		close(stopc)
-		return <-seenc
+		<-exited
 	}
 }
 

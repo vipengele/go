@@ -172,8 +172,10 @@ func (a *App) Execute() int {
 // The hooks [WithPreRun] and [WithPostRun] add run around every run function it calls, as they
 // describe.
 //
-// The exit code of an error is, first match wins: the code of a [spec.CodedError] the error
-// carries, when it is 1 or 3 through 125; the code of the first registered [WithExitCode] or
+// Interrupts are handled as [ExecuteArgs] handles them. The exit code of an error is, first match
+// wins: [ExitInterrupted], written nowhere, when an interrupt cancelled the run's context and the
+// error is [context.Canceled]; the code of a [spec.CodedError] the error carries, when it is 1 or
+// 3 through 125; the code of the first registered [WithExitCode] or
 // [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept;
 // [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {

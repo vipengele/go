@@ -284,9 +284,10 @@ func TestAppInterruptCancelsTheContextOfHooksAndRun(t *testing.T) {
 	ch <- struct{}{}
 	select {
 	case code := <-codes:
-		if code != cli.ExitInterrupted || stderr.String() != "tool: hook failed\n" {
+		// The post-run error is opaque, so the interrupt leaves it the code it has without one.
+		if code != cli.ExitError || stderr.String() != "tool: hook failed\n" {
 			t.Errorf("code %d, stderr %q; want %d and %q",
-				code, stderr.String(), cli.ExitInterrupted, "tool: hook failed\n")
+				code, stderr.String(), cli.ExitError, "tool: hook failed\n")
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("ExecuteArgs did not return after the interrupt cancelled its context")

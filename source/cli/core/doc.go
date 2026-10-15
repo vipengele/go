@@ -74,10 +74,11 @@
 //  4. 2 for a usage error;
 //  5. 1 otherwise.
 //
-// The context an [App] and the package-level [Execute] run with is cancelled only by an
-// interrupt, so rule 1 does not apply to them. Instead, the first value [spec.Env.Interrupts]
-// delivers cancels the context every hook and run function receives, and an error rules 2 to 5
-// then give 1 exits 130; the second value returns 130 at once and abandons the run. [Execute] and
+// The root context is cancelled by an interrupt. The first value [spec.Env.Interrupts] delivers
+// cancels the context every hook and run function receives, and does nothing else: the run goes
+// on, and the error it returns is mapped by the rules above, so [context.Canceled] exits 130 with
+// nothing written and any other error is written and keeps the code rules 2 to 5 give it. The
+// second value returns 130 at once, without waiting for the run, which is abandoned. [Execute] and
 // [App.Execute] deliver SIGINT and SIGTERM as those values.
 //
 // The registrations belong to the [App] and are read-only after [New]. The package-level

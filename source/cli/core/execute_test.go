@@ -487,10 +487,10 @@ func TestExecuteArgsInterrupts(t *testing.T) {
 		want       result
 	}{
 		{
-			name:       "error after an interrupt",
+			name:       "context canceled after an interrupt",
 			args:       []string{"cancelled"},
 			interrupts: 1,
-			want:       result{code: cli.ExitInterrupted, stderr: "tool: context canceled\n"},
+			want:       result{code: cli.ExitInterrupted},
 		},
 		{
 			name:       "nil after an interrupt",
@@ -526,6 +526,43 @@ func TestExecuteArgsInterrupts(t *testing.T) {
 				t.Errorf("ExecuteArgs(%q)\n got: %+v\nwant: %+v", tt.args, got, tt.want)
 			}
 			waitGoroutines(t, baseline)
+		})
+	}
+}
+
+// TestExecuteArgsErrorAfterAnInterruptKeepsItsCode pins that an interrupt changes the code of
+// context.Canceled alone: every other error the run returns once its context is cancelled is
+// written and keeps the code it has without an interrupt.
+func TestExecuteArgsErrorAfterAnInterruptKeepsItsCode(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name string
+		err  error
+		want result
+	}{
+		{name: "plain error", err: boom, want: result{code: cli.ExitError, stderr: "tool: boom\n"}},
+		{name: "coded error", err: spec.Coded(7, boom), want: result{code: 7, stderr: "tool: boom\n"}},
+		{name: "usage error", err: cli.NewUsageError(boom), want: result{code: cli.ExitUsage, stderr: "tool: boom\n"}},
+		{name: "reported error", err: spec.Reported(boom), want: result{code: cli.ExitError}},
+		{name: "deadline exceeded", err: context.DeadlineExceeded,
+			want: result{code: cli.ExitError, stderr: "tool: context deadline exceeded\n"}},
+		{name: "wrapped context canceled", err: fmt.Errorf("fetch: %w", context.Canceled),
+			want: result{code: cli.ExitInterrupted}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := &spec.Command{
+				Name: "tool",
+				Run: func(ctx context.Context, _ *spec.Invocation) error {
+					<-ctx.Done()
+					return tt.err
+				},
+			}
+			var stderr bytes.Buffer
+			code := cli.ExecuteArgs(&spec.Env{Stderr: &stderr, Interrupts: interrupts(1)}, root, nil)
+			if got := (result{code: code, stderr: stderr.String()}); got != tt.want {
+				t.Errorf("ExecuteArgs\n got: %+v\nwant: %+v", got, tt.want)
+			}
 		})
 	}
 }
@@ -759,6 +796,7 @@ func startSignalChild(t *testing.T, arg string) *signalChild {
 		for scanner.Scan() {
 			c.lines <- scanner.Text()
 		}
+		close(c.lines)
 		if err := c.cmd.Wait(); err != nil {
 			var exit *exec.ExitError
 			if !errors.As(err, &exit) {
@@ -781,6 +819,12 @@ func (c *signalChild) waitLine(want string) {
 	select {
 	case line, ok := <-c.lines:
 		if !ok {
+			// Wait has filled stderr only once exited is closed.
+			select {
+			case <-c.exited:
+			case <-time.After(childDeadline):
+				c.t.Fatalf("child closed its standard output before printing %q and did not exit", want)
+			}
 			c.t.Fatalf("child exited before printing %q; stderr %q", want, c.stderr.String())
 		}
 		if line != want {
@@ -818,9 +862,9 @@ func TestExecuteSignalCancelsTheRun(t *testing.T) {
 			c.waitLine("ready")
 			c.signal(sig)
 			code, stderr := c.wait()
-			if code != cli.ExitInterrupted || stderr != "tool: context canceled\n" {
-				t.Errorf("child: code %d, stderr %q; want %d and %q",
-					code, stderr, cli.ExitInterrupted, "tool: context canceled\n")
+			if code != cli.ExitInterrupted || stderr != "" {
+				t.Errorf("child: code %d, stderr %q; want %d and no stderr",
+					code, stderr, cli.ExitInterrupted)
 			}
 		})
 	}
