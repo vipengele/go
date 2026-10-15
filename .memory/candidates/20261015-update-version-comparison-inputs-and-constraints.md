@@ -1,33 +1,23 @@
 ---
-about: "update's version comparison: no existing implementation; dev-build definition is fixed by ADR-0007; ADR-0003's Config sketch (Version field, 'dev') is stale"
+about: "the release rule and 'newer' are defined once in cli/spec/version (ADR-0010); update has no caller of it yet and does not require golang.org/x/mod until it imports the package"
 saw:
-  - docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md
+  - docs/adr/0010-version-comparison-lives-in-cli-spec-version.md
   - docs/adr/0007-the-cli-project-owns-the-version-json-contract.md
-  - source/cli/core/buildinfo/buildinfo.go
-  - source/update/config.go
-  - source/update/source.go
+  - source/cli/spec/version/version.go
+  - source/cli/spec/version/doc.go
   - source/update/go.mod
-  - source/update/.golangci.yml
-  - CONTEXT.md
+  - source/update/source.go
 ---
 
-Findings from planning issue #47 (version comparison in source/update):
-
-- No version comparison exists in the repo: `grep -rniE "semver|x/mod|CompareVersion|IsNewer"` hits only
-  buildinfo (dev detection by regex, not ordering), ADRs 0003/0007 and CONTEXT.md. No go.mod in
-  source/ requires golang.org/x/*. Lydite's update.go (the issue's prior art) is not in this repo.
-- ADR-0003 assigns "version comparison" to `update` and says `Release source ... does not choose among
-  them; version comparison and asset selection do` (CONTEXT.md, Release source).
-- Dev build is defined in ADR-0007 and CONTEXT.md "Dev build", implemented in
-  source/cli/core/buildinfo/buildinfo.go:93-97 (releaseVersion regex + pseudoVersionTail regex at :32):
-  empty, `(devel)`, build metadata (`v1.2.3+dirty`), any pseudo-version, anything not vMAJOR.MINOR.PATCH[-pre].
-  update must not import cli/core (depguard, source/update/.golangci.yml), so it cannot reuse that
-  function; ADR-0007 says update "keeps no copy of the shape's definition".
-- source/update/config.go has NO Version field (fields: BinaryName, TempPrefix, AssetTemplate,
-  ChecksumsAsset, StateDir, Source, HTTPClient, Now, GOOS, GOARCH, Executable, Getenv, UserHomeDir);
-  ADR-0003's Config sketch with `Version string // "dev"` predates ADR-0008 and is not the current code.
-  Release.Tag (source/update/source.go) is "as the source publishes it, such as v1.2.3".
-- Third-party deps: no rule forbids them in update. Only constraints: ADR-0003 (cobra only in updatecmd),
-  ADR-0008 (siblings: cli/spec and commons only), ADR-0009 rejects adrg/xdg as a dependency for a few
-  path rules (precedent of reluctance, not a rule). cli/core already requires cobra/pflag.
-- source/update is in development mode: docs/release-notes holds only commons/v0.1.0.md, none for update.
+- `version.IsRelease(v)` is `semver.IsValid(v) && semver.Canonical(v) == v && !module.IsPseudoVersion(v)`
+  (version.go); `Newer(current, latest)` is false for a non-release `latest`, true for a non-release
+  `current` and a release `latest`, else `semver.Compare(latest, current) > 0`. Dev builds are older
+  than every release by that explicit rule.
+- Pure ordering: `Newer("v1.2.3", "v1.3.0-rc.1")` is true, so offering a prerelease to a stable user
+  is the caller's decision. A Source tag without the leading `v` is not a release, so `Newer` is
+  false for it and indistinguishable from "up to date" (doc.go).
+- `source/update` has no import of `cli/spec/version` and its go.mod lists no `golang.org/x/mod`;
+  `Release.Tag` (source.go) is "as the source publishes it, such as v1.2.3". The check story that
+  calls `Newer` is not written.
+- `source/update/config.go` has no Version field; ADR-0003's Config sketch (`Version string // "dev"`)
+  is not the code.
