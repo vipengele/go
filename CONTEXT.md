@@ -137,8 +137,9 @@ _Avoid_: name, path (also a directory), property
 **Origin**:
 Where the value of a **Key** was read: a file and line, an environment variable, a **Flag**, or
 `default` when no **Provider** set it. Error messages and the report of a loaded **Configuration**
-name it (ADR-0012).
-_Avoid_: source, location, provenance
+name it (ADR-0012). The report lists, for each **Key**, its effective value and its Origin; an entry
+of the report is a Source, a **Key**'s value together with its Origin, never a **Provider**.
+_Avoid_: location, provenance
 
 **Command**:
 One named action of a tool (`version`, `update`), described as data in `cli/spec`: its name,
