@@ -5,3 +5,4 @@ use ./source/update
 use ./source/daemon
 use ./source/commons
 use ./source/cli/spec
+use ./source/config

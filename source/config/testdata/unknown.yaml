@@ -1,0 +1,4 @@
+name: app
+server:
+  host: example.org
+  prot: 80

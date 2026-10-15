@@ -1,0 +1,6 @@
+name: app
+server:
+  host: example.org
+  port: 8080
+  max-retries: 3
+tags: [a, b]

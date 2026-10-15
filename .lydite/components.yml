@@ -37,6 +37,10 @@ components:
     dir: source/cli/spec
     runner: go-test
     args: ["-race", "./..."]
+  - name: config
+    dir: source/config
+    runner: go-test
+    args: ["-race", "./..."]
   - name: vanity-worker
     dir: tools/vanity-worker
     runner: vitest

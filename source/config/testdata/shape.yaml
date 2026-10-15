@@ -1,0 +1,9 @@
+server: 80
+name:
+  first: a
+server.port: [1, 2]
+tags:
+  - a
+  - {b: c}
+ports:
+  - [1, 2]

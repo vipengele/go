@@ -1,0 +1,4 @@
+server.port: 1
+server:
+  host: example.org
+  port: 2

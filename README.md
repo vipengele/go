@@ -13,6 +13,7 @@ command-line tools. The repo holds **projects**, each a self-contained Go module
 | [`source/update`](source/update) | `go.vipengele.org/update` |
 | [`source/daemon`](source/daemon) | `go.vipengele.org/daemon` |
 | [`source/commons`](source/commons) | `go.vipengele.org/commons` |
+| [`source/config`](source/config) | `go.vipengele.org/config` |
 
 A project's module path is `go.vipengele.org/<project>`, which needs Go 1.25 or later:
 

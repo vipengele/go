@@ -1,0 +1,3 @@
+server: &defaults
+  port: 80
+<<: *defaults
