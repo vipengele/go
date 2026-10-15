@@ -160,6 +160,11 @@ An error whose message a **Command** has already shown to the user, so the **App
 with its **Exit code** without printing it again (ADR-0010).
 _Avoid_: silent error, handled error
 
+**Error layer**:
+One wrap's own text in an error chain: what a wrapping error adds in front of the error it wraps.
+The **App** prints a top-level error as its layers, outermost first (ADR-0011).
+_Avoid_: level, frame, cause (the error a layer wraps)
+
 **Release source**:
 Where a tool's own published releases come from, behind the `update` project's `Source` interface:
 it lists releases and serves the assets of one. It does not choose among them; version comparison
