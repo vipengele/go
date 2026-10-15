@@ -15,8 +15,11 @@ run, and unregister when it returns. Each signal reaches the run as a value of
   The abandoned run may still run its PostRun hooks and write to the Env's streams. Library code
   never calls `os.Exit`: the return value reaches `main`, and `main`'s `os.Exit` ends the process
   and the abandoned goroutines with it.
-- **Exit code after an interrupt.** A run error after the first value exits 130. A usage error is
-  still 2 and a nil error is still 0, so a run that finishes cleanly despite the interrupt reports
+- **Exit code after an interrupt.** The first value only cancels the context; the exit code is
+  then decided by the rules of [ADR-0010](0010-errors-map-to-exit-codes-through-a-registry-with-coded-and-reported-in-cli-spec.md).
+  A run that returns `context.Canceled` while its context is done exits 130 and prints nothing. Any
+  other error keeps the code coded errors, the registry and the usage rule give it: a usage error
+  is 2, else 1. A nil error is 0, so a run that finishes cleanly despite the interrupt reports
   success. SIGTERM is mapped to 130 like SIGINT; the framework does not tell the two apart.
 - **Nil `Interrupts`.** The run is inline on the calling goroutine, with no watcher and no extra
   goroutine. A non-nil channel costs one watcher goroutine and one run goroutine, both joined on
@@ -51,11 +54,12 @@ interrupts deterministically, with no real signal raised.
   inside the library and leave the return value of `ExecuteArgs` unreachable for that path. A test
   has to fake the exit, and an embedder cannot be sure the library does not end its process.
   Returning 130 leaves `main` the only caller of `os.Exit`.
-- **Always 130 after an interrupt, even for a clean return.** It reports a failure for a run that
-  finished its work, and a script cannot tell a completed command from an aborted one.
-- **The exit mapping unchanged, a cancelled run exiting 1.** An interrupt is indistinguishable from
-  a failure for a caller or a shell. 130 is the conventional status of a process ended by SIGINT,
-  and a run error caused by cancellation is the case it names.
+- **A second mapping that turns any non-usage error after an interrupt into 130.** It prints and
+  reports differently from ADR-0010 and hides real failures: a run that fails for its own reason
+  while an interrupt is pending would look like a clean abort.
+- **Leaving a cancelled run to exit 1.** An interrupt is then indistinguishable from a failure for
+  a caller or a shell. 130 is the conventional status of a process ended by SIGINT, and ADR-0010
+  gives it to the run error caused by cancellation.
 
 ## Consequences
 
