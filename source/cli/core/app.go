@@ -82,8 +82,9 @@ func (a *App) Add(cmd *spec.Command) {
 // Execute runs the App with the arguments of the process, os.Args[1:], against the environment
 // of the process: its standard streams, working directory and environment variables. It
 // returns the exit code, which a tool's main passes to os.Exit. It behaves as [App.ExecuteArgs]
-// does, and returns [ExitError] after writing "<name>: <error>" to os.Stderr when the working
-// directory cannot be determined.
+// does, with SIGINT and SIGTERM as the values of [spec.Env.Interrupts]: the first cancels the
+// run's context and the second returns [ExitInterrupted]. It returns [ExitError] after writing
+// "<name>: <error>" to os.Stderr when the working directory cannot be determined.
 func (a *App) Execute() int {
 	return executeProcess(prefix(a.root(standardFlags{})), a.ExecuteArgs)
 }

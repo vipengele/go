@@ -28,8 +28,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   every hook and run function receives, the second returns 130 at once and abandons the run, which
   may still run its PostRun hooks and write to the Env's streams. Nil runs `cobra.Run` inline with
   no goroutine; otherwise one watcher goroutine and one run goroutine, both joined on every path
-  but the abandoning one. `ExecuteArgs` registers no OS signal handler. A test injects its own
-  `chan struct{}`.
+  but the abandoning one. `ExecuteArgs` registers no OS signal handler; `Execute` and
+  `App.Execute` register SIGINT and SIGTERM once, in `executeProcess`, forward them as `Interrupts`
+  values and unregister on return. A test injects its own `chan struct{}`.
 - `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
   fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
   times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`
