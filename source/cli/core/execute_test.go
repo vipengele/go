@@ -611,6 +611,38 @@ func TestExecuteArgsSecondInterruptAbandonsTheRun(t *testing.T) {
 	}
 }
 
+// TestExecuteArgsClosedInterruptsDeliverNoInterrupt pins that closing Interrupts is not an
+// interrupt: the run's context stays live and the run's own result is the exit code. A closed
+// channel read as values would cancel the run and then abandon it with 130.
+func TestExecuteArgsClosedInterruptsDeliverNoInterrupt(t *testing.T) {
+	ch := make(chan struct{})
+	gate := make(chan struct{})
+	seen := make(chan context.Context, 1)
+	codes := make(chan int, 1)
+	go func() {
+		codes <- cli.ExecuteArgs(&spec.Env{Interrupts: ch}, ctxRoot(gate, seen), []string{"gated"})
+	}()
+	ctx := <-seen
+	close(ch)
+	select {
+	case code := <-codes:
+		t.Fatalf("ExecuteArgs returned %d after Interrupts closed, want it to wait for the run", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := ctx.Err(); err != nil {
+		t.Errorf("context after Interrupts closed: %v, want nil", err)
+	}
+	close(gate)
+	select {
+	case code := <-codes:
+		if code != cli.ExitOK {
+			t.Errorf("code %d, want %d", code, cli.ExitOK)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ExecuteArgs did not return after the run finished")
+	}
+}
+
 func TestExecuteArgsWithoutInterrupts(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	var during int
