@@ -49,5 +49,8 @@ golangci-lint run
   It also forbids `golang.org/x/term` outside `cli/spec/terminal`.
 - `Env.IsTerminal` with a nil `Env.Terminal` answers false for a non-file stream and panics for a
   stream with an `Fd() uintptr` method: build the `Env` with `cli/core` or set `Env.Terminal`.
+- `Env.Interrupts` is a plain `<-chan struct{}`: the first value cancels the run's context, the second
+  abandons the run with exit code 130, and nil watches nothing. `spec` registers no signal handler;
+  `cli/core` does and feeds the channel (ADR-0012). `Resolved` copies it unchanged.
 - `commons` is a sibling reached by a directory `replace` in `go.mod` (`../../commons`); see the
   repo-root rule on sibling replaces.
