@@ -91,7 +91,7 @@ version)
 **Dev build**:
 A binary whose version is not a release: anything but `vMAJOR.MINOR.PATCH`, optionally with a
 prerelease, that is not a Go pseudo-version. An unknown version, a pseudo-version and a version
-carrying build metadata are all dev builds (ADR-0007).
+carrying build metadata are all dev builds (ADR-0007). `cli/spec/version` implements the rule (ADR-0010).
 _Avoid_: debug build, snapshot, local build (a tagged release built locally is not a dev build)
 
 **Env**:
@@ -152,7 +152,7 @@ _Avoid_: tag (a **Prefixed tag** is a release), label, metadata
 **Release source**:
 Where a tool's own published releases come from, behind the `update` project's `Source` interface:
 it lists releases and serves the assets of one. It does not choose among them; version comparison
-and asset selection do.
+(`cli/spec/version`, called from `update`) and asset selection do.
 _Avoid_: update server, registry, feed, repository
 
 **Managed binary**:
