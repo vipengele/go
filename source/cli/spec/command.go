@@ -30,7 +30,15 @@ type Command struct {
 	Commands []*Command
 	// Hidden leaves the command out of its parent's help, while it still runs.
 	Hidden bool
+	// Annotations are key-value metadata about the command, read by the framework and by
+	// hooks through [CommandInfo]; [SkipUpdateCheck] is one such key. An annotation applies to
+	// the command that carries it alone, not to its subcommands.
+	Annotations map[string]string
 }
+
+// SkipUpdateCheck is the annotation key that exempts a command from the update check that
+// otherwise runs around it. Any value, the empty string included, exempts it.
+const SkipUpdateCheck = "vipengele.skip-update-check"
 
 // CommandError reports a problem with one command of a tree.
 type CommandError struct {

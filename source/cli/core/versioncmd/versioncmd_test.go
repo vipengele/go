@@ -102,7 +102,7 @@ func TestRejectsArguments(t *testing.T) {
 	}
 }
 
-func TestJSONIsLocalFlag(t *testing.T) {
+func TestJSONIsLocalFlagByDefault(t *testing.T) {
 	cmd := versioncmd.New(buildinfo.Info{})
 	if len(cmd.Flags) != 1 {
 		t.Fatalf("flags = %d, want 1", len(cmd.Flags))
@@ -115,8 +115,67 @@ func TestJSONIsLocalFlag(t *testing.T) {
 		t.Error("--json is inherited, want local")
 	}
 
+	if got, code := run(t, buildinfo.Info{Version: "v1.0.0"}, "version", "--json"); code != cli.ExitOK || !strings.HasPrefix(got, "{") {
+		t.Errorf("version --json = %d, %q; want 0 and JSON", code, got)
+	}
 	if _, code := run(t, buildinfo.Info{}, "--json"); code != cli.ExitUsage {
 		t.Errorf("exit code of the root with --json = %d, want %d", code, cli.ExitUsage)
+	}
+}
+
+func TestWithOutputJSONReadsTheOutput(t *testing.T) {
+	info := buildinfo.Info{Version: "v1.0.0"}
+	cmd := versioncmd.New(info, versioncmd.WithOutputJSON())
+	if len(cmd.Flags) != 0 {
+		t.Fatalf("flags = %d, want none", len(cmd.Flags))
+	}
+	want, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, asJSON := range []bool{false, true} {
+		var out bytes.Buffer
+		inv := spec.NewInvocation(&spec.Env{Stdout: &out}, nil, nil)
+		inv.Output = spec.NewOutput(spec.OutputOptions{JSON: asJSON})
+		if err := cmd.Run(context.Background(), inv); err != nil {
+			t.Fatalf("Run with Output.JSON %t: %v", asJSON, err)
+		}
+		wantOut := "v1.0.0\n"
+		if asJSON {
+			wantOut = string(want) + "\n"
+		}
+		if got := out.String(); got != wantOut {
+			t.Errorf("output with Output.JSON %t = %q, want %q", asJSON, got, wantOut)
+		}
+	}
+
+	for _, args := range [][]string{{"version", "--json"}, {"--json", "version"}} {
+		var out, errOut bytes.Buffer
+		app := cli.New(spec.Identity{Name: "tool"}, cli.WithJSON(), cli.WithBuildInfo(info))
+		code := app.ExecuteArgs(&spec.Env{Stdout: &out, Stderr: &errOut}, args)
+		if code != cli.ExitOK || out.String() != string(want)+"\n" {
+			t.Errorf("%q = %d, stdout %q, stderr %q; want 0 and %q", args, code, out.String(), errOut.String(), want)
+		}
+	}
+}
+
+func TestLocalJSONUnderAnInheritedJSONIsInvalid(t *testing.T) {
+	inherited := spec.BoolFlag("json", "write JSON", spec.Inherited())
+	tests := []struct {
+		name string
+		cmd  *spec.Command
+		ok   bool
+	}{
+		{"local flag", versioncmd.New(buildinfo.Info{}), false},
+		{"output JSON", versioncmd.New(buildinfo.Info{}, versioncmd.WithOutputJSON()), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := &spec.Command{Name: "tool", Flags: []spec.Flag{inherited}, Commands: []*spec.Command{tt.cmd}}
+			if err := root.Validate(); (err == nil) != tt.ok {
+				t.Errorf("Validate = %v, want valid %t", err, tt.ok)
+			}
+		})
 	}
 }
 

@@ -75,3 +75,58 @@ func ExampleIdentity() {
 	// ATK_NO_COLOR
 	// agentic-toolkit/cache
 }
+
+func ExampleOutput() {
+	report := func(_ context.Context, inv *spec.Invocation) error {
+		if inv.Output.JSON() {
+			_, err := fmt.Fprintln(inv.Env.Stdout, `{"status":"ok"}`)
+			return err
+		}
+		if inv.Output.Verbose() {
+			_, err := fmt.Fprintln(inv.Env.Stdout, "status: ok (checked 3 sources)")
+			return err
+		}
+		_, err := fmt.Fprintln(inv.Env.Stdout, "status: ok")
+		return err
+	}
+
+	var out strings.Builder
+	for _, o := range []spec.Output{
+		{},
+		spec.NewOutput(spec.OutputOptions{Verbose: true}),
+		spec.NewOutput(spec.OutputOptions{JSON: true}),
+	} {
+		inv := spec.NewInvocation(&spec.Env{Stdout: &out}, nil, nil)
+		inv.Output = o
+		if err := report(context.Background(), inv); err != nil {
+			fmt.Println(err)
+			return
+		}
+	}
+	fmt.Print(out.String())
+	fmt.Println(spec.Output{}.Color())
+	// Output:
+	// status: ok
+	// status: ok (checked 3 sources)
+	// {"status":"ok"}
+	// true
+}
+
+func ExampleCommandInfo() {
+	selfUpdate := &spec.Command{
+		Name:        "self-update",
+		Run:         func(context.Context, *spec.Invocation) error { return nil },
+		Annotations: map[string]string{spec.SkipUpdateCheck: "true"},
+	}
+
+	// An adapter builds the view of the command it runs and passes it to each hook.
+	info := spec.NewCommandInfo([]string{"tool", selfUpdate.Name}, selfUpdate.Annotations)
+	_, skip := info.Annotation(spec.SkipUpdateCheck)
+	fmt.Println(info)
+	fmt.Println(info.Path())
+	fmt.Println(skip)
+	// Output:
+	// tool self-update
+	// [tool self-update]
+	// true
+}

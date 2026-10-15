@@ -12,7 +12,11 @@
 // listed in the Flags of the command that declares it, and its Get reads the flag's value from
 // the [Invocation] the run function receives. An Invocation carries one execution's positional
 // arguments, flag values and [Env], the standard streams, working directory and environment
-// variables the run function reaches the process through.
+// variables the run function reaches the process through, and the [Output] the adapter resolves
+// for it: whether the execution is verbose or quiet, writes JSON and may use colour.
+//
+// A command's Annotations are key-value metadata, such as [SkipUpdateCheck], that the framework
+// and its hooks read through the [CommandInfo] of the command that runs.
 //
 // A tree of commands holds no per-execution state, so it can be run any number of times,
 // concurrently, and by a test that substitutes the Env. An adapter in another module runs it:

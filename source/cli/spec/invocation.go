@@ -6,14 +6,17 @@ import (
 )
 
 // Invocation is what a run function receives for one execution of a command: its environment,
-// its positional arguments, and the flag values, which are read through the flags' handles with
-// [FlagOf.Get].
+// its positional arguments, its output settings, and the flag values, which are read through
+// the flags' handles with [FlagOf.Get].
 type Invocation struct {
 	// Env is the environment of the execution. [NewInvocation] never leaves it nil, nor any of
 	// its reader, writer or lookup fields.
 	Env *Env
 	// Args are the positional arguments, flags removed.
 	Args []string
+	// Output is how the execution presents its output, resolved once per run by the adapter.
+	// [NewInvocation] leaves it at the zero value, which is the default presentation.
+	Output Output
 
 	values map[string]any
 }

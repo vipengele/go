@@ -411,3 +411,12 @@ func TestCommandErrorMessage(t *testing.T) {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
+
+func TestCommandValidateAcceptsAnnotations(t *testing.T) {
+	tree := validTree()
+	tree.Annotations = map[string]string{spec.SkipUpdateCheck: ""}
+	tree.Commands[1].Annotations = map[string]string{"any.key": "any value"}
+	if err := tree.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
