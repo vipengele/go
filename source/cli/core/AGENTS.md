@@ -45,6 +45,7 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   (`buildinfo/testdata/ldflagsmain`) to prove it, so that test needs the `go` command.
 - Cobra lives only in `internal/cobra`, imported under the alias `spf`; the depguard rule in
   `.golangci.yml` fails any import of `github.com/spf13/cobra` elsewhere. `cli/spec` is cobra-free.
+  The same file confines `golang.org/x/term` to `cli/spec/terminal`.
 - Commands are `cli/spec` data. Flags are read through typed handles (`asJSON.Get(inv)`) built inside
   the command's constructor: `gochecknoglobals` is on, so there are no package-level handles, and a
   package-level variable needs a justified `//nolint`.
@@ -55,3 +56,7 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 - An `ExecuteArgs` test passes a fake `Env` (buffers, a fake `LookupEnv`, a `t.TempDir` `WorkDir`).
   A real environment variable set with `t.Setenv` is invisible to `Run`, which reads only
   `Env.LookupEnv`.
+- `ExecuteArgs` fills a nil `Env.Terminal` on its own copy with `terminal.Detect` over the `Env`
+  streams; a supplied `Terminal` is kept and the caller's `Env` is not mutated. A real file is
+  probed and buffers are not terminals, so a test that needs a terminal sets `Env.Terminal`.
+  Colour asks `env.IsTerminal(spec.Stdout)`.

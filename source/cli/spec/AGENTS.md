@@ -26,6 +26,10 @@ golangci-lint run
   kind it derives from (log from state on XDG, state and data from config on darwin). Resolving
   creates and stats nothing; `Dirs.Ensure` creates directories 0700 on demand and reports a kind
   that was not resolved. `InContainer` is a heuristic over injectable `Probes` and changes no path.
+- `terminal/` — `terminal.Detect(stdin, stdout, stderr)` returns the `func(spec.Stream) bool` for
+  `Env.Terminal`; `DetectWith(Probes, ...)` takes the probes as a seam. Each stream is probed lazily
+  and at most once, and anything that is not an `*os.File` is not a terminal. It is the only importer
+  of `golang.org/x/term`.
 
 ## Conventions
 
@@ -34,5 +38,8 @@ golangci-lint run
   The layout is selected by `Options.GOOS`, not by build tags.
 - No package-level mutable state: `gochecknoglobals` is enabled.
 - `depguard` forbids `github.com/spf13/cobra` here; the cobra adapter lives in `cli/core/internal/cobra`.
+  It also forbids `golang.org/x/term` outside `cli/spec/terminal`.
+- `Env.IsTerminal` with a nil `Env.Terminal` answers false for a non-file stream and panics for a
+  stream with an `Fd() uintptr` method: build the `Env` with `cli/core` or set `Env.Terminal`.
 - `commons` is a sibling reached by a directory `replace` in `go.mod` (`../../commons`); see the
   repo-root rule on sibling replaces.
