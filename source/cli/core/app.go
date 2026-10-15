@@ -5,6 +5,7 @@ import (
 
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/core/internal/cobra"
+	"go.vipengele.org/cli/core/internal/errrender"
 	"go.vipengele.org/cli/core/versioncmd"
 	"go.vipengele.org/cli/spec"
 )
@@ -50,6 +51,9 @@ type settings struct {
 	// exitMatchers are the matchers [WithExitCode] and [WithExitCodeAs] add, in the order they
 	// were added. Nothing changes them after [New], so concurrent executions share them.
 	exitMatchers exitMatchers
+	// errorRenderers are the renderers [WithErrorRenderer] adds, in the order they were added.
+	// Nothing changes them after [New], so concurrent executions share them.
+	errorRenderers []errrender.Renderer
 }
 
 // Option configures an [App] when [New] builds it.
@@ -106,6 +110,22 @@ func WithExitCodeAs[E error](fn func(E) int) Option {
 	}
 }
 
+// WithErrorRenderer makes [App.Execute] and [App.ExecuteArgs] write an error of the tree they
+// print that is an E, by type assertion on that error itself, as fn renders it. The first line fn
+// returns is the error's row, and each further line a detail row indented under it; fn's output
+// replaces the error's whole subtree, so nothing it wraps or joins is printed. An empty string
+// renders the error as if no renderer matched it. A nil fn is ignored.
+//
+// When an error matches several renderers, the one registered first renders it. The
+// package-level [Execute] and [ExecuteArgs] have no renderers.
+func WithErrorRenderer[E error](fn func(E) string) Option {
+	return func(s *settings) {
+		if fn != nil {
+			s.errorRenderers = append(s.errorRenderers, typedRenderer(fn))
+		}
+	}
+}
+
 // Add adds cmd as a subcommand of the root, after the commands added before it. It checks
 // nothing: a nil command, an invalid one, or a name another added command already has is
 // reported by [App.ExecuteArgs] as an invalid command tree.
@@ -116,10 +136,10 @@ func (a *App) Add(cmd *spec.Command) {
 // Execute runs the App with the arguments of the process, os.Args[1:], against the environment
 // of the process: its standard streams, working directory and environment variables. It
 // returns the exit code, which a tool's main passes to os.Exit. It behaves as [App.ExecuteArgs]
-// does, and returns [ExitError] after writing "<name>: <error>" to os.Stderr when the working
-// directory cannot be determined.
+// does, and returns [ExitError] after writing the error, as [ExecuteArgs] writes one and with no
+// [WithErrorRenderer] renderer, to os.Stderr when the working directory cannot be determined.
 func (a *App) Execute() int {
-	return executeProcess(prefix(a.root(standardFlags{})), a.ExecuteArgs)
+	return executeProcess(a.identity.Name, a.ExecuteArgs)
 }
 
 // ExecuteArgs runs the App with args against env, and returns the exit code, as the
@@ -129,9 +149,12 @@ func (a *App) Execute() int {
 // into as its inherited flags. Given no argument, the root writes its help to env.Stdout and
 // returns [ExitOK].
 // The root is checked on every call, so an App with two commands of one name, "version"
-// included, returns [ExitError] after writing "<name>: invalid command tree: <error>" to
-// env.Stderr. So does a command that declares a flag with the name or the shorthand of a
-// standard flag the App takes.
+// included, returns [ExitError] after writing "<name>: invalid command tree" to env.Stderr,
+// followed by one row per problem found. So does a command that declares a flag with the name or
+// the shorthand of a standard flag the App takes.
+//
+// Every error is written to env.Stderr as [ExecuteArgs] writes one, with each error of its tree
+// offered to the renderers [WithErrorRenderer] adds, in the order they were added.
 //
 // "version --json" writes JSON whether or not the App takes the standard --json. Without it,
 // --json is a local flag of "version"; with it, "version" declares no flag of its own and reads
@@ -156,7 +179,8 @@ func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	pre, post := a.settings.hookFuncs()
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
-	return executeArgsCtx(context.Background(), env, a.root(flags), args, cfg, a.settings.exitMatchers)
+	return executeArgsCtx(context.Background(), env, a.root(flags), args, cfg, a.settings.exitMatchers,
+		a.settings.errorRenderers...)
 }
 
 // root returns a fresh root command for one execution, declaring flags as its inherited flags.

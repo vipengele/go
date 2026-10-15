@@ -1,0 +1,3 @@
+tool: load config
+  → open app.yml
+  → file does not exist

@@ -147,7 +147,7 @@ func TestAppExecuteArgsInvalidTree(t *testing.T) {
 				app.Add(&spec.Command{Name: "dup", Run: ok})
 				return app
 			},
-			want: "tool: invalid command tree: ",
+			want: "tool: invalid command tree\n",
 		},
 		{
 			name: "invalid command",
@@ -156,7 +156,7 @@ func TestAppExecuteArgsInvalidTree(t *testing.T) {
 				app.Add(&spec.Command{Name: "empty"})
 				return app
 			},
-			want: "tool: invalid command tree: ",
+			want: "tool: invalid command tree\n",
 		},
 		{
 			name: "nil command",
@@ -165,7 +165,7 @@ func TestAppExecuteArgsInvalidTree(t *testing.T) {
 				app.Add(nil)
 				return app
 			},
-			want: "tool: invalid command tree: ",
+			want: "tool: invalid command tree\n",
 		},
 		{
 			name: "added command named version",
@@ -174,7 +174,7 @@ func TestAppExecuteArgsInvalidTree(t *testing.T) {
 				app.Add(&spec.Command{Name: "version", Run: ok})
 				return app
 			},
-			want: "tool: invalid command tree: ",
+			want: "tool: invalid command tree\n",
 		},
 		{
 			name: "identity without a name",
@@ -183,7 +183,7 @@ func TestAppExecuteArgsInvalidTree(t *testing.T) {
 				app.Add(&spec.Command{Name: "run", Run: ok})
 				return app
 			},
-			want: "invalid command tree: ",
+			want: "invalid command tree\n",
 		},
 	}
 	for _, tt := range tests {
@@ -459,6 +459,105 @@ func TestAppExitCodesAreIndependentPerApp(t *testing.T) {
 		if got := runApp(t, tt.app, "do"); got.code != tt.want {
 			t.Errorf("exit code %d, want %d", got.code, tt.want)
 		}
+	}
+}
+
+func TestAppErrorRenderer(t *testing.T) {
+	byType := func(out string) cli.Option {
+		return cli.WithErrorRenderer(func(e exitErr) string { return fmt.Sprintf(out, e.code) })
+	}
+	tests := []struct {
+		name string
+		err  error
+		opts []cli.Option
+		want string
+	}{
+		{
+			name: "typed error",
+			err:  exitErr{code: 9},
+			opts: []cli.Option{byType("code %d")},
+			want: "tool: code 9\n",
+		},
+		{
+			name: "detail lines indent under the row",
+			err:  exitErr{code: 9},
+			opts: []cli.Option{byType("code %d\nretry later")},
+			want: "tool: code 9\n  retry later\n",
+		},
+		{
+			name: "typed error under a wrap",
+			err:  fmt.Errorf("doing: %w", exitErr{code: 9}),
+			opts: []cli.Option{byType("code %d")},
+			want: "tool: doing\n  → code 9\n",
+		},
+		{
+			name: "typed error in a join",
+			err:  fmt.Errorf("doing: %w", errors.Join(errExitSentinel, exitErr{code: 9})),
+			opts: []cli.Option{byType("code %d")},
+			want: "tool: doing\n  • sentinel\n  • code 9\n",
+		},
+		{
+			name: "the rendered error's subtree is replaced",
+			err:  spec.Coded(4, fmt.Errorf("inner: %w", errExitSentinel)),
+			opts: []cli.Option{cli.WithErrorRenderer(func(e *spec.CodedError) string {
+				return fmt.Sprintf("code %d", e.Code())
+			})},
+			want: "tool: code 4\n",
+		},
+		{
+			name: "other type is rendered by default",
+			err:  fmt.Errorf("doing: %w", errExitSentinel),
+			opts: []cli.Option{byType("code %d")},
+			want: "tool: doing\n  → sentinel\n",
+		},
+		{
+			name: "nil fn is ignored",
+			err:  exitErr{code: 9},
+			opts: []cli.Option{cli.WithErrorRenderer[exitErr](nil)},
+			want: "tool: exit 9\n",
+		},
+		{
+			name: "empty string renders by default",
+			err:  exitErr{code: 9},
+			opts: []cli.Option{cli.WithErrorRenderer(func(exitErr) string { return "" })},
+			want: "tool: exit 9\n",
+		},
+		{
+			name: "first registered wins",
+			err:  exitErr{code: 9},
+			opts: []cli.Option{byType("first %d"), byType("second %d")},
+			want: "tool: first 9\n",
+		},
+		{
+			name: "reported error is not written",
+			err:  spec.Reported(exitErr{code: 9}),
+			opts: []cli.Option{byType("code %d")},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runApp(t, exitApp(tt.err, tt.opts...), "do"); got.stderr != tt.want {
+				t.Errorf("stderr %q, want %q", got.stderr, tt.want)
+			}
+		})
+	}
+}
+
+func TestErrorRendererLeavesThePackageLevelPathAlone(t *testing.T) {
+	err := fmt.Errorf("doing: %w", exitErr{code: 9})
+	app := exitApp(err, cli.WithErrorRenderer(func(e exitErr) string { return "rendered" }))
+	if got := runApp(t, app, "do"); got.stderr != "tool: doing\n  → rendered\n" {
+		t.Fatalf("App stderr %q, want the renderer's output", got.stderr)
+	}
+	root := &spec.Command{
+		Name:     "tool",
+		Commands: []*spec.Command{{Name: "do", Run: func(context.Context, *spec.Invocation) error { return err }}},
+	}
+	var stderr bytes.Buffer
+	cli.ExecuteArgs(&spec.Env{Stderr: &stderr, WorkDir: t.TempDir()}, root, []string{"do"})
+	if want := "tool: doing\n  → exit 9\n"; stderr.String() != want {
+		t.Errorf("ExecuteArgs stderr %q, want %q", stderr.String(), want)
 	}
 }
 
