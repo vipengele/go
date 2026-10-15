@@ -26,10 +26,29 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   cancelled, so none returns it); 3-125 are registrable. Order, first match wins: 130,
   `spec.Coded` (1 or 3-125), `WithExitCode(code, sentinel)` / `WithExitCodeAs(fn)` in option order,
   usage 2, else 1. The registry is per-`App`, read-only after `New` (a bad code panics there); the
-  package-level `Execute` / `ExecuteArgs` have none. Every error is written to stderr as
-  `<root name>: <error>` unless it carries `spec.Reported` (the code is still chosen as above; the
-  `invalid command tree` line is never suppressed). A post-run hook error after a successful run is
-  an opaque `*HookError` (exit 1, printed); a pre-run hook error maps like a run error (ADR-0010).
+  package-level `Execute` / `ExecuteArgs` have none. Every error is written to stderr as a tree
+  (`internal/errrender`, ADR-0011) unless it carries `spec.Reported` (the code is still chosen as
+  above; the `invalid command tree` tree, `fmt.Errorf("invalid command tree: %w", err)` with a row per
+  defect, is never suppressed). A post-run hook error after a successful run is an opaque
+  `*HookError` (exit 1, printed); a pre-run hook error maps like a run error (ADR-0010).
+  `WithErrorRenderer[E error](fn func(E) string)` renders an error of type `E` itself: each node of
+  the tree is tried by a direct type assertion to `E` (not `errors.As`), the first registered match
+  wins and its output replaces the node's whole subtree (first line the row, further lines detail
+  rows indented beneath it). An empty string falls back to the default for that node and a nil `fn`
+  is ignored. The renderers are per-`App`, read-only after `New`; the package-level `Execute` /
+  `ExecuteArgs` have none. Three sites write to stderr: the run error and the invalid-tree error
+  (both with the App's renderers), and a failed `os.Getwd` in `Execute` before any run (default
+  rendering only).
+- `internal/errrender` — `Render(w, tool, err, renderers)` prints the tree. The summary line is
+  `<tool>: <outermost layer's own text>` (no prefix for an empty tool); each inner `%w` layer is a
+  `→` row and each error of an `errors.Join` a `•` row, indented two spaces per depth; always UTF-8,
+  no colour. A layer's own text is its message with `": "+child.Error()` cut off the end. Transparent
+  (message equals the child's, e.g. `spec.CodedError`): skipped. Opaque (child's text is not a
+  suffix, or a nil child): the whole message is one row and the walk stops. Empty own text: dropped.
+  A multi-child node is a join only when its message is the newline-join of the children's;
+  otherwise (a `fmt.Errorf` with several `%w`) it is opaque. A bare join has the summary `N errors`
+  and a join of one renders as that child. `*cobra.UsageError` is a flat leaf, so a usage error stays
+  `tool: greet: unknown flag: --bogus`.
 - `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
   fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
   times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`
@@ -60,6 +79,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   (indirect, because spec imports it), each with a version-less directory `replace` (`../spec`,
   `../../commons`) while they are developed together (ADR-0006). The main module ignores a
   dependency's `replace`, which is why commons is listed here.
+- Error output is pinned by golden files under `testdata/render/*.golden` (`render_golden_test.go`).
+  Regenerate with `go test -update`; the `-update` flag is registered in `TestMain`
+  (`execute_test.go`), so a test binary without that `TestMain` does not know it.
 - An `ExecuteArgs` test passes a fake `Env` (buffers, a fake `LookupEnv`, a `t.TempDir` `WorkDir`).
   A real environment variable set with `t.Setenv` is invisible to `Run`, which reads only
   `Env.LookupEnv`.
