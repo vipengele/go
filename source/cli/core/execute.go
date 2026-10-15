@@ -129,6 +129,11 @@ func processEnv() (*spec.Env, error) {
 // env's streams, though ExecuteArgs writes nothing more for it. A nil env.Interrupts watches
 // nothing and starts no goroutine.
 //
+// A panic in a run function or a hook propagates to the caller of ExecuteArgs with the same
+// value, whether env.Interrupts is nil or not, after ExecuteArgs has stopped watching
+// env.Interrupts. The panic of a run abandoned on a second interrupt is recovered and dropped:
+// nothing waits for that run any more.
+//
 // It checks root with [spec.Command.Validate] on every call, and returns [ExitError] after
 // writing "<name>: invalid command tree: <error>" to env.Stderr when the tree is invalid. It
 // then selects the command args name and calls its run function. Every error is written to
@@ -160,16 +165,32 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 	}
 
 	second, stop := watchInterrupts(env.Interrupts, cancel)
-	done := make(chan error, 1)
+	done := make(chan outcome, 1)
 	go func() {
-		done <- cobra.Run(ctx, env, root, args, cfg)
+		defer func() {
+			if v := recover(); v != nil {
+				done <- outcome{panicked: true, value: v}
+			}
+		}()
+		done <- outcome{err: cobra.Run(ctx, env, root, args, cfg)}
 	}()
 	select {
-	case err := <-done:
-		return report(env, root, err, stop())
+	case out := <-done:
+		interrupted := stop()
+		if out.panicked {
+			panic(out.value)
+		}
+		return report(env, root, out.err, interrupted)
 	case <-second:
 		return ExitInterrupted
 	}
+}
+
+// outcome is how a run on its own goroutine ended: it returned err, or it panicked with value.
+type outcome struct {
+	err      error
+	panicked bool
+	value    any
 }
 
 // report writes err, preceded by root's name, to env.Stderr and returns its exit code:

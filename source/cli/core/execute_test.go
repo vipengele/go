@@ -597,6 +597,44 @@ func TestExecuteArgsWithoutInterrupts(t *testing.T) {
 	}
 }
 
+func TestExecuteArgsPanicReachesTheCaller(t *testing.T) {
+	type panicValue struct{ msg string }
+	want := &panicValue{msg: "run panicked"}
+	root := &spec.Command{
+		Name: "tool",
+		Run: func(context.Context, *spec.Invocation) error {
+			panic(want)
+		},
+	}
+	tests := []struct {
+		name       string
+		interrupts chan struct{}
+	}{
+		{name: "without interrupts"},
+		{name: "with interrupts", interrupts: make(chan struct{})},
+		{name: "after an interrupt", interrupts: interrupts(1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			var stderr bytes.Buffer
+			env := &spec.Env{Stderr: &stderr, Interrupts: tt.interrupts}
+			got := func() (v any) {
+				defer func() { v = recover() }()
+				cli.ExecuteArgs(env, root, nil)
+				return nil
+			}()
+			if got != want {
+				t.Errorf("recovered %v, want %v", got, want)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr %q, want none", stderr.String())
+			}
+			waitGoroutines(t, baseline)
+		})
+	}
+}
+
 func TestExecuteArgsConcurrentInterrupts(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	gate := make(chan struct{})

@@ -40,7 +40,8 @@
 //
 // Every execution checks the tree with [spec.Command.Validate] before running it, writes every
 // error to the standard error as "<name>: <error>", where name is the root command's Name, and
-// returns [ExitOK], [ExitError] or [ExitUsage]. Each command answers --help by writing its help
-// to the standard output. The commands are run with github.com/spf13/cobra, which no API of this
-// package exposes: a tool's commands depend on spec alone.
+// returns [ExitOK], [ExitError], [ExitUsage], or [ExitInterrupted] for a run error after an
+// interrupt and for a run abandoned on a second interrupt. Each command answers --help by
+// writing its help to the standard output. The commands are run with github.com/spf13/cobra,
+// which no API of this package exposes: a tool's commands depend on spec alone.
 package cli
