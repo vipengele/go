@@ -132,3 +132,13 @@ func TestIsTerminalOfUnknownStreamIsFalseWithoutCallingTerminal(t *testing.T) {
 		t.Error("Terminal was called for a Stream that names no standard stream")
 	}
 }
+
+func TestIsTerminalWithoutTerminalIsFalseForTypedNilFileStreams(t *testing.T) {
+	var f *fileLike
+	env := &spec.Env{Stdin: f, Stdout: f, Stderr: f}
+	for _, s := range []spec.Stream{spec.Stdin, spec.Stdout, spec.Stderr} {
+		if env.IsTerminal(s) {
+			t.Errorf("IsTerminal(%v) of a typed-nil file stream is true, want false", s)
+		}
+	}
+}
