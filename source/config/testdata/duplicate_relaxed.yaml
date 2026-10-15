@@ -1,0 +1,3 @@
+server:
+  max_retries: 1
+  max-retries: 2

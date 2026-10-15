@@ -1,0 +1,6 @@
+name: app
+colour: blue
+server:
+  port: 1
+  port: 2
+  timeout: 5s
