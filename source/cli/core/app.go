@@ -84,7 +84,7 @@ func WithBuildInfo(info buildinfo.Info) Option {
 //
 // When an error matches several registrations, the one registered first decides. A
 // [spec.CodedError] the error carries, with a code 1 or 3 through 125, takes precedence over every
-// registration; [App.ExecuteArgs] describes the whole order.
+// registration; the package documentation's "Exit codes" section describes the whole order.
 func WithExitCode(code int, sentinel error) Option {
 	return func(s *settings) {
 		s.exitMatchers = append(s.exitMatchers, sentinelMatcher(code, sentinel))
