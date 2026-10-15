@@ -171,7 +171,7 @@ func ownText(err, inner error) (string, bool) {
 	}
 	suffix := ": " + innerMsg
 	if !strings.HasSuffix(msg, suffix) {
-		return "", false
+		return "", false // [lydite:exclude_from_mutation][chain prints the whole message when the bool is false and never reads the text, so the text returned with it is unobservable]
 	}
 	return strings.TrimSuffix(msg, suffix), true
 }

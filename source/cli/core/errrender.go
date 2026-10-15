@@ -9,7 +9,7 @@ func typedRenderer[E error](fn func(E) string) errrender.Renderer {
 	return func(err error) (string, bool) {
 		e, ok := err.(E)
 		if !ok {
-			return "", false
+			return "", false // [lydite:exclude_from_mutation][errrender.Render skips a renderer's output unless the bool is true and the text is non-empty, so neither value returned for an error that is not an E is observable]
 		}
 		return fn(e), true
 	}
