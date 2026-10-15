@@ -307,7 +307,9 @@ func TestExecuteArgsInvalidTree(t *testing.T) {
 		if got.code != cli.ExitError || got.stdout != "" {
 			t.Errorf("code %d, stdout %q; want 1 and no stdout", got.code, got.stdout)
 		}
-		want := "tool: invalid command tree: " + root.Validate().Error() + "\n"
+		want := "tool: invalid command tree\n" +
+			"  → command \"tool empty\"\n" +
+			"  → value is invalid: has neither Run nor Commands\n"
 		if got.stderr != want {
 			t.Errorf("stderr %q, want %q", got.stderr, want)
 		}
@@ -317,8 +319,8 @@ func TestExecuteArgsInvalidTree(t *testing.T) {
 		if got.code != cli.ExitError || got.stdout != "" {
 			t.Errorf("code %d, stdout %q; want 1 and no stdout", got.code, got.stdout)
 		}
-		if !strings.HasPrefix(got.stderr, "invalid command tree: ") {
-			t.Errorf("stderr %q, want the prefix %q", got.stderr, "invalid command tree: ")
+		if !strings.HasPrefix(got.stderr, "invalid command tree\n") {
+			t.Errorf("stderr %q, want the prefix %q", got.stderr, "invalid command tree\n")
 		}
 	})
 }
@@ -679,7 +681,7 @@ func TestExecuteArgsContextExitCodePrecedence(t *testing.T) {
 			name: "coded",
 			ctx:  context.Background(),
 			root: fails(fmt.Errorf("wrapped: %w", spec.Coded(7, boom))),
-			want: result{code: 7, stderr: "tool: wrapped: boom\n"},
+			want: result{code: 7, stderr: "tool: wrapped\n  → boom\n"},
 		},
 		{
 			name: "coded outranks the registry",
@@ -699,7 +701,7 @@ func TestExecuteArgsContextExitCodePrecedence(t *testing.T) {
 			ctx:  context.Background(),
 			root: fails(fmt.Errorf("wrapped: %w", sentinelError{})),
 			c:    registry,
-			want: result{code: 9, stderr: "tool: wrapped: sentinel\n"},
+			want: result{code: 9, stderr: "tool: wrapped\n  → sentinel\n"},
 		},
 		{
 			name: "registry outranks usage",
@@ -839,7 +841,7 @@ func TestExecuteArgsContextHooks(t *testing.T) {
 			name: "pre-run error is registered",
 			ctx:  context.Background(),
 			c:    cli.ExecuteConfig{Registry: registry, PreRun: pre(fmt.Errorf("pre: %w", sentinelError{}))},
-			want: result{code: 9, stderr: "tool: pre: sentinel\n"},
+			want: result{code: 9, stderr: "tool: pre\n  → sentinel\n"},
 		},
 		{
 			name: "pre-run error is coded",
@@ -896,7 +898,7 @@ func TestExecuteArgsContextInvalidTreeIsPrinted(t *testing.T) {
 	root := &spec.Command{Name: "tool", Commands: []*spec.Command{{Name: "x"}, {Name: "x"}}}
 	c := cli.ExecuteConfig{Registry: []func(error) (int, bool){func(error) (int, bool) { return 9, true }}}
 	got := runCtx(cancelled(), root, c)
-	if got.code != cli.ExitError || !strings.HasPrefix(got.stderr, "tool: invalid command tree: ") {
+	if got.code != cli.ExitError || !strings.HasPrefix(got.stderr, "tool: invalid command tree\n") {
 		t.Errorf("got %+v, want ExitError and the invalid tree written", got)
 	}
 }

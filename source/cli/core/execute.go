@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"go.vipengele.org/cli/core/internal/cobra"
+	"go.vipengele.org/cli/core/internal/errrender"
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/terminal"
 )
@@ -32,21 +33,22 @@ const (
 //		os.Exit(cli.Execute(newRoot()))
 //	}
 //
-// It behaves as [ExecuteArgs] does, and returns [ExitError] after writing "<name>: <error>" to
-// os.Stderr when the working directory cannot be determined.
+// It behaves as [ExecuteArgs] does, and returns [ExitError] after writing the error, as
+// [ExecuteArgs] writes one, to os.Stderr when the working directory cannot be determined.
 func Execute(root *spec.Command) int {
-	return executeProcess(prefix(root), func(env *spec.Env, args []string) int {
+	return executeProcess(name(root), func(env *spec.Env, args []string) int {
 		return ExecuteArgs(env, root, args)
 	})
 }
 
 // executeProcess calls run with the environment and the arguments of the process, and returns
-// its exit code. It returns [ExitError] without calling run after writing the error, preceded
-// by errPrefix, to os.Stderr when the working directory cannot be determined.
-func executeProcess(errPrefix string, run func(env *spec.Env, args []string) int) int {
+// its exit code. It returns [ExitError] without calling run after writing the error, with tool
+// as its prefix and no renderers, to os.Stderr when the working directory cannot be determined:
+// the failure precedes the run, so no option's renderer applies to it.
+func executeProcess(tool string, run func(env *spec.Env, args []string) int) int {
 	env, err := processEnv()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "%s%v\n", errPrefix, err)
+		errrender.Render(os.Stderr, tool, err, nil)
 		return ExitError
 	}
 	return run(env, os.Args[1:])
@@ -73,14 +75,29 @@ func processEnv() (*spec.Env, error) {
 // calls receives context.Background().
 //
 // It checks root with [spec.Command.Validate] on every call, and returns [ExitError] after
-// writing "<name>: invalid command tree: <error>" to env.Stderr when the tree is invalid. It
-// then selects the command args name and calls its run function. --help, on any command, writes
-// the command's help to env.Stdout and returns [ExitOK]. A command with subcommands and no Run,
-// given no positional argument, does the same. There is no help or completion subcommand.
+// writing "<name>: invalid command tree" to env.Stderr, followed by one row per problem found,
+// when the tree is invalid. It then selects the command args name and calls its run function.
+// --help, on any command, writes the command's help to env.Stdout and returns [ExitOK]. A command
+// with subcommands and no Run, given no positional argument, does the same. There is no help or
+// completion subcommand.
 //
-// Every error is written to env.Stderr as "<name>: <error>", where name is root's Name, unless
-// the error carries a [spec.ReportedError]: the run function has then shown it already, and
-// nothing is written. The exit code of an error is, first match wins:
+// Every error is written to env.Stderr as a tree, unless it carries a [spec.ReportedError]: the
+// run function has then shown it already, and nothing is written. The tree's first line is
+// "<name>: " and the text of the error's outermost layer, where name is root's Name, or that text
+// alone when the name is empty. Each further layer of a wrapped error is a row marked "→"
+// indented under the first, and each error of an [errors.Join] a row marked "•" indented under
+// the layer it is joined beneath, itself printed as a tree:
+//
+//	tool: load config
+//	  → validate tool.yaml
+//	    • name: required
+//	    • port: out of range
+//
+// A layer is the text an error adds before ": " and the message of the error it wraps; an error
+// whose message does not end that way prints whole, with nothing beneath it. An error that
+// neither wraps nor joins, and a usage error, print on the first line alone, as "<name>: <error>".
+// An [App] can render an error of its own type in its own way with [WithErrorRenderer]. The exit
+// code of an error is, first match wins:
 //   - the code of a [spec.CodedError] the error carries, when it is 1 or 3 through 125; a code
 //     outside that range is ignored;
 //   - [ExitUsage] for a command line the tree does not accept;
@@ -105,8 +122,8 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 }
 
 // executeArgsCtx is [ExecuteArgs] with the adapter configured by cfg, every run function
-// receiving ctx, and the matchers of registry giving exit codes to errors. The exit code of an
-// error is, first match wins:
+// receiving ctx, the matchers of registry giving exit codes to errors, and renderers offered each
+// error of the tree it writes, in order. The exit code of an error is, first match wins:
 //  1. [ExitInterrupted], written nowhere, when ctx is done and the error is
 //     [context.Canceled]. A run function that cancels or times out a context of its own while
 //     ctx is not done is not interrupted;
@@ -115,19 +132,19 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 //  4. [ExitUsage] for a [*cobra.UsageError];
 //  5. [ExitError].
 //
-// Outside rule 1, the error is written to env.Stderr as "<name>: <error>" unless it carries a
-// [spec.ReportedError], which changes no exit code. An error a PostRun returns after the run
-// function succeeds reaches rules 2 to 4 as a [*cobra.HookError], which unwraps to nothing, so
-// its code is [ExitError].
+// Outside rule 1, the error is written to env.Stderr by [errrender.Render] unless it carries a
+// [spec.ReportedError], which changes no exit code. The invalid-tree error is written whatever it
+// carries. An error a PostRun returns after the run function succeeds reaches rules 2 to 4 as a
+// [*cobra.HookError], which unwraps to nothing, so its code is [ExitError].
 func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args []string,
-	cfg cobra.Config, registry exitMatchers,
+	cfg cobra.Config, registry exitMatchers, renderers ...errrender.Renderer,
 ) int {
 	env = env.Resolved()
 	if env.Terminal == nil {
 		env.Terminal = terminal.Detect(env.Stdin, env.Stdout, env.Stderr)
 	}
 	if err := root.Validate(); err != nil {
-		_, _ = fmt.Fprintf(env.Stderr, "%sinvalid command tree: %v\n", prefix(root), err)
+		errrender.Render(env.Stderr, name(root), fmt.Errorf("invalid command tree: %w", err), renderers)
 		return ExitError
 	}
 	err := cobra.Run(ctx, env, root, args, cfg)
@@ -139,7 +156,7 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 	}
 	var reported *spec.ReportedError
 	if !errors.As(err, &reported) {
-		_, _ = fmt.Fprintf(env.Stderr, "%s%v\n", prefix(root), err)
+		errrender.Render(env.Stderr, name(root), err, renderers)
 	}
 	return exitCode(err, registry)
 }
@@ -161,10 +178,10 @@ func exitCode(err error, registry exitMatchers) int {
 	return ExitError
 }
 
-// prefix returns "<name>: " for root's name, and "" for a nil root or an empty name.
-func prefix(root *spec.Command) string {
-	if root == nil || root.Name == "" {
+// name returns root's name, and "" for a nil root.
+func name(root *spec.Command) string {
+	if root == nil {
 		return ""
 	}
-	return root.Name + ": "
+	return root.Name
 }

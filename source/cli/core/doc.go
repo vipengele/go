@@ -39,8 +39,12 @@
 // against buffers, a fixed environment and a temporary working directory.
 //
 // Every execution checks the tree with [spec.Command.Validate] before running it and writes every
-// error to the standard error as "<name>: <error>", where name is the root command's Name, unless
-// the error carries a [spec.ReportedError]. Each command answers --help by writing its help to the
+// error to the standard error, unless the error carries a [spec.ReportedError], as a tree headed
+// "<name>: ", where name is the root command's Name: each layer of a wrapped error is a row
+// marked "→" and each error of an [errors.Join] a row marked "•", indented under the layer it is
+// joined beneath, as [ExecuteArgs] describes. An error that neither wraps nor joins prints as
+// "<name>: <error>". [WithErrorRenderer] renders an error of a type the tool chooses, and what it
+// wraps, in the tool's own way. Each command answers --help by writing its help to the
 // standard output. The commands are run with github.com/spf13/cobra, which no API of this package
 // exposes: a tool's commands depend on spec alone.
 //
@@ -76,9 +80,9 @@
 // The registrations belong to the [App] and are read-only after [New]. The package-level
 // [Execute] and [ExecuteArgs] have none, so for them rules 1, 2, 4 and 5 apply.
 //
-// [spec.Reported] suppresses the "<name>: <error>" line and nothing else: the code is still chosen
-// by rules 2 to 5, so a reported usage error exits 2 silently. The "invalid command tree" message
-// is never suppressed.
+// [spec.Reported] suppresses the written error and nothing else: the code is still chosen
+// by rules 2 to 5, so a reported usage error exits 2 silently. The "invalid command tree" message,
+// one row per problem [spec.Command.Validate] finds, is never suppressed.
 //
 // A [PreRunHook] error is mapped as a run function's error is. A [PostRunHook] error after a run
 // that succeeded is opaque: it is written and exits 1, whatever it wraps. When the run function
