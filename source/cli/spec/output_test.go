@@ -8,20 +8,35 @@ import (
 
 func TestOutputAccessors(t *testing.T) {
 	tests := []struct {
-		name                         string
-		out                          spec.Output
-		verbose, quiet, json, colour bool
+		name                 string
+		out                  spec.Output
+		verbose, quiet, json bool
+		stdout, stderr       bool
 	}{
-		{"zero value is the default presentation", spec.Output{}, false, false, false, true},
-		{"zero options build the zero value", spec.NewOutput(spec.OutputOptions{}), false, false, false, true},
-		{"verbose", spec.NewOutput(spec.OutputOptions{Verbose: true}), true, false, false, true},
-		{"quiet", spec.NewOutput(spec.OutputOptions{Quiet: true}), false, true, false, true},
-		{"json", spec.NewOutput(spec.OutputOptions{JSON: true}), false, false, true, true},
-		{"no colour", spec.NewOutput(spec.OutputOptions{NoColor: true}), false, false, false, false},
+		{"zero value is the default presentation", spec.Output{}, false, false, false, true, true},
+		{"zero options build the zero value", spec.NewOutput(spec.OutputOptions{}), false, false, false, true, true},
+		{"verbose", spec.NewOutput(spec.OutputOptions{Verbose: true}), true, false, false, true, true},
+		{"quiet", spec.NewOutput(spec.OutputOptions{Quiet: true}), false, true, false, true, true},
+		{"json", spec.NewOutput(spec.OutputOptions{JSON: true}), false, false, true, true, true},
+		{
+			"no colour on stdout keeps colour on stderr",
+			spec.NewOutput(spec.OutputOptions{NoColorStdout: true}),
+			false, false, false, false, true,
+		},
+		{
+			"no colour on stderr keeps colour on stdout",
+			spec.NewOutput(spec.OutputOptions{NoColorStderr: true}),
+			false, false, false, true, false,
+		},
+		{
+			"no colour on either stream",
+			spec.NewOutput(spec.OutputOptions{NoColorStdout: true, NoColorStderr: true}),
+			false, false, false, false, false,
+		},
 		{
 			"conflicting settings are kept as given",
-			spec.NewOutput(spec.OutputOptions{Verbose: true, Quiet: true, JSON: true, NoColor: true}),
-			true, true, true, false,
+			spec.NewOutput(spec.OutputOptions{Verbose: true, Quiet: true, JSON: true, NoColorStdout: true}),
+			true, true, true, false, true,
 		},
 	}
 	for _, tt := range tests {
@@ -35,10 +50,21 @@ func TestOutputAccessors(t *testing.T) {
 			if got := tt.out.JSON(); got != tt.json {
 				t.Errorf("JSON() = %t, want %t", got, tt.json)
 			}
-			if got := tt.out.Color(); got != tt.colour {
-				t.Errorf("Color() = %t, want %t", got, tt.colour)
+			if got := tt.out.Color(spec.Stdout); got != tt.stdout {
+				t.Errorf("Color(Stdout) = %t, want %t", got, tt.stdout)
+			}
+			if got := tt.out.Color(spec.Stderr); got != tt.stderr {
+				t.Errorf("Color(Stderr) = %t, want %t", got, tt.stderr)
 			}
 		})
+	}
+}
+
+func TestOutputColorIsFalseForStreamsThatTakeNoOutput(t *testing.T) {
+	for _, s := range []spec.Stream{spec.Stdin, spec.Stream(-1), spec.Stream(3)} {
+		if spec.NewOutput(spec.OutputOptions{}).Color(s) {
+			t.Errorf("Color(%v) = true on the zero Output, want false", s)
+		}
 	}
 }
 

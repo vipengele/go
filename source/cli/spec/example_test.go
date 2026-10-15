@@ -104,12 +104,12 @@ func ExampleOutput() {
 		}
 	}
 	fmt.Print(out.String())
-	fmt.Println(spec.Output{}.Color())
+	fmt.Println(spec.Output{}.Color(spec.Stdout), spec.Output{}.Color(spec.Stderr))
 	// Output:
 	// status: ok
 	// status: ok (checked 3 sources)
 	// {"status":"ok"}
-	// true
+	// true true
 }
 
 func ExampleCommandInfo() {

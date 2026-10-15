@@ -17,10 +17,11 @@ func WithQuiet() Option {
 	return func(s *settings) { s.quiet = true }
 }
 
-// WithNoColor gives the App the standard flag --no-color, which forbids colour:
-// [spec.Output.Color] reports false. It is inherited as [WithVerbose] describes. Colour is also
-// forbidden, with or without the flag, by the environment variables NO_COLOR and
-// <EnvPrefix>_NO_COLOR, and when the Env reports that the standard output is not a terminal.
+// WithNoColor gives the App the standard flag --no-color, which forbids colour on every stream:
+// [spec.Output.Color] reports false for [spec.Stdout] and [spec.Stderr] alike. It is inherited as
+// [WithVerbose] describes. Without the flag, colour is decided for each stream separately by
+// [spec.ColorAllowed], from NO_COLOR, <EnvPrefix>_NO_COLOR, FORCE_COLOR, TERM and whether the Env
+// reports that stream as a terminal.
 func WithNoColor() Option {
 	return func(s *settings) { s.noColor = true }
 }

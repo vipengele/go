@@ -249,7 +249,7 @@ func TestRunConfigOutput(t *testing.T) {
 			name: "resolver sees the parsed flags",
 			args: []string{"leaf", "--quiet"},
 			output: func(inv *spec.Invocation) (spec.Output, error) {
-				return spec.NewOutput(spec.OutputOptions{Quiet: quiet.Get(inv), NoColor: true}), nil
+				return spec.NewOutput(spec.OutputOptions{Quiet: quiet.Get(inv), NoColorStdout: true, NoColorStderr: true}), nil
 			},
 			wantQuiet: true,
 			wantRun:   true,
@@ -294,9 +294,10 @@ func TestRunConfigOutput(t *testing.T) {
 			if ran != tt.wantRun {
 				t.Fatalf("run function ran: %t, want %t", ran, tt.wantRun)
 			}
-			if got.Quiet() != tt.wantQuiet || got.Color() != tt.wantColor {
-				t.Errorf("Output quiet=%t color=%t, want quiet=%t color=%t",
-					got.Quiet(), got.Color(), tt.wantQuiet, tt.wantColor)
+			if got.Quiet() != tt.wantQuiet || got.Color(spec.Stdout) != tt.wantColor ||
+				got.Color(spec.Stderr) != tt.wantColor {
+				t.Errorf("Output quiet=%t color stdout=%t stderr=%t, want quiet=%t color=%t",
+					got.Quiet(), got.Color(spec.Stdout), got.Color(spec.Stderr), tt.wantQuiet, tt.wantColor)
 			}
 		})
 	}

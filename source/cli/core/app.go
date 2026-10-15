@@ -162,10 +162,10 @@ func (a *App) Execute() int {
 //
 // Every run function receives a [spec.Invocation] whose Output reports the standard flags the
 // command line sets; a standard flag the App does not take reads as unset. --verbose with
-// --quiet returns [ExitUsage] and calls no run function. The Output forbids colour when
-// --no-color is set, when the environment variable NO_COLOR or <EnvPrefix>_NO_COLOR, named by
-// the identity, is set and not empty, or when env.Stdout is not a terminal as
-// [spec.Env.IsTerminal] reports it for [spec.Stdout].
+// --quiet returns [ExitUsage] and calls no run function. The Output decides colour for
+// [spec.Stdout] and [spec.Stderr] separately, each as [spec.ColorAllowed] decides it from
+// --no-color, the identity, which names <EnvPrefix>_NO_COLOR, and env, so a redirected standard
+// output forbids colour there and leaves it allowed on a standard error that is a terminal.
 //
 // The hooks [WithPreRun] and [WithPostRun] add run around every run function it calls, as they
 // describe.
