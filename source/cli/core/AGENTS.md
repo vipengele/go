@@ -28,8 +28,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`
   hooks as plain funcs; a post-run error after a successful run is a `*HookError`, never a
   `*UsageError`.
-- `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). Standard
-  library only. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
+- `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). `Info.IsDev`
+  delegates to `cli/spec/version`. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
   schema-versioned JSON form (`schema` is 1). Adding a key keeps `schema`; renaming, removing or
   retyping a key increments it.
 - `versioncmd` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated

@@ -2,9 +2,10 @@ package buildinfo
 
 import (
 	"encoding/json"
-	"regexp"
 	"runtime"
 	"runtime/debug"
+
+	specversion "go.vipengele.org/cli/spec/version"
 )
 
 // The link-time values. The linker sets them with -X only while they are uninitialised string
@@ -20,16 +21,6 @@ const schema = 1
 
 // shortCommitLen is the number of characters of the commit that [Info.String] prints.
 const shortCommitLen = 12
-
-// releaseVersion matches vMAJOR.MINOR.PATCH with an optional prerelease and no build metadata.
-var releaseVersion = regexp.MustCompile(
-	`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`,
-)
-
-// pseudoVersionTail matches the timestamp and revision a Go pseudo-version ends with, in each of
-// its forms: vX.0.0-yyyymmddhhmmss-abcdefabcdef, vX.Y.Z-pre.0.yyyymmddhhmmss-abcdefabcdef and
-// vX.Y.Z-0.yyyymmddhhmmss-abcdefabcdef.
-var pseudoVersionTail = regexp.MustCompile(`[-.][0-9]{14}-[0-9a-f]{12}$`)
 
 // Info describes a build of a binary. A field is "" when nothing supplies its value.
 type Info struct {
@@ -89,12 +80,12 @@ func resolve(lf ldflags, bi *debug.BuildInfo, ok bool) Info {
 	return info
 }
 
-// IsDev reports whether the build is not a release. A release version is vMAJOR.MINOR.PATCH with
-// an optional prerelease, such as "v1.2.3" or "v1.2.3-rc.1", that is not a Go pseudo-version.
-// An empty version, "(devel)", a version carrying build metadata such as "v1.2.3+dirty", and
-// every pseudo-version are dev.
+// IsDev reports whether the build is not a release, as [specversion.IsRelease] decides. A release
+// version is vMAJOR.MINOR.PATCH with an optional prerelease, such as "v1.2.3" or "v1.2.3-rc.1",
+// that is not a Go pseudo-version. An empty version, "(devel)", a version carrying build metadata
+// such as "v1.2.3+dirty", and every pseudo-version are dev.
 func (i Info) IsDev() bool {
-	return !releaseVersion.MatchString(i.Version) || pseudoVersionTail.MatchString(i.Version)
+	return !specversion.IsRelease(i.Version)
 }
 
 // String returns the one-line text form: the version, or "dev" when it is empty, followed by

@@ -3,8 +3,9 @@
 Status: amended by ADR-0004, which replaces the project inventory and narrows the rejection of a
 shared project, by ADR-0006, which replaces how `daemon` requires its siblings and the order a
 feature spanning two projects is released in, by ADR-0007, which makes `cli` the owner of the
-`version --json` contract, and by ADR-0009, which reverses the clause that has `update` keep its own
-platform-directory resolver. Partially superseded by ADR-0005, which replaces the rule on where cobra
+`version --json` contract, by ADR-0009, which reverses the clause that has `update` keep its own
+platform-directory resolver, and by ADR-0010, which moves the version comparison rule `update` owned
+into `cli/spec/version`. Partially superseded by ADR-0005, which replaces the rule on where cobra
 is allowed ("The CLI framework dependency") and the rule that `update` requires no sibling
 ("Dependency direction").
 

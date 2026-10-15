@@ -32,6 +32,9 @@ pseudo-version. A pseudo-version is what `go install` of an untagged commit prod
 metadata such as `+dirty` marks a build that differs from the version it names, so neither is a
 release a self-update can compare against.
 
+The rule is implemented by `go.vipengele.org/cli/spec/version`, which `buildinfo` calls and which
+applies it to the latest version a release source reports as well (ADR-0010).
+
 ## The text form
 
 Without `--json` the command prints one line, and that line is the whole text contract:

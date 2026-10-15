@@ -2,8 +2,9 @@
 
 `go.vipengele.org/cli/spec`: the framework-neutral model of a command-line tool (`Identity`, `Command`,
 `Flag`, `Invocation`, `Env`) that `cli/core`, `update` and `daemon` share. Read `doc.go` first, then
-`docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md`
-and `docs/adr/0009-platform-paths-live-in-cli-spec-paths.md` at the repo root.
+`docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md`,
+`docs/adr/0009-platform-paths-live-in-cli-spec-paths.md` and
+`docs/adr/0010-version-comparison-lives-in-cli-spec-version.md` at the repo root.
 
 ## Commands (run from `source/cli/spec`)
 
@@ -30,6 +31,10 @@ golangci-lint run
   `Env.Terminal`; `DetectWith(Probes, ...)` takes the probes as a seam. Each stream is probed lazily
   and at most once, and anything that is not an `*os.File` is not a terminal. It is the only importer
   of `golang.org/x/term`.
+- `version/` — `version.IsRelease(v)` and `version.Newer(current, latest)`, pure string-to-bool
+  functions on `golang.org/x/mod/semver`: the one definition of a release version and of "newer"
+  (ADR-0010). A non-release current version is a dev build, older than every release; invalid input
+  means no update. It performs no I/O.
 
 ## Conventions
 
