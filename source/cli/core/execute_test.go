@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -444,6 +445,7 @@ func TestMain(m *testing.M) {
 		os.Args = []string{os.Args[0], "greet"}
 		os.Exit(cli.Execute(newRoot()))
 	}
+	flag.Bool("update", false, "rewrite the golden files under testdata")
 	os.Exit(m.Run())
 }
 

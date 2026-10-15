@@ -1,0 +1,5 @@
+tool: invalid command tree
+  • command "tool"
+    → value is invalid: subcommand "dup" is declared twice
+  • command "tool empty"
+    → value is invalid: has neither Run nor Commands
