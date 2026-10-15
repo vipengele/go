@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -756,6 +758,8 @@ func TestMain(m *testing.M) {
 	case "signal":
 		os.Args = []string{os.Args[0], os.Getenv("CLI_CORE_EXECUTE_ARGS")}
 		os.Exit(cli.Execute(signalRoot()))
+	case "raise":
+		os.Exit(raiseAfterStop(os.Getenv("CLI_CORE_EXECUTE_ARGS")))
 	}
 	flag.Bool("update", false, "rewrite the golden files under testdata")
 	os.Exit(m.Run())
@@ -912,6 +916,163 @@ func TestExecuteSecondSignalAbandonsTheRun(t *testing.T) {
 	if code != cli.ExitInterrupted || stderr != "" {
 		t.Errorf("child: code %d, stderr %q; want %d and no stderr",
 			code, stderr, cli.ExitInterrupted)
+	}
+}
+
+// raiseAfterStop is the main of a child that registers for interrupts as Execute does, stops,
+// and then sends itself the signal numbered by arg. Once stop has returned the signal has its
+// default effect, so it ends the child before the child prints "survived". A signal ignored when
+// the child starts stays ignored after stop, and the child prints "ignored" and exits instead.
+func raiseAfterStop(arg string) int {
+	n, err := strconv.Atoi(arg)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 99
+	}
+	sig := syscall.Signal(n)
+	if signal.Ignored(sig) {
+		_, _ = fmt.Println("ignored")
+		return 0
+	}
+	_, stop := cli.NotifyInterrupts()
+	stop()
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 99
+	}
+	if err := self.Signal(sig); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 99
+	}
+	time.Sleep(5 * time.Second)
+	_, _ = fmt.Println("survived")
+	return 0
+}
+
+func TestNotifyInterruptsStopRestoresTheDefaultEffect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signals cannot be sent to a process on Windows")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := exec.Command(exe)
+			cmd.Env = append(os.Environ(), executeChild+"=raise",
+				"CLI_CORE_EXECUTE_ARGS="+strconv.Itoa(int(sig)))
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatalf("running the child: %v", err)
+				}
+			}
+			if stdout.String() == "ignored\n" {
+				t.Skipf("%v is ignored by the test process, and stop keeps it ignored", sig)
+			}
+			status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != sig {
+				t.Errorf("child: %v, stdout %q, stderr %q; want it ended by %v",
+					cmd.ProcessState, stdout.String(), stderr.String(), sig)
+			}
+		})
+	}
+}
+
+// stopCycles is how many times a test starts a goroutine and stops it, asserting each time that
+// none outlives stop.
+const stopCycles = 500
+
+// oneProcessor runs goroutines on a single processor until t ends, which makes the number of
+// goroutines exact the moment stop returns. A goroutine stop wakes but does not wait for is
+// runnable, and counted, until the goroutine calling stop blocks. A goroutine stop waits for
+// wakes stop as it exits and goes on running until it has exited; with a second processor,
+// stop could resume on it while the goroutine is still counted.
+func oneProcessor(t *testing.T) {
+	t.Helper()
+	prev := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+}
+
+// goroutineBaseline returns the number of goroutines once every goroutine that is runnable has
+// had the processor. A goroutine left runnable by an earlier cycle, or an earlier test, that is
+// about to exit would otherwise be counted in the baseline and hide one that outlives stop.
+func goroutineBaseline() int {
+	runtime.Gosched()
+	return runtime.NumGoroutine()
+}
+
+func TestNotifyInterruptsStopJoinsTheForwarder(t *testing.T) {
+	oneProcessor(t)
+	// os/signal starts a goroutine of its own on the first registration, and it never exits.
+	_, stop := cli.NotifyInterrupts()
+	stop()
+	for i := range stopCycles {
+		baseline := goroutineBaseline()
+		_, stop := cli.NotifyInterrupts()
+		stop()
+		if got := runtime.NumGoroutine(); got > baseline {
+			t.Fatalf("cycle %d: %d goroutines once stop returned, want at most %d", i, got, baseline)
+		}
+	}
+}
+
+func TestWatchInterruptsStopJoinsTheWatcher(t *testing.T) {
+	tests := []struct {
+		name string
+		// feed acts on the interrupts the watcher reads before stop is called.
+		feed func(interrupts chan struct{}, second <-chan struct{})
+		// cancels is whether cancel has been called once stop returns.
+		cancels bool
+	}{
+		{
+			name: "no interrupt",
+			feed: func(chan struct{}, <-chan struct{}) {},
+		},
+		{
+			name:    "one interrupt",
+			feed:    func(interrupts chan struct{}, _ <-chan struct{}) { interrupts <- struct{}{} },
+			cancels: true,
+		},
+		{
+			name: "two interrupts",
+			feed: func(interrupts chan struct{}, second <-chan struct{}) {
+				interrupts <- struct{}{}
+				interrupts <- struct{}{}
+				<-second
+			},
+			cancels: true,
+		},
+		{
+			name: "closed interrupts",
+			feed: func(interrupts chan struct{}, _ <-chan struct{}) { close(interrupts) },
+		},
+	}
+	oneProcessor(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for i := range stopCycles {
+				baseline := goroutineBaseline()
+				interrupts := make(chan struct{})
+				// A plain variable: only stop waiting for the watcher orders its write before
+				// the read below.
+				cancelled := false
+				second, stop := cli.WatchInterrupts(interrupts, func() { cancelled = true })
+				tt.feed(interrupts, second)
+				stop()
+				if got := runtime.NumGoroutine(); got > baseline {
+					t.Fatalf("cycle %d: %d goroutines once stop returned, want at most %d", i, got, baseline)
+				}
+				if cancelled != tt.cancels {
+					t.Fatalf("cycle %d: cancelled %t once stop returned, want %t", i, cancelled, tt.cancels)
+				}
+			}
+		})
 	}
 }
 

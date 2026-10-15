@@ -30,6 +30,18 @@ func ExecuteArgsContext(ctx context.Context, env *spec.Env, root *spec.Command, 
 	return executeArgsCtx(ctx, env, root, args, cfg, registry)
 }
 
+// NotifyInterrupts is [notifyInterrupts].
+func NotifyInterrupts() (interrupts <-chan struct{}, stop func()) {
+	return notifyInterrupts()
+}
+
+// WatchInterrupts is [watchInterrupts].
+func WatchInterrupts(interrupts <-chan struct{}, cancel context.CancelFunc) (
+	second <-chan struct{}, stop func(),
+) {
+	return watchInterrupts(interrupts, cancel)
+}
+
 // NewUsageError returns err as the error of a command line the tree does not accept.
 func NewUsageError(err error) error {
 	return &cobra.UsageError{Err: err}
