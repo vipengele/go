@@ -20,15 +20,16 @@ func registrableExitCode(code int) bool {
 	return code >= ExitError && code <= maxExitCode && code != ExitUsage
 }
 
-// exitMatcher maps an error to the exit code an option gives it, and reports false for an error
-// the option does not match.
+// exitMatcher maps an error to the exit code an option gives it. For an error the option does not
+// match it returns 0 and false.
 type exitMatcher func(err error) (int, bool)
 
 // exitMatchers is the ordered list of matchers the options add, in option order.
 // Nothing changes it after [New], so concurrent executions share it.
 type exitMatchers []exitMatcher
 
-// code returns the code of the first matcher that matches err, and false when none does. The
+// code returns the code of the first matcher that matches err; when none does it returns 0 and
+// false. The
 // order is the matchers' registration order, whatever the order of the errors a joined err holds.
 func (m exitMatchers) code(err error) (int, bool) {
 	if err == nil {

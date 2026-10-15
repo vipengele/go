@@ -78,21 +78,40 @@ func TestExitMatchersOrderAcrossKinds(t *testing.T) {
 func TestTypedMatcherIgnoresUnregistrableCodes(t *testing.T) {
 	for _, code := range []int{0, ExitUsage, ExitInterrupted, -1, 126} {
 		m := exitMatchers{typedMatcher(func(*exitTestError) int { return code })}
-		if got, ok := m.code(&exitTestError{}); ok {
-			t.Errorf("code %d: matched with %d", code, got)
+		if got, ok := m.code(&exitTestError{}); ok || got != 0 {
+			t.Errorf("code %d: got (%d, %v), want (0, false)", code, got, ok)
 		}
 	}
 }
 
 func TestExitMatchersNoMatch(t *testing.T) {
 	m := exitMatchers{sentinelMatcher(7, errors.New("s"))}
-	if got, ok := m.code(errors.New("other")); ok {
-		t.Errorf("matched with %d", got)
+	if got, ok := m.code(errors.New("other")); ok || got != 0 {
+		t.Errorf("got (%d, %v), want (0, false)", got, ok)
 	}
-	if _, ok := m.code(nil); ok {
-		t.Error("nil error matched")
+	if got, ok := m.code(nil); ok || got != 0 {
+		t.Errorf("nil error: got (%d, %v), want (0, false)", got, ok)
 	}
-	if _, ok := (exitMatchers(nil)).code(errors.New("e")); ok {
-		t.Error("empty list matched")
+	if got, ok := (exitMatchers(nil)).code(errors.New("e")); ok || got != 0 {
+		t.Errorf("empty list: got (%d, %v), want (0, false)", got, ok)
+	}
+}
+
+func TestMatchersReturnCodeZeroWhenTheyDoNotMatch(t *testing.T) {
+	other := errors.New("other")
+	cases := map[string]exitMatcher{
+		"sentinel":                sentinelMatcher(7, errors.New("s")),
+		"typed, no target":        typedMatcher(func(*exitTestError) int { return 7 }),
+		"typed, unregistrable":    typedMatcher(func(*exitTestError) int { return ExitInterrupted }),
+		"typed, wrong error type": typedMatcher(func(*exitTestError) int { return 8 }),
+	}
+	for name, match := range cases {
+		err := error(other)
+		if name == "typed, unregistrable" {
+			err = &exitTestError{}
+		}
+		if got, ok := match(err); ok || got != 0 {
+			t.Errorf("%s: got (%d, %v), want (0, false)", name, got, ok)
+		}
 	}
 }
