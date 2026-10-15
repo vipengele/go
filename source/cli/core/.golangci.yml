@@ -13,3 +13,9 @@ linters:
           deny:
             - pkg: github.com/spf13/cobra
               desc: cobra stays inside internal/cobra (ADR-0005)
+        x-term-stays-in-cli-spec-terminal:
+          files:
+            - $all
+          deny:
+            - pkg: golang.org/x/term
+              desc: golang.org/x/term stays inside cli/spec/terminal; detect a terminal with terminal.Detect

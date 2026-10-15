@@ -97,8 +97,9 @@ _Avoid_: debug build, snapshot, local build (a tagged release built locally is n
 **Env**:
 The surroundings a command reads, passed in explicitly: environment variables, the standard
 streams and the working directory. Code takes an `Env`, never `os.Getenv` or `os.Stdout`, so tests
-substitute it. An `Env` does not carry the platform directories: `cli/spec/paths` resolves them
-(ADR-0009).
+substitute it. An `Env` also answers, per standard stream, whether that stream is a terminal;
+anything that is not a terminal file, such as a buffer in a test, is not one. An `Env` does not
+carry the platform directories: `cli/spec/paths` resolves them (ADR-0009).
 _Avoid_: environment (also means a deployment such as staging), context (`context.Context`), config
 (values loaded from a file or flags)
 
@@ -148,6 +149,21 @@ A key-value note on one **Command**, read by the **App** and its **Hook**s, neve
 own run: one key exempts a Command from the update check. It applies to the Command that carries it,
 not to its subcommands.
 _Avoid_: tag (a **Prefixed tag** is a release), label, metadata
+
+**Exit code**:
+The number a tool's process ends with. 0 is success, 1 a general error, 2 a command line the tool
+does not accept, 130 an interruption; a tool gives 3 through 125 to its own errors (ADR-0010).
+_Avoid_: status, return code, error code (a code inside an error's own text)
+
+**Reported error**:
+An error whose message a **Command** has already shown to the user, so the **App** ends the process
+with its **Exit code** without printing it again (ADR-0010).
+_Avoid_: silent error, handled error
+
+**Error layer**:
+One wrap's own text in an error chain: what a wrapping error adds in front of the error it wraps.
+The **App** prints a top-level error as its layers, outermost first (ADR-0011).
+_Avoid_: level, frame, cause (the error a layer wraps)
 
 **Release source**:
 Where a tool's own published releases come from, behind the `update` project's `Source` interface:

@@ -137,7 +137,7 @@ func TestAppStandardFlagCollision(t *testing.T) {
 			app := cli.New(identity(), tt.opt)
 			app.Add(&spec.Command{Name: "show", Flags: []spec.Flag{tt.flag}, Run: ok})
 			r := runApp(t, app, "show")
-			if r.code != cli.ExitError || !strings.HasPrefix(r.stderr, "tool: invalid command tree: ") {
+			if r.code != cli.ExitError || !strings.HasPrefix(r.stderr, "tool: invalid command tree\n") {
 				t.Errorf("code %d, stderr %q; want 1 and an invalid command tree", r.code, r.stderr)
 			}
 		})

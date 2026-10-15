@@ -38,10 +38,56 @@
 // the caller gives, and touch nothing else of the process, so a test runs the tool's commands
 // against buffers, a fixed environment and a temporary working directory.
 //
-// Every execution checks the tree with [spec.Command.Validate] before running it, writes every
-// error to the standard error as "<name>: <error>", where name is the root command's Name, and
-// returns [ExitOK], [ExitError], [ExitUsage], or [ExitInterrupted] for a run error after an
-// interrupt and for a run abandoned on a second interrupt. Each command answers --help by
-// writing its help to the standard output. The commands are run with github.com/spf13/cobra,
-// which no API of this package exposes: a tool's commands depend on spec alone.
+// Every execution checks the tree with [spec.Command.Validate] before running it and writes every
+// error to the standard error, unless the error carries a [spec.ReportedError], as a tree headed
+// "<name>: ", where name is the root command's Name: each layer of a wrapped error is a row
+// marked "→" and each error of an [errors.Join] a row marked "•", indented under the layer it is
+// joined beneath, as [ExecuteArgs] describes. An error that neither wraps nor joins prints as
+// "<name>: <error>". [WithErrorRenderer] renders an error of a type the tool chooses, and what it
+// wraps, in the tool's own way. Each command answers --help by writing its help to the
+// standard output. The commands are run with github.com/spf13/cobra, which no API of this package
+// exposes: a tool's commands depend on spec alone.
+//
+// # Exit codes
+//
+// An execution returns one of these codes:
+//
+//	0        success, and --help ([ExitOK])
+//	1        a general error ([ExitError])
+//	2        a usage error: a command line the tree does not accept ([ExitUsage])
+//	3-125    registrable: a tool gives them to its own errors
+//	130      interrupted ([ExitInterrupted])
+//
+// 0, 2 and 130 are reserved for the runs they describe, and no error can be given them. 1 can also
+// be given to an error by registration. 125 is the highest registrable code, because a shell
+// reports 126 and above for its own failures and a code above 255 does not survive the exit
+// status.
+//
+// The exit code of an error is, first match wins:
+//  1. 130, with nothing written, when the root context is cancelled and the error is
+//     [context.Canceled]. A run function that cancels or times out a context it derived itself
+//     while the root context is live is not interrupted;
+//  2. the code of a [spec.CodedError] the error carries, when it is 1 or 3 through 125; any other
+//     code is ignored;
+//  3. the code of the first match among the [WithExitCode] and [WithExitCodeAs] registrations, in
+//     the order the options were given, also for an error that is a join of several;
+//  4. 2 for a usage error;
+//  5. 1 otherwise.
+//
+// The context an [App] and the package-level [Execute] run with is cancelled only by an
+// interrupt, so rule 1 does not apply to them. Instead, the first value [spec.Env.Interrupts]
+// delivers cancels the context every hook and run function receives, and an error rules 2 to 5
+// then give 1 exits 130; the second value returns 130 at once and abandons the run. [Execute] and
+// [App.Execute] deliver SIGINT and SIGTERM as those values.
+//
+// The registrations belong to the [App] and are read-only after [New]. The package-level
+// [Execute] and [ExecuteArgs] have none, so for them rules 1, 2, 4 and 5 apply.
+//
+// [spec.Reported] suppresses the written error and nothing else: the code is still chosen
+// by rules 2 to 5, so a reported usage error exits 2 silently. The "invalid command tree" message,
+// one row per problem [spec.Command.Validate] finds, is never suppressed.
+//
+// A [PreRunHook] error is mapped as a run function's error is. A [PostRunHook] error after a run
+// that succeeded is opaque: it is written and exits 1, whatever it wraps. When the run function
+// fails, its error decides, whatever a post-run hook returns.
 package cli

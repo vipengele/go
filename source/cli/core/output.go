@@ -2,8 +2,6 @@ package cli
 
 import (
 	"errors"
-	"io"
-	"os"
 
 	"go.vipengele.org/cli/spec"
 )
@@ -33,8 +31,9 @@ func (r outputResolver) resolve(inv *spec.Invocation) (spec.Output, error) {
 }
 
 // colorForbidden reports whether env forbids colour: NO_COLOR or <EnvPrefix>_NO_COLOR is set and
-// not empty, or env.Stdout is not a terminal. env must be resolved as [spec.Env.Resolved]
-// returns it. An identity whose EnvPrefix names no variable reads no prefixed variable.
+// not empty, or env.IsTerminal reports that [spec.Stdout] is not a terminal. env must be
+// resolved as [spec.Env.Resolved] returns it. An identity whose EnvPrefix names no variable
+// reads no prefixed variable.
 func (r outputResolver) colorForbidden(env *spec.Env) bool {
 	if nonEmpty(env, "NO_COLOR") {
 		return true
@@ -44,22 +43,11 @@ func (r outputResolver) colorForbidden(env *spec.Env) bool {
 			return true
 		}
 	}
-	return !isTerminal(env.Stdout)
+	return !env.IsTerminal(spec.Stdout)
 }
 
 // nonEmpty reports whether env sets the variable name to a value that is not empty.
 func nonEmpty(env *spec.Env, name string) bool {
 	v, ok := env.LookupEnv(name)
 	return ok && v != ""
-}
-
-// isTerminal reports whether w is an *os.File open on a character device. Any other writer,
-// and a file whose mode cannot be read, is not a terminal.
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := f.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }

@@ -21,9 +21,24 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   the process (`os.Args[1:]`, standard streams, working directory, environment) and returns the exit
   code; `ExecuteArgs(env, root, args)` is the same against a given `*spec.Env`, for tests. Both
   validate the tree on every call. Exit codes: 0 success and `--help`, 1 a run error or an invalid
-  tree, 2 a command line the tree does not accept, 130 a run error after an interrupt or a second
-  interrupt. Every error is written to stderr as `<root name>: <error>`, always on the calling
-  goroutine.
+  tree, 2 a command line the tree does not accept, 130 interrupted (the `executeArgsCtx` context
+  cancelled and `context.Canceled`, nothing printed; also an error that would exit 1 after an
+  interrupt reached the run, and a second interrupt); 3-125 are registrable. Order, first match wins: 130,
+  `spec.Coded` (1 or 3-125), `WithExitCode(code, sentinel)` / `WithExitCodeAs(fn)` in option order,
+  usage 2, else 1. The registry is per-`App`, read-only after `New` (a bad code panics there); the
+  package-level `Execute` / `ExecuteArgs` have none. Every error is written to stderr as a tree
+  (`internal/errrender`, ADR-0011) unless it carries `spec.Reported` (the code is still chosen as
+  above; the `invalid command tree` tree, `fmt.Errorf("invalid command tree: %w", err)` with a row per
+  defect, is never suppressed). A post-run hook error after a successful run is an opaque
+  `*HookError` (exit 1, printed); a pre-run hook error maps like a run error (ADR-0010).
+  `WithErrorRenderer[E error](fn func(E) string)` renders an error of type `E` itself: each node of
+  the tree is tried by a direct type assertion to `E` (not `errors.As`), the first registered match
+  wins and its output replaces the node's whole subtree (first line the row, further lines detail
+  rows indented beneath it). An empty string falls back to the default for that node and a nil `fn`
+  is ignored. The renderers are per-`App`, read-only after `New`; the package-level `Execute` /
+  `ExecuteArgs` have none. Three sites write to stderr: the run error and the invalid-tree error
+  (both with the App's renderers), and a failed `os.Getwd` in `Execute` before any run (default
+  rendering only). Errors are always written on the calling goroutine.
   `spec.Env.Interrupts` drives interruption (`execute.go`): the first value cancels the context
   every hook and run function receives, the second returns 130 at once and abandons the run, which
   may still run its PostRun hooks and write to the Env's streams. Nil runs `cobra.Run` inline with
@@ -31,6 +46,16 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   but the abandoning one. `ExecuteArgs` registers no OS signal handler; `Execute` and
   `App.Execute` register SIGINT and SIGTERM once, in `executeProcess`, forward them as `Interrupts`
   values and unregister on return. A test injects its own `chan struct{}`.
+- `internal/errrender` — `Render(w, tool, err, renderers)` prints the tree. The summary line is
+  `<tool>: <outermost layer's own text>` (no prefix for an empty tool); each inner `%w` layer is a
+  `→` row and each error of an `errors.Join` a `•` row, indented two spaces per depth; always UTF-8,
+  no colour. A layer's own text is its message with `": "+child.Error()` cut off the end. Transparent
+  (message equals the child's, e.g. `spec.CodedError`): skipped. Opaque (child's text is not a
+  suffix, or a nil child): the whole message is one row and the walk stops. Empty own text: dropped.
+  A multi-child node is a join only when its message is the newline-join of the children's;
+  otherwise (a `fmt.Errorf` with several `%w`) it is opaque. A bare join has the summary `N errors`
+  and a join of one renders as that child. `*cobra.UsageError` is a flat leaf, so a usage error stays
+  `tool: greet: unknown flag: --bogus`.
 - `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
   fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
   times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`
@@ -53,6 +78,7 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   (`buildinfo/testdata/ldflagsmain`) to prove it, so that test needs the `go` command.
 - Cobra lives only in `internal/cobra`, imported under the alias `spf`; the depguard rule in
   `.golangci.yml` fails any import of `github.com/spf13/cobra` elsewhere. `cli/spec` is cobra-free.
+  The same file confines `golang.org/x/term` to `cli/spec/terminal`.
 - Commands are `cli/spec` data. Flags are read through typed handles (`asJSON.Get(inv)`) built inside
   the command's constructor: `gochecknoglobals` is on, so there are no package-level handles, and a
   package-level variable needs a justified `//nolint`.
@@ -60,6 +86,13 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   (indirect, because spec imports it), each with a version-less directory `replace` (`../spec`,
   `../../commons`) while they are developed together (ADR-0006). The main module ignores a
   dependency's `replace`, which is why commons is listed here.
+- Error output is pinned by golden files under `testdata/render/*.golden` (`render_golden_test.go`).
+  Regenerate with `go test -update`; the `-update` flag is registered in `TestMain`
+  (`execute_test.go`), so a test binary without that `TestMain` does not know it.
 - An `ExecuteArgs` test passes a fake `Env` (buffers, a fake `LookupEnv`, a `t.TempDir` `WorkDir`).
   A real environment variable set with `t.Setenv` is invisible to `Run`, which reads only
   `Env.LookupEnv`.
+- `ExecuteArgs` fills a nil `Env.Terminal` on its own copy with `terminal.Detect` over the `Env`
+  streams; a supplied `Terminal` is kept and the caller's `Env` is not mutated. A real file is
+  probed and buffers are not terminals, so a test that needs a terminal sets `Env.Terminal`.
+  Colour asks `env.IsTerminal(spec.Stdout)`.

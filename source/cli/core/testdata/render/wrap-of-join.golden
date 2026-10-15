@@ -1,0 +1,5 @@
+tool: load config
+  → validate tool.yaml
+    • name: required
+    • port
+      → out of range

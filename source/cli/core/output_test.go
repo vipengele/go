@@ -4,39 +4,20 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 	"testing"
 
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/spec"
 )
 
-// terminal returns an *os.File open on a character device, which the Output treats as a
-// terminal, and skips the test where the null device is not one.
-func terminal(t *testing.T) *os.File {
-	t.Helper()
-	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = f.Close() })
-	info, err := f.Stat()
-	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-		t.Skipf("%s is not a character device", os.DevNull)
-	}
-	return f
-}
+// stdoutTerminal is an Env.Terminal under which only the standard output is a terminal.
+func stdoutTerminal(s spec.Stream) bool { return s == spec.Stdout }
 
-// regularFile returns an *os.File open on a regular file, which is not a terminal.
-func regularFile(t *testing.T) *os.File {
-	t.Helper()
-	f, err := os.CreateTemp(t.TempDir(), "stdout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = f.Close() })
-	return f
-}
+// stderrTerminal is an Env.Terminal under which only the standard error is a terminal.
+func stderrTerminal(s spec.Stream) bool { return s == spec.Stderr }
+
+// noTerminal is an Env.Terminal under which no standard stream is a terminal.
+func noTerminal(spec.Stream) bool { return false }
 
 // outputApp returns an App configured by opts whose command "show" stores the Output it
 // receives in *got.
@@ -62,83 +43,95 @@ func lookup(vars map[string]string) func(string) (string, bool) {
 
 func TestAppOutputColor(t *testing.T) {
 	tests := []struct {
-		name   string
-		opts   []cli.Option
-		args   []string
-		vars   map[string]string
-		stdout func(t *testing.T) io.Writer
-		want   bool
+		name     string
+		opts     []cli.Option
+		args     []string
+		vars     map[string]string
+		stdout   io.Writer
+		terminal func(spec.Stream) bool
+		want     bool
 	}{
 		{
-			name:   "terminal allows colour",
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
-			want:   true,
+			name:     "terminal allows colour",
+			stdout:   &bytes.Buffer{},
+			terminal: stdoutTerminal,
+			want:     true,
 		},
 		{
-			name:   "regular file forbids colour",
-			stdout: func(t *testing.T) io.Writer { return regularFile(t) },
+			name:     "stdout that is not a terminal forbids colour",
+			stdout:   &bytes.Buffer{},
+			terminal: noTerminal,
+		},
+		{
+			name:     "a terminal on stderr alone forbids colour",
+			stdout:   &bytes.Buffer{},
+			terminal: stderrTerminal,
 		},
 		{
 			name:   "writer that is not a file forbids colour",
-			stdout: func(*testing.T) io.Writer { return &bytes.Buffer{} },
+			stdout: &bytes.Buffer{},
 		},
 		{
-			name:   "nil stdout forbids colour",
-			stdout: func(*testing.T) io.Writer { return nil },
+			name: "nil stdout forbids colour",
 		},
 		{
-			name:   "--no-color forbids colour",
-			opts:   []cli.Option{cli.WithNoColor()},
-			args:   []string{"--no-color"},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
+			name:     "--no-color forbids colour",
+			opts:     []cli.Option{cli.WithNoColor()},
+			args:     []string{"--no-color"},
+			terminal: stdoutTerminal,
 		},
 		{
-			name:   "--no-color absent allows colour",
-			opts:   []cli.Option{cli.WithNoColor()},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
-			want:   true,
+			name:     "--no-color absent allows colour",
+			opts:     []cli.Option{cli.WithNoColor()},
+			terminal: stdoutTerminal,
+			want:     true,
 		},
 		{
-			name:   "NO_COLOR forbids colour",
-			vars:   map[string]string{"NO_COLOR": "1"},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
+			name:     "NO_COLOR forbids colour",
+			vars:     map[string]string{"NO_COLOR": "1"},
+			terminal: stdoutTerminal,
 		},
 		{
-			name:   "empty NO_COLOR allows colour",
-			vars:   map[string]string{"NO_COLOR": ""},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
-			want:   true,
+			name:     "empty NO_COLOR allows colour",
+			vars:     map[string]string{"NO_COLOR": ""},
+			terminal: stdoutTerminal,
+			want:     true,
 		},
 		{
-			name:   "prefixed NO_COLOR forbids colour",
-			vars:   map[string]string{"TOOL_NO_COLOR": "yes"},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
+			name:     "prefixed NO_COLOR forbids colour",
+			vars:     map[string]string{"TOOL_NO_COLOR": "yes"},
+			terminal: stdoutTerminal,
 		},
 		{
-			name:   "empty prefixed NO_COLOR allows colour",
-			vars:   map[string]string{"TOOL_NO_COLOR": ""},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
-			want:   true,
+			name:     "empty prefixed NO_COLOR allows colour",
+			vars:     map[string]string{"TOOL_NO_COLOR": ""},
+			terminal: stdoutTerminal,
+			want:     true,
 		},
 		{
-			name:   "another tool's NO_COLOR allows colour",
-			vars:   map[string]string{"OTHER_NO_COLOR": "1"},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
-			want:   true,
+			name:     "another tool's NO_COLOR allows colour",
+			vars:     map[string]string{"OTHER_NO_COLOR": "1"},
+			terminal: stdoutTerminal,
+			want:     true,
 		},
 		{
-			name:   "--json keeps colour",
-			opts:   []cli.Option{cli.WithJSON()},
-			args:   []string{"--json"},
-			stdout: func(t *testing.T) io.Writer { return terminal(t) },
-			want:   true,
+			name:     "--json keeps colour",
+			opts:     []cli.Option{cli.WithJSON()},
+			args:     []string{"--json"},
+			terminal: stdoutTerminal,
+			want:     true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got spec.Output
 			var stderr bytes.Buffer
-			env := &spec.Env{Stdout: tt.stdout(t), Stderr: &stderr, LookupEnv: lookup(tt.vars)}
+			env := &spec.Env{
+				Stdout:    tt.stdout,
+				Stderr:    &stderr,
+				LookupEnv: lookup(tt.vars),
+				Terminal:  tt.terminal,
+			}
 			args := append([]string{"show"}, tt.args...)
 			if code := outputApp(&got, tt.opts...).ExecuteArgs(env, args); code != cli.ExitOK {
 				t.Fatalf("ExecuteArgs(%q) = %d, stderr %q; want 0", args, code, stderr.String())
@@ -170,7 +163,7 @@ func TestExecuteArgsOutputColor(t *testing.T) {
 					return nil
 				},
 			}
-			env := &spec.Env{Stdout: terminal(t), LookupEnv: lookup(tt.vars)}
+			env := &spec.Env{LookupEnv: lookup(tt.vars), Terminal: stdoutTerminal}
 			if code := cli.ExecuteArgs(env, root, nil); code != cli.ExitOK {
 				t.Fatalf("ExecuteArgs = %d, want 0", code)
 			}

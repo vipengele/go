@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"context"
+
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/core/internal/cobra"
+	"go.vipengele.org/cli/core/internal/errrender"
 	"go.vipengele.org/cli/core/versioncmd"
 	"go.vipengele.org/cli/spec"
 )
@@ -45,6 +48,12 @@ type settings struct {
 	// buildInfo is what the "version" command prints: the Info [WithBuildInfo] gives, or
 	// [buildinfo.Read] when no option gives one.
 	buildInfo *buildinfo.Info
+	// exitMatchers are the matchers [WithExitCode] and [WithExitCodeAs] add, in the order they
+	// were added. Nothing changes them after [New], so concurrent executions share them.
+	exitMatchers exitMatchers
+	// errorRenderers are the renderers [WithErrorRenderer] adds, in the order they were added.
+	// Nothing changes them after [New], so concurrent executions share them.
+	errorRenderers []errrender.Renderer
 }
 
 // Option configures an [App] when [New] builds it.
@@ -72,6 +81,51 @@ func WithBuildInfo(info buildinfo.Info) Option {
 	return func(s *settings) { s.buildInfo = &info }
 }
 
+// WithExitCode makes [App.Execute] and [App.ExecuteArgs] exit with code for an error that
+// matches sentinel by errors.Is. The codes 0, [ExitUsage] and [ExitInterrupted] are reserved and
+// a code outside 1 through 125 is refused: [New] panics with a message naming the code. 1 and 3
+// through 125 are accepted. A nil sentinel matches no error.
+//
+// When an error matches several registrations, the one registered first decides. A
+// [spec.CodedError] the error carries, with a code 1 or 3 through 125, takes precedence over every
+// registration; the package documentation's "Exit codes" section describes the whole order.
+func WithExitCode(code int, sentinel error) Option {
+	return func(s *settings) {
+		s.exitMatchers = append(s.exitMatchers, sentinelMatcher(code, sentinel))
+	}
+}
+
+// WithExitCodeAs makes [App.Execute] and [App.ExecuteArgs] exit with the code fn returns for an
+// error that matches E by errors.As, given the error found. A code fn returns that 0, [ExitUsage],
+// [ExitInterrupted] or a number outside 1 through 125 is ignored, as if the error did not match,
+// because [New] cannot know it. A nil fn is ignored.
+//
+// It orders against [WithExitCode] by registration, and yields to a [spec.CodedError], as that
+// option describes.
+func WithExitCodeAs[E error](fn func(E) int) Option {
+	return func(s *settings) {
+		if fn != nil {
+			s.exitMatchers = append(s.exitMatchers, typedMatcher(fn))
+		}
+	}
+}
+
+// WithErrorRenderer makes [App.Execute] and [App.ExecuteArgs] write an error of the tree they
+// print that is an E, by type assertion on that error itself, as fn renders it. The first line fn
+// returns is the error's row, and each further line a detail row indented under it; fn's output
+// replaces the error's whole subtree, so nothing it wraps or joins is printed. An empty string
+// renders the error as if no renderer matched it. A nil fn is ignored.
+//
+// When an error matches several renderers, the one registered first renders it. The
+// package-level [Execute] and [ExecuteArgs] have no renderers.
+func WithErrorRenderer[E error](fn func(E) string) Option {
+	return func(s *settings) {
+		if fn != nil {
+			s.errorRenderers = append(s.errorRenderers, typedRenderer(fn))
+		}
+	}
+}
+
 // Add adds cmd as a subcommand of the root, after the commands added before it. It checks
 // nothing: a nil command, an invalid one, or a name another added command already has is
 // reported by [App.ExecuteArgs] as an invalid command tree.
@@ -84,9 +138,10 @@ func (a *App) Add(cmd *spec.Command) {
 // returns the exit code, which a tool's main passes to os.Exit. It behaves as [App.ExecuteArgs]
 // does, with SIGINT and SIGTERM as the values of [spec.Env.Interrupts]: the first cancels the
 // run's context and the second returns [ExitInterrupted]. It returns [ExitError] after writing
-// "<name>: <error>" to os.Stderr when the working directory cannot be determined.
+// the error, as [ExecuteArgs] writes one and with no [WithErrorRenderer] renderer, to os.Stderr
+// when the working directory cannot be determined.
 func (a *App) Execute() int {
-	return executeProcess(prefix(a.root(standardFlags{})), a.ExecuteArgs)
+	return executeProcess(a.identity.Name, a.ExecuteArgs)
 }
 
 // ExecuteArgs runs the App with args against env, and returns the exit code, as the
@@ -96,9 +151,12 @@ func (a *App) Execute() int {
 // into as its inherited flags. Given no argument, the root writes its help to env.Stdout and
 // returns [ExitOK].
 // The root is checked on every call, so an App with two commands of one name, "version"
-// included, returns [ExitError] after writing "<name>: invalid command tree: <error>" to
-// env.Stderr. So does a command that declares a flag with the name or the shorthand of a
-// standard flag the App takes.
+// included, returns [ExitError] after writing "<name>: invalid command tree" to env.Stderr,
+// followed by one row per problem found. So does a command that declares a flag with the name or
+// the shorthand of a standard flag the App takes.
+//
+// Every error is written to env.Stderr as [ExecuteArgs] writes one, with each error of its tree
+// offered to the renderers [WithErrorRenderer] adds, in the order they were added.
 //
 // "version --json" writes JSON whether or not the App takes the standard --json. Without it,
 // --json is a local flag of "version"; with it, "version" declares no flag of its own and reads
@@ -108,16 +166,23 @@ func (a *App) Execute() int {
 // command line sets; a standard flag the App does not take reads as unset. --verbose with
 // --quiet returns [ExitUsage] and calls no run function. The Output forbids colour when
 // --no-color is set, when the environment variable NO_COLOR or <EnvPrefix>_NO_COLOR, named by
-// the identity, is set and not empty, or when env.Stdout is not a terminal.
+// the identity, is set and not empty, or when env.Stdout is not a terminal as
+// [spec.Env.IsTerminal] reports it for [spec.Stdout].
 //
 // The hooks [WithPreRun] and [WithPostRun] add run around every run function it calls, as they
 // describe.
+//
+// The exit code of an error is, first match wins: the code of a [spec.CodedError] the error
+// carries, when it is 1 or 3 through 125; the code of the first registered [WithExitCode] or
+// [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept;
+// [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	flags := newStandardFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	pre, post := a.settings.hookFuncs()
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
-	return executeArgs(env, a.root(flags), args, cfg)
+	return executeArgsCtx(context.Background(), env, a.root(flags), args, cfg, a.settings.exitMatchers,
+		a.settings.errorRenderers...)
 }
 
 // root returns a fresh root command for one execution, declaring flags as its inherited flags.
