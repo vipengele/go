@@ -1,6 +1,6 @@
 // Package buildinfo reports the version, commit and build date of the running binary, and the
 // Go toolchain, operating system and architecture it was built for. It depends on the standard
-// library only.
+// library and on go.vipengele.org/cli/spec/version.
 //
 // # Resolution
 //
