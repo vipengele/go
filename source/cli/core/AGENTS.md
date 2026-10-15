@@ -21,8 +21,14 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   the process (`os.Args[1:]`, standard streams, working directory, environment) and returns the exit
   code; `ExecuteArgs(env, root, args)` is the same against a given `*spec.Env`, for tests. Both
   validate the tree on every call. Exit codes: 0 success and `--help`, 1 a run error or an invalid
-  tree, 2 a command line the tree does not accept. Every error is written to stderr as
-  `<root name>: <error>`.
+  tree, 2 a command line the tree does not accept, 130 interrupted (root context cancelled and
+  `context.Canceled`, nothing printed); 3-125 are registrable. Order, first match wins: 130,
+  `spec.Coded` (1 or 3-125), `WithExitCode(code, sentinel)` / `WithExitCodeAs(fn)` in option order,
+  usage 2, else 1. The registry is per-`App`, read-only after `New` (a bad code panics there); the
+  package-level `Execute` / `ExecuteArgs` have none. Every error is written to stderr as
+  `<root name>: <error>` unless it carries `spec.Reported` (the code is still chosen as above; the
+  `invalid command tree` line is never suppressed). A post-run hook error after a successful run is
+  an opaque `*HookError` (exit 1, printed); a pre-run hook error maps like a run error (ADR-0010).
 - `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
   fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
   times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`

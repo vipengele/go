@@ -149,6 +149,16 @@ own run: one key exempts a Command from the update check. It applies to the Comm
 not to its subcommands.
 _Avoid_: tag (a **Prefixed tag** is a release), label, metadata
 
+**Exit code**:
+The number a tool's process ends with. 0 is success, 1 a general error, 2 a command line the tool
+does not accept, 130 an interruption; a tool gives 3 through 125 to its own errors (ADR-0010).
+_Avoid_: status, return code, error code (a code inside an error's own text)
+
+**Reported error**:
+An error whose message a **Command** has already shown to the user, so the **App** ends the process
+with its **Exit code** without printing it again (ADR-0010).
+_Avoid_: silent error, handled error
+
 **Release source**:
 Where a tool's own published releases come from, behind the `update` project's `Source` interface:
 it lists releases and serves the assets of one. It does not choose among them; version comparison
