@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -641,8 +643,158 @@ func TestMain(m *testing.M) {
 		}
 		os.Args = []string{os.Args[0], "greet"}
 		os.Exit(cli.Execute(newRoot()))
+	case "signal":
+		os.Args = []string{os.Args[0], os.Getenv("CLI_CORE_EXECUTE_ARGS")}
+		os.Exit(cli.Execute(signalRoot()))
 	}
 	os.Exit(m.Run())
+}
+
+// signalRoot returns a tree whose root, named "tool", prints "ready" and waits for its context
+// to be cancelled. Given "cancelled", it then returns the context's error; given "ignore", it
+// prints "cancelled" and waits for its standard input to close. Its run function prints "ready"
+// only once Execute has registered for signals.
+func signalRoot() *spec.Command {
+	return &spec.Command{
+		Name: "tool",
+		Args: spec.ExactArgs(1),
+		Run: func(ctx context.Context, inv *spec.Invocation) error {
+			_, _ = fmt.Fprintln(inv.Env.Stdout, "ready")
+			<-ctx.Done()
+			if inv.Args[0] == "ignore" {
+				_, _ = fmt.Fprintln(inv.Env.Stdout, "cancelled")
+				_, err := io.ReadAll(inv.Env.Stdin)
+				return err
+			}
+			return ctx.Err()
+		},
+	}
+}
+
+// signalChild is the test binary running as the tool signalRoot builds, whose standard input
+// stays open until the child exits.
+type signalChild struct {
+	t      *testing.T
+	cmd    *exec.Cmd
+	stderr bytes.Buffer
+	lines  chan string
+	exited chan struct{}
+	code   int
+}
+
+// childDeadline bounds every wait on a child, so a child that hangs fails its test.
+const childDeadline = 10 * time.Second
+
+// startSignalChild starts the test binary as the tool signalRoot builds, with arg as its
+// argument, and kills it when the test ends.
+func startSignalChild(t *testing.T, arg string) *signalChild {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("signals cannot be sent to a process on Windows")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &signalChild{t: t, lines: make(chan string, 16), exited: make(chan struct{})}
+	c.cmd = exec.Command(exe)
+	c.cmd.Env = append(os.Environ(), executeChild+"=signal", "CLI_CORE_EXECUTE_ARGS="+arg)
+	c.cmd.Stderr = &c.stderr
+	// The write end of the pipe stays open until Wait closes it, after the child exits.
+	if _, err := c.cmd.StdinPipe(); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := c.cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		defer close(c.exited)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			c.lines <- scanner.Text()
+		}
+		if err := c.cmd.Wait(); err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				c.code = -1
+				return
+			}
+			c.code = exit.ExitCode()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = c.cmd.Process.Kill()
+		<-c.exited
+	})
+	return c
+}
+
+// waitLine fails the test unless the next line the child prints is want.
+func (c *signalChild) waitLine(want string) {
+	c.t.Helper()
+	select {
+	case line, ok := <-c.lines:
+		if !ok {
+			c.t.Fatalf("child exited before printing %q; stderr %q", want, c.stderr.String())
+		}
+		if line != want {
+			c.t.Fatalf("child printed %q, want %q", line, want)
+		}
+	case <-time.After(childDeadline):
+		c.t.Fatalf("child did not print %q", want)
+	}
+}
+
+// signal sends sig to the child.
+func (c *signalChild) signal(sig os.Signal) {
+	c.t.Helper()
+	if err := c.cmd.Process.Signal(sig); err != nil {
+		c.t.Fatalf("sending %v: %v", sig, err)
+	}
+}
+
+// wait returns the child's exit code and standard error once it exits.
+func (c *signalChild) wait() (code int, stderr string) {
+	c.t.Helper()
+	select {
+	case <-c.exited:
+		return c.code, c.stderr.String()
+	case <-time.After(childDeadline):
+		c.t.Fatal("child did not exit")
+		return 0, ""
+	}
+}
+
+func TestExecuteSignalCancelsTheRun(t *testing.T) {
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			c := startSignalChild(t, "cancelled")
+			c.waitLine("ready")
+			c.signal(sig)
+			code, stderr := c.wait()
+			if code != cli.ExitInterrupted || stderr != "tool: context canceled\n" {
+				t.Errorf("child: code %d, stderr %q; want %d and %q",
+					code, stderr, cli.ExitInterrupted, "tool: context canceled\n")
+			}
+		})
+	}
+}
+
+func TestExecuteSecondSignalAbandonsTheRun(t *testing.T) {
+	c := startSignalChild(t, "ignore")
+	c.waitLine("ready")
+	c.signal(os.Interrupt)
+	c.waitLine("cancelled")
+	c.signal(os.Interrupt)
+	code, stderr := c.wait()
+	if code != cli.ExitInterrupted || stderr != "" {
+		t.Errorf("child: code %d, stderr %q; want %d and no stderr",
+			code, stderr, cli.ExitInterrupted)
+	}
 }
 
 // runChild runs the test binary as the tool in dir, with mode selecting the main TestMain runs

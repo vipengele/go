@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/spec"
@@ -35,8 +37,10 @@ const (
 //		os.Exit(cli.Execute(newRoot()))
 //	}
 //
-// It behaves as [ExecuteArgs] does, and returns [ExitError] after writing "<name>: <error>" to
-// os.Stderr when the working directory cannot be determined.
+// It behaves as [ExecuteArgs] does, with SIGINT and SIGTERM as the values of
+// [spec.Env.Interrupts]: the first cancels the run's context and the second returns
+// [ExitInterrupted]. It returns [ExitError] after writing "<name>: <error>" to os.Stderr when the
+// working directory cannot be determined.
 func Execute(root *spec.Command) int {
 	return executeProcess(prefix(root), func(env *spec.Env, args []string) int {
 		return ExecuteArgs(env, root, args)
@@ -46,13 +50,53 @@ func Execute(root *spec.Command) int {
 // executeProcess calls run with the environment and the arguments of the process, and returns
 // its exit code. It returns [ExitError] without calling run after writing the error, preceded
 // by errPrefix, to os.Stderr when the working directory cannot be determined.
+//
+// While run runs, SIGINT and SIGTERM reach it as values of env.Interrupts instead of ending the
+// process; once executeProcess returns, they have their default effect again.
 func executeProcess(errPrefix string, run func(env *spec.Env, args []string) int) int {
 	env, err := processEnv()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%s%v\n", errPrefix, err)
 		return ExitError
 	}
+	interrupts, stop := notifyInterrupts()
+	defer stop()
+	env.Interrupts = interrupts
 	return run(env, os.Args[1:])
+}
+
+// notifyInterrupts registers for SIGINT and SIGTERM and starts the goroutine that forwards each
+// of them as a value of interrupts. stop unregisters, asks the goroutine to exit and waits until
+// it has. The goroutine never blocks the delivery of a signal: os/signal drops a signal its
+// channel has no room for rather than wait, and every send to interrupts also watches for stop.
+// interrupts holds two values, the most a run reacts to, so two signals in quick succession
+// both reach it.
+func notifyInterrupts() (interrupts <-chan struct{}, stop func()) {
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	interruptc := make(chan struct{}, 2)
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		for {
+			select {
+			case <-sigs:
+				select {
+				case interruptc <- struct{}{}:
+				case <-done:
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return interruptc, func() {
+		signal.Stop(sigs)
+		close(done)
+		<-exited
+	}
 }
 
 // processEnv returns the environment of the process.
