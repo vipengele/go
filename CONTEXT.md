@@ -152,7 +152,7 @@ _Avoid_: tag (a **Prefixed tag** is a release), label, metadata
 **Release source**:
 Where a tool's own published releases come from, behind the `update` project's `Source` interface:
 it lists releases and serves the assets of one. It does not choose among them; version comparison
-(`cli/spec/version`, called from `update`) and asset selection do.
+(`cli/spec/version`) and asset selection do.
 _Avoid_: update server, registry, feed, repository
 
 **Managed binary**:
