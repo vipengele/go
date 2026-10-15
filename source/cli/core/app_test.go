@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -365,5 +366,119 @@ func TestAppVersionReadsTheBinary(t *testing.T) {
 	}
 	if m["go"] != runtime.Version() {
 		t.Errorf("go = %v, want %q", m["go"], runtime.Version())
+	}
+}
+
+// exitErr is the error type the exit-code option tests register by type.
+type exitErr struct{ code int }
+
+func (e exitErr) Error() string { return fmt.Sprintf("exit %d", e.code) }
+
+var errExitSentinel = errors.New("sentinel") //nolint:gochecknoglobals // a sentinel is the identity the tests register.
+
+// exitApp builds an App with opts whose command "do" returns err.
+func exitApp(err error, opts ...cli.Option) *cli.App {
+	app := cli.New(identity(), opts...)
+	app.Add(&spec.Command{
+		Name: "do",
+		Run:  func(context.Context, *spec.Invocation) error { return err },
+	})
+	return app
+}
+
+func TestAppExitCodes(t *testing.T) {
+	byType := cli.WithExitCodeAs(func(e exitErr) int { return e.code })
+	tests := []struct {
+		name string
+		err  error
+		opts []cli.Option
+		want int
+	}{
+		{
+			name: "sentinel",
+			err:  fmt.Errorf("wrapped: %w", errExitSentinel),
+			opts: []cli.Option{cli.WithExitCode(7, errExitSentinel)},
+			want: 7,
+		},
+		{name: "typed error", err: exitErr{code: 9}, opts: []cli.Option{byType}, want: 9},
+		{name: "typed error with an unregistrable code", err: exitErr{code: 130}, opts: []cli.Option{byType},
+			want: cli.ExitError},
+		{
+			name: "unrelated error",
+			err:  errors.New("other"),
+			opts: []cli.Option{cli.WithExitCode(7, errExitSentinel), byType},
+			want: cli.ExitError,
+		},
+		{
+			name: "coded wins over a registration",
+			err:  spec.Coded(4, errExitSentinel),
+			opts: []cli.Option{cli.WithExitCode(7, errExitSentinel)},
+			want: 4,
+		},
+		{
+			name: "first registered wins, sentinel first",
+			err:  fmt.Errorf("%w: %w", errExitSentinel, exitErr{code: 9}),
+			opts: []cli.Option{cli.WithExitCode(7, errExitSentinel), byType},
+			want: 7,
+		},
+		{
+			name: "first registered wins, typed first",
+			err:  fmt.Errorf("%w: %w", errExitSentinel, exitErr{code: 9}),
+			opts: []cli.Option{byType, cli.WithExitCode(7, errExitSentinel)},
+			want: 9,
+		},
+		{
+			name: "nil fn is ignored",
+			err:  exitErr{code: 9},
+			opts: []cli.Option{cli.WithExitCodeAs[exitErr](nil)},
+			want: cli.ExitError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runApp(t, exitApp(tt.err, tt.opts...), "do"); got.code != tt.want {
+				t.Errorf("exit code %d, want %d (stderr %q)", got.code, tt.want, got.stderr)
+			}
+		})
+	}
+}
+
+func TestAppExitCodesAreIndependentPerApp(t *testing.T) {
+	a := exitApp(errExitSentinel, cli.WithExitCode(7, errExitSentinel))
+	b := exitApp(errExitSentinel, cli.WithExitCode(8, errExitSentinel))
+	c := exitApp(errExitSentinel)
+	for _, tt := range []struct {
+		app  *cli.App
+		want int
+	}{{a, 7}, {b, 8}, {c, cli.ExitError}, {a, 7}} {
+		if got := runApp(t, tt.app, "do"); got.code != tt.want {
+			t.Errorf("exit code %d, want %d", got.code, tt.want)
+		}
+	}
+}
+
+func TestWithExitCodePanicsInNewForAReservedCode(t *testing.T) {
+	for _, code := range []int{0, 2, 130, -1, 126} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			defer func() {
+				r := recover()
+				msg, _ := r.(string)
+				if want := fmt.Sprintf("exit code %d ", code); !strings.Contains(msg, want) {
+					t.Errorf("panic %v, want a message containing %q", r, want)
+				}
+			}()
+			cli.New(identity(), cli.WithExitCode(code, errExitSentinel))
+		})
+	}
+}
+
+func TestWithExitCodeAcceptsARegistrableCode(t *testing.T) {
+	for _, code := range []int{1, 3, 125} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			app := exitApp(errExitSentinel, cli.WithExitCode(code, errExitSentinel))
+			if got := runApp(t, app, "do"); got.code != code {
+				t.Errorf("exit code %d, want %d", got.code, code)
+			}
+		})
 	}
 }
