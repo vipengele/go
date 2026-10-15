@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/core/buildinfo"
@@ -245,6 +247,54 @@ func TestAppConcurrent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestAppInterruptCancelsTheContextOfHooksAndRun(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	preCtx := make(chan context.Context, 1)
+	var runErr, postErr error
+	app := cli.New(identity(),
+		cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) error {
+			preCtx <- ctx
+			<-ctx.Done()
+			return nil
+		}),
+		cli.WithPostRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo, _ error) error {
+			postErr = ctx.Err()
+			return errors.New("hook failed")
+		}),
+	)
+	app.Add(&spec.Command{
+		Name: "wait",
+		Run: func(ctx context.Context, _ *spec.Invocation) error {
+			runErr = ctx.Err()
+			return nil
+		},
+	})
+
+	ch := make(chan struct{})
+	var stderr bytes.Buffer
+	codes := make(chan int, 1)
+	go func() {
+		codes <- app.ExecuteArgs(&spec.Env{Stderr: &stderr, Interrupts: ch}, []string{"wait"})
+	}()
+	if err := (<-preCtx).Err(); err != nil {
+		t.Fatalf("pre-run context before an interrupt: %v, want nil", err)
+	}
+	ch <- struct{}{}
+	select {
+	case code := <-codes:
+		if code != cli.ExitInterrupted || stderr.String() != "tool: hook failed\n" {
+			t.Errorf("code %d, stderr %q; want %d and %q",
+				code, stderr.String(), cli.ExitInterrupted, "tool: hook failed\n")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ExecuteArgs did not return after the interrupt cancelled its context")
+	}
+	if !errors.Is(runErr, context.Canceled) || !errors.Is(postErr, context.Canceled) {
+		t.Errorf("run saw %v, post-run hook saw %v; want %v for both", runErr, postErr, context.Canceled)
+	}
+	waitGoroutines(t, baseline)
 }
 
 func TestAppExecuteUsesTheProcess(t *testing.T) {

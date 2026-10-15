@@ -21,8 +21,15 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   the process (`os.Args[1:]`, standard streams, working directory, environment) and returns the exit
   code; `ExecuteArgs(env, root, args)` is the same against a given `*spec.Env`, for tests. Both
   validate the tree on every call. Exit codes: 0 success and `--help`, 1 a run error or an invalid
-  tree, 2 a command line the tree does not accept. Every error is written to stderr as
-  `<root name>: <error>`.
+  tree, 2 a command line the tree does not accept, 130 a run error after an interrupt or a second
+  interrupt. Every error is written to stderr as `<root name>: <error>`, always on the calling
+  goroutine.
+  `spec.Env.Interrupts` drives interruption (`execute.go`): the first value cancels the context
+  every hook and run function receives, the second returns 130 at once and abandons the run, which
+  may still run its PostRun hooks and write to the Env's streams. Nil runs `cobra.Run` inline with
+  no goroutine; otherwise one watcher goroutine and one run goroutine, both joined on every path
+  but the abandoning one. `ExecuteArgs` registers no OS signal handler. A test injects its own
+  `chan struct{}`.
 - `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
   fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
   times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/spec"
@@ -418,6 +419,205 @@ func TestExecuteArgsConcurrent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// ctxRoot returns a tree whose root, named "tool", takes one argument selecting what its run
+// function does with its context: "cancelled" waits for the context to be cancelled and returns
+// its error, "ignore" waits for it and returns nil, "gated" waits for gate to close and returns
+// the context's error, "boom" returns an error, and anything else returns the context's error at
+// once. Every run sends its context to seen, when seen is not nil, before it waits.
+func ctxRoot(gate <-chan struct{}, seen chan<- context.Context) *spec.Command {
+	return &spec.Command{
+		Name: "tool",
+		Args: spec.ExactArgs(1),
+		Run: func(ctx context.Context, inv *spec.Invocation) error {
+			if seen != nil {
+				seen <- ctx
+			}
+			switch inv.Args[0] {
+			case "cancelled":
+				<-ctx.Done()
+			case "ignore":
+				<-ctx.Done()
+				return nil
+			case "gated":
+				<-gate
+			case "boom":
+				return errors.New("boom")
+			}
+			return ctx.Err()
+		},
+	}
+}
+
+// interrupts returns a channel already holding n interrupts.
+func interrupts(n int) chan struct{} {
+	ch := make(chan struct{}, n)
+	for range n {
+		ch <- struct{}{}
+	}
+	return ch
+}
+
+// waitGoroutines fails t unless the number of goroutines falls to baseline or below within a
+// few seconds. A goroutine that has delivered its result may still be exiting, so the count is
+// polled.
+func waitGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Errorf("%d goroutines remain, want at most %d", runtime.NumGoroutine(), baseline)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestExecuteArgsInterrupts(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		interrupts int
+		want       result
+	}{
+		{
+			name:       "error after an interrupt",
+			args:       []string{"cancelled"},
+			interrupts: 1,
+			want:       result{code: cli.ExitInterrupted, stderr: "tool: context canceled\n"},
+		},
+		{
+			name:       "nil after an interrupt",
+			args:       []string{"ignore"},
+			interrupts: 1,
+			want:       result{code: cli.ExitOK},
+		},
+		{
+			name:       "usage error after an interrupt",
+			args:       []string{"now", "--bogus"},
+			interrupts: 1,
+			want:       result{code: cli.ExitUsage, stderr: "tool: unknown flag: --bogus\n"},
+		},
+		{
+			name: "error without an interrupt",
+			args: []string{"boom"},
+			want: result{code: cli.ExitError, stderr: "tool: boom\n"},
+		},
+		{
+			name: "nil without an interrupt",
+			args: []string{"now"},
+			want: result{code: cli.ExitOK},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			var stdout, stderr bytes.Buffer
+			env := &spec.Env{Stdout: &stdout, Stderr: &stderr, Interrupts: interrupts(tt.interrupts)}
+			code := cli.ExecuteArgs(env, ctxRoot(nil, nil), tt.args)
+			got := result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+			if got != tt.want {
+				t.Errorf("ExecuteArgs(%q)\n got: %+v\nwant: %+v", tt.args, got, tt.want)
+			}
+			waitGoroutines(t, baseline)
+		})
+	}
+}
+
+func TestExecuteArgsInterruptCancelsTheContext(t *testing.T) {
+	ch := make(chan struct{})
+	seen := make(chan context.Context, 1)
+	codes := make(chan int, 1)
+	go func() {
+		codes <- cli.ExecuteArgs(&spec.Env{Interrupts: ch}, ctxRoot(nil, seen), []string{"cancelled"})
+	}()
+	ctx := <-seen
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("context before an interrupt: %v, want nil", err)
+	}
+	ch <- struct{}{}
+	select {
+	case code := <-codes:
+		if code != cli.ExitInterrupted {
+			t.Errorf("code %d, want %d", code, cli.ExitInterrupted)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ExecuteArgs did not return after the interrupt cancelled its context")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Errorf("context after an interrupt: %v, want %v", ctx.Err(), context.Canceled)
+	}
+}
+
+func TestExecuteArgsSecondInterruptAbandonsTheRun(t *testing.T) {
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	codes := make(chan int, 1)
+	go func() {
+		// Stderr is never read: the abandoned run may still be running when the test ends.
+		env := &spec.Env{Interrupts: interrupts(2)}
+		codes <- cli.ExecuteArgs(env, ctxRoot(gate, nil), []string{"gated"})
+	}()
+	select {
+	case code := <-codes:
+		if code != cli.ExitInterrupted {
+			t.Errorf("code %d, want %d", code, cli.ExitInterrupted)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ExecuteArgs waited for a run that ignores its context after a second interrupt")
+	}
+}
+
+func TestExecuteArgsWithoutInterrupts(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	var during int
+	var runCtx context.Context
+	root := &spec.Command{
+		Name: "tool",
+		Run: func(ctx context.Context, _ *spec.Invocation) error {
+			during = runtime.NumGoroutine()
+			runCtx = ctx
+			return ctx.Err()
+		},
+	}
+	if code := cli.ExecuteArgs(&spec.Env{}, root, nil); code != cli.ExitOK {
+		t.Fatalf("code %d, want 0", code)
+	}
+	if during > baseline {
+		t.Errorf("%d goroutines while the run function ran, want at most %d", during, baseline)
+	}
+	if !errors.Is(runCtx.Err(), context.Canceled) {
+		t.Errorf("context after ExecuteArgs returned: %v, want %v", runCtx.Err(), context.Canceled)
+	}
+	if got := run(t, "fail"); got != (result{code: cli.ExitError, stderr: "tool: boom\n"}) {
+		t.Errorf("run error: %+v, want code 1 and stderr %q", got, "tool: boom\n")
+	}
+}
+
+func TestExecuteArgsConcurrentInterrupts(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	gate := make(chan struct{})
+	root := ctxRoot(gate, nil)
+	var interrupted, gated sync.WaitGroup
+	for i := range 4 {
+		gated.Go(func() {
+			code := cli.ExecuteArgs(&spec.Env{Interrupts: make(chan struct{})}, root, []string{"gated"})
+			if code != cli.ExitOK {
+				t.Errorf("gated run %d: code %d, want 0", i, code)
+			}
+		})
+		interrupted.Go(func() {
+			code := cli.ExecuteArgs(&spec.Env{Interrupts: interrupts(1)}, root, []string{"cancelled"})
+			if code != cli.ExitInterrupted {
+				t.Errorf("interrupted run %d: code %d, want %d", i, code, cli.ExitInterrupted)
+			}
+		})
+	}
+	interrupted.Wait()
+	close(gate)
+	gated.Wait()
+	waitGoroutines(t, baseline)
 }
 
 // The test binary runs itself as a tool whose main calls cli.Execute when this variable is

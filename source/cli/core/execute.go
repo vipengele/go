@@ -21,6 +21,10 @@ const (
 	// flag value that does not parse, an unknown subcommand, or a number of positional arguments
 	// the command's [spec.ArgPolicy] rejects.
 	ExitUsage = 2
+	// ExitInterrupted is the exit code of a run that returns an error after an interrupt reaches
+	// it through [spec.Env.Interrupts], and of a run abandoned on a second interrupt: 128 plus the
+	// number of SIGINT, as a shell reports a process an interrupt ended.
+	ExitInterrupted = 130
 )
 
 // Execute runs root with the arguments of the process, os.Args[1:], against the environment of
@@ -68,8 +72,18 @@ func processEnv() (*spec.Env, error) {
 
 // ExecuteArgs runs root with args against env, and returns the exit code. It touches no part of
 // the process that env does not give it: a nil env, or a nil field of env, holds the inert
-// default [spec.Env.Resolved] gives it, and a nil args is no arguments. Every run function it
-// calls receives context.Background().
+// default [spec.Env.Resolved] gives it, and a nil args is no arguments. It registers no signal
+// handler of its own.
+//
+// Every run function and hook receives one context, cancelled when ExecuteArgs returns. The
+// first value env.Interrupts delivers cancels it; a run that then returns an error, a PostRun
+// hook's included, returns [ExitInterrupted] instead of [ExitError], a usage error still returns
+// [ExitUsage], and a run that returns nil returns [ExitOK]. An interrupt pending in
+// env.Interrupts when the run returns counts as one that reached it. The second value returns
+// [ExitInterrupted] at once, without waiting for the run: the abandoned run goes on in the
+// background until its run function returns, and may still call its PostRun hooks and write to
+// env's streams, though ExecuteArgs writes nothing more for it. A nil env.Interrupts watches
+// nothing and starts no goroutine.
 //
 // It checks root with [spec.Command.Validate] on every call, and returns [ExitError] after
 // writing "<name>: invalid command tree: <error>" to env.Stderr when the tree is invalid. It
@@ -95,7 +109,29 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 		_, _ = fmt.Fprintf(env.Stderr, "%sinvalid command tree: %v\n", prefix(root), err)
 		return ExitError
 	}
-	err := cobra.Run(context.Background(), env, root, args, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if env.Interrupts == nil {
+		return report(env, root, cobra.Run(ctx, env, root, args, cfg), false)
+	}
+
+	second, stop := watchInterrupts(env.Interrupts, cancel)
+	done := make(chan error, 1)
+	go func() {
+		done <- cobra.Run(ctx, env, root, args, cfg)
+	}()
+	select {
+	case err := <-done:
+		return report(env, root, err, stop())
+	case <-second:
+		return ExitInterrupted
+	}
+}
+
+// report writes err, preceded by root's name, to env.Stderr and returns its exit code:
+// [ExitOK] for nil, [ExitUsage] for a command line the tree does not accept, [ExitInterrupted]
+// for any other error when interrupted, and [ExitError] otherwise.
+func report(env *spec.Env, root *spec.Command, err error, interrupted bool) int {
 	if err == nil {
 		return ExitOK
 	}
@@ -104,7 +140,53 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 	if errors.As(err, &usage) {
 		return ExitUsage
 	}
+	if interrupted {
+		return ExitInterrupted
+	}
 	return ExitError
+}
+
+// watchInterrupts starts the goroutine that watches interrupts for one run. It calls cancel on
+// the first value and closes second on the next one, then exits. stop asks it to exit, waits
+// until it has, and reports whether it received a value; a value pending in interrupts when
+// stop is called counts as received. stop is called at most once. A closed interrupts delivers
+// no more values.
+func watchInterrupts(interrupts <-chan struct{}, cancel context.CancelFunc) (
+	second <-chan struct{}, stop func() bool,
+) {
+	secondc := make(chan struct{})
+	stopc := make(chan struct{})
+	seenc := make(chan bool, 1)
+	go func() {
+		seen := false
+		defer func() { seenc <- seen }()
+		for {
+			select {
+			case _, ok := <-interrupts:
+				if !ok {
+					interrupts = nil
+					continue
+				}
+				if seen {
+					close(secondc)
+					return
+				}
+				seen = true
+				cancel()
+			case <-stopc:
+				select {
+				case _, ok := <-interrupts:
+					seen = seen || ok
+				default:
+				}
+				return
+			}
+		}
+	}()
+	return secondc, func() bool {
+		close(stopc)
+		return <-seenc
+	}
 }
 
 // prefix returns "<name>: " for root's name, and "" for a nil root or an empty name.
