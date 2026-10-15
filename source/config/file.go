@@ -44,7 +44,9 @@ type FileProvider struct {
 // The file is a mapping of keys. Nested mappings and dotted keys share one key space, so
 // "server.port: 80" and "server:" with "port: 80" below it set the same key, and keys match their
 // Schema field ignoring case, "-" and "_" within each segment. A missing file, an empty file and a
-// file holding only comments set nothing.
+// file holding only comments set nothing. An alias stands for the node it points to, so a value
+// reached through one is read as written at its anchor, origin included. A merge key "<<" is not
+// interpreted: it is an unknown key.
 //
 // Load reports every problem in one error: a key with no Schema field, a key set twice under any
 // two spellings, a mapping or list where the field holds a single value, a value where the key

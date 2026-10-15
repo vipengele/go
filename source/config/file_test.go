@@ -99,6 +99,11 @@ func TestFileEntries(t *testing.T) {
 			{Key: "server.port", Value: "0080", Origin: "config.yaml:2"},
 			{Key: "server.host", Value: "yes", Origin: "config.yaml:3"},
 		}},
+		// An alias yields the anchored node, so its origin is the line of the anchored value.
+		{"alias.yaml", []Entry{
+			{Key: "name", Value: "demo", Origin: "config.yaml:1"},
+			{Key: "server.host", Value: "demo", Origin: "config.yaml:1"},
+		}},
 		{"empty.yaml", nil},
 		{"comments.yaml", nil},
 	}
@@ -175,6 +180,10 @@ func TestFileProblems(t *testing.T) {
 			`config.yaml:1: key "name" is null`,
 			`config.yaml:2: key "server.host" is null`,
 			`config.yaml:3: an element of key "tags" is null`,
+		}},
+		// A merge key is an ordinary key named "<<", which no Schema has.
+		{"merge_key.yaml", []string{
+			`config.yaml:3: unknown key "<<"`,
 		}},
 		{"syntax.yaml", []string{
 			`config.yaml: yaml:`,
