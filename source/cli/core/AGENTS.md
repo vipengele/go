@@ -21,9 +21,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   the process (`os.Args[1:]`, standard streams, working directory, environment) and returns the exit
   code; `ExecuteArgs(env, root, args)` is the same against a given `*spec.Env`, for tests. Both
   validate the tree on every call. Exit codes: 0 success and `--help`, 1 a run error or an invalid
-  tree, 2 a command line the tree does not accept, 130 interrupted (root context cancelled and
-  `context.Canceled`, nothing printed; the public entry points run with a context that is never
-  cancelled, so none returns it); 3-125 are registrable. Order, first match wins: 130,
+  tree, 2 a command line the tree does not accept, 130 interrupted (the run's context, derived from
+  the `executeArgsCtx` context, done and `context.Canceled`, nothing printed; also a second
+  interrupt); 3-125 are registrable. Order, first match wins: 130,
   `spec.Coded` (1 or 3-125), `WithExitCode(code, sentinel)` / `WithExitCodeAs(fn)` in option order,
   usage 2, else 1. The registry is per-`App`, read-only after `New` (a bad code panics there); the
   package-level `Execute` / `ExecuteArgs` have none. Every error is written to stderr as a tree
@@ -38,7 +38,16 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   is ignored. The renderers are per-`App`, read-only after `New`; the package-level `Execute` /
   `ExecuteArgs` have none. Three sites write to stderr: the run error and the invalid-tree error
   (both with the App's renderers), and a failed `os.Getwd` in `Execute` before any run (default
-  rendering only).
+  rendering only). Errors are always written on the calling goroutine.
+  `spec.Env.Interrupts` drives interruption (`execute.go`): the first value only cancels the run's
+  context, which every hook and run function receives, and the error the run then returns is mapped
+  by the order above (rule 1 reads the run's context, so a run returning `context.Canceled` exits
+  130 silently; any other error keeps its code and is printed). The second returns 130 at once and
+  abandons the run, which may still run its PostRun hooks and write to the Env's streams. Nil runs `cobra.Run` inline with
+  no goroutine; otherwise one watcher goroutine and one run goroutine, both joined on every path
+  but the abandoning one. `ExecuteArgs` registers no OS signal handler; `Execute` and
+  `App.Execute` register SIGINT and SIGTERM once, in `executeProcess`, forward them as `Interrupts`
+  values and unregister on return. A test injects its own `chan struct{}`.
 - `internal/errrender` — `Render(w, tool, err, renderers)` prints the tree. The summary line is
   `<tool>: <outermost layer's own text>` (no prefix for an empty tool); each inner `%w` layer is a
   `→` row and each error of an `errors.Join` a `•` row, indented two spaces per depth; always UTF-8,

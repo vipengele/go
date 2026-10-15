@@ -7,7 +7,8 @@ import (
 
 // ExitInterrupted is the exit code of a run that the process was interrupted out of. It is the
 // conventional 128 plus SIGINT, and no option can give it to an error. The entry points of this
-// package run with a context that is never cancelled and so never return it.
+// package return it when an interrupt cancelled the run's context and the run returns
+// [context.Canceled], and on a second interrupt, without waiting for the run.
 const ExitInterrupted = 130
 
 // maxExitCode is the highest exit code an option can register: a shell reports 126 and above for

@@ -59,6 +59,22 @@ func TestEnvResolvedKeepsSetFields(t *testing.T) {
 	}
 }
 
+func TestEnvResolvedPassesInterruptsThrough(t *testing.T) {
+	if got := (&spec.Env{}).Resolved().Interrupts; got != nil {
+		t.Errorf("Interrupts of a zero Env resolved to %v, want nil", got)
+	}
+	var nilEnv *spec.Env
+	if got := nilEnv.Resolved().Interrupts; got != nil {
+		t.Errorf("Interrupts of a nil Env resolved to %v, want nil", got)
+	}
+
+	interrupts := make(chan struct{})
+	r := (&spec.Env{Interrupts: interrupts}).Resolved()
+	if r.Interrupts != (<-chan struct{})(interrupts) {
+		t.Error("Resolved changed a set Interrupts")
+	}
+}
+
 func TestEnvResolvedFreshStdinPerCall(t *testing.T) {
 	var env *spec.Env
 	first := env.Resolved()

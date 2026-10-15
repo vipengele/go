@@ -136,8 +136,10 @@ func (a *App) Add(cmd *spec.Command) {
 // Execute runs the App with the arguments of the process, os.Args[1:], against the environment
 // of the process: its standard streams, working directory and environment variables. It
 // returns the exit code, which a tool's main passes to os.Exit. It behaves as [App.ExecuteArgs]
-// does, and returns [ExitError] after writing the error, as [ExecuteArgs] writes one and with no
-// [WithErrorRenderer] renderer, to os.Stderr when the working directory cannot be determined.
+// does, with SIGINT and SIGTERM as the values of [spec.Env.Interrupts]: the first cancels the
+// run's context and the second returns [ExitInterrupted]. It returns [ExitError] after writing
+// the error, as [ExecuteArgs] writes one and with no [WithErrorRenderer] renderer, to os.Stderr
+// when the working directory cannot be determined.
 func (a *App) Execute() int {
 	return executeProcess(a.identity.Name, a.ExecuteArgs)
 }
@@ -170,8 +172,10 @@ func (a *App) Execute() int {
 // The hooks [WithPreRun] and [WithPostRun] add run around every run function it calls, as they
 // describe.
 //
-// The exit code of an error is, first match wins: the code of a [spec.CodedError] the error
-// carries, when it is 1 or 3 through 125; the code of the first registered [WithExitCode] or
+// Interrupts are handled as [ExecuteArgs] handles them. The exit code of an error is, first match
+// wins: [ExitInterrupted], written nowhere, when an interrupt cancelled the run's context and the
+// error is [context.Canceled]; the code of a [spec.CodedError] the error carries, when it is 1 or
+// 3 through 125; the code of the first registered [WithExitCode] or
 // [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept;
 // [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {

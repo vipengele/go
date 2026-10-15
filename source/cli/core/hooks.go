@@ -12,15 +12,17 @@ import (
 // the root's name included, and its own annotations. An error it returns stops the execution:
 // neither the run function nor any [PostRunHook] is called, and the error is reported as a run
 // error: it is mapped to an exit code as a run function's error is, so it may carry a
-// [spec.CodedError] or match a registered exit code.
+// [spec.CodedError] or match a registered exit code, and is [ExitInterrupted] when the run's
+// context is done and the error is [context.Canceled].
 type PreRunHook func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error
 
 // PostRunHook is called after the run function of the command an [App] executes returns. It
 // receives what a [PreRunHook] receives and runErr, the error the run function returned. When
 // runErr is not nil it is the error reported, whatever the hook returns. Otherwise an error the
-// hook returns is reported, with [ExitError] even when it describes a usage problem. That error
-// is opaque to exit-code selection: it is not unwrapped, so a [spec.CodedError] it wraps, a
-// registered exit code it matches and a [spec.ReportedError] it carries have no effect.
+// hook returns is reported, with [ExitError] even when it describes a usage problem or the
+// run was interrupted. That error is opaque to exit-code selection: it is not unwrapped,
+// so a [spec.CodedError] it wraps, a registered exit code it matches and a [spec.ReportedError]
+// it carries have no effect.
 type PostRunHook func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo, runErr error) error
 
 // WithPreRun adds h to the hooks the App calls before every run function, after the ones added

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/core/internal/errrender"
@@ -33,8 +35,10 @@ const (
 //		os.Exit(cli.Execute(newRoot()))
 //	}
 //
-// It behaves as [ExecuteArgs] does, and returns [ExitError] after writing the error, as
-// [ExecuteArgs] writes one, to os.Stderr when the working directory cannot be determined.
+// It behaves as [ExecuteArgs] does, with SIGINT and SIGTERM as the values of
+// [spec.Env.Interrupts]: the first cancels the run's context and the second returns
+// [ExitInterrupted]. It returns [ExitError] after writing the error, as [ExecuteArgs] writes one,
+// to os.Stderr when the working directory cannot be determined.
 func Execute(root *spec.Command) int {
 	return executeProcess(name(root), func(env *spec.Env, args []string) int {
 		return ExecuteArgs(env, root, args)
@@ -45,13 +49,53 @@ func Execute(root *spec.Command) int {
 // its exit code. It returns [ExitError] without calling run after writing the error, with tool
 // as its prefix and no renderers, to os.Stderr when the working directory cannot be determined:
 // the failure precedes the run, so no option's renderer applies to it.
+//
+// While run runs, SIGINT and SIGTERM reach it as values of env.Interrupts instead of ending the
+// process; once executeProcess returns, they have their default effect again.
 func executeProcess(tool string, run func(env *spec.Env, args []string) int) int {
 	env, err := processEnv()
 	if err != nil {
 		errrender.Render(os.Stderr, tool, err, nil)
 		return ExitError
 	}
+	interrupts, stop := notifyInterrupts()
+	defer stop()
+	env.Interrupts = interrupts
 	return run(env, os.Args[1:])
+}
+
+// notifyInterrupts registers for SIGINT and SIGTERM and starts the goroutine that forwards each
+// of them as a value of interrupts. stop unregisters, asks the goroutine to exit and waits until
+// it has. The goroutine never blocks the delivery of a signal: os/signal drops a signal its
+// channel has no room for rather than wait, and every send to interrupts also watches for stop.
+// interrupts holds two values, the most a run reacts to, so two signals in quick succession
+// both reach it.
+func notifyInterrupts() (interrupts <-chan struct{}, stop func()) {
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	interruptc := make(chan struct{}, 2)
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		for {
+			select {
+			case <-sigs:
+				select {
+				case interruptc <- struct{}{}:
+				case <-done:
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return interruptc, func() {
+		signal.Stop(sigs)
+		close(done)
+		<-exited
+	}
 }
 
 // processEnv returns the environment of the process.
@@ -71,8 +115,23 @@ func processEnv() (*spec.Env, error) {
 
 // ExecuteArgs runs root with args against env, and returns the exit code. It touches no part of
 // the process that env does not give it: a nil env, or a nil field of env, holds the inert
-// default [spec.Env.Resolved] gives it, and a nil args is no arguments. Every run function it
-// calls receives context.Background().
+// default [spec.Env.Resolved] gives it, and a nil args is no arguments. It registers no signal
+// handler of its own.
+//
+// Every run function and hook receives one context, cancelled when ExecuteArgs returns. The
+// first value env.Interrupts delivers cancels it and does nothing else: the run goes on, and what
+// it returns decides the exit code as it does without an interrupt, except that
+// [context.Canceled] then returns [ExitInterrupted] and is written nowhere. A run that returns nil
+// returns [ExitOK], and any other error is written and keeps its code. The second value returns
+// [ExitInterrupted] at once, without waiting for the run: the abandoned run goes on in the
+// background until its run function returns, and may still call its PostRun hooks and write to
+// env's streams, though ExecuteArgs writes nothing more for it. A nil env.Interrupts watches
+// nothing and starts no goroutine.
+//
+// A panic in a run function or a hook propagates to the caller of ExecuteArgs with the same
+// value, whether env.Interrupts is nil or not, after ExecuteArgs has stopped watching
+// env.Interrupts. The panic of a run abandoned on a second interrupt is recovered and dropped:
+// nothing waits for that run any more.
 //
 // It checks root with [spec.Command.Validate] on every call, and returns [ExitError] after
 // writing "<name>: invalid command tree" to env.Stderr, followed by one row per problem found,
@@ -98,6 +157,8 @@ func processEnv() (*spec.Env, error) {
 // neither wraps nor joins, and a usage error, print on the first line alone, as "<name>: <error>".
 // An [App] can render an error of its own type in its own way with [WithErrorRenderer]. The exit
 // code of an error is, first match wins:
+//   - [ExitInterrupted], written nowhere, when an interrupt cancelled the run's context and the
+//     error is [context.Canceled];
 //   - the code of a [spec.CodedError] the error carries, when it is 1 or 3 through 125; a code
 //     outside that range is ignored;
 //   - [ExitUsage] for a command line the tree does not accept;
@@ -122,11 +183,12 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 }
 
 // executeArgsCtx is [ExecuteArgs] with the adapter configured by cfg, every run function
-// receiving ctx, the matchers of registry giving exit codes to errors, and renderers offered each
-// error of the tree it writes, in order. The exit code of an error is, first match wins:
-//  1. [ExitInterrupted], written nowhere, when ctx is done and the error is
-//     [context.Canceled]. A run function that cancels or times out a context of its own while
-//     ctx is not done is not interrupted;
+// receiving the run's context, derived from ctx, which the first value of env.Interrupts
+// cancels, the matchers of registry giving exit codes to errors, and renderers offered each error
+// of the tree it writes, in order. The exit code of an error is, first match wins:
+//  1. [ExitInterrupted], written nowhere, when the run's context is done, because ctx is done or
+//     an interrupt cancelled it, and the error is [context.Canceled]. A run function that cancels
+//     or times out a context of its own while the run's context is not done is not interrupted;
 //  2. the code of a [spec.CodedError] the error carries, when [registrableExitCode] accepts it;
 //  3. the code of the first matcher of registry that matches the error;
 //  4. [ExitUsage] for a [*cobra.UsageError];
@@ -135,7 +197,7 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 // Outside rule 1, the error is written to env.Stderr by [errrender.Render] unless it carries a
 // [spec.ReportedError], which changes no exit code. The invalid-tree error is written whatever it
 // carries. An error a PostRun returns after the run function succeeds reaches rules 2 to 4 as a
-// [*cobra.HookError], which unwraps to nothing, so its code is [ExitError].
+// [*cobra.HookError], which unwraps to nothing, so its code is [ExitError], interrupted or not.
 func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args []string,
 	cfg cobra.Config, registry exitMatchers, renderers ...errrender.Renderer,
 ) int {
@@ -147,11 +209,51 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 		errrender.Render(env.Stderr, name(root), fmt.Errorf("invalid command tree: %w", err), renderers)
 		return ExitError
 	}
-	err := cobra.Run(ctx, env, root, args, cfg)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if env.Interrupts == nil {
+		return report(runCtx, env, root, cobra.Run(runCtx, env, root, args, cfg), registry, renderers)
+	}
+
+	second, stop := watchInterrupts(env.Interrupts, cancel)
+	done := make(chan outcome, 1)
+	go func() {
+		defer func() {
+			if v := recover(); v != nil {
+				done <- outcome{panicked: true, value: v}
+			}
+		}()
+		done <- outcome{err: cobra.Run(runCtx, env, root, args, cfg)}
+	}()
+	select {
+	case out := <-done:
+		stop()
+		if out.panicked {
+			panic(out.value)
+		}
+		return report(runCtx, env, root, out.err, registry, renderers)
+	case <-second:
+		return ExitInterrupted
+	}
+}
+
+// outcome is how a run on its own goroutine ended: it returned err, or it panicked with value.
+type outcome struct {
+	err      error
+	panicked bool
+	value    any
+}
+
+// report writes err to env.Stderr and returns its exit code by the rules of [executeArgsCtx],
+// runCtx being the run's context. Rule 1 reads runCtx rather than the context executeArgsCtx was
+// given, so a run an interrupt cancelled is interrupted as one whose parent context is done is.
+func report(runCtx context.Context, env *spec.Env, root *spec.Command, err error,
+	registry exitMatchers, renderers []errrender.Renderer,
+) int {
 	if err == nil {
 		return ExitOK
 	}
-	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+	if runCtx.Err() != nil && errors.Is(err, context.Canceled) {
 		return ExitInterrupted
 	}
 	var reported *spec.ReportedError
@@ -176,6 +278,43 @@ func exitCode(err error, registry exitMatchers) int {
 		return ExitUsage
 	}
 	return ExitError
+}
+
+// watchInterrupts starts the goroutine that watches interrupts for one run. It calls cancel on
+// the first value and closes second on the next one, then exits. stop asks it to exit and waits
+// until it has, so every cancel it makes happens before stop returns. stop is called at most
+// once. A closed interrupts delivers no more values.
+func watchInterrupts(interrupts <-chan struct{}, cancel context.CancelFunc) (
+	second <-chan struct{}, stop func(),
+) {
+	secondc := make(chan struct{})
+	stopc := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		seen := false
+		for {
+			select {
+			case _, ok := <-interrupts:
+				if !ok {
+					interrupts = nil
+					continue
+				}
+				if seen {
+					close(secondc)
+					return
+				}
+				seen = true
+				cancel()
+			case <-stopc:
+				return
+			}
+		}
+	}()
+	return secondc, func() {
+		close(stopc)
+		<-exited
+	}
 }
 
 // name returns root's name, and "" for a nil root.

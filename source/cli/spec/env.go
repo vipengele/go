@@ -27,13 +27,16 @@ type Env struct {
 	// implementation cli/core wires, not of Env. Nil leaves IsTerminal to answer false for a
 	// stream that is not a file and to panic for one that is.
 	Terminal func(Stream) bool
+	// Interrupts delivers the interrupt signals the process receives. The first value cancels the
+	// run's context; the second abandons the run with exit code 130. Nil watches nothing.
+	Interrupts <-chan struct{}
 }
 
 // Resolved returns a copy of e in which Stdin, Stdout, Stderr and LookupEnv, when nil, hold an
 // inert default: an empty Stdin, Stdout and Stderr that discard, and a LookupEnv that finds
-// nothing. A nil e resolves to an Env made only of those defaults. WorkDir and Terminal are copied
-// unchanged: a nil Terminal stays nil, since no default could know whether a file is a terminal.
-// e itself is not modified.
+// nothing. A nil e resolves to an Env made only of those defaults. WorkDir, Terminal and
+// Interrupts are copied unchanged: a nil Terminal stays nil, since no default could know whether a
+// file is a terminal, and a nil Interrupts stays nil. e itself is not modified.
 func (e *Env) Resolved() *Env {
 	var r Env
 	if e != nil {
