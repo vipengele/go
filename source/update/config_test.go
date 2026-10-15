@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/commons/validate"
 )
 
@@ -31,13 +33,21 @@ func validIdentity() spec.Identity {
 }
 
 // validConfig is a Config with every required field set and every optional field at its zero
-// value, except UserConfigDir, which returns configDir so that no test reads the host's home.
-func validConfig(configDir string) Config {
+// value, except the two seams the default StateDir is resolved through: Getenv reports every
+// variable unset and UserHomeDir returns home, so that no test reads the host's environment or
+// home directory.
+func validConfig(home string) Config {
 	return Config{
-		Identity:      validIdentity(),
-		Source:        &stubSource{},
-		UserConfigDir: func() (string, error) { return configDir, nil },
+		Identity:    validIdentity(),
+		Source:      &stubSource{},
+		Getenv:      envOf(nil),
+		UserHomeDir: func() (string, error) { return home, nil },
 	}
+}
+
+// envOf returns a Getenv that reads vars, and "" for a variable vars does not hold.
+func envOf(vars map[string]string) func(string) string {
+	return func(name string) string { return vars[name] }
 }
 
 // plainFields is the comparable part of a Config: every field that is not a func.
@@ -72,10 +82,11 @@ func plainFieldsOf(c Config) plainFields {
 func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	const envName = "VIPENGELE_UPDATE_TEST_DEFAULT_GETENV"
 	t.Setenv(envName, "from-the-environment")
-	configDir := filepath.Join(t.TempDir(), "config")
+	home := filepath.Join(t.TempDir(), "atk-home")
+	t.Setenv("ATK_HOME", home)
 
 	before := time.Now()
-	r, err := validConfig(configDir).resolve()
+	r, err := Config{Identity: validIdentity(), Source: &stubSource{}}.resolve()
 	if err != nil {
 		t.Fatalf("resolve() error = %v, want nil", err)
 	}
@@ -109,6 +120,13 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if got := r.Getenv(envName); got != "from-the-environment" {
 		t.Errorf("Getenv(%q) = %q, want %q", envName, got, "from-the-environment")
 	}
+	if r.UserHomeDir == nil {
+		t.Fatal("UserHomeDir = nil, want os.UserHomeDir")
+	}
+	wantHome, wantErr := os.UserHomeDir()
+	if got, err := r.UserHomeDir(); got != wantHome || (err == nil) != (wantErr == nil) {
+		t.Errorf("UserHomeDir() = %q, %v, want %q, %v", got, err, wantHome, wantErr)
+	}
 	if r.BinaryName != "atk" {
 		t.Errorf("BinaryName = %q, want Identity.Name %q", r.BinaryName, "atk")
 	}
@@ -121,8 +139,40 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if r.ChecksumsAsset != "checksums.txt" {
 		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, "checksums.txt")
 	}
-	if want := filepath.Join(configDir, "agentic-toolkit"); r.StateDir != want {
+	if want := filepath.Join(home, "state"); r.StateDir != want {
 		t.Errorf("StateDir = %q, want %q", r.StateDir, want)
+	}
+}
+
+func TestResolveDefaultStateDirReadsTheProcessEnvironment(t *testing.T) {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		t.Skipf("the XDG layout does not serve %s", runtime.GOOS)
+	}
+	home := filepath.Join(t.TempDir(), "home")
+	stateHome := filepath.Join(t.TempDir(), "state-home")
+	t.Setenv("ATK_HOME", "")
+	t.Setenv("HOME", home)
+
+	tests := []struct {
+		name      string
+		stateHome string
+		want      string
+	}{
+		{"XDG_STATE_HOME set", stateHome, filepath.Join(stateHome, "agentic-toolkit")},
+		{"XDG_STATE_HOME unset", "", filepath.Join(home, ".local", "state", "agentic-toolkit")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", tc.stateHome)
+
+			r, err := Config{Identity: validIdentity(), Source: &stubSource{}}.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if r.StateDir != tc.want {
+				t.Errorf("StateDir = %q, want %q", r.StateDir, tc.want)
+			}
+		})
 	}
 }
 
@@ -144,7 +194,8 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	t.Parallel()
 	fixed := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
 	client := &http.Client{}
-	configRoot := filepath.Join(t.TempDir(), "elsewhere")
+	home := filepath.Join(t.TempDir(), "elsewhere")
+	stateHome := filepath.Join(t.TempDir(), "state-home")
 
 	c := validConfig("")
 	c.BinaryName = "toolkit"
@@ -156,8 +207,8 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	c.GOOS = "plan9"
 	c.GOARCH = "mips64"
 	c.Executable = func() (string, error) { return "/opt/toolkit/bin/toolkit", nil }
-	c.Getenv = func(name string) string { return "stub:" + name }
-	c.UserConfigDir = func() (string, error) { return configRoot, nil }
+	c.Getenv = envOf(map[string]string{"XDG_STATE_HOME": stateHome})
+	c.UserHomeDir = func() (string, error) { return home, nil }
 
 	r, err := c.resolve()
 	if err != nil {
@@ -191,14 +242,83 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	if path, err := r.Executable(); err != nil || path != "/opt/toolkit/bin/toolkit" {
 		t.Errorf("Executable() = %q, %v, want %q, nil", path, err, "/opt/toolkit/bin/toolkit")
 	}
-	if got := r.Getenv("HOME"); got != "stub:HOME" {
-		t.Errorf("Getenv(%q) = %q, want %q", "HOME", got, "stub:HOME")
+	if got := r.Getenv("XDG_STATE_HOME"); got != stateHome {
+		t.Errorf("Getenv(%q) = %q, want %q", "XDG_STATE_HOME", got, stateHome)
 	}
-	if dir, err := r.UserConfigDir(); err != nil || dir != configRoot {
-		t.Errorf("UserConfigDir() = %q, %v, want %q, nil", dir, err, configRoot)
+	if dir, err := r.UserHomeDir(); err != nil || dir != home {
+		t.Errorf("UserHomeDir() = %q, %v, want %q, nil", dir, err, home)
 	}
-	if want := filepath.Join(configRoot, "agentic-toolkit"); r.StateDir != want {
+	if want := filepath.Join(stateHome, "agentic-toolkit"); r.StateDir != want {
 		t.Errorf("StateDir = %q, want %q", r.StateDir, want)
+	}
+}
+
+func TestResolveDefaultStateDirFollowsTheSeams(t *testing.T) {
+	t.Parallel()
+	home := filepath.Join(t.TempDir(), "home")
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	const app = "agentic-toolkit"
+
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want string
+	}{
+		{"linux", "linux", nil, filepath.Join(home, ".local", "state", app)},
+		{
+			"linux with XDG_STATE_HOME", "linux",
+			map[string]string{"XDG_STATE_HOME": elsewhere},
+			filepath.Join(elsewhere, app),
+		},
+		{"darwin", "darwin", nil, filepath.Join(home, "Library", "Application Support", app, "state")},
+		{
+			"darwin ignores XDG_STATE_HOME", "darwin",
+			map[string]string{"XDG_STATE_HOME": elsewhere},
+			filepath.Join(home, "Library", "Application Support", app, "state"),
+		},
+		{"windows", "windows", nil, filepath.Join(home, "AppData", "Local", app, "state")},
+		{
+			"windows with LocalAppData", "windows",
+			map[string]string{"LocalAppData": elsewhere},
+			filepath.Join(elsewhere, app, "state"),
+		},
+		{
+			"ATK_HOME on linux", "linux",
+			map[string]string{"ATK_HOME": elsewhere, "XDG_STATE_HOME": home},
+			filepath.Join(elsewhere, "state"),
+		},
+		{
+			"ATK_HOME on darwin", "darwin",
+			map[string]string{"ATK_HOME": elsewhere},
+			filepath.Join(elsewhere, "state"),
+		},
+		{
+			"ATK_HOME on windows", "windows",
+			map[string]string{"ATK_HOME": elsewhere},
+			filepath.Join(elsewhere, "state"),
+		},
+		{
+			"ATK_HOME set to the empty string", "linux",
+			map[string]string{"ATK_HOME": ""},
+			filepath.Join(home, ".local", "state", app),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(home)
+			c.GOOS = tc.goos
+			c.Getenv = envOf(tc.env)
+
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if r.StateDir != tc.want {
+				t.Errorf("StateDir = %q, want %q", r.StateDir, tc.want)
+			}
+		})
 	}
 }
 
@@ -207,9 +327,10 @@ func TestResolveKeepsExplicitStateDir(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	c := validConfig("")
 	c.StateDir = stateDir
-	c.UserConfigDir = func() (string, error) {
-		t.Error("UserConfigDir called, want an explicit StateDir used as it is")
-		return "", errors.New("UserConfigDir called")
+	calls := 0
+	c.UserHomeDir = func() (string, error) {
+		calls++
+		return "", errors.New("UserHomeDir called")
 	}
 
 	r, err := c.resolve()
@@ -219,20 +340,82 @@ func TestResolveKeepsExplicitStateDir(t *testing.T) {
 	if r.StateDir != stateDir {
 		t.Errorf("StateDir = %q, want %q", r.StateDir, stateDir)
 	}
+	if calls != 0 {
+		t.Errorf("UserHomeDir called %d times, want an explicit StateDir used without the home directory", calls)
+	}
 }
 
-func TestResolveReportsUserConfigDirError(t *testing.T) {
+func TestResolveDefaultStateDirNeedsNoHomeDirWhenTheStateDirectoryIsSet(t *testing.T) {
+	t.Parallel()
+	stateHome := filepath.Join(t.TempDir(), "state-home")
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want string
+	}{
+		{"linux with XDG_STATE_HOME", "linux", map[string]string{"XDG_STATE_HOME": stateHome},
+			filepath.Join(stateHome, "agentic-toolkit")},
+		{"windows with LocalAppData", "windows", map[string]string{"LocalAppData": stateHome},
+			filepath.Join(stateHome, "agentic-toolkit", "state")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.GOOS = tc.goos
+			c.Getenv = envOf(tc.env)
+			calls := 0
+			c.UserHomeDir = func() (string, error) {
+				calls++
+				return "", errors.New("no home directory")
+			}
+
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if r.StateDir != tc.want {
+				t.Errorf("StateDir = %q, want %q", r.StateDir, tc.want)
+			}
+			if calls != 0 {
+				t.Errorf("UserHomeDir called %d times, want the state directory resolved without it", calls)
+			}
+		})
+	}
+}
+
+func TestResolveReportsHomeDirError(t *testing.T) {
 	t.Parallel()
 	errNoHome := errors.New("no home directory")
-	c := validConfig("")
-	c.UserConfigDir = func() (string, error) { return "", errNoHome }
-
-	r, err := c.resolve()
-	if !errors.Is(err, errNoHome) {
-		t.Fatalf("resolve() error = %v, want one wrapping %v", err, errNoHome)
+	tests := []struct {
+		name        string
+		userHomeDir func() (string, error)
+		want        []error
+	}{
+		{"UserHomeDir fails", func() (string, error) { return "", errNoHome }, []error{errNoHome, paths.ErrNoHomeDir}},
+		{"UserHomeDir returns empty", func() (string, error) { return "", nil }, []error{paths.ErrNoHomeDir}},
 	}
-	if got := plainFieldsOf(r); got != (plainFields{}) {
-		t.Errorf("resolve() Config = %+v, want the zero Config", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.GOOS = "linux"
+			c.UserHomeDir = tc.userHomeDir
+
+			r, err := c.resolve()
+			for _, want := range tc.want {
+				if !errors.Is(err, want) {
+					t.Errorf("resolve() error = %v, want one wrapping %v", err, want)
+				}
+			}
+			if got := plainFieldsOf(r); got != (plainFields{}) {
+				t.Errorf("resolve() Config = %+v, want the zero Config", got)
+			}
+			if r.Now != nil || r.Executable != nil || r.Getenv != nil || r.UserHomeDir != nil {
+				t.Error("resolve() Config has func fields set, want the zero Config")
+			}
+		})
 	}
 }
 
@@ -247,8 +430,8 @@ func TestResolveDoesNotModifyItsReceiver(t *testing.T) {
 	if after := plainFieldsOf(c); after != before {
 		t.Errorf("Config after resolve = %+v, want %+v", after, before)
 	}
-	if c.Now != nil || c.Executable != nil || c.Getenv != nil {
-		t.Error("resolve set a func field on its receiver, want the receiver's func fields left nil")
+	if c.Now != nil || c.Executable != nil {
+		t.Error("resolve set a func field on its receiver, want the receiver's nil func fields left nil")
 	}
 }
 
@@ -267,9 +450,9 @@ func TestResolveRejectsInvalidConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig("")
-			c.UserConfigDir = func() (string, error) {
-				t.Error("UserConfigDir called, want an invalid Config rejected before any default")
-				return "", errors.New("UserConfigDir called")
+			c.UserHomeDir = func() (string, error) {
+				t.Error("UserHomeDir called, want an invalid Config rejected before any default")
+				return "", errors.New("UserHomeDir called")
 			}
 			c.BinaryName = "toolkit"
 			tc.set(&c)
@@ -282,7 +465,7 @@ func TestResolveRejectsInvalidConfig(t *testing.T) {
 			if got := plainFieldsOf(r); got != (plainFields{}) {
 				t.Errorf("resolve() Config = %+v, want the zero Config", got)
 			}
-			if r.Now != nil || r.Executable != nil || r.Getenv != nil || r.UserConfigDir != nil {
+			if r.Now != nil || r.Executable != nil || r.Getenv != nil || r.UserHomeDir != nil {
 				t.Error("resolve() Config has func fields set, want the zero Config")
 			}
 			if after := plainFieldsOf(c); after != before {

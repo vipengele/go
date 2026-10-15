@@ -96,10 +96,24 @@ _Avoid_: debug build, snapshot, local build (a tagged release built locally is n
 
 **Env**:
 The surroundings a command reads, passed in explicitly: environment variables, the standard
-streams, the working directory and the platform paths. Code takes an `Env`, never `os.Getenv` or
-`os.Stdout`, so tests substitute it.
+streams and the working directory. Code takes an `Env`, never `os.Getenv` or `os.Stdout`, so tests
+substitute it. An `Env` does not carry the platform directories: `cli/spec/paths` resolves them
+(ADR-0009).
 _Avoid_: environment (also means a deployment such as staging), context (`context.Context`), config
 (values loaded from a file or flags)
+
+**Directory kind**:
+One of the five directories a tool keeps its files in: config, state, cache, data and log.
+`cli/spec/paths` resolves one directory for each kind from the **Identity**, the operating system's
+layout and the environment (ADR-0009).
+_Avoid_: directory type, location, path (a resolved directory is a path, the kind is what it is
+for)
+
+**Home**:
+The single root under which every **Directory kind** is a subdirectory (`config`, `state`, `cache`,
+`data`, `log`). It is set by the `Home` option or by the environment variable `<PREFIX>_HOME`, and
+is used as given, without the directory name appended (ADR-0009).
+_Avoid_: home directory (the user's own, `~`), root, base directory
 
 **Command**:
 One named action of a tool (`version`, `update`), described as data in `cli/spec`: its name,
