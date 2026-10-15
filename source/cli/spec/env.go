@@ -21,11 +21,15 @@ type Env struct {
 	// LookupEnv returns an environment variable's value and whether it is set, as os.LookupEnv
 	// does. Nil is an empty environment.
 	LookupEnv func(key string) (string, bool)
+	// Interrupts delivers the interrupt signals the process receives. The first value cancels the
+	// run's context; the second abandons the run with exit code 130. Nil watches nothing.
+	Interrupts <-chan struct{}
 }
 
 // Resolved returns a copy of e in which every nil field holds an inert default: an empty
 // Stdin, Stdout and Stderr that discard, and a LookupEnv that finds nothing. A nil e resolves to
-// an Env made only of those defaults. WorkDir is copied unchanged. e itself is not modified.
+// an Env made only of those defaults. WorkDir and Interrupts are copied unchanged; a nil
+// Interrupts stays nil. e itself is not modified.
 func (e *Env) Resolved() *Env {
 	var r Env
 	if e != nil {
