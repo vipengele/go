@@ -86,7 +86,8 @@ func processEnv() (*spec.Env, error) {
 // env.Terminal is used as is. The Terminal is set on the resolved copy, and env is not modified.
 //
 // Every run function receives a [spec.Invocation] whose Output forbids colour when the
-// environment variable NO_COLOR is set and not empty, or when env.Stdout is not a terminal.
+// environment variable NO_COLOR is set and not empty, or when env.Stdout is not a terminal as
+// [spec.Env.IsTerminal] reports it for [spec.Stdout].
 //
 // One tree may be run any number of times, concurrently: each call parses its own flag values.
 func ExecuteArgs(env *spec.Env, root *spec.Command, args []string) int {
