@@ -136,6 +136,73 @@ func TestLoadDoesNotChangeDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadValueSharesNoSliceWithDefaults(t *testing.T) {
+	type sliceConfig struct {
+		Tags  []string
+		Ports []int
+		Empty []string
+		None  []string
+	}
+	newDefaults := func() sliceConfig {
+		return sliceConfig{Tags: []string{"a", "b"}, Ports: []int{80}, Empty: []string{}}
+	}
+	change := func(c *sliceConfig) {
+		c.Tags[0] = "changed"
+		c.Ports[0] = 1
+	}
+	tests := []struct {
+		name string
+		// run changes one side and returns the other, which must still equal newDefaults().
+		run func(defaults *sliceConfig, res Result[sliceConfig]) sliceConfig
+	}{
+		{
+			name: "changing the value leaves defaults",
+			run: func(defaults *sliceConfig, res Result[sliceConfig]) sliceConfig {
+				value := res.Value()
+				change(&value)
+				return *defaults
+			},
+		},
+		{
+			name: "changing defaults leaves the value",
+			run: func(defaults *sliceConfig, res Result[sliceConfig]) sliceConfig {
+				change(defaults)
+				return res.Value()
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defaults := newDefaults()
+			res, err := Load(defaults)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := tt.run(&defaults, res); !reflect.DeepEqual(got, newDefaults()) {
+				t.Errorf("got %+v, want %+v", got, newDefaults())
+			}
+		})
+	}
+}
+
+func TestLoadKeepsNilAndEmptySlicesDistinct(t *testing.T) {
+	type sliceConfig struct {
+		Empty []string
+		None  []string
+	}
+	res, err := Load(sliceConfig{Empty: []string{}})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	value := res.Value()
+	if value.None != nil {
+		t.Errorf("None = %#v, want nil", value.None)
+	}
+	if value.Empty == nil {
+		t.Error("Empty = nil, want an empty slice")
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	bad := writeFile(t, "config.yaml", "server:\n  port: abc\n  bogus: 1\n")
 	good := writeFile(t, "good.yaml", "server:\n  port: abc\n")

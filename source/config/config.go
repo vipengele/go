@@ -93,7 +93,9 @@ func Load[T any](defaults T, providers ...Provider) (Result[T], error) {
 	}
 
 	value := defaults
-	b := newBinder(schema, reflect.ValueOf(&value).Elem())
+	target := reflect.ValueOf(&value).Elem()
+	cloneSlices(schema, target)
+	b := newBinder(schema, target)
 	for _, entries := range layers {
 		for _, e := range entries {
 			b.bind(e)
@@ -104,6 +106,25 @@ func Load[T any](defaults T, providers ...Provider) (Result[T], error) {
 		return Result[T]{}, errors.Join(problems...)
 	}
 	return Result[T]{value: value, sources: b.sources()}, nil
+}
+
+// cloneSlices gives every slice field of schema in v a backing array of its own, holding the same
+// elements. v starts as a copy of the caller's defaults, and a copied slice shares its array: a key
+// no provider sets would otherwise let a change to an element of the Result's value change
+// defaults, and the other way round. A nil slice stays nil, so that nil and empty stay distinct.
+func cloneSlices(schema *Schema, v reflect.Value) {
+	for _, f := range schema.fields {
+		if f.typ.Kind() != reflect.Slice {
+			continue
+		}
+		field := v.FieldByIndex(f.index)
+		if field.IsNil() {
+			continue
+		}
+		clone := reflect.MakeSlice(f.typ, field.Len(), field.Len())
+		reflect.Copy(clone, field)
+		field.Set(clone)
+	}
 }
 
 // isNil reports whether p is nil or holds a nil pointer, on which Load cannot be called.

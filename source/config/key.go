@@ -56,7 +56,7 @@ func snakeCase(name string) string {
 // "-" and "_" removed, the "." between segments kept.
 func matchKey(key string) string {
 	var b strings.Builder
-	b.Grow(len(key))
+	b.Grow(len(key)) // [lydite:exclude_from_mutation][Grow only reserves capacity; the string built is the same without it]
 	for i := range len(key) {
 		c := key[i]
 		if c == '-' || c == '_' {

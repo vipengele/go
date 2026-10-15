@@ -138,7 +138,7 @@ func (l *fileLoader) fail(line int, format string, args ...any) {
 
 // mapping flattens the pairs of mapping n, whose keys sit below the dotted key prefix as written.
 func (l *fileLoader) mapping(n *yaml.Node, prefix string) {
-	for i := 0; i+1 < len(n.Content); i += 2 {
+	for i := 0; i+1 < len(n.Content); i += 2 { // [lydite:exclude_from_mutation][the YAML parser gives every mapping node an even number of content nodes, so i+1 == len(n.Content) never holds and < and <= stop at the same i]
 		k, v := resolve(n.Content[i]), resolve(n.Content[i+1])
 		if k.Kind != yaml.ScalarNode {
 			l.fail(k.Line, "a key below %q is %s, not a name", prefix, kindName(k))

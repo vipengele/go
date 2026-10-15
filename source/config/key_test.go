@@ -21,6 +21,8 @@ func TestSnakeCase(t *testing.T) {
 		{name: "upper-case after a separator adds no second separator", in: "Max_Retries", want: "max_retries"},
 		{name: "consecutive separators collapse", in: "max__-retries", want: "max_retries"},
 		{name: "trailing separator is dropped", in: "port_", want: "port"},
+		{name: "leading separator is dropped", in: "_port", want: "port"},
+		{name: "leading separators before an upper-case letter are dropped", in: "-_Port", want: "port"},
 		{name: "SCREAMING_SNAKE becomes snake_case", in: "MAX_RETRIES", want: "max_retries"},
 	}
 	for _, tc := range cases {
@@ -137,6 +139,42 @@ func TestValidPrefix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := validPrefix(tc.in); got != tc.want {
 				t.Errorf("validPrefix(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCharacterClasses(t *testing.T) {
+	cases := []struct {
+		c                           byte
+		upper, lower, digit, letter bool
+	}{
+		{c: '/'},
+		{c: '0', digit: true},
+		{c: '9', digit: true},
+		{c: ':'},
+		{c: '@'},
+		{c: 'A', upper: true, letter: true},
+		{c: 'Z', upper: true, letter: true},
+		{c: '['},
+		{c: '`'},
+		{c: 'a', lower: true, letter: true},
+		{c: 'z', lower: true, letter: true},
+		{c: '{'},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.c), func(t *testing.T) {
+			if got := isUpper(tc.c); got != tc.upper {
+				t.Errorf("isUpper(%q) = %v, want %v", tc.c, got, tc.upper)
+			}
+			if got := isLower(tc.c); got != tc.lower {
+				t.Errorf("isLower(%q) = %v, want %v", tc.c, got, tc.lower)
+			}
+			if got := isDigit(tc.c); got != tc.digit {
+				t.Errorf("isDigit(%q) = %v, want %v", tc.c, got, tc.digit)
+			}
+			if got := isLetter(tc.c); got != tc.letter {
+				t.Errorf("isLetter(%q) = %v, want %v", tc.c, got, tc.letter)
 			}
 		})
 	}
