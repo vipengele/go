@@ -74,12 +74,17 @@ func processEnv() (*spec.Env, error) {
 //
 // It checks root with [spec.Command.Validate] on every call, and returns [ExitError] after
 // writing "<name>: invalid command tree: <error>" to env.Stderr when the tree is invalid. It
-// then selects the command args name and calls its run function. Every error is written to
-// env.Stderr as "<name>: <error>", where name is root's Name, and the exit code is [ExitUsage]
-// for a command line the tree does not accept and [ExitError] for an error the run function
-// returns. --help, on any command, writes the command's help to env.Stdout and returns
-// [ExitOK]. A command with subcommands and no Run, given no positional argument, does the same.
-// There is no help or completion subcommand.
+// then selects the command args name and calls its run function. --help, on any command, writes
+// the command's help to env.Stdout and returns [ExitOK]. A command with subcommands and no Run,
+// given no positional argument, does the same. There is no help or completion subcommand.
+//
+// Every error is written to env.Stderr as "<name>: <error>", where name is root's Name, unless
+// the error carries a [spec.ReportedError]: the run function has then shown it already, and
+// nothing is written. The exit code of an error is, first match wins:
+//   - the code of a [spec.CodedError] the error carries, when it is 1 or 3 through 125; a code
+//     outside that range is ignored;
+//   - [ExitUsage] for a command line the tree does not accept;
+//   - [ExitError] otherwise.
 //
 // A nil env.Terminal is filled with [terminal.Detect] of the resolved env's Stdin, Stdout and
 // Stderr, so [spec.Env.IsTerminal] answers for a real file instead of panicking; a non-nil
@@ -96,6 +101,27 @@ func ExecuteArgs(env *spec.Env, root *spec.Command, args []string) int {
 
 // executeArgs is [ExecuteArgs] with the adapter configured by cfg.
 func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Config) int {
+	return executeArgsCtx(context.Background(), env, root, args, cfg, nil)
+}
+
+// executeArgsCtx is [ExecuteArgs] with the adapter configured by cfg, every run function
+// receiving ctx, and the matchers of registry giving exit codes to errors. The exit code of an
+// error is, first match wins:
+//  1. [ExitInterrupted], written nowhere, when ctx is done and the error is
+//     [context.Canceled]. A run function that cancels or times out a context of its own while
+//     ctx is not done is not interrupted;
+//  2. the code of a [spec.CodedError] the error carries, when [registrableExitCode] accepts it;
+//  3. the code of the first matcher of registry that matches the error;
+//  4. [ExitUsage] for a [*cobra.UsageError];
+//  5. [ExitError].
+//
+// Outside rule 1, the error is written to env.Stderr as "<name>: <error>" unless it carries a
+// [spec.ReportedError], which changes no exit code. An error a PostRun returns after the run
+// function succeeds reaches rules 2 to 4 as a [*cobra.HookError], which unwraps to nothing, so
+// its code is [ExitError].
+func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args []string,
+	cfg cobra.Config, registry exitMatchers,
+) int {
 	env = env.Resolved()
 	if env.Terminal == nil {
 		env.Terminal = terminal.Detect(env.Stdin, env.Stdout, env.Stderr)
@@ -104,11 +130,30 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 		_, _ = fmt.Fprintf(env.Stderr, "%sinvalid command tree: %v\n", prefix(root), err)
 		return ExitError
 	}
-	err := cobra.Run(context.Background(), env, root, args, cfg)
+	err := cobra.Run(ctx, env, root, args, cfg)
 	if err == nil {
 		return ExitOK
 	}
-	_, _ = fmt.Fprintf(env.Stderr, "%s%v\n", prefix(root), err)
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		return ExitInterrupted
+	}
+	var reported *spec.ReportedError
+	if !errors.As(err, &reported) {
+		_, _ = fmt.Fprintf(env.Stderr, "%s%v\n", prefix(root), err)
+	}
+	return exitCode(err, registry)
+}
+
+// exitCode returns the exit code of err, which is not an interruption, by rules 2 to 5 of
+// [executeArgsCtx].
+func exitCode(err error, registry exitMatchers) int {
+	var coded *spec.CodedError
+	if errors.As(err, &coded) && registrableExitCode(coded.Code()) {
+		return coded.Code()
+	}
+	if code, ok := registry.code(err); ok {
+		return code
+	}
 	var usage *cobra.UsageError
 	if errors.As(err, &usage) {
 		return ExitUsage

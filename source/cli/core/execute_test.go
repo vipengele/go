@@ -545,3 +545,382 @@ func TestExecuteArgsHelpFlagShorthand(t *testing.T) {
 		}
 	})
 }
+
+// sentinelError is the error the exit-code tests register a code for.
+type sentinelError struct{}
+
+func (sentinelError) Error() string { return "sentinel" }
+
+// registerSentinel is a registry matcher giving code to every error that is a sentinelError.
+func registerSentinel(code int) func(error) (int, bool) {
+	return func(err error) (int, bool) {
+		if errors.Is(err, sentinelError{}) {
+			return code, true
+		}
+		return 0, false
+	}
+}
+
+// returning returns a tree of a tool named "tool" whose command "do" returns what run returns
+// given the context it receives.
+func returning(run func(ctx context.Context) error) *spec.Command {
+	return &spec.Command{
+		Name: "tool",
+		Commands: []*spec.Command{{
+			Name: "do",
+			Run: func(ctx context.Context, _ *spec.Invocation) error {
+				return run(ctx)
+			},
+		}},
+	}
+}
+
+// fails returns a tree whose command "do" returns err.
+func fails(err error) *spec.Command {
+	return returning(func(context.Context) error { return err })
+}
+
+// runCtx executes root with "do" against buffers, with ctx and c.
+func runCtx(ctx context.Context, root *spec.Command, c cli.ExecuteConfig, args ...string) result {
+	if args == nil {
+		args = []string{"do"}
+	}
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{Stdout: &stdout, Stderr: &stderr}
+	code := cli.ExecuteArgsContext(ctx, env, root, args, c)
+	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+// cancelled returns a context that is already cancelled.
+func cancelled() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func TestExecuteArgsContextExitCodePrecedence(t *testing.T) {
+	boom := errors.New("boom")
+	usage := cli.NewUsageError(errors.New("bad usage"))
+	registry := cli.ExecuteConfig{Registry: []func(error) (int, bool){registerSentinel(9)}}
+	tests := []struct {
+		name string
+		ctx  context.Context
+		root *spec.Command
+		args []string
+		c    cli.ExecuteConfig
+		want result
+	}{
+		{
+			name: "cancelled context, run returns its error",
+			ctx:  cancelled(),
+			root: returning(func(ctx context.Context) error { return ctx.Err() }),
+			want: result{code: cli.ExitInterrupted},
+		},
+		{
+			name: "cancelled context, run wraps its error",
+			ctx:  cancelled(),
+			root: returning(func(ctx context.Context) error { return fmt.Errorf("waiting: %w", ctx.Err()) }),
+			want: result{code: cli.ExitInterrupted},
+		},
+		{
+			name: "cancelled context outranks a coded error",
+			ctx:  cancelled(),
+			root: returning(func(ctx context.Context) error { return spec.Coded(5, ctx.Err()) }),
+			c:    registry,
+			want: result{code: cli.ExitInterrupted},
+		},
+		{
+			name: "cancelled context, run succeeds",
+			ctx:  cancelled(),
+			root: fails(nil),
+			want: result{code: cli.ExitOK},
+		},
+		{
+			name: "cancelled context, another error is printed and coded",
+			ctx:  cancelled(),
+			root: fails(spec.Coded(7, boom)),
+			want: result{code: 7, stderr: "tool: boom\n"},
+		},
+		{
+			name: "cancelled context, another error is printed and registered",
+			ctx:  cancelled(),
+			root: fails(sentinelError{}),
+			c:    registry,
+			want: result{code: 9, stderr: "tool: sentinel\n"},
+		},
+		{
+			name: "cancelled context, another error is printed",
+			ctx:  cancelled(),
+			root: fails(boom),
+			want: result{code: cli.ExitError, stderr: "tool: boom\n"},
+		},
+		{
+			name: "run's own timeout is not an interrupt",
+			ctx:  context.Background(),
+			root: returning(func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 0)
+				defer cancel()
+				<-ctx.Done()
+				return ctx.Err()
+			}),
+			want: result{code: cli.ExitError, stderr: "tool: context deadline exceeded\n"},
+		},
+		{
+			name: "run's own cancelled context is not an interrupt",
+			ctx:  context.Background(),
+			root: returning(func(ctx context.Context) error {
+				ctx, cancel := context.WithCancel(ctx)
+				cancel()
+				return ctx.Err()
+			}),
+			want: result{code: cli.ExitError, stderr: "tool: context canceled\n"},
+		},
+		{
+			name: "coded",
+			ctx:  context.Background(),
+			root: fails(fmt.Errorf("wrapped: %w", spec.Coded(7, boom))),
+			want: result{code: 7, stderr: "tool: wrapped: boom\n"},
+		},
+		{
+			name: "coded outranks the registry",
+			ctx:  context.Background(),
+			root: fails(spec.Coded(7, sentinelError{})),
+			c:    registry,
+			want: result{code: 7, stderr: "tool: sentinel\n"},
+		},
+		{
+			name: "coded outranks usage",
+			ctx:  context.Background(),
+			root: fails(spec.Coded(7, usage)),
+			want: result{code: 7, stderr: "tool: bad usage\n"},
+		},
+		{
+			name: "registry",
+			ctx:  context.Background(),
+			root: fails(fmt.Errorf("wrapped: %w", sentinelError{})),
+			c:    registry,
+			want: result{code: 9, stderr: "tool: wrapped: sentinel\n"},
+		},
+		{
+			name: "registry outranks usage",
+			ctx:  context.Background(),
+			root: fails(cli.NewUsageError(sentinelError{})),
+			c:    registry,
+			want: result{code: 9, stderr: "tool: sentinel\n"},
+		},
+		{
+			name: "registry matches a command line the tree rejects",
+			ctx:  context.Background(),
+			root: fails(nil),
+			args: []string{"do", "extra"},
+			c: cli.ExecuteConfig{Registry: []func(error) (int, bool){func(err error) (int, bool) {
+				var count *spec.ArgCountError
+				return 11, errors.As(err, &count)
+			}}},
+			want: result{code: 11, stderr: "tool: do: accepts no arguments, received 1 argument\n"},
+		},
+		{
+			name: "registry without a match",
+			ctx:  context.Background(),
+			root: fails(boom),
+			c:    registry,
+			want: result{code: cli.ExitError, stderr: "tool: boom\n"},
+		},
+		{
+			name: "usage",
+			ctx:  context.Background(),
+			root: fails(usage),
+			c:    registry,
+			want: result{code: cli.ExitUsage, stderr: "tool: bad usage\n"},
+		},
+		{
+			name: "reported",
+			ctx:  context.Background(),
+			root: fails(spec.Reported(boom)),
+			want: result{code: cli.ExitError},
+		},
+		{
+			name: "reported keeps its coded code",
+			ctx:  context.Background(),
+			root: fails(spec.Reported(spec.Coded(7, boom))),
+			want: result{code: 7},
+		},
+		{
+			name: "coded and reported in either order",
+			ctx:  context.Background(),
+			root: fails(spec.Coded(7, spec.Reported(boom))),
+			want: result{code: 7},
+		},
+		{
+			name: "reported keeps its registered code",
+			ctx:  context.Background(),
+			root: fails(spec.Reported(sentinelError{})),
+			c:    registry,
+			want: result{code: 9},
+		},
+		{
+			name: "reported keeps its usage code",
+			ctx:  context.Background(),
+			root: fails(spec.Reported(usage)),
+			want: result{code: cli.ExitUsage},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runCtx(tt.ctx, tt.root, tt.c, tt.args...); got != tt.want {
+				t.Errorf("got: %+v\nwant: %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecuteArgsContextIgnoresUnregistrableCodes(t *testing.T) {
+	for _, code := range []int{-1, 0, cli.ExitUsage, cli.ExitInterrupted, 126, 200} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			registry := cli.ExecuteConfig{Registry: []func(error) (int, bool){registerSentinel(9)}}
+			tests := []struct {
+				name string
+				err  error
+				c    cli.ExecuteConfig
+				want int
+			}{
+				{name: "to the registry", err: spec.Coded(code, sentinelError{}), c: registry, want: 9},
+				{name: "to usage", err: spec.Coded(code, cli.NewUsageError(errors.New("bad"))),
+					want: cli.ExitUsage},
+				{name: "to error", err: spec.Coded(code, errors.New("bad")), want: cli.ExitError},
+			}
+			for _, tt := range tests {
+				got := runCtx(context.Background(), fails(tt.err), tt.c)
+				if got.code != tt.want || got.stderr == "" {
+					t.Errorf("%s: got %+v, want code %d and a message", tt.name, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestExecuteArgsContextReachesTheRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), sentinelError{}, "value"))
+	cancel()
+	var gotValue any
+	var gotErr error
+	root := returning(func(ctx context.Context) error {
+		gotValue, gotErr = ctx.Value(sentinelError{}), ctx.Err()
+		return nil
+	})
+	if got := runCtx(ctx, root, cli.ExecuteConfig{}); got.code != cli.ExitOK {
+		t.Fatalf("got %+v", got)
+	}
+	if gotValue != "value" || !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("run received a context with value %v and error %v", gotValue, gotErr)
+	}
+}
+
+func TestExecuteArgsContextHooks(t *testing.T) {
+	registry := []func(error) (int, bool){registerSentinel(9)}
+	pre := func(err error) []func(context.Context, *spec.Invocation, spec.CommandInfo) error {
+		return []func(context.Context, *spec.Invocation, spec.CommandInfo) error{
+			func(context.Context, *spec.Invocation, spec.CommandInfo) error { return err },
+		}
+	}
+	post := func(err error) []func(context.Context, *spec.Invocation, spec.CommandInfo, error) error {
+		return []func(context.Context, *spec.Invocation, spec.CommandInfo, error) error{
+			func(context.Context, *spec.Invocation, spec.CommandInfo, error) error { return err },
+		}
+	}
+	tests := []struct {
+		name string
+		ctx  context.Context
+		run  error
+		c    cli.ExecuteConfig
+		want result
+	}{
+		{
+			name: "pre-run error is registered",
+			ctx:  context.Background(),
+			c:    cli.ExecuteConfig{Registry: registry, PreRun: pre(fmt.Errorf("pre: %w", sentinelError{}))},
+			want: result{code: 9, stderr: "tool: pre: sentinel\n"},
+		},
+		{
+			name: "pre-run error is coded",
+			ctx:  context.Background(),
+			c:    cli.ExecuteConfig{PreRun: pre(spec.Coded(7, errors.New("pre")))},
+			want: result{code: 7, stderr: "tool: pre\n"},
+		},
+		{
+			name: "pre-run error is an interrupt",
+			ctx:  cancelled(),
+			c:    cli.ExecuteConfig{PreRun: pre(context.Canceled)},
+			want: result{code: cli.ExitInterrupted},
+		},
+		{
+			name: "run error outranks a post-run error",
+			ctx:  context.Background(),
+			run:  spec.Coded(7, errors.New("run")),
+			c:    cli.ExecuteConfig{Registry: registry, PostRun: post(sentinelError{})},
+			want: result{code: 7, stderr: "tool: run\n"},
+		},
+		{
+			name: "plain run error outranks a registered post-run error",
+			ctx:  context.Background(),
+			run:  errors.New("run"),
+			c:    cli.ExecuteConfig{Registry: registry, PostRun: post(sentinelError{})},
+			want: result{code: cli.ExitError, stderr: "tool: run\n"},
+		},
+		{
+			name: "post-run error alone is an error",
+			ctx:  context.Background(),
+			c: cli.ExecuteConfig{
+				Registry: registry,
+				PostRun:  post(spec.Coded(7, fmt.Errorf("post: %w", sentinelError{}))),
+			},
+			want: result{code: cli.ExitError, stderr: "tool: post: sentinel\n"},
+		},
+		{
+			name: "post-run usage error alone is an error",
+			ctx:  context.Background(),
+			c:    cli.ExecuteConfig{PostRun: post(cli.NewUsageError(errors.New("post")))},
+			want: result{code: cli.ExitError, stderr: "tool: post\n"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runCtx(tt.ctx, fails(tt.run), tt.c); got != tt.want {
+				t.Errorf("got: %+v\nwant: %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecuteArgsContextInvalidTreeIsPrinted(t *testing.T) {
+	root := &spec.Command{Name: "tool", Commands: []*spec.Command{{Name: "x"}, {Name: "x"}}}
+	c := cli.ExecuteConfig{Registry: []func(error) (int, bool){func(error) (int, bool) { return 9, true }}}
+	got := runCtx(cancelled(), root, c)
+	if got.code != cli.ExitError || !strings.HasPrefix(got.stderr, "tool: invalid command tree: ") {
+		t.Errorf("got %+v, want ExitError and the invalid tree written", got)
+	}
+}
+
+func TestExecuteArgsCodedAndReported(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name string
+		err  error
+		want result
+	}{
+		{name: "coded", err: spec.Coded(7, boom), want: result{code: 7, stderr: "tool: boom\n"}},
+		{name: "unregistrable code", err: spec.Coded(cli.ExitInterrupted, boom),
+			want: result{code: cli.ExitError, stderr: "tool: boom\n"}},
+		{name: "reported", err: spec.Reported(boom), want: result{code: cli.ExitError}},
+		{name: "reported and coded", err: spec.Reported(spec.Coded(7, boom)), want: result{code: 7}},
+		{name: "context canceled is not an interrupt", err: context.Canceled,
+			want: result{code: cli.ExitError, stderr: "tool: context canceled\n"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runTree(t, fails(tt.err), "do"); got != tt.want {
+				t.Errorf("got: %+v\nwant: %+v", got, tt.want)
+			}
+		})
+	}
+}

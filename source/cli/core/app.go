@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/core/versioncmd"
@@ -45,6 +47,9 @@ type settings struct {
 	// buildInfo is what the "version" command prints: the Info [WithBuildInfo] gives, or
 	// [buildinfo.Read] when no option gives one.
 	buildInfo *buildinfo.Info
+	// exitMatchers are the matchers [WithExitCode] and [WithExitCodeAs] add, in the order they
+	// were added. Nothing changes them after [New], so concurrent executions share them.
+	exitMatchers exitMatchers
 }
 
 // Option configures an [App] when [New] builds it.
@@ -70,6 +75,35 @@ func New(identity spec.Identity, opts ...Option) *App {
 // [buildinfo.Read] reports for the running binary.
 func WithBuildInfo(info buildinfo.Info) Option {
 	return func(s *settings) { s.buildInfo = &info }
+}
+
+// WithExitCode makes [App.Execute] and [App.ExecuteArgs] exit with code for an error that
+// matches sentinel by errors.Is. The codes 0, [ExitUsage] and [ExitInterrupted] are reserved and
+// a code outside 1 through 125 is refused: [New] panics with a message naming the code. 1 and 3
+// through 125 are accepted. A nil sentinel matches no error.
+//
+// When an error matches several registrations, the one registered first decides. A
+// [spec.CodedError] the error carries, with a code 1 or 3 through 125, takes precedence over every
+// registration; the package documentation's "Exit codes" section describes the whole order.
+func WithExitCode(code int, sentinel error) Option {
+	return func(s *settings) {
+		s.exitMatchers = append(s.exitMatchers, sentinelMatcher(code, sentinel))
+	}
+}
+
+// WithExitCodeAs makes [App.Execute] and [App.ExecuteArgs] exit with the code fn returns for an
+// error that matches E by errors.As, given the error found. A code fn returns that 0, [ExitUsage],
+// [ExitInterrupted] or a number outside 1 through 125 is ignored, as if the error did not match,
+// because [New] cannot know it. A nil fn is ignored.
+//
+// It orders against [WithExitCode] by registration, and yields to a [spec.CodedError], as that
+// option describes.
+func WithExitCodeAs[E error](fn func(E) int) Option {
+	return func(s *settings) {
+		if fn != nil {
+			s.exitMatchers = append(s.exitMatchers, typedMatcher(fn))
+		}
+	}
 }
 
 // Add adds cmd as a subcommand of the root, after the commands added before it. It checks
@@ -112,12 +146,17 @@ func (a *App) Execute() int {
 //
 // The hooks [WithPreRun] and [WithPostRun] add run around every run function it calls, as they
 // describe.
+//
+// The exit code of an error is, first match wins: the code of a [spec.CodedError] the error
+// carries, when it is 1 or 3 through 125; the code of the first registered [WithExitCode] or
+// [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept;
+// [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	flags := newStandardFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	pre, post := a.settings.hookFuncs()
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
-	return executeArgs(env, a.root(flags), args, cfg)
+	return executeArgsCtx(context.Background(), env, a.root(flags), args, cfg, a.settings.exitMatchers)
 }
 
 // root returns a fresh root command for one execution, declaring flags as its inherited flags.

@@ -19,6 +19,9 @@ golangci-lint run
 
 - Root package `spec` — performs no I/O: it imports no `os` and touches neither the environment nor the
   file system. Anything that does belongs in a subpackage.
+- `Coded(code, err)` / `Reported(err)` (`exit.go`) — the exit code and the already-shown mark a run
+  function returns; they live here so `update` and `daemon` need not import `cli/core`, which maps
+  them to an exit code (ADR-0010).
 - `paths/` — `paths.Resolve(spec.Identity, paths.Options, kinds...)` resolves the requested config,
   state, cache, data and log directories per OS layout (XDG, darwin, windows), honouring
   `<PREFIX>_HOME`, `Options.Home` and explicit per-kind options, and `paths.New` resolves all five.
