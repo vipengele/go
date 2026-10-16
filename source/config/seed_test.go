@@ -180,6 +180,20 @@ func TestSeedNilSliceIsAnEmptyList(t *testing.T) {
 	assertRoundTrip(t, path, config{})
 }
 
+func TestSeedListLayout(t *testing.T) {
+	type config struct {
+		Tags  []string
+		Empty []string
+	}
+	path := seedPath(t)
+	if _, err := Seed(path, config{Tags: []string{"a", "b"}, Empty: []string{}}); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if got, want := readSeed(t, path), "tags:\n  - a\n  - b\nempty: []\n"; got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+}
+
 func TestSeedLayout(t *testing.T) {
 	path := seedPath(t)
 	if _, err := Seed(path, docConfig{Verbose: true}); err != nil {
@@ -333,6 +347,9 @@ func TestSeedUnencodableValue(t *testing.T) {
 	created, err := Seed(path, struct{ Name string }{Name: "\xff"})
 	if created || err == nil || !strings.Contains(err.Error(), path) {
 		t.Fatalf("Seed = %v, %v; want false and an error naming %s", created, err, path)
+	}
+	if !strings.Contains(err.Error(), "invalid UTF-8") {
+		t.Errorf("Seed error = %v, want the encoder's report of the invalid UTF-8", err)
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Seed left a file: Lstat = %v", err)

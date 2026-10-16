@@ -332,7 +332,7 @@ func (b *schemaBuilder) removedKeys(root string, entries map[string]string) map[
 			live[m] = i
 		}
 		segments := strings.Split(m, ".")
-		for n := 1; n < len(segments); n++ {
+		for n := 1; n < len(segments); n++ { // [lydite:exclude_from_mutation][with <= the whole of m also enters groups, but m is in live, which is checked first, so groups is never read at a key that is also live]
 			g := strings.Join(segments[:n], ".")
 			if _, ok := groups[g]; !ok {
 				groups[g] = i

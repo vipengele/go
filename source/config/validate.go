@@ -1,8 +1,9 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -99,8 +100,8 @@ func annotate(err error, schema *Schema, sources []Source) error {
 	}
 	// A longer text is replaced before a shorter one it contains, such as "server.port: bad" before
 	// "port: bad", and the replacer never matches inside a replacement.
-	sort.SliceStable(pairs, func(a, b int) bool { return len(pairs[a][0]) > len(pairs[b][0]) })
-	oldnew := make([]string, 0, 2*len(pairs))
+	slices.SortStableFunc(pairs, func(a, b [2]string) int { return cmp.Compare(len(b[0]), len(a[0])) })
+	oldnew := make([]string, 0, 2*len(pairs)) // [lydite:exclude_from_mutation][the capacity only reserves space; append grows the slice to the same strings without it]
 	for _, p := range pairs {
 		oldnew = append(oldnew, p[0], p[1])
 	}

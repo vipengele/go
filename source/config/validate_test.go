@@ -160,6 +160,21 @@ func TestLoadValidateJoinedErrors(t *testing.T) {
 	}
 }
 
+func TestLoadValidatePrefixTexts(t *testing.T) {
+	check := func(c validConfig) error {
+		return errors.Join(
+			&FieldError{Key: "server.port", Err: errors.New("bad")},
+			&FieldError{Key: "server.port", Err: errors.New("bad value")},
+		)
+	}
+	err := loadInvalid(t, validDefaults(check))
+
+	want := `server.port: bad: "80" from default` + "\n" + `server.port: bad value: "80" from default`
+	if got := err.Error(); got != want {
+		t.Errorf("error =\n%s\nwant\n%s", got, want)
+	}
+}
+
 func TestLoadValidateUnmatchedKeyPassesThrough(t *testing.T) {
 	orig := &FieldError{Key: "server", Err: errors.New("bad")}
 	err := loadInvalid(t, validDefaults(failWith(orig)))
