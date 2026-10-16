@@ -189,3 +189,66 @@ func TestRunWritesToEnvStdout(t *testing.T) {
 		t.Errorf("output = %q, want %q", got, want)
 	}
 }
+
+func TestLocalJSONReadsTheOutputFormatToo(t *testing.T) {
+	info := buildinfo.Info{Version: "v1.0.0"}
+	want, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		values map[string]any
+		format spec.Format
+		want   string
+	}{
+		{"neither", nil, spec.FormatText, "v1.0.0\n"},
+		{"local --json", map[string]any{"json": true}, spec.FormatText, string(want) + "\n"},
+		{"JSON format", nil, spec.FormatJSON, string(want) + "\n"},
+		{"both", map[string]any{"json": true}, spec.FormatJSON, string(want) + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			inv := spec.NewInvocation(&spec.Env{Stdout: &out}, nil, tt.values)
+			inv.Output = spec.NewOutput(spec.OutputOptions{Format: tt.format})
+			if err := versioncmd.New(info).Run(context.Background(), inv); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got := out.String(); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVersionUnderAnAppWithOutput(t *testing.T) {
+	info := buildinfo.Info{Version: "v1.0.0"}
+	want, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		args       []string
+		wantCode   int
+		wantStdout string
+	}{
+		{[]string{"version"}, cli.ExitOK, "v1.0.0\n"},
+		{[]string{"version", "--output", "text"}, cli.ExitOK, "v1.0.0\n"},
+		{[]string{"version", "--json"}, cli.ExitOK, string(want) + "\n"},
+		{[]string{"version", "--output", "json"}, cli.ExitOK, string(want) + "\n"},
+		{[]string{"--output=json", "version"}, cli.ExitOK, string(want) + "\n"},
+		{[]string{"version", "--json", "--output", "json"}, cli.ExitOK, string(want) + "\n"},
+		{[]string{"version", "--json", "--output", "text"}, cli.ExitUsage, ""},
+		{[]string{"version", "--json=false", "--output", "json"}, cli.ExitUsage, ""},
+	}
+	for _, tt := range tests {
+		var out, errOut bytes.Buffer
+		app := cli.New(spec.Identity{Name: "tool"}, cli.WithOutput(), cli.WithBuildInfo(info))
+		code := app.ExecuteArgs(&spec.Env{Stdout: &out, Stderr: &errOut}, tt.args)
+		if code != tt.wantCode || out.String() != tt.wantStdout {
+			t.Errorf("%q = %d, stdout %q, stderr %q; want %d and %q",
+				tt.args, code, out.String(), errOut.String(), tt.wantCode, tt.wantStdout)
+		}
+	}
+}

@@ -25,6 +25,11 @@ golangci-lint run
 - `ColorAllowed(noColor, identity, env, stream)` (`colour.go`) — the colour decision for one stream
   and its precedence; `Output.Styler(stream)`, `Styler` and the `Glyph*` constants (`style.go`) —
   coloured text and role glyphs that follow `Output.Color(stream)`.
+- `FlagOf.Get(inv)` / `FlagOf.IsSet(inv)` (`flag.go`) — a flag's value, and whether the command
+  line sets it explicitly, so `--json=false` is set and a `--json` not given is not. The adapter
+  names the set flags with the variadic `NewInvocation(env, args, values, ExplicitFlags(names...))`
+  (`invocation.go`); without the option nothing reads as set. `IsSet` is false for a value of
+  another type under the name, as `Get` then returns the default.
 - `Invocation.Info`, `Success`, `Warning`, `Error`, `Detail` and `Data` (`message.go`) — printf-style
   output helpers. The first five write one styled line to `Env.Stderr`; `Detail` is dim and only
   written when verbose; quiet drops all but `Error`; `--json` changes none of them. `Data` writes its

@@ -36,11 +36,13 @@ type App struct {
 
 // settings holds what the [Option]s given to [New] set.
 type settings struct {
-	// verbose, quiet, noColor and json opt the App into the standard flag of the same name.
+	// verbose, quiet, noColor, json and output opt the App into the standard flag of the same
+	// name. json and output exclude each other.
 	verbose bool
 	quiet   bool
 	noColor bool
 	json    bool
+	output  bool
 	// preRun and postRun are the hooks [WithPreRun] and [WithPostRun] add, in the order they
 	// were added. Nothing changes them after [New], so concurrent executions share them.
 	preRun  []PreRunHook
@@ -60,13 +62,17 @@ type settings struct {
 type Option func(*settings)
 
 // New returns an App for the tool identity names, configured by opts in order. It checks
-// nothing: the root command and the commands under it are checked on every execution. It reads
-// the build information of the running binary with [buildinfo.Read] unless [WithBuildInfo]
-// gives it.
+// the options alone, not the commands: the root command and the commands under it are checked on
+// every execution. It panics when opts register an exit code [WithExitCode] refuses, or hold both
+// [WithJSON] and [WithOutput], in either order. It reads the build information of the running
+// binary with [buildinfo.Read] unless [WithBuildInfo] gives it.
 func New(identity spec.Identity, opts ...Option) *App {
 	a := &App{identity: identity}
 	for _, opt := range opts {
 		opt(&a.settings)
+	}
+	if a.settings.json && a.settings.output {
+		panic("cli: WithJSON and WithOutput cannot be used together: an App takes one of --json and --output")
 	}
 	if a.settings.buildInfo == nil {
 		info := buildinfo.Read()
@@ -160,11 +166,13 @@ func (a *App) Execute() int {
 //
 // "version --json" writes JSON whether or not the App takes the standard --json. Without it,
 // --json is a local flag of "version"; with it, "version" declares no flag of its own and reads
-// the standard one, given before or after "version".
+// the standard one, given before or after "version". Under [WithOutput], "version --output json"
+// writes JSON as well, and "version --json" still does.
 //
 // Every run function receives a [spec.Invocation] whose Output reports the standard flags the
 // command line sets; a standard flag the App does not take reads as unset. --verbose with
-// --quiet returns [ExitUsage] and calls no run function. The Output decides colour for
+// --quiet returns [ExitUsage] and calls no run function, as does an --output that [WithOutput]
+// refuses. The Output decides colour for
 // [spec.Stdout] and [spec.Stderr] separately, each as [spec.ColorAllowed] decides it from
 // --no-color, the identity, which names <EnvPrefix>_NO_COLOR, and env, so a redirected standard
 // output forbids colour there and leaves it allowed on a standard error that is a terminal.

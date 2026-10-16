@@ -7,15 +7,22 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 
 - `cli` (the root package) — `New(identity, opts...)` builds an `App`; `Add(cmd)` adds a command
   tree; `Execute()` / `ExecuteArgs(env, args)` run it, each execution building a fresh root named by
-  `identity.Name`. Options: `WithVerbose`, `WithQuiet`, `WithNoColor`, `WithJSON` opt into the
-  standard flags, declared as inherited flags on the root (`flags.go`); `WithPreRun` / `WithPostRun`
+  `identity.Name`. Options: `WithVerbose`, `WithQuiet`, `WithNoColor`, `WithJSON`, `WithOutput` opt
+  into the standard flags, declared as inherited flags on the root (`flags.go`); `WithPreRun` / `WithPostRun`
   add `PreRunHook` / `PostRunHook`s (`hooks.go`), which receive the `Invocation` and a
   `spec.CommandInfo` (path and `Annotations`); `WithBuildInfo` fixes what `version` prints (tests),
   otherwise `buildinfo.Read()`. A run function reads the standard flags and colour (per stream,
   `Output.Color(stream)`) from `inv.Output` (`spec.Output`, resolved in `output.go`), never from a
-  handle. The App owns `version`
+  handle. `Output.Format()` is resolved by `outputResolver.format`: `WithJSON`'s `--json` or
+  `WithOutput`'s `--output text|json`, never both (`New` panics, whatever the option order). Under
+  `--output`, not set is text (told from an explicit `text` by `FlagOf.IsSet`, the adapter's
+  `pflag` `Changed`), and the running command's own `--json` must agree: `--output text` with a
+  true `--json`, `--output json` with an explicit `--json=false`, and an unknown value are usage
+  errors (exit 2). A command with a local `--json` reads it OR'd with `Output.Format()`. The App
+  owns `version`
   (ADR-0009): every root holds `versioncmd.New(...)` after the added commands, with a local `--json`
-  unless `WithJSON` is given, then `versioncmd.WithOutputJSON()`; a tool's own `version` is a
+  unless `WithJSON` is given, then `versioncmd.WithOutputJSON()`, so `version --json` writes JSON
+  under every option set, and `version --output json` too under `WithOutput`; a tool's own `version` is a
   duplicate name. `cli/core` never imports `update`: the tool's `main` wires the update check as a
   hook, and `spec.SkipUpdateCheck` is the opt-out annotation.
   The package-level `Execute(root)` runs a `*spec.Command` tree for a tool's `main` against
@@ -62,14 +69,16 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 - `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
   fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
   times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`
-  hooks as plain funcs; a post-run error after a successful run is a `*HookError`, never a
+  hooks as plain funcs; each invocation names the flags `pflag` reports `Changed` with
+  `spec.ExplicitFlags`; a post-run error after a successful run is a `*HookError`, never a
   `*UsageError`.
 - `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). `Info.IsDev`
   delegates to `cli/spec/version`. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
   schema-versioned JSON form (`schema` is 1). Adding a key keeps `schema`; renaming, removing or
   retyping a key increments it.
 - `versioncmd` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated
-  `spec.SkipUpdateCheck`. By default it has a local (not inherited) `--json` flag;
+  `spec.SkipUpdateCheck`. By default it has a local (not inherited) `--json` flag, OR'd with
+  `inv.Output.Format() == spec.FormatJSON`;
   `WithOutputJSON()` declares none and reads `inv.Output.JSON()`, for a root with an inherited
   `--json` (a descendant flag of the same name makes the tree invalid).
 

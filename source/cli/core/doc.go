@@ -21,11 +21,19 @@
 // with the JSON contract the buildinfo package specifies. A tool does not add "version"; a
 // command of that name it adds makes the tree invalid.
 //
-// The standard flags are opt-in: [WithVerbose], [WithQuiet], [WithNoColor] and [WithJSON] each
-// declare one inherited flag on the root. A run function reads them, together with whether
-// colour is allowed on each of the standard output and the standard error, from the
+// The standard flags are opt-in: [WithVerbose], [WithQuiet], [WithNoColor], [WithJSON] and
+// [WithOutput] each declare one inherited flag on the root. A run function reads them, together
+// with whether colour is allowed on each of the standard output and the standard error, from the
 // [spec.Output] of its [spec.Invocation], never from a flag handle. Without [WithJSON], --json is
 // a local flag of "version" alone; with it, "version" reads the standard flag.
+//
+// The format of the output, [spec.Output.Format], is text unless the command line asks for JSON.
+// An App takes one of two standard flags for it, and [New] panics when it is given both:
+// [WithJSON]'s --json, true for JSON, or [WithOutput]'s --output, text or json. Under --output, a
+// command that declares its own --json, as "version" does, reads that --json together with the
+// Format, and the two must agree: --output text with a --json that is true, --output json with
+// --json=false, and any --output other than text or json are usage errors. A flag given twice
+// takes its last value.
 //
 // Hooks run around every run function: [WithPreRun] adds a [PreRunHook] called before it and
 // [WithPostRun] a [PostRunHook] called after it. A hook receives the [spec.CommandInfo] of the

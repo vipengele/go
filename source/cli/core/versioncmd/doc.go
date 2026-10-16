@@ -16,7 +16,9 @@
 // With --json the command writes the JSON encoding of the Info that [buildinfo.Info.MarshalJSON]
 // specifies, as one object on one line followed by a newline. By default --json is a local flag
 // of the command: it is declared on the command itself, not as an inherited flag, so no other
-// command of the binary has it. With [WithOutputJSON] the command declares no flag and reads
-// [spec.Output.JSON] instead, so an inherited --json declared on the root, given before or after
-// "version", selects JSON. Either way "version --json" writes JSON.
+// command of the binary has it. The command then writes JSON when its --json is true or
+// [spec.Output.Format] is [spec.FormatJSON], so under an inherited --output, "version --json"
+// and "version --output json" both write JSON. With [WithOutputJSON] the command declares no
+// flag and reads [spec.Output.JSON] instead, so an inherited --json declared on the root, given
+// before or after "version", selects JSON. Either way "version --json" writes JSON.
 package versioncmd

@@ -10,8 +10,9 @@
 // accepts as an [ArgPolicy], its flags, its subcommands and the function that runs it. A flag is
 // created by [BoolFlag], [StringFlag] or [IntFlag], which return a typed handle; the handle is
 // listed in the Flags of the command that declares it, and its Get reads the flag's value from
-// the [Invocation] the run function receives. An Invocation carries one execution's positional
-// arguments, flag values and [Env], the standard streams, working directory and environment
+// the [Invocation] the run function receives, and its IsSet whether the command line sets the
+// flag explicitly, which tells --json=false from a --json not given. An Invocation carries one
+// execution's positional arguments, flag values, the names of the flags set explicitly and [Env], the standard streams, working directory and environment
 // variables the run function reaches the process through, and the [Output] the adapter resolves
 // for it: whether the execution is verbose or quiet, writes JSON and may use colour, which is
 // decided for the standard output and the standard error separately by [ColorAllowed]. The
@@ -28,5 +29,5 @@
 // concurrently, and by a test that substitutes the Env. An adapter in another module runs it:
 // it checks the tree with [Command.Validate], maps each command and [Flag] to its framework,
 // checks positional arguments with [ArgPolicy.Check], and builds each Invocation with
-// [NewInvocation].
+// [NewInvocation], naming the flags its framework reports as changed with [ExplicitFlags].
 package spec

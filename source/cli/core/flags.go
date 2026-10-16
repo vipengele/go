@@ -27,10 +27,25 @@ func WithNoColor() Option {
 }
 
 // WithJSON gives the App the standard flag --json, which asks for machine-readable JSON instead
-// of text: [spec.Output.JSON] reports it. It is inherited as [WithVerbose] describes, and has no
-// bearing on colour.
+// of text: [spec.Output.JSON] reports it, and [spec.Output.Format] reports [spec.FormatJSON]. It
+// is inherited as [WithVerbose] describes, and has no bearing on colour. It is the shorthand of
+// [WithOutput] for a tool whose only other format is text; an App takes one of the two, and [New]
+// panics when it is given both.
 func WithJSON() Option {
 	return func(s *settings) { s.json = true }
+}
+
+// WithOutput gives the App the standard flag --output, which names the format of the output,
+// text or json: [spec.Output.Format] reports it, and is [spec.FormatText] when the command line
+// does not set --output. It is inherited as [WithVerbose] describes, and has no bearing on colour.
+// Any other value is a usage error.
+//
+// A command that declares a --json of its own, such as "version", keeps it: the command reads its
+// own --json together with [spec.Output.Format], and --output text with a --json that is true, or
+// --output json with a --json explicitly false, is a usage error. An App takes one of WithOutput
+// and [WithJSON], and [New] panics when it is given both.
+func WithOutput() Option {
+	return func(s *settings) { s.output = true }
 }
 
 // standardFlags holds the handles of the standard flags of one execution. A nil handle is a
@@ -41,6 +56,10 @@ type standardFlags struct {
 	quiet   *spec.FlagOf[bool]
 	noColor *spec.FlagOf[bool]
 	json    *spec.FlagOf[bool]
+	output  *spec.FlagOf[string]
+	// localJSON reads the --json the running command declares itself, which --output must agree
+	// with. It is set exactly when output is, and the root does not declare it.
+	localJSON *spec.FlagOf[bool]
 }
 
 // newStandardFlags returns the handles of the standard flags s opts into.
@@ -58,16 +77,24 @@ func newStandardFlags(s settings) standardFlags {
 	if s.json {
 		f.json = spec.BoolFlag("json", "write JSON instead of text", spec.Inherited())
 	}
+	if s.output {
+		f.output = spec.StringFlag("output", "write the output as text or json",
+			spec.Default(spec.FormatText.String()), spec.Inherited())
+		f.localJSON = spec.BoolFlag("json", "write JSON instead of text")
+	}
 	return f
 }
 
-// list returns the flags f holds, in the order -v, -q, --no-color, --json.
+// list returns the flags the root declares, in the order -v, -q, --no-color, --json, --output.
 func (f standardFlags) list() []spec.Flag {
 	var flags []spec.Flag
 	for _, h := range []*spec.FlagOf[bool]{f.verbose, f.quiet, f.noColor, f.json} {
 		if h != nil {
 			flags = append(flags, h)
 		}
+	}
+	if f.output != nil {
+		flags = append(flags, f.output)
 	}
 	return flags
 }

@@ -187,6 +187,35 @@ func TestRunFlagDefaults(t *testing.T) {
 	}
 }
 
+func TestRunReportsTheExplicitFlags(t *testing.T) {
+	b := spec.BoolFlag("b", "", spec.Inherited())
+	s := spec.StringFlag("s", "", spec.Default("def"))
+	i := spec.IntFlag("i", "")
+	sub := &spec.Command{
+		Name:  "sub",
+		Flags: []spec.Flag{s, i},
+		Run: func(_ context.Context, inv *spec.Invocation) error {
+			_, _ = fmt.Fprintln(inv.Env.Stdout, b.IsSet(inv), s.IsSet(inv), i.IsSet(inv))
+			return nil
+		},
+	}
+	root := &spec.Command{Name: "tool", Flags: []spec.Flag{b}, Commands: []*spec.Command{sub}}
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"sub"}, "false false false\n"},
+		{[]string{"sub", "--b=false", "--s", "def"}, "true true false\n"},
+		{[]string{"--b", "sub", "--i=0"}, "true false true\n"},
+	}
+	for _, tt := range tests {
+		stdout, _, err := run(t, root, tt.args...)
+		if err != nil || stdout != tt.want {
+			t.Errorf("Run(%q): stdout %q, err %v; want %q", tt.args, stdout, err, tt.want)
+		}
+	}
+}
+
 func TestRunCommandWithRunAndSubcommands(t *testing.T) {
 	root := &spec.Command{
 		Name: "tool",
