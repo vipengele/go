@@ -16,6 +16,10 @@ func stdoutTerminal(s spec.Stream) bool { return s == spec.Stdout }
 // stderrTerminal is an Env.Terminal under which only the standard error is a terminal.
 func stderrTerminal(s spec.Stream) bool { return s == spec.Stderr }
 
+// bothTerminal is an Env.Terminal under which the standard output and the standard error are
+// terminals.
+func bothTerminal(s spec.Stream) bool { return s == spec.Stdout || s == spec.Stderr }
+
 // noTerminal is an Env.Terminal under which no standard stream is a terminal.
 func noTerminal(spec.Stream) bool { return false }
 
@@ -43,83 +47,104 @@ func lookup(vars map[string]string) func(string) (string, bool) {
 
 func TestAppOutputColor(t *testing.T) {
 	tests := []struct {
-		name     string
-		opts     []cli.Option
-		args     []string
-		vars     map[string]string
-		stdout   io.Writer
-		terminal func(spec.Stream) bool
-		want     bool
+		name       string
+		opts       []cli.Option
+		args       []string
+		vars       map[string]string
+		stdout     io.Writer
+		terminal   func(spec.Stream) bool
+		wantStdout bool
+		wantStderr bool
 	}{
 		{
-			name:     "terminal allows colour",
-			stdout:   &bytes.Buffer{},
-			terminal: stdoutTerminal,
-			want:     true,
+			name:       "terminals allow colour on both streams",
+			stdout:     &bytes.Buffer{},
+			terminal:   bothTerminal,
+			wantStdout: true,
+			wantStderr: true,
 		},
 		{
-			name:     "stdout that is not a terminal forbids colour",
+			name:     "no terminal forbids colour on both streams",
 			stdout:   &bytes.Buffer{},
 			terminal: noTerminal,
 		},
 		{
-			name:     "a terminal on stderr alone forbids colour",
-			stdout:   &bytes.Buffer{},
-			terminal: stderrTerminal,
+			name:       "a redirected stdout forbids colour on stdout alone",
+			stdout:     &bytes.Buffer{},
+			terminal:   stderrTerminal,
+			wantStderr: true,
 		},
 		{
-			name:   "writer that is not a file forbids colour",
+			name:       "a redirected stderr forbids colour on stderr alone",
+			stdout:     &bytes.Buffer{},
+			terminal:   stdoutTerminal,
+			wantStdout: true,
+		},
+		{
+			name:   "writers that are not files forbid colour",
 			stdout: &bytes.Buffer{},
 		},
 		{
 			name: "nil stdout forbids colour",
 		},
 		{
-			name:     "--no-color forbids colour",
+			name:     "--no-color forbids colour on both streams",
 			opts:     []cli.Option{cli.WithNoColor()},
 			args:     []string{"--no-color"},
-			terminal: stdoutTerminal,
+			terminal: bothTerminal,
 		},
 		{
-			name:     "--no-color absent allows colour",
-			opts:     []cli.Option{cli.WithNoColor()},
-			terminal: stdoutTerminal,
-			want:     true,
+			name:       "--no-color absent allows colour",
+			opts:       []cli.Option{cli.WithNoColor()},
+			terminal:   bothTerminal,
+			wantStdout: true,
+			wantStderr: true,
 		},
 		{
 			name:     "NO_COLOR forbids colour",
 			vars:     map[string]string{"NO_COLOR": "1"},
-			terminal: stdoutTerminal,
+			terminal: bothTerminal,
 		},
 		{
-			name:     "empty NO_COLOR allows colour",
-			vars:     map[string]string{"NO_COLOR": ""},
-			terminal: stdoutTerminal,
-			want:     true,
+			name:       "empty NO_COLOR allows colour",
+			vars:       map[string]string{"NO_COLOR": ""},
+			terminal:   bothTerminal,
+			wantStdout: true,
+			wantStderr: true,
 		},
 		{
 			name:     "prefixed NO_COLOR forbids colour",
 			vars:     map[string]string{"TOOL_NO_COLOR": "yes"},
-			terminal: stdoutTerminal,
+			terminal: bothTerminal,
 		},
 		{
-			name:     "empty prefixed NO_COLOR allows colour",
-			vars:     map[string]string{"TOOL_NO_COLOR": ""},
-			terminal: stdoutTerminal,
-			want:     true,
+			name:       "empty prefixed NO_COLOR allows colour",
+			vars:       map[string]string{"TOOL_NO_COLOR": ""},
+			terminal:   bothTerminal,
+			wantStdout: true,
+			wantStderr: true,
 		},
 		{
-			name:     "another tool's NO_COLOR allows colour",
-			vars:     map[string]string{"OTHER_NO_COLOR": "1"},
-			terminal: stdoutTerminal,
-			want:     true,
+			name:       "another tool's NO_COLOR allows colour",
+			vars:       map[string]string{"OTHER_NO_COLOR": "1"},
+			terminal:   bothTerminal,
+			wantStdout: true,
+			wantStderr: true,
 		},
 		{
-			name:     "--json keeps colour",
-			opts:     []cli.Option{cli.WithJSON()},
-			args:     []string{"--json"},
-			terminal: stdoutTerminal,
-			want:     true,
+			name:       "FORCE_COLOR allows colour on streams that are not terminals",
+			vars:       map[string]string{"FORCE_COLOR": "1"},
+			terminal:   noTerminal,
+			wantStdout: true,
+			wantStderr: true,
+		},
+		{
+			name:       "--json keeps colour",
+			opts:       []cli.Option{cli.WithJSON()},
+			args:       []string{"--json"},
+			terminal:   bothTerminal,
+			wantStdout: true,
+			wantStderr: true,
 		},
 	}
 	for _, tt := range tests {
@@ -136,8 +161,11 @@ func TestAppOutputColor(t *testing.T) {
 			if code := outputApp(&got, tt.opts...).ExecuteArgs(env, args); code != cli.ExitOK {
 				t.Fatalf("ExecuteArgs(%q) = %d, stderr %q; want 0", args, code, stderr.String())
 			}
-			if got.Color() != tt.want {
-				t.Errorf("Color() = %t, want %t", got.Color(), tt.want)
+			if got.Color(spec.Stdout) != tt.wantStdout {
+				t.Errorf("Color(Stdout) = %t, want %t", got.Color(spec.Stdout), tt.wantStdout)
+			}
+			if got.Color(spec.Stderr) != tt.wantStderr {
+				t.Errorf("Color(Stderr) = %t, want %t", got.Color(spec.Stderr), tt.wantStderr)
 			}
 		})
 	}
@@ -145,13 +173,22 @@ func TestAppOutputColor(t *testing.T) {
 
 func TestExecuteArgsOutputColor(t *testing.T) {
 	tests := []struct {
-		name string
-		vars map[string]string
-		want bool
+		name                   string
+		vars                   map[string]string
+		terminal               func(spec.Stream) bool
+		wantStdout, wantStderr bool
 	}{
-		{name: "terminal allows colour", want: true},
-		{name: "NO_COLOR forbids colour", vars: map[string]string{"NO_COLOR": "1"}},
-		{name: "a prefixed NO_COLOR is not read", vars: map[string]string{"TOOL_NO_COLOR": "1"}, want: true},
+		{name: "terminals allow colour", terminal: bothTerminal, wantStdout: true, wantStderr: true},
+		{name: "a redirected stdout forbids colour on stdout alone", terminal: stderrTerminal, wantStderr: true},
+		{name: "a redirected stderr forbids colour on stderr alone", terminal: stdoutTerminal, wantStdout: true},
+		{name: "NO_COLOR forbids colour", vars: map[string]string{"NO_COLOR": "1"}, terminal: bothTerminal},
+		{
+			name:       "a prefixed NO_COLOR is not read",
+			vars:       map[string]string{"TOOL_NO_COLOR": "1"},
+			terminal:   bothTerminal,
+			wantStdout: true,
+			wantStderr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -163,12 +200,15 @@ func TestExecuteArgsOutputColor(t *testing.T) {
 					return nil
 				},
 			}
-			env := &spec.Env{LookupEnv: lookup(tt.vars), Terminal: stdoutTerminal}
+			env := &spec.Env{LookupEnv: lookup(tt.vars), Terminal: tt.terminal}
 			if code := cli.ExecuteArgs(env, root, nil); code != cli.ExitOK {
 				t.Fatalf("ExecuteArgs = %d, want 0", code)
 			}
-			if got.Color() != tt.want {
-				t.Errorf("Color() = %t, want %t", got.Color(), tt.want)
+			if got.Color(spec.Stdout) != tt.wantStdout {
+				t.Errorf("Color(Stdout) = %t, want %t", got.Color(spec.Stdout), tt.wantStdout)
+			}
+			if got.Color(spec.Stderr) != tt.wantStderr {
+				t.Errorf("Color(Stderr) = %t, want %t", got.Color(spec.Stderr), tt.wantStderr)
 			}
 		})
 	}

@@ -22,6 +22,9 @@ golangci-lint run
 - `Coded(code, err)` / `Reported(err)` (`exit.go`) — the exit code and the already-shown mark a run
   function returns; they live here so `update` and `daemon` need not import `cli/core`, which maps
   them to an exit code (ADR-0010).
+- `ColorAllowed(noColor, identity, env, stream)` (`colour.go`) — the colour decision for one stream
+  and its precedence; `Output.Styler(stream)`, `Styler` and the `Glyph*` constants (`style.go`) —
+  coloured text and role glyphs that follow `Output.Color(stream)`.
 - `paths/` — `paths.Resolve(spec.Identity, paths.Options, kinds...)` resolves the requested config,
   state, cache, data and log directories per OS layout (XDG, darwin, windows), honouring
   `<PREFIX>_HOME`, `Options.Home` and explicit per-kind options, and `paths.New` resolves all five.

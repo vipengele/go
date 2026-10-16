@@ -22,10 +22,10 @@
 // command of that name it adds makes the tree invalid.
 //
 // The standard flags are opt-in: [WithVerbose], [WithQuiet], [WithNoColor] and [WithJSON] each
-// declare one inherited flag on the root. A run function reads them, together with the
-// environment's colour settings, from the [spec.Output] of its [spec.Invocation], never from a
-// flag handle. Without [WithJSON], --json is a local flag of "version" alone; with it, "version"
-// reads the standard flag.
+// declare one inherited flag on the root. A run function reads them, together with whether
+// colour is allowed on each of the standard output and the standard error, from the
+// [spec.Output] of its [spec.Invocation], never from a flag handle. Without [WithJSON], --json is
+// a local flag of "version" alone; with it, "version" reads the standard flag.
 //
 // Hooks run around every run function: [WithPreRun] adds a [PreRunHook] called before it and
 // [WithPostRun] a [PostRunHook] called after it. A hook receives the [spec.CommandInfo] of the

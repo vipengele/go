@@ -13,7 +13,9 @@
 // the [Invocation] the run function receives. An Invocation carries one execution's positional
 // arguments, flag values and [Env], the standard streams, working directory and environment
 // variables the run function reaches the process through, and the [Output] the adapter resolves
-// for it: whether the execution is verbose or quiet, writes JSON and may use colour.
+// for it: whether the execution is verbose or quiet, writes JSON and may use colour, which is
+// decided for the standard output and the standard error separately by [ColorAllowed]. The
+// [Styler] of a stream writes the glyphs and coloured text that decision allows.
 //
 // A command's Annotations are key-value metadata, such as [SkipUpdateCheck], that the framework
 // and its hooks read through the [CommandInfo] of the command that runs.
