@@ -3,8 +3,9 @@
 `go.vipengele.org/cli/spec`: the framework-neutral model of a command-line tool (`Identity`, `Command`,
 `Flag`, `Invocation`, `Env`) that `cli/core`, `update` and `daemon` share. Read `doc.go` first, then
 `docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md`,
-`docs/adr/0009-platform-paths-live-in-cli-spec-paths.md` and
-`docs/adr/0010-version-comparison-lives-in-cli-spec-version.md` at the repo root.
+`docs/adr/0009-platform-paths-live-in-cli-spec-paths.md`,
+`docs/adr/0010-version-comparison-lives-in-cli-spec-version.md` and
+`docs/adr/0015-table-helper-lives-in-cli-spec-table.md` at the repo root.
 
 ## Commands (run from `source/cli/spec`)
 
@@ -56,6 +57,12 @@ golangci-lint run
   functions on `golang.org/x/mod/semver`: the one definition of a release version and of "newer"
   (ADR-0010). A non-release current version is a dev build, older than every release; invalid input
   means no update. It performs no I/O.
+- `table/` — `table.New(cols...)`, `Add(values...)`, `Render(w, st)` and `Rows()`: aligned text and
+  the same rows as `[]Row` for JSON, which marshal with the columns' keys in column order. The
+  command owns the JSON envelope and the key the rows sit under (ADR-0014). A style sees the unpadded
+  cell and padding follows the measured width, so colour never alters alignment; width is the rune
+  count. `New` with no columns and `Add` with the wrong number of values panic. See
+  `docs/adr/0015-table-helper-lives-in-cli-spec-table.md`.
 
 ## Conventions
 
