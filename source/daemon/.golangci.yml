@@ -1,0 +1,17 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - depguard
+    - gochecknoglobals
+  settings:
+    depguard:
+      rules:
+        no-cli:
+          files:
+            - "**"
+          deny:
+            - pkg: github.com/spf13/cobra
+              desc: daemon does not depend on cobra
+            - pkg: "go.vipengele.org/cli/core/**"
+              desc: daemon does not depend on cli/core

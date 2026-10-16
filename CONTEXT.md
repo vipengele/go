@@ -249,6 +249,11 @@ The `daemon` component that starts every **Runner**, stops them in reverse order
 when one fails, and owns the process lifecycle and health. One per process.
 _Avoid_: manager (a **Service** manager is the operating system's), orchestrator, scheduler
 
+**Grace period**:
+The single time budget a shutdown shares: the **Runners** are stopped one after another within it,
+and a **Runner** that has not stopped when it ends is reported as timed out.
+_Avoid_: timeout, deadline, shutdown timeout
+
 **Service**:
 A daemon registered with the operating system's service manager (systemd, launchd, the Windows
 service control manager), started, stopped and restarted by it. Installing, removing and querying
