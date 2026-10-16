@@ -16,7 +16,8 @@ const ExitInterrupted = 130
 const maxExitCode = 125
 
 // registrableExitCode reports whether an option can give code to an error: 1, and 3 through 125.
-// 0, [ExitUsage] and [ExitInterrupted] are reserved for the runs they describe.
+// 0, [ExitUsage] and [ExitInterrupted] are reserved for the runs they describe: a run function
+// asks for [ExitUsage] by returning a [spec.UsageError], never by a code.
 func registrableExitCode(code int) bool {
 	return code >= ExitError && code <= maxExitCode && code != ExitUsage
 }

@@ -1232,6 +1232,7 @@ func cancelled() context.Context {
 func TestExecuteArgsContextExitCodePrecedence(t *testing.T) {
 	boom := errors.New("boom")
 	usage := cli.NewUsageError(errors.New("bad usage"))
+	runUsage := &spec.UsageError{Question: "continue?", Flag: "--yes"}
 	registry := cli.ExecuteConfig{Registry: []func(error) (int, bool){registerSentinel(9)}}
 	tests := []struct {
 		name string
@@ -1365,10 +1366,48 @@ func TestExecuteArgsContextExitCodePrecedence(t *testing.T) {
 			want: result{code: cli.ExitUsage, stderr: "tool: bad usage\n"},
 		},
 		{
+			name: "run usage",
+			ctx:  context.Background(),
+			root: fails(runUsage),
+			c:    registry,
+			want: result{code: cli.ExitUsage, stderr: "tool: continue? requires interactive input; pass --yes\n"},
+		},
+		{
+			name: "wrapped run usage",
+			ctx:  context.Background(),
+			root: fails(fmt.Errorf("deploy: %w", runUsage)),
+			want: result{
+				code:   cli.ExitUsage,
+				stderr: "tool: deploy\n  → continue? requires interactive input; pass --yes\n",
+			},
+		},
+		{
+			name: "coded outranks run usage",
+			ctx:  context.Background(),
+			root: fails(spec.Coded(7, runUsage)),
+			want: result{code: 7, stderr: "tool: continue? requires interactive input; pass --yes\n"},
+		},
+		{
+			name: "registry outranks run usage",
+			ctx:  context.Background(),
+			root: fails(runUsage),
+			c: cli.ExecuteConfig{Registry: []func(error) (int, bool){func(err error) (int, bool) {
+				var u *spec.UsageError
+				return 11, errors.As(err, &u)
+			}}},
+			want: result{code: 11, stderr: "tool: continue? requires interactive input; pass --yes\n"},
+		},
+		{
 			name: "reported",
 			ctx:  context.Background(),
 			root: fails(spec.Reported(boom)),
 			want: result{code: cli.ExitError},
+		},
+		{
+			name: "reported keeps its run usage code",
+			ctx:  context.Background(),
+			root: fails(spec.Reported(runUsage)),
+			want: result{code: cli.ExitUsage},
 		},
 		{
 			name: "reported keeps its coded code",
@@ -1417,6 +1456,8 @@ func TestExecuteArgsContextIgnoresUnregistrableCodes(t *testing.T) {
 			}{
 				{name: "to the registry", err: spec.Coded(code, sentinelError{}), c: registry, want: 9},
 				{name: "to usage", err: spec.Coded(code, cli.NewUsageError(errors.New("bad"))),
+					want: cli.ExitUsage},
+				{name: "to run usage", err: spec.Coded(code, &spec.UsageError{Question: "continue?"}),
 					want: cli.ExitUsage},
 				{name: "to error", err: spec.Coded(code, errors.New("bad")), want: cli.ExitError},
 			}
@@ -1512,6 +1553,18 @@ func TestExecuteArgsContextHooks(t *testing.T) {
 			ctx:  context.Background(),
 			c:    cli.ExecuteConfig{PostRun: post(cli.NewUsageError(errors.New("post")))},
 			want: result{code: cli.ExitError, stderr: "tool: post\n"},
+		},
+		{
+			name: "post-run run usage error alone is an error",
+			ctx:  context.Background(),
+			c:    cli.ExecuteConfig{PostRun: post(&spec.UsageError{Question: "continue?"})},
+			want: result{code: cli.ExitError, stderr: "tool: continue? requires interactive input\n"},
+		},
+		{
+			name: "pre-run run usage error is usage",
+			ctx:  context.Background(),
+			c:    cli.ExecuteConfig{PreRun: pre(&spec.UsageError{Question: "continue?"})},
+			want: result{code: cli.ExitUsage, stderr: "tool: continue? requires interactive input\n"},
 		},
 	}
 	for _, tt := range tests {

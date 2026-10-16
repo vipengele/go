@@ -127,6 +127,14 @@ func TestRenderGolden(t *testing.T) {
 			args: []string{"do", "--nope"},
 			code: cli.ExitUsage,
 		},
+		{
+			name: "run-usage",
+			app: func() *cli.App {
+				return exitApp(&spec.UsageError{Question: "delete 3 files?", Flag: "--yes"})
+			},
+			args: []string{"do"},
+			code: cli.ExitUsage,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

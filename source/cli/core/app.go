@@ -90,7 +90,8 @@ func WithBuildInfo(info buildinfo.Info) Option {
 // WithExitCode makes [App.Execute] and [App.ExecuteArgs] exit with code for an error that
 // matches sentinel by errors.Is. The codes 0, [ExitUsage] and [ExitInterrupted] are reserved and
 // a code outside 1 through 125 is refused: [New] panics with a message naming the code. 1 and 3
-// through 125 are accepted. A nil sentinel matches no error.
+// through 125 are accepted. A nil sentinel matches no error. An error is given [ExitUsage] by
+// carrying a [spec.UsageError], which a registration that matches it overrides.
 //
 // When an error matches several registrations, the one registered first decides. A
 // [spec.CodedError] the error carries, with a code 1 or 3 through 125, takes precedence over every
@@ -184,8 +185,8 @@ func (a *App) Execute() int {
 // wins: [ExitInterrupted], written nowhere, when an interrupt cancelled the run's context and the
 // error is [context.Canceled]; the code of a [spec.CodedError] the error carries, when it is 1 or
 // 3 through 125; the code of the first registered [WithExitCode] or
-// [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept;
-// [ExitError] otherwise.
+// [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept, and for
+// an error that carries a [spec.UsageError]; [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	flags := newStandardFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
