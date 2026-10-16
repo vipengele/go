@@ -1,0 +1,9 @@
+empty
+items[].id
+items[].name
+meta.created
+meta.owner.name
+name
+none[]
+schema
+tags[]

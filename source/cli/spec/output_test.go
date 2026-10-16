@@ -73,3 +73,40 @@ func TestZeroOutputEqualsNewOutputOfZeroOptions(t *testing.T) {
 		t.Error("NewOutput(OutputOptions{}) differs from the zero Output")
 	}
 }
+
+func TestOutputFormat(t *testing.T) {
+	tests := []struct {
+		name string
+		out  spec.Output
+		want spec.Format
+	}{
+		{"zero value is text", spec.Output{}, spec.FormatText},
+		{"zero options are text", spec.NewOutput(spec.OutputOptions{}), spec.FormatText},
+		{"explicit text", spec.NewOutput(spec.OutputOptions{Format: spec.FormatText}), spec.FormatText},
+		{"explicit json", spec.NewOutput(spec.OutputOptions{Format: spec.FormatJSON}), spec.FormatJSON},
+		{"json option selects json", spec.NewOutput(spec.OutputOptions{JSON: true}), spec.FormatJSON},
+		{
+			"json option wins over explicit text",
+			spec.NewOutput(spec.OutputOptions{Format: spec.FormatText, JSON: true}),
+			spec.FormatJSON,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.out.Format(); got != tt.want {
+				t.Errorf("Format() = %v, want %v", got, tt.want)
+			}
+			if got, want := tt.out.JSON(), tt.want == spec.FormatJSON; got != want {
+				t.Errorf("JSON() = %t, want %t", got, want)
+			}
+		})
+	}
+}
+
+func TestFormatString(t *testing.T) {
+	for f, want := range map[spec.Format]string{spec.FormatText: "text", spec.FormatJSON: "json", spec.Format(9): "unknown"} {
+		if got := f.String(); got != want {
+			t.Errorf("Format(%d).String() = %q, want %q", int(f), got, want)
+		}
+	}
+}

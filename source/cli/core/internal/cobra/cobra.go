@@ -179,11 +179,11 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 		return &UsageError{Path: relPath(cmd), Err: err}
 	}
 	cmd.RunE = func(cmd *spf.Command, args []string) error {
-		values, err := read(cmd.Flags(), visible)
+		values, set, err := read(cmd.Flags(), visible)
 		if err != nil {
 			return err
 		}
-		inv := spec.NewInvocation(env, args, values)
+		inv := spec.NewInvocation(env, args, values, spec.ExplicitFlags(set...))
 		if cfg.Output != nil {
 			out, err := cfg.Output(inv)
 			if err != nil {
@@ -260,11 +260,13 @@ func define(fs *pflag.FlagSet, f spec.Flag) error {
 	return nil
 }
 
-// read returns the parsed value of every flag in flags, keyed by name. fs is the flag set of the
-// command that runs, which holds its own flags and those inherited from its ancestors once cobra
-// has parsed the command line.
-func read(fs *pflag.FlagSet, flags []spec.Flag) (map[string]any, error) {
+// read returns the parsed value of every flag in flags, keyed by name, and the names of those
+// the command line sets explicitly, as pflag reports them changed: a flag given its default
+// value, such as --json=false, is set. fs is the flag set of the command that runs, which holds
+// its own flags and those inherited from its ancestors once cobra has parsed the command line.
+func read(fs *pflag.FlagSet, flags []spec.Flag) (map[string]any, []string, error) {
 	values := make(map[string]any, len(flags))
+	var set []string
 	for _, f := range flags {
 		var (
 			v   any
@@ -281,11 +283,14 @@ func read(fs *pflag.FlagSet, flags []spec.Flag) (map[string]any, error) {
 			err = fmt.Errorf("flag --%s has unsupported kind %s", f.Name(), f.Kind())
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		values[f.Name()] = v
+		if fs.Changed(f.Name()) {
+			set = append(set, f.Name())
+		}
 	}
-	return values, nil
+	return values, set, nil
 }
 
 // relPath returns the command path of cmd without the root's name.

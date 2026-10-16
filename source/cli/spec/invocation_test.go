@@ -58,3 +58,18 @@ func TestNewInvocationLeavesTheDefaultOutput(t *testing.T) {
 		t.Errorf("Output = %+v, want the zero Output", inv.Output)
 	}
 }
+
+func TestNewInvocationCopiesTheExplicitFlags(t *testing.T) {
+	asJSON := spec.BoolFlag("json", "")
+	names := []string{"json"}
+	inv := spec.NewInvocation(nil, nil, map[string]any{"json": false, "other": true},
+		spec.ExplicitFlags(names...))
+
+	names[0] = "other"
+	if !asJSON.IsSet(inv) {
+		t.Error("IsSet = false after the caller changed its slice, want true")
+	}
+	if other := spec.BoolFlag("other", ""); other.IsSet(inv) {
+		t.Error("IsSet of a flag the option does not name = true, want false")
+	}
+}

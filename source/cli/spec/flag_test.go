@@ -207,3 +207,41 @@ func TestShorthandAcceptsOnlyASCIILettersAndDigits(t *testing.T) {
 		})
 	}
 }
+
+func TestFlagIsSetReadsTheExplicitFlags(t *testing.T) {
+	asJSON := spec.BoolFlag("json", "print JSON")
+	output := spec.StringFlag("output", "format", spec.Default("text"))
+	retries := spec.IntFlag("retries", "attempts")
+	values := map[string]any{"json": false, "output": "text", "retries": 0}
+
+	tests := []struct {
+		name                  string
+		inv                   *spec.Invocation
+		json, output, retries bool
+	}{
+		{"nil invocation", nil, false, false, false},
+		{"no option", spec.NewInvocation(nil, nil, values), false, false, false},
+		{"default values given explicitly", spec.NewInvocation(nil, nil, values,
+			spec.ExplicitFlags("json", "output")), true, true, false},
+		{"names given across options", spec.NewInvocation(nil, nil, values,
+			spec.ExplicitFlags("json"), nil, spec.ExplicitFlags("retries")), true, false, true},
+		{"set without a value", spec.NewInvocation(nil, nil, nil,
+			spec.ExplicitFlags("json", "output", "retries")), false, false, false},
+		{"set with a value of another type", spec.NewInvocation(nil, nil,
+			map[string]any{"json": "yes", "output": 1, "retries": true},
+			spec.ExplicitFlags("json", "output", "retries")), false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := asJSON.IsSet(tt.inv); got != tt.json {
+				t.Errorf("json IsSet = %t, want %t", got, tt.json)
+			}
+			if got := output.IsSet(tt.inv); got != tt.output {
+				t.Errorf("output IsSet = %t, want %t", got, tt.output)
+			}
+			if got := retries.IsSet(tt.inv); got != tt.retries {
+				t.Errorf("retries IsSet = %t, want %t", got, tt.retries)
+			}
+		})
+	}
+}

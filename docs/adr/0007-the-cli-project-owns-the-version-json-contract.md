@@ -1,6 +1,6 @@
 # The `cli` project owns the `version --json` contract
 
-Status: amends ADR-0003.
+Status: amends ADR-0003. ADR-0014 defines how the object is written.
 
 Every tool built on the library ships the `version` command from `cli/core`, the project that holds
 the app shell ADR-0003 assigns to `cli` (ADR-0004). What that command prints is a contract between
@@ -10,7 +10,9 @@ processes: `update`'s staged-binary preflight runs `<staged> version --json` and
 
 ## The JSON shape
 
-`version --json` writes one object on one line, every key always present (wrapped here):
+`version --json` writes one indented object, through the envelope writer of ADR-0014, every key
+always present (shown compact and wrapped here; a consumer decodes it, and whitespace is not part of
+the contract):
 
 ```json
 {"schema":1,"version":"v1.0.0","commit":"0123abcdef0123abcdef0123abcdef0123abcdef",

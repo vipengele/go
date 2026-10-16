@@ -151,6 +151,19 @@ func (f *FlagOf[T]) Get(inv *Invocation) T {
 	return f.def
 }
 
+// IsSet reports whether the command line of inv sets the flag explicitly, as the adapter names
+// it with [ExplicitFlags], whatever the value given: --json=false is set, a --json not given is
+// not. It returns false when inv is nil or holds no value of the flag's type under its name, as
+// for a flag of another kind that shares the name, so IsSet is true only when [FlagOf.Get]
+// returns the value the command line gives.
+func (f *FlagOf[T]) IsSet(inv *Invocation) bool {
+	if inv == nil || !inv.set[f.name] {
+		return false
+	}
+	_, ok := inv.values[f.name].(T)
+	return ok
+}
+
 // Name returns the flag's long name.
 func (f *FlagOf[T]) Name() string { return f.name }
 

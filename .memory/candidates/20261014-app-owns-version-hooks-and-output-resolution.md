@@ -17,7 +17,8 @@ Facts that break silently if changed:
   that also adds its own `version` gets a duplicate name and "invalid command tree" (exit 1). `version` has a
   local `--json` unless the App took the standard `--json` (`WithJSON`); then it declares no flag and reads
   `inv.Output.JSON()` (`versioncmd.WithOutputJSON`), because `Command.Validate` rejects a descendant flag that
-  collides with an inherited one (`source/cli/spec/command.go`). Dropping the local flag outright would make
+  collides with an inherited one (`source/cli/spec/command.go`). Under `WithOutput` the local flag stays and is
+  ORed with the resolved format. Dropping the local flag outright would make
   `version --json` exit 2 for tools without `WithJSON` and fail `update`'s `<staged> version --json` preflight.
 - `versioncmd.New` carries the `spec.SkipUpdateCheck` annotation so an update-check hook skips the preflight run.
   An annotation applies to the command carrying it only, never its subcommands. `cli/core` never imports `update`

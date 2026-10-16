@@ -9,8 +9,8 @@ import (
 )
 
 // buildAndRun builds testdata/ldflagsmain with -buildvcs=false and the given -ldflags, runs it
-// and returns the two lines it prints. The build runs in the module directory, so it resolves
-// the module whether or not a go.work covers it.
+// and returns the text line it prints and the JSON that follows. The build runs in the module
+// directory, so it resolves the module whether or not a go.work covers it.
 func buildAndRun(t *testing.T, ldflags string) (text string, js []byte) {
 	t.Helper()
 	goBin, err := exec.LookPath("go")
@@ -38,11 +38,11 @@ func buildAndRun(t *testing.T, ldflags string) (text string, js []byte) {
 	if err != nil {
 		t.Fatalf("running %s: %v", bin, err)
 	}
-	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("output has %d lines, want 2:\n%s", len(lines), out)
+	text, rest, ok := strings.Cut(string(out), "\n")
+	if !ok || rest == "" {
+		t.Fatalf("output has no JSON after the text line:\n%s", out)
 	}
-	return lines[0], []byte(lines[1])
+	return text, []byte(rest)
 }
 
 type encoded struct {

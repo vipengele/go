@@ -16,9 +16,6 @@ var (
 	date    string //nolint:gochecknoglobals // -X sets only a package-level string variable
 )
 
-// schema is the value of the "schema" key in the JSON encoding of an [Info].
-const schema = 1
-
 // shortCommitLen is the number of characters of the commit that [Info.String] prints.
 const shortCommitLen = 12
 
@@ -101,9 +98,9 @@ func (i Info) String() string {
 	return s + " build " + i.Commit[:min(len(i.Commit), shortCommitLen)]
 }
 
-// jsonInfo is the JSON encoding of an Info. Its keys are the package's JSON contract.
+// jsonInfo is the JSON encoding of an Info. Its keys are the package's JSON contract, apart from
+// "schema", which the writer of the envelope adds.
 type jsonInfo struct {
-	Schema    int    `json:"schema"`
 	Version   string `json:"version"`
 	Commit    string `json:"commit"`
 	Date      string `json:"date"`
@@ -113,12 +110,11 @@ type jsonInfo struct {
 	Dev       bool   `json:"dev"`
 }
 
-// MarshalJSON encodes i as the JSON object the package documentation specifies, with the
-// "schema" key, the full commit and the "dev" key set to [Info.IsDev]. Every key is present
-// whatever i holds.
+// MarshalJSON encodes i as the JSON object the package documentation specifies, with the full
+// commit and the "dev" key set to [Info.IsDev]. Every key is present whatever i holds. The object
+// has no "schema" key: [go.vipengele.org/cli/spec.WriteJSON] adds it in front of the keys.
 func (i Info) MarshalJSON() ([]byte, error) {
 	return json.Marshal(jsonInfo{
-		Schema:    schema,
 		Version:   i.Version,
 		Commit:    i.Commit,
 		Date:      i.Date,
