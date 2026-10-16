@@ -166,6 +166,17 @@ separately. It is decided for the Invocation from the standard flags the **App**
 **Env**, and a **Command** reads it rather than parsing those flags itself.
 _Avoid_: format (JSON or text is one part of it), verbosity, log level
 
+**Message**:
+A line a **Command** writes about the run itself, such as progress, a warning or an error it shows,
+as opposed to what it produces. It goes to the standard error, styled by the **Output mode**, and
+quiet silences it except for errors (ADR-0013).
+_Avoid_: log, print
+
+**Data**:
+What a **Command** exists to produce: the text or JSON a user or a script reads from the standard
+output. It is written as given, unstyled, and no **Output mode** suppresses it (ADR-0013).
+_Avoid_: result, output (the **Output mode** covers both streams)
+
 **Hook**:
 A function the **App** runs before or after every **Command** it runs, given the **Invocation** and
 the Command's path and **Annotation**s. It belongs to the tool, not to the Command, so a Command
