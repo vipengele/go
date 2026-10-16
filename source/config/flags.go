@@ -43,6 +43,10 @@ func (p *FlagsProvider) Load(schema *Schema) ([]Entry, error) {
 	for _, k := range keys {
 		f, ok := schema.Lookup(k)
 		if !ok {
+			if hint, removed := schema.Removed(k); removed {
+				problems = append(problems, fmt.Errorf("flag --%s: key was removed: %s", k, hint))
+				continue
+			}
 			problems = append(problems, fmt.Errorf("flag --%s: unknown key", k))
 			continue
 		}

@@ -133,6 +133,31 @@ func TestFlagsErrors(t *testing.T) {
 			},
 		},
 		{
+			name:   "removed key carries its hint",
+			values: map[string]string{"legacy": "1"},
+			want:   []string{"flag --legacy: key was removed: drop it"},
+		},
+		{
+			name:   "removed key in another spelling is named as written",
+			values: map[string]string{"server.max-conns": "1"},
+			want:   []string{"flag --server.max-conns: key was removed: use server.max-retries"},
+		},
+		{
+			name:   "removed and unknown keys together, sorted",
+			values: map[string]string{"zeta": "1", "legacy": "2", "server.max-conns": "3", "alpha": "4", "name": "ok"},
+			want: []string{
+				"flag --alpha: unknown key",
+				"flag --legacy: key was removed: drop it",
+				"flag --server.max-conns: key was removed: use server.max-retries",
+				"flag --zeta: unknown key",
+			},
+		},
+		{
+			name:   "a key below a removed key is unknown",
+			values: map[string]string{"legacy.x": "1"},
+			want:   []string{"flag --legacy.x: unknown key"},
+		},
+		{
 			name:   "two spellings of one field",
 			values: map[string]string{"server.max-retries": "1", "server.max_retries": "2"},
 			want:   []string{"flag --server.max_retries sets the same key as --server.max-retries"},
@@ -158,6 +183,17 @@ func TestFlagsErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFlagsValidKeyLoadsBesideSchemaRemovals(t *testing.T) {
+	got, err := Flags(map[string]string{"server.host": "h"}).Load(flagSchema(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []Entry{{Key: "server.host", Value: "h", Origin: "flag --server.host"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries = %#v, want %#v", got, want)
 	}
 }
 
