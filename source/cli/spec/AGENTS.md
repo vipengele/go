@@ -29,8 +29,8 @@ golangci-lint run
   <Flag>` (without the `; pass` clause when `Flag` is empty); wrapped it renders as a two-row tree.
 - `Invocation.Confirm(question, ConfirmOptions)` and `Invocation.Prompt(question, PromptOptions)`
   (`prompt.go`) — ask on `Env.Stderr` and read one line from `Env.Stdin`, byte by byte so nothing
-  after the newline is consumed. They ask only when `Env.IsTerminal(Stdin)`; quiet and `--json` do
-  not change that, and nothing is written to stdout. Not a terminal: a question with a default and
+  after the newline is consumed. They ask only when `Env.IsTerminal(Stdin)`; quiet and the JSON output mode
+  do not change that, and nothing is written to stdout. Not a terminal: a question with a default and
   not `Required` answers with the default and writes nothing; any other returns a bare
   `*UsageError` naming `Flag`. `ConfirmDefault` is `NoDefault` (hint `[y/n]`, the zero value),
   `DefaultYes` (`[Y/n]`) or `DefaultNo` (`[y/N]`); `Confirm` accepts y, yes, n and no in any case.
