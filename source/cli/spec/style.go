@@ -30,8 +30,8 @@ const (
 // removing the SGR sequences yields exactly what the same call returns with colour off; with
 // colour off the text is returned with no escape at all. Glyphs are the same either way.
 //
-// The Styler methods below are the stable surface; message helpers extend it with further
-// methods. The zero Styler has colour off.
+// The Styler methods below are the stable surface. The message helpers, such as
+// [Invocation.Info], are methods on [Invocation] built on it. The zero Styler has colour off.
 type Styler struct {
 	color bool
 }
