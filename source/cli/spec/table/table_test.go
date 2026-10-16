@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/speccheck"
 	"go.vipengele.org/cli/spec/table"
 )
 
@@ -400,4 +401,29 @@ func TestRenderReportsAWriteError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("Render error = %v, want one wrapping the write error", err)
 	}
+}
+
+// The keys of a row are the column keys, so renaming, removing or retyping a column is a contract
+// change that increments the command's schema. The table is non-empty: an empty rows slice has no
+// element keys to pin.
+func TestRowKeys(t *testing.T) {
+	tbl := table.New(
+		table.Column{Key: "name", Header: "NAME"},
+		table.Column{Key: "size", Header: "SIZE", Right: true},
+		table.Column{Key: "tags", Header: "TAGS"},
+	)
+	tbl.Add("alpha", 12, []string{"a"})
+
+	var out bytes.Buffer
+	payload := struct {
+		Items []table.Row `json:"items"`
+	}{Items: tbl.Rows()}
+	if err := spec.WriteJSON(&out, 1, payload); err != nil {
+		t.Fatalf("spec.WriteJSON() error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decoding %s: %v", out.Bytes(), err)
+	}
+	speccheck.AssertJSONKeys(t, got, "testdata/row-keys.golden")
 }
