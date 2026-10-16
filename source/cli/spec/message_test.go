@@ -55,6 +55,7 @@ func TestInvocationMessages(t *testing.T) {
 		{"default", spec.OutputOptions{}},
 		{"quiet", spec.OutputOptions{Quiet: true}},
 		{"verbose", spec.OutputOptions{Verbose: true}},
+		{"verbose+quiet", spec.OutputOptions{Verbose: true, Quiet: true}},
 		{"json", spec.OutputOptions{JSON: true}},
 	}
 	type row struct {
