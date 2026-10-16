@@ -20,8 +20,9 @@ type FlagsProvider struct {
 // arrives as the single comma-separated text of its flag; it is not split here.
 //
 // Load reports every problem in one error, the keys in sorted order: a key with no Schema field,
-// and two keys that match the same field. Origins name the flag by its canonical name, such as
-// "flag --server.max-retries", however the key was spelled.
+// a key the Schema lists as removed, reported with its hint, and two keys that match the same field.
+// Origins name the flag by its canonical name, such as "flag --server.max-retries", however the key
+// was spelled.
 func Flags(values map[string]string) *FlagsProvider {
 	return &FlagsProvider{values: values}
 }

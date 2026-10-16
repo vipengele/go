@@ -21,6 +21,14 @@ type fileConfig struct {
 	Ports  []int
 }
 
+func (fileConfig) RemovedKeys() map[string]string {
+	return map[string]string{
+		"legacy":           "drop it",
+		"server.max_conns": "use server.max_retries",
+		"old_settings":     "settings moved to server",
+	}
+}
+
 func fileSchema(t *testing.T) *Schema {
 	t.Helper()
 	s, err := NewSchema(&fileConfig{}, "APP")
@@ -185,6 +193,12 @@ func TestFileProblems(t *testing.T) {
 		{"merge_key.yaml", []string{
 			`config.yaml:3: unknown key "<<"`,
 		}},
+		{"removed.yaml", []string{
+			`config.yaml:2: key "legacy" was removed: drop it`,
+			`config.yaml:4: key "server.max_conns" was removed: use server.max_retries`,
+			`config.yaml:6: key "Old-Settings" was removed: settings moved to server`,
+			`config.yaml:9: unknown key "colour"`,
+		}},
 		{"syntax.yaml", []string{
 			`config.yaml: yaml:`,
 		}},
@@ -269,5 +283,31 @@ func TestFileIsStrict(t *testing.T) {
 	t.Parallel()
 	if !File("config.yaml").Strict() {
 		t.Error("File(...).Strict() = false, want true")
+	}
+}
+
+func TestFileRemovedKeyDottedAndMapped(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "config.yaml", "server.max-conns: 4\nlegacy:\n  deep:\n    - 1\n")
+	_, err := File(path).Load(fileSchema(t))
+	want := []string{
+		`config.yaml:1: key "server.max-conns" was removed: use server.max_retries`,
+		`config.yaml:2: key "legacy" was removed: drop it`,
+	}
+	if got := fileProblems(err); !reflect.DeepEqual(got, want) {
+		t.Errorf("problems = %q, want %q", got, want)
+	}
+}
+
+func TestEnvIgnoresRemovedKey(t *testing.T) {
+	t.Parallel()
+	env := mapLookup(map[string]string{"APP_LEGACY": "1", "APP_SERVER_MAX_CONNS": "4", "APP_NAME": "n"})
+	got, err := Env("APP", env).Load(fileSchema(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []Entry{{Key: "name", Value: "n", Origin: "env APP_NAME"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("entries = %#v, want %#v", got, want)
 	}
 }

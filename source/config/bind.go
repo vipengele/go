@@ -32,6 +32,10 @@ func newBinder(schema *Schema, target reflect.Value) *binder {
 func (b *binder) bind(e Entry) {
 	i, ok := b.schema.byKey[matchKey(e.Key)]
 	if !ok {
+		if hint, removed := b.schema.Removed(e.Key); removed {
+			b.problems = append(b.problems, fmt.Errorf("%s: key was removed: %s from %s", e.Key, hint, e.Origin))
+			return
+		}
 		b.problems = append(b.problems, fmt.Errorf("%s: unknown key from %s", e.Key, e.Origin))
 		return
 	}

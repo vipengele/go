@@ -17,6 +17,13 @@ type flagConfig struct {
 	Tags   []string
 }
 
+func (flagConfig) RemovedKeys() map[string]string {
+	return map[string]string{
+		"legacy":           "drop it",
+		"server.max_conns": "use server.max-retries",
+	}
+}
+
 func flagSchema(t *testing.T) *Schema {
 	t.Helper()
 	s, err := NewSchema(&flagConfig{}, "APP")
