@@ -335,8 +335,17 @@ func versionInfo() buildinfo.Info {
 
 func TestAppVersion(t *testing.T) {
 	const text = "v1.2.3 build 0123abcdef01\n"
-	const asJSON = `{"schema":1,"version":"v1.2.3","commit":"0123abcdef0123abcdef",` +
-		`"date":"2026-01-02T03:04:05Z","go":"go1.27.2","os":"linux","arch":"amd64","dev":false}` + "\n"
+	const asJSON = `{
+  "schema": 1,
+  "version": "v1.2.3",
+  "commit": "0123abcdef0123abcdef",
+  "date": "2026-01-02T03:04:05Z",
+  "go": "go1.27.2",
+  "os": "linux",
+  "arch": "amd64",
+  "dev": false
+}
+`
 	tests := []struct {
 		name string
 		opts []cli.Option

@@ -14,7 +14,8 @@
 // # JSON
 //
 // With --json the command writes the JSON encoding of the Info that [buildinfo.Info.MarshalJSON]
-// specifies, as one object on one line followed by a newline. By default --json is a local flag
+// specifies with [spec.WriteJSON] at schema 1: one indented object whose first key is "schema",
+// followed by a newline. By default --json is a local flag
 // of the command: it is declared on the command itself, not as an inherited flag, so no other
 // command of the binary has it. The command then writes JSON when its --json is true or
 // [spec.Output.Format] is [spec.FormatJSON], so under an inherited --output, "version --json"

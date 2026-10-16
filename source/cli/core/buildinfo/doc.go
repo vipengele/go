@@ -36,13 +36,24 @@
 //
 // # JSON
 //
-// [Info.MarshalJSON] encodes an Info as one object, every key always present:
+// [Info.MarshalJSON] encodes an Info as one object, every key always present. The "version"
+// command writes it with [go.vipengele.org/cli/spec.WriteJSON] at schema 1, which puts the
+// "schema" key first and indents the object, so "version --json" prints:
 //
-//	{"schema":1,"version":"v1.0.0","commit":"0123abcdef0123abcdef0123abcdef0123abcdef",
-//	 "date":"2026-01-02T03:04:05Z","go":"go1.27.2","os":"linux","arch":"amd64","dev":false}
+//	{
+//	  "schema": 1,
+//	  "version": "v1.0.0",
+//	  "commit": "0123abcdef0123abcdef0123abcdef0123abcdef",
+//	  "date": "2026-01-02T03:04:05Z",
+//	  "go": "go1.27.2",
+//	  "os": "linux",
+//	  "arch": "amd64",
+//	  "dev": false
+//	}
 //
+// The object [Info.MarshalJSON] returns has no "schema" key of its own; WriteJSON refuses one.
 // commit is the full SHA, date is passed through as given, unvalidated, and dev is
 // [Info.IsDev]. Every string value is "" when it is unknown. schema is 1. Adding a key is a
 // compatible change and leaves schema as it is; renaming, removing or retyping a key increments
-// schema.
+// schema. A reader decodes the keys it needs and ignores whitespace and unknown keys.
 package buildinfo

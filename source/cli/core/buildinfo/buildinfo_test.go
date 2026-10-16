@@ -1,10 +1,14 @@
 package buildinfo
 
 import (
+	"bytes"
 	"encoding/json"
 	"runtime"
 	"runtime/debug"
 	"testing"
+
+	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/speccheck"
 )
 
 const (
@@ -203,23 +207,23 @@ func TestInfoMarshalJSON(t *testing.T) {
 		{
 			"release",
 			Info{Version: "v1.0.0", Commit: testSHA, Date: testTime, GoVersion: "go1.27.2", OS: "linux", Arch: "amd64"},
-			`{"schema":1,"version":"v1.0.0","commit":"` + testSHA + `","date":"` + testTime +
+			`{"version":"v1.0.0","commit":"` + testSHA + `","date":"` + testTime +
 				`","go":"go1.27.2","os":"linux","arch":"amd64","dev":false}`,
 		},
 		{
 			"zero value keeps every key",
 			Info{},
-			`{"schema":1,"version":"","commit":"","date":"","go":"","os":"","arch":"","dev":true}`,
+			`{"version":"","commit":"","date":"","go":"","os":"","arch":"","dev":true}`,
 		},
 		{
 			"pseudo-version",
 			Info{Version: "v0.0.0-20260102030405-0123abcdef01"},
-			`{"schema":1,"version":"v0.0.0-20260102030405-0123abcdef01","commit":"","date":"","go":"","os":"","arch":"","dev":true}`,
+			`{"version":"v0.0.0-20260102030405-0123abcdef01","commit":"","date":"","go":"","os":"","arch":"","dev":true}`,
 		},
 		{
 			"date is passed through unvalidated",
 			Info{Version: "v1.0.0", Date: "not a date"},
-			`{"schema":1,"version":"v1.0.0","commit":"","date":"not a date","go":"","os":"","arch":"","dev":false}`,
+			`{"version":"v1.0.0","commit":"","date":"not a date","go":"","os":"","arch":"","dev":false}`,
 		},
 	}
 	for _, tc := range tests {
@@ -241,8 +245,27 @@ func TestInfoMarshalJSONThroughPointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	want := `{"schema":1,"version":"v1.0.0","commit":"","date":"","go":"","os":"","arch":"","dev":false}`
+	want := `{"version":"v1.0.0","commit":"","date":"","go":"","os":"","arch":"","dev":false}`
 	if string(got) != want {
 		t.Errorf("json.Marshal() = %s, want %s", got, want)
 	}
+}
+
+// TestVersionJSONKeys pins the keys of the object "version --json" writes, the Info under a
+// schema 1 envelope. A key renamed, removed or retyped here is a contract change that increments
+// schema (ADR-0007).
+func TestVersionJSONKeys(t *testing.T) {
+	var out bytes.Buffer
+	info := Info{Version: "v1.0.0", Commit: testSHA, Date: testTime, GoVersion: "go1.27.2", OS: "linux", Arch: "amd64"}
+	if err := spec.WriteJSON(&out, 1, info); err != nil {
+		t.Fatalf("spec.WriteJSON() error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decoding %s: %v", out.Bytes(), err)
+	}
+	if got["schema"] != float64(1) {
+		t.Errorf("schema = %v, want 1", got["schema"])
+	}
+	speccheck.AssertJSONKeys(t, got, "testdata/version-json.golden")
 }

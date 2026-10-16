@@ -74,8 +74,10 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `*UsageError`.
 - `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). `Info.IsDev`
   delegates to `cli/spec/version`. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
-  schema-versioned JSON form (`schema` is 1). Adding a key keeps `schema`; renaming, removing or
-  retyping a key increments it.
+  JSON object without `schema`; `versioncmd` writes it with `spec.WriteJSON(inv.Env.Stdout, 1, info)`,
+  which adds `schema` first and indents. The keys are pinned by
+  `buildinfo/testdata/version-json.golden` (`speccheck.AssertJSONKeys`, `SPECCHECK_UPDATE=1`
+  rewrites it). Adding a key keeps `schema`; renaming, removing or retyping a key increments it.
 - `versioncmd` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated
   `spec.SkipUpdateCheck`. By default it has a local (not inherited) `--json` flag, OR'd with
   `inv.Output.Format() == spec.FormatJSON`;

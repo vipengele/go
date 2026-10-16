@@ -28,6 +28,16 @@ func run(t *testing.T, info buildinfo.Info, args ...string) (stdout string, code
 	return out.String(), code
 }
 
+// versionJSON returns what "version --json" writes for info.
+func versionJSON(t *testing.T, info buildinfo.Info) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := spec.WriteJSON(&out, 1, info); err != nil {
+		t.Fatalf("spec.WriteJSON: %v", err)
+	}
+	return out.String()
+}
+
 func TestText(t *testing.T) {
 	tests := []struct {
 		name string
@@ -67,8 +77,8 @@ func TestJSON(t *testing.T) {
 			if code != cli.ExitOK {
 				t.Fatalf("exit code = %d, want %d", code, cli.ExitOK)
 			}
-			if !strings.HasSuffix(got, "}\n") || strings.Count(got, "\n") != 1 {
-				t.Fatalf("output = %q, want one object and a newline", got)
+			if !strings.HasPrefix(got, "{\n  \"schema\": 1,\n") || !strings.HasSuffix(got, "\n}\n") {
+				t.Fatalf("output = %q, want an indented object led by schema and a newline", got)
 			}
 			var m map[string]any
 			if err := json.Unmarshal([]byte(got), &m); err != nil {
@@ -129,10 +139,7 @@ func TestWithOutputJSONReadsTheOutput(t *testing.T) {
 	if len(cmd.Flags) != 0 {
 		t.Fatalf("flags = %d, want none", len(cmd.Flags))
 	}
-	want, err := json.Marshal(info)
-	if err != nil {
-		t.Fatal(err)
-	}
+	want := versionJSON(t, info)
 	for _, asJSON := range []bool{false, true} {
 		var out bytes.Buffer
 		inv := spec.NewInvocation(&spec.Env{Stdout: &out}, nil, nil)
@@ -142,7 +149,7 @@ func TestWithOutputJSONReadsTheOutput(t *testing.T) {
 		}
 		wantOut := "v1.0.0\n"
 		if asJSON {
-			wantOut = string(want) + "\n"
+			wantOut = want
 		}
 		if got := out.String(); got != wantOut {
 			t.Errorf("output with Output.JSON %t = %q, want %q", asJSON, got, wantOut)
@@ -153,7 +160,7 @@ func TestWithOutputJSONReadsTheOutput(t *testing.T) {
 		var out, errOut bytes.Buffer
 		app := cli.New(spec.Identity{Name: "tool"}, cli.WithJSON(), cli.WithBuildInfo(info))
 		code := app.ExecuteArgs(&spec.Env{Stdout: &out, Stderr: &errOut}, args)
-		if code != cli.ExitOK || out.String() != string(want)+"\n" {
+		if code != cli.ExitOK || out.String() != want {
 			t.Errorf("%q = %d, stdout %q, stderr %q; want 0 and %q", args, code, out.String(), errOut.String(), want)
 		}
 	}
@@ -192,10 +199,7 @@ func TestRunWritesToEnvStdout(t *testing.T) {
 
 func TestLocalJSONReadsTheOutputFormatToo(t *testing.T) {
 	info := buildinfo.Info{Version: "v1.0.0"}
-	want, err := json.Marshal(info)
-	if err != nil {
-		t.Fatal(err)
-	}
+	want := versionJSON(t, info)
 	tests := []struct {
 		name   string
 		values map[string]any
@@ -203,9 +207,9 @@ func TestLocalJSONReadsTheOutputFormatToo(t *testing.T) {
 		want   string
 	}{
 		{"neither", nil, spec.FormatText, "v1.0.0\n"},
-		{"local --json", map[string]any{"json": true}, spec.FormatText, string(want) + "\n"},
-		{"JSON format", nil, spec.FormatJSON, string(want) + "\n"},
-		{"both", map[string]any{"json": true}, spec.FormatJSON, string(want) + "\n"},
+		{"local --json", map[string]any{"json": true}, spec.FormatText, want},
+		{"JSON format", nil, spec.FormatJSON, want},
+		{"both", map[string]any{"json": true}, spec.FormatJSON, want},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -224,10 +228,7 @@ func TestLocalJSONReadsTheOutputFormatToo(t *testing.T) {
 
 func TestVersionUnderAnAppWithOutput(t *testing.T) {
 	info := buildinfo.Info{Version: "v1.0.0"}
-	want, err := json.Marshal(info)
-	if err != nil {
-		t.Fatal(err)
-	}
+	want := versionJSON(t, info)
 	tests := []struct {
 		args       []string
 		wantCode   int
@@ -235,10 +236,10 @@ func TestVersionUnderAnAppWithOutput(t *testing.T) {
 	}{
 		{[]string{"version"}, cli.ExitOK, "v1.0.0\n"},
 		{[]string{"version", "--output", "text"}, cli.ExitOK, "v1.0.0\n"},
-		{[]string{"version", "--json"}, cli.ExitOK, string(want) + "\n"},
-		{[]string{"version", "--output", "json"}, cli.ExitOK, string(want) + "\n"},
-		{[]string{"--output=json", "version"}, cli.ExitOK, string(want) + "\n"},
-		{[]string{"version", "--json", "--output", "json"}, cli.ExitOK, string(want) + "\n"},
+		{[]string{"version", "--json"}, cli.ExitOK, want},
+		{[]string{"version", "--output", "json"}, cli.ExitOK, want},
+		{[]string{"--output=json", "version"}, cli.ExitOK, want},
+		{[]string{"version", "--json", "--output", "json"}, cli.ExitOK, want},
 		{[]string{"version", "--json", "--output", "text"}, cli.ExitUsage, ""},
 		{[]string{"version", "--json=false", "--output", "json"}, cli.ExitUsage, ""},
 	}

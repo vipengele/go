@@ -2,12 +2,14 @@ package versioncmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/spec"
 )
+
+// schema is the version of the JSON shape the command writes, as [buildinfo] documents it.
+const schema = 1
 
 // Option configures the command [New] returns.
 type Option func(*settings)
@@ -29,8 +31,9 @@ func WithOutputJSON() Option {
 // New returns the "version" command, which prints info as text or, with --json, as JSON. By
 // default --json is a local flag of the command, and the command also prints JSON when
 // [spec.Output.Format] is [spec.FormatJSON], as it is under an inherited --output json;
-// [WithOutputJSON] takes the choice from the Output alone. The command carries the [spec.SkipUpdateCheck] annotation: it reports the binary that
-// runs, and the self-update preflight runs it on a binary not yet installed.
+// [WithOutputJSON] takes the choice from the Output alone. The command carries the
+// [spec.SkipUpdateCheck] annotation: it reports the binary that runs, and the self-update
+// preflight runs it on a binary not yet installed.
 func New(info buildinfo.Info, opts ...Option) *spec.Command {
 	var s settings
 	for _, opt := range opts {
@@ -55,12 +58,7 @@ func New(info buildinfo.Info, opts ...Option) *spec.Command {
 			_, err := fmt.Fprintf(inv.Env.Stdout, "%s\n", info.String())
 			return err
 		}
-		b, err := json.Marshal(info)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintf(inv.Env.Stdout, "%s\n", b)
-		return err
+		return spec.WriteJSON(inv.Env.Stdout, schema, info)
 	}
 	return cmd
 }

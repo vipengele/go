@@ -1,10 +1,11 @@
 package buildinfo_test
 
 import (
-	"encoding/json"
 	"fmt"
+	"os"
 
 	"go.vipengele.org/cli/core/buildinfo"
+	"go.vipengele.org/cli/spec"
 )
 
 func ExampleInfo_String() {
@@ -27,12 +28,19 @@ func ExampleInfo_MarshalJSON() {
 		OS:        "linux",
 		Arch:      "amd64",
 	}
-	out, err := json.Marshal(info)
-	if err != nil {
+	// The version command writes the Info under schema 1, as "version --json" prints it.
+	if err := spec.WriteJSON(os.Stdout, 1, info); err != nil {
 		fmt.Println(err)
-		return
 	}
-	fmt.Println(string(out))
 	// Output:
-	// {"schema":1,"version":"v1.0.0","commit":"0123abcdef0123abcdef0123abcdef0123abcdef","date":"2026-01-02T03:04:05Z","go":"go1.27.2","os":"linux","arch":"amd64","dev":false}
+	// {
+	//   "schema": 1,
+	//   "version": "v1.0.0",
+	//   "commit": "0123abcdef0123abcdef0123abcdef0123abcdef",
+	//   "date": "2026-01-02T03:04:05Z",
+	//   "go": "go1.27.2",
+	//   "os": "linux",
+	//   "arch": "amd64",
+	//   "dev": false
+	// }
 }
