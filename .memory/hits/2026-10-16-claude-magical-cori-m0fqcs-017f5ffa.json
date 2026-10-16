@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "notes": {
+    "changed-projects-select-all-regex": {
+      "count": 1,
+      "first": "2026-10-16T01:57:55.565072249Z",
+      "last": "2026-10-16T01:57:55.565072249Z"
+    },
+    "dependabot-gomod-entry-per-project": {
+      "count": 1,
+      "first": "2026-10-16T01:57:55.553528732Z",
+      "last": "2026-10-16T01:57:55.553528732Z"
+    },
+    "lydite-clearance-is-separate-workflow": {
+      "count": 1,
+      "first": "2026-10-16T01:57:55.570773943Z",
+      "last": "2026-10-16T01:57:55.570773943Z"
+    },
+    "lydite-job-has-no-skip-guard": {
+      "count": 2,
+      "first": "2026-10-16T01:57:55.538506282Z",
+      "last": "2026-10-16T02:18:52.835793465Z"
+    }
+  }
+}
