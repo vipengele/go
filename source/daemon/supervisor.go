@@ -87,12 +87,12 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 // another Start returns; Run keeps waiting even once every Start has panicked. A panic in Start or
 // Stop during shutdown is a stop problem of that Runner under either policy.
 //
-// The whole shutdown shares one deadline, the grace period. For each Runner in turn, Run cancels
+// The whole shutdown shares one grace period. For each Runner in turn, Run cancels
 // its Start context, calls its Stop and waits for Stop and then Start to return. Every Runner's
 // Stop is called exactly once, including one whose Start failed or panicked. A Stop that returns
-// an error, or a Stop or Start still running at the deadline, is reported as ErrStopTimeout naming
+// an error, or a Stop or Start still running when the grace period ends, is reported as ErrStopTimeout naming
 // the Runner, and a Stop that panics as its *PanicError; the Runners after it are still cancelled
-// and their Stop called, but once the deadline has passed Run no longer waits for them. An
+// and their Stop called, but once the grace period has ended Run no longer waits for them. An
 // abandoned Stop or Start goroutine may still be running when Run returns.
 //
 // Run returns nil when ctx is cancelled, no Start panicked and every Runner stops cleanly.
@@ -267,7 +267,7 @@ func (l *launched) waitStart(ctx context.Context, reportTimeout bool) []error {
 	return nil
 }
 
-// timeout reports that the Runner did not finish stopping before the shutdown deadline.
+// timeout reports that the Runner did not finish stopping within the grace period.
 func (l *launched) timeout() error {
 	return fmt.Errorf("daemon: runner %q: %w", l.name, ErrStopTimeout)
 }

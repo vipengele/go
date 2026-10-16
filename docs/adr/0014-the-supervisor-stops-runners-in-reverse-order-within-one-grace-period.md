@@ -22,12 +22,12 @@ are later stories and not part of this decision.
   panicking `Start` as a failure that stops the rest, and `PanicIsolate`, which records it while
   the siblings keep running. `PanicFail` is the default deliberately: a zero-config daemon should
   not run silently degraded.
-- **Grace.** One deadline, ten seconds unless `WithGrace` sets another, made from
+- **Grace.** One grace period, ten seconds unless `WithGrace` sets another, made from
   `context.Background()` and never from the cancelled run context, covers the whole shutdown.
 - **Order.** Each Runner's `Start` runs under its own context, which carries the values of the
   parent but not its cancellation. Shutdown cancels it just before calling `Stop`, so a Runner
   started earlier keeps running until its turn. `Stop` runs in its own goroutine and is selected
-  against the deadline.
+  against the grace period.
 - **Stop errors.** `Stop` returns an error, so a failing `Stop` is reported.
 
 ## Considered options

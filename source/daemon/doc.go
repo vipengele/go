@@ -15,8 +15,8 @@
 // Runner started earlier keeps running until its turn.
 //
 // The Runners share one grace period for the whole shutdown, ten seconds unless WithGrace sets
-// another. It is a single deadline, not a budget per Runner. A Runner whose Stop or Start has not
-// returned when it passes is reported as ErrStopTimeout, and Run does not wait for the Runners
+// another. It is shared, not a budget per Runner. A Runner whose Stop or Start has not
+// returned when it ends is reported as ErrStopTimeout, and Run does not wait for the Runners
 // after it. An abandoned Stop or Start may still be running when Run returns.
 //
 // # Panics
