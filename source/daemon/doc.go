@@ -1,2 +1,3 @@
-// Package daemon is the root of the vipengele libraries for building long-running daemons.
+// Package daemon runs the long-running work of a process as Runners under a Supervisor. It
+// requires nothing beyond the standard library.
 package daemon
