@@ -119,7 +119,7 @@ func (inv *Invocation) Prompt(question string, opts PromptOptions) (string, erro
 	}
 	answer, err := inv.ask(text)
 	if err != nil {
-		return "", err
+		return answer, err
 	}
 	if answer != "" {
 		return answer, nil
@@ -131,16 +131,9 @@ func (inv *Invocation) Prompt(question string, opts PromptOptions) (string, erro
 }
 
 // answer returns the answer d gives and whether it gives one. A value other than [DefaultYes]
-// and [DefaultNo] gives none.
+// and [DefaultNo] gives none, and then yes is false.
 func (d ConfirmDefault) answer() (yes, ok bool) {
-	switch d {
-	case DefaultYes:
-		return true, true
-	case DefaultNo:
-		return false, true
-	default:
-		return false, false
-	}
+	return d == DefaultYes, d == DefaultYes || d == DefaultNo
 }
 
 func (d ConfirmDefault) hint() string {
@@ -155,15 +148,12 @@ func (d ConfirmDefault) hint() string {
 }
 
 // ask writes text to the standard error and returns the line read from the standard input,
-// trimmed.
+// trimmed, and the error of reading it, with which the line is empty.
 func (inv *Invocation) ask(text string) (string, error) {
 	env := inv.Env.Resolved()
 	_, _ = io.WriteString(env.Stderr, text)
 	line, err := readLine(env.Stdin)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(line), nil
+	return strings.TrimSpace(line), err
 }
 
 // readLine reads r a byte at a time up to and including the first newline, which it drops, so
