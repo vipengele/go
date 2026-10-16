@@ -20,6 +20,10 @@
 // A command's Annotations are key-value metadata, such as [SkipUpdateCheck], that the framework
 // and its hooks read through the [CommandInfo] of the command that runs.
 //
+// A command's JSON output is one flat object, written by [WriteJSON]: its first key is "schema",
+// an integer that versions the shape of the keys after it (ADR-0007). Adding a key is a
+// compatible change and keeps the schema; renaming, removing or retyping a key increments it.
+//
 // A tree of commands holds no per-execution state, so it can be run any number of times,
 // concurrently, and by a test that substitutes the Env. An adapter in another module runs it:
 // it checks the tree with [Command.Validate], maps each command and [Flag] to its framework,
