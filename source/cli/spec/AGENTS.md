@@ -25,6 +25,12 @@ golangci-lint run
 - `ColorAllowed(noColor, identity, env, stream)` (`colour.go`) — the colour decision for one stream
   and its precedence; `Output.Styler(stream)`, `Styler` and the `Glyph*` constants (`style.go`) —
   coloured text and role glyphs that follow `Output.Color(stream)`.
+- `Invocation.Info`, `Success`, `Warning`, `Error`, `Detail` and `Data` (`message.go`) — printf-style
+  output helpers. The first five write one styled line to `Env.Stderr`; `Detail` is dim and only
+  written when verbose; quiet drops all but `Error`; `--json` changes none of them. `Data` writes its
+  text to `Env.Stdout` exactly, is never dropped, and returns the write error. A dynamic string is
+  passed as `inv.Info("%s", msg)`. A nil `Env` discards. See
+  `docs/adr/0013-stdout-carries-data-stderr-carries-messages.md`.
 - `paths/` — `paths.Resolve(spec.Identity, paths.Options, kinds...)` resolves the requested config,
   state, cache, data and log directories per OS layout (XDG, darwin, windows), honouring
   `<PREFIX>_HOME`, `Options.Home` and explicit per-kind options, and `paths.New` resolves all five.

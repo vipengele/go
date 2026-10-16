@@ -92,6 +92,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 - Error output is pinned by golden files under `testdata/render/*.golden` (`render_golden_test.go`).
   Regenerate with `go test -update`; the `-update` flag is registered in `TestMain`
   (`execute_test.go`), so a test binary without that `TestMain` does not know it.
+- A command writes its result with `inv.Data` (stdout) and everything about the run with the
+  `inv.Info`/`Success`/`Warning`/`Error`/`Detail` helpers (stderr), so `--json` stdout stays a clean
+  document; `message_test.go` pins it (ADR-0013).
 - An `ExecuteArgs` test passes a fake `Env` (buffers, a fake `LookupEnv`, a `t.TempDir` `WorkDir`).
   A real environment variable set with `t.Setenv` is invisible to `Run`, which reads only
   `Env.LookupEnv`.
