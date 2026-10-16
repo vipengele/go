@@ -48,6 +48,23 @@ parses no command line, declares no flag and imports no CLI framework. The adapt
 `cli/spec` command's invocation into that map belongs to the project that knows both sides, and
 another front end can supply the map from its own parser.
 
+## Seed is the one write `config` makes
+
+`Seed` creates a default configuration file holding every key at its default value, commented from
+the `doc` tag of each field. It creates the file exclusively with mode 0600, never replaces an
+existing file, creates no directory, and removes a file it could not write in full. A tool that
+wants no default file does not call it. `config` writes nothing else.
+
+- **A `doc` struct tag supplies the comments.** The text sits beside the field it describes and
+  cannot drift from the schema. Rejected: a key-to-comment map the caller supplies, and a describer
+  interface; both name keys apart from the fields and can go stale.
+- **`config` owns `*FieldError`.** `Validate` reports a problem with a key as a `*FieldError`, and
+  `Load` adds the value and origin. Rejected: `commons/validate.FieldError`, which would make
+  `config` require a sibling.
+- **`RemovedKeys()` is an optional method of the configuration type.** The type that dropped a key
+  knows what replaces it, and every provider reports the hint the same way. Rejected: an option on
+  each provider or on `Load`, which every caller would have to repeat and keep in step.
+
 ## Considered options
 
 - **In `commons`.** `commons` holds generic building blocks any project may require, and every
@@ -59,6 +76,8 @@ another front end can supply the map from its own parser.
   dependency would reach every dependent.
 - **Scanning the environment for a prefix.** Needs a rule to split `APP_A_B_C` into levels, which
   cannot be right for every schema.
+- **`config` rendering the bytes while the tool's `main` writes them.** Every tool would repeat the
+  create-exclusive and 0600 logic, and a mistake in one would leave a partial or world-readable file.
 - **Strict environment.** Rejects any `APP_`-prefixed variable outside the schema, including the
   ones other tools of the same family set.
 
