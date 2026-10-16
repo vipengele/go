@@ -32,7 +32,7 @@ func WriteJSON(w io.Writer, schema int, v any) error {
 	}
 
 	// json.Marshal writes compact JSON, so data is "{}" or "{" followed by the first key.
-	spliced := make([]byte, 0, len(data)+len(schemaKey)+24)
+	var spliced []byte
 	spliced = append(spliced, `{"`+schemaKey+`":`...)
 	spliced = strconv.AppendInt(spliced, int64(schema), 10)
 	if len(data) > len("{}") {

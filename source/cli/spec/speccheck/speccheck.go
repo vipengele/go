@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,7 +37,7 @@ func AssertJSONKeys(t testing.TB, v any, goldenPath string) {
 		return
 	}
 
-	content, err := os.ReadFile(goldenPath)
+	content, err := os.ReadFile(filepath.Clean(goldenPath))
 	if errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("speccheck: golden file %s does not exist; run the test with %s=1 to create it", goldenPath, updateEnv)
 	}
@@ -74,12 +75,7 @@ func keyPaths(v any) ([]string, error) {
 
 	set := make(map[string]struct{})
 	collect(set, "", decoded)
-	paths := make([]string, 0, len(set))
-	for p := range set {
-		paths = append(paths, p)
-	}
-	slices.Sort(paths)
-	return paths, nil
+	return slices.Sorted(maps.Keys(set)), nil
 }
 
 // collect adds to set the leaf paths of value, which sits at path prefix. The root value has the
@@ -131,14 +127,15 @@ func parseGolden(content []byte) []string {
 }
 
 func writeGolden(path string, paths []string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	path = filepath.Clean(path)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
 	var content strings.Builder
 	for _, p := range paths {
 		content.WriteString(p + "\n")
 	}
-	return os.WriteFile(path, []byte(content.String()), 0o644)
+	return os.WriteFile(path, []byte(content.String()), 0o600)
 }
 
 // difference returns the paths in got and not in want, and those in want and not in got. Both

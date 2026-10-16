@@ -111,13 +111,13 @@ func TestWriteJSONRejectsInvalidInput(t *testing.T) {
 		v      any
 		want   string
 	}{
-		{"array", 1, []int{1, 2}, "not an object"},
-		{"empty array", 1, []string{}, "not an object"},
-		{"string", 1, "text", "not an object"},
-		{"number", 1, 42, "not an object"},
-		{"boolean", 1, true, "not an object"},
-		{"null", 1, nil, "not an object"},
-		{"nil map", 1, map[string]int(nil), "not an object"},
+		{"array", 1, []int{1, 2}, "JSON value is an array, not an object"},
+		{"empty array", 1, []string{}, "JSON value is an array, not an object"},
+		{"string", 1, "text", "JSON value is a string, not an object"},
+		{"number", 1, 42, "JSON value is a number, not an object"},
+		{"boolean", 1, true, "JSON value is a boolean, not an object"},
+		{"null", 1, nil, "JSON value is null, not an object"},
+		{"nil map", 1, map[string]int(nil), "JSON value is null, not an object"},
 		{"schema zero", 0, ordered{}, "schema 0"},
 		{"schema negative", -1, ordered{}, "schema -1"},
 		{"value has schema", 1, struct {
