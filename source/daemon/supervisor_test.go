@@ -206,21 +206,29 @@ func (r *recorder) stopOrder() []string {
 }
 
 // scriptedRunner is a Runner driven by its test through channels. Start reports its context on
-// started and returns what the test sends on exit, or the cancellation of its context. Stop
-// reports itself on stopCalled and returns stopErr. With hangStart or hangStop the call blocks
-// until the test closes release.
+// started and returns what the test sends on exit, panics with what the test sends on startPanic,
+// or returns the cancellation of its context. Stop reports itself on stopCalled and returns
+// stopErr, or panics with stopPanic. With hangStart or hangStop the call blocks until the test
+// closes release.
 type scriptedRunner struct {
 	name string
 	rec  *recorder
 
 	started    chan context.Context
 	exit       chan error
+	startPanic chan any
 	stopCalled chan struct{}
 	release    chan struct{}
 
 	hangStart bool
 	hangStop  bool
 	stopErr   error
+
+	// stopPanic, when set, is what Stop panics with after reporting itself.
+	stopPanic any
+
+	// cancelPanic, when set, is what Start panics with once its context is cancelled.
+	cancelPanic any
 
 	// cancelErr, when set, is what Start returns once its context is cancelled.
 	cancelErr error
@@ -234,6 +242,7 @@ func newScripted(name string) *scriptedRunner {
 		name:       name,
 		started:    make(chan context.Context, 1),
 		exit:       make(chan error, 1),
+		startPanic: make(chan any, 1),
 		stopCalled: make(chan struct{}, 1),
 		release:    make(chan struct{}),
 	}
@@ -254,7 +263,12 @@ func (r *scriptedRunner) Start(ctx context.Context) error {
 	select {
 	case err := <-r.exit:
 		return err
+	case v := <-r.startPanic:
+		panic(v)
 	case <-ctx.Done():
+		if r.cancelPanic != nil {
+			panic(r.cancelPanic)
+		}
 		if r.cancelErr != nil {
 			return r.cancelErr
 		}
@@ -268,10 +282,29 @@ func (r *scriptedRunner) Stop(context.Context) error {
 	if r.onStop != nil {
 		r.onStop()
 	}
+	if r.stopPanic != nil {
+		panic(r.stopPanic)
+	}
 	if r.hangStop {
 		<-r.release
 	}
 	return r.stopErr
+}
+
+// waitingContext is a run context that reports each call to Done on waiting. Run's wait for
+// shutdown calls Done once each time it starts waiting, so the second report means Run has dealt
+// with a Start that returned or panicked and is waiting again.
+type waitingContext struct {
+	context.Context
+	waiting chan struct{}
+}
+
+func (c *waitingContext) Done() <-chan struct{} {
+	select {
+	case c.waiting <- struct{}{}:
+	default:
+	}
+	return c.Context.Done()
 }
 
 // ctxKey keys the value the run context carries, to check that each Start context inherits it.
@@ -288,10 +321,19 @@ type harness struct {
 	cancelRun  context.CancelFunc
 	cancelStop context.CancelFunc
 	result     chan error
+
+	// waiting receives a value each time Run starts waiting for shutdown.
+	waiting chan struct{}
 }
 
 // runScripted starts Run over runners and returns once every Start has been entered.
 func runScripted(t *testing.T, runners ...*scriptedRunner) *harness {
+	t.Helper()
+	return runScriptedWith(t, nil, runners...)
+}
+
+// runScriptedWith is runScripted with options for New.
+func runScriptedWith(t *testing.T, opts []Option, runners ...*scriptedRunner) *harness {
 	t.Helper()
 	h := &harness{t: t, baseline: runtime.NumGoroutine(), rec: &recorder{}, runners: runners}
 	list := make([]Runner, len(runners))
@@ -299,7 +341,7 @@ func runScripted(t *testing.T, runners ...*scriptedRunner) *harness {
 		r.rec = h.rec
 		list[i] = r
 	}
-	s, err := New(list)
+	s, err := New(list, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -307,9 +349,11 @@ func runScripted(t *testing.T, runners ...*scriptedRunner) *harness {
 	s.newStopContext = func() (context.Context, context.CancelFunc) { return stopCtx, cancelStop }
 	runCtx, cancelRun := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "run"))
 	h.cancelRun, h.cancelStop = cancelRun, cancelStop
+	h.waiting = make(chan struct{}, 16)
+	waitCtx := &waitingContext{Context: runCtx, waiting: h.waiting}
 
 	h.result = make(chan error, 1)
-	go func() { h.result <- s.Run(runCtx) }()
+	go func() { h.result <- s.Run(waitCtx) }()
 	for _, r := range runners {
 		h.startCtx = append(h.startCtx, <-r.started)
 	}
@@ -547,4 +591,266 @@ func TestRunJoinsTheFailureFirstThenStopProblemsInStopOrder(t *testing.T) {
 		}
 	}
 	h.finish()
+}
+
+// wantErr describes one error Run joined: a *PanicError recovered from the Runner named panicked,
+// or an error wrapping is.
+type wantErr struct {
+	panicked string
+	is       error
+}
+
+// checkJoined checks that err joins exactly the errors want describes, in order.
+func checkJoined(t *testing.T, err error, want []wantErr) {
+	t.Helper()
+	errs := joined(t, err)
+	if len(errs) != len(want) {
+		t.Fatalf("Run joined %d errors (%v), want %d", len(errs), errs, len(want))
+	}
+	for i, w := range want {
+		if w.is != nil && !errors.Is(errs[i], w.is) {
+			t.Errorf("error %d = %v, want it to wrap %v", i, errs[i], w.is)
+		}
+		if w.panicked == "" {
+			continue
+		}
+		var pe *PanicError
+		if !errors.As(errs[i], &pe) {
+			t.Errorf("error %d = %v, want a *PanicError", i, errs[i])
+			continue
+		}
+		if pe.Runner != w.panicked {
+			t.Errorf("error %d is a panic of %q, want %q", i, pe.Runner, w.panicked)
+		}
+	}
+}
+
+// checkPanic checks that err holds a *PanicError recovered from runner with value, whose stack is
+// that of the goroutine running method. A nil value stands for panic(nil), which recover reports
+// as a *runtime.PanicNilError.
+func checkPanic(t *testing.T, err error, runner string, value any, method string) {
+	t.Helper()
+	var pe *PanicError
+	if !errors.As(err, &pe) {
+		t.Fatalf("Run = %v, want a *PanicError", err)
+	}
+	if pe.Runner != runner {
+		t.Errorf("PanicError.Runner = %q, want %q", pe.Runner, runner)
+	}
+	if value == nil {
+		var nilPanic *runtime.PanicNilError
+		if !errors.As(err, &nilPanic) {
+			t.Errorf("PanicError.Value = %v, want a *runtime.PanicNilError", pe.Value)
+		}
+	} else if pe.Value != value {
+		t.Errorf("PanicError.Value = %v, want %v", pe.Value, value)
+	}
+	if frame := "(*scriptedRunner)." + method; !strings.Contains(string(pe.Stack), frame) {
+		t.Errorf("PanicError.Stack does not contain %s:\n%s", frame, pe.Stack)
+	}
+	if cause, ok := value.(error); ok && !errors.Is(err, cause) {
+		t.Errorf("Run = %v, want it to wrap the panic value %v", err, cause)
+	}
+}
+
+func TestRunStartPanicUnderPanicFailBeginsShutdown(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "error value", value: errors.New("cause")},
+		{name: "string value", value: "oops"},
+		{name: "nil value", value: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			h := runScriptedWith(t, []Option{WithPanicPolicy(PanicFail)}, a, b, c)
+			b.startPanic <- tt.value
+
+			err := <-h.result
+			checkJoined(t, err, []wantErr{{panicked: "b"}})
+			checkPanic(t, err, "b", tt.value, "Start")
+			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
+				t.Errorf("stop order = %v, want %v", got, want)
+			}
+			h.finish()
+		})
+	}
+}
+
+func TestRunIsolatesAStartPanicAndKeepsTheSiblingsRunning(t *testing.T) {
+	boom, stopBoom := errors.New("boom"), errors.New("stop boom")
+	tests := []struct {
+		name string
+		// setup configures runners a, b and c before Run starts.
+		setup func(a, b, c *scriptedRunner)
+		// panics lists, by index, the Runners whose Start panics, in the order they panic.
+		panics []int
+		// end begins shutdown once every panic has been isolated.
+		end  func(h *harness)
+		want []wantErr
+	}{
+		{
+			name:   "only problem is the panic",
+			panics: []int{1},
+			end:    func(h *harness) { h.cancelRun() },
+			want:   []wantErr{{panicked: "b"}},
+		},
+		{
+			name:   "panics joined in start order",
+			panics: []int{2, 0},
+			end:    func(h *harness) { h.cancelRun() },
+			want:   []wantErr{{panicked: "a"}, {panicked: "c"}},
+		},
+		{
+			name:   "a later failure comes first",
+			panics: []int{1},
+			end:    func(h *harness) { h.runners[2].exit <- boom },
+			want:   []wantErr{{is: boom}, {panicked: "b"}},
+		},
+		{
+			name:   "stop problems come after the panic",
+			setup:  func(a, _, _ *scriptedRunner) { a.stopErr = stopBoom },
+			panics: []int{1},
+			end:    func(h *harness) { h.cancelRun() },
+			want:   []wantErr{{panicked: "b"}, {is: stopBoom}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			if tt.setup != nil {
+				tt.setup(a, b, c)
+			}
+			h := runScriptedWith(t, []Option{WithPanicPolicy(PanicIsolate)}, a, b, c)
+			<-h.waiting
+			panicked := make(map[int]bool, len(tt.panics))
+			for _, i := range tt.panics {
+				h.runners[i].startPanic <- errors.New(h.runners[i].name)
+				<-h.waiting
+				panicked[i] = true
+			}
+
+			for i, r := range h.runners {
+				if len(r.stopCalled) != 0 {
+					t.Errorf("%s stopped while a sibling's panic was isolated", r.name)
+				}
+				if !panicked[i] && h.startCtx[i].Err() != nil {
+					t.Errorf("%s Start context = %v, want it live while a sibling's panic is isolated",
+						r.name, h.startCtx[i].Err())
+				}
+			}
+
+			tt.end(h)
+			err := <-h.result
+			checkJoined(t, err, tt.want)
+			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
+				t.Errorf("stop order = %v, want %v", got, want)
+			}
+			h.finish()
+		})
+	}
+}
+
+func TestRunIsolatedPanicIsTheResultWhenItIsTheOnlyProblem(t *testing.T) {
+	cause := errors.New("cause")
+	a, b := newScripted("a"), newScripted("b")
+	h := runScriptedWith(t, []Option{WithPanicPolicy(PanicIsolate)}, a, b)
+	<-h.waiting
+	a.startPanic <- cause
+	<-h.waiting
+	h.cancelRun()
+
+	err := <-h.result
+	if err == nil {
+		t.Fatalf("Run = nil, want the isolated panic")
+	}
+	checkPanic(t, err, "a", cause, "Start")
+	h.finish()
+}
+
+func TestRunReportsAPanicDuringShutdownAsAStopProblem(t *testing.T) {
+	cause, stopBoom := errors.New("cause"), errors.New("stop boom")
+	tests := []struct {
+		name   string
+		policy PanicPolicy
+		// setup configures runners a and b, stopped in that order after c.
+		setup  func(a, b *scriptedRunner)
+		want   []wantErr
+		method string
+	}{
+		{
+			name:   "stop panic under fail",
+			policy: PanicFail,
+			setup:  func(a, b *scriptedRunner) { b.stopPanic = cause; a.stopErr = stopBoom },
+			want:   []wantErr{{panicked: "b", is: cause}, {is: stopBoom}},
+			method: "Stop",
+		},
+		{
+			name:   "stop panic under isolate",
+			policy: PanicIsolate,
+			setup:  func(a, b *scriptedRunner) { b.stopPanic = cause; a.stopErr = stopBoom },
+			want:   []wantErr{{panicked: "b", is: cause}, {is: stopBoom}},
+			method: "Stop",
+		},
+		{
+			name:   "start panic on cancellation under fail",
+			policy: PanicFail,
+			setup:  func(a, b *scriptedRunner) { b.cancelPanic = cause; a.stopErr = stopBoom },
+			want:   []wantErr{{panicked: "b", is: cause}, {is: stopBoom}},
+			method: "Start",
+		},
+		{
+			name:   "start panic on cancellation under isolate",
+			policy: PanicIsolate,
+			setup:  func(a, b *scriptedRunner) { b.cancelPanic = cause; a.stopErr = stopBoom },
+			want:   []wantErr{{panicked: "b", is: cause}, {is: stopBoom}},
+			method: "Start",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			tt.setup(a, b)
+			h := runScriptedWith(t, []Option{WithPanicPolicy(tt.policy)}, a, b, c)
+			h.cancelRun()
+
+			err := <-h.result
+			checkJoined(t, err, tt.want)
+			checkPanic(t, joined(t, err)[0], "b", cause, tt.method)
+			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
+				t.Errorf("stop order = %v, want %v", got, want)
+			}
+			h.finish()
+		})
+	}
+}
+
+func TestRunCallsStopOnceOnARunnerWhoseStartPanicked(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy PanicPolicy
+	}{
+		{name: "fail", policy: PanicFail},
+		{name: "isolate", policy: PanicIsolate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b := newScripted("a"), newScripted("b")
+			h := runScriptedWith(t, []Option{WithPanicPolicy(tt.policy)}, a, b)
+			<-h.waiting
+			a.startPanic <- "oops"
+			if tt.policy == PanicIsolate {
+				<-h.waiting
+				h.cancelRun()
+			}
+
+			checkPanic(t, <-h.result, "a", "oops", "Start")
+			if got, want := h.rec.stopOrder(), []string{"b", "a"}; !slices.Equal(got, want) {
+				t.Errorf("stop order = %v, want %v", got, want)
+			}
+			h.finish()
+		})
+	}
 }

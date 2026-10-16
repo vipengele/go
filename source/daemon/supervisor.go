@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -79,18 +80,26 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 // Start returns, shuts the Runners down in reverse start order. A Start that returns before
 // shutdown, with nil or an error, is the failure that begins it.
 //
+// A panic in a Runner's Start or Stop is recovered in the goroutine that called it and becomes a
+// *PanicError naming the Runner; it is never re-raised. Under PanicFail a Start that panics before
+// shutdown is the failure that begins it, like any other early return. Under PanicIsolate it is
+// recorded and Run keeps waiting, with the other Runners still running, until ctx is done or
+// another Start returns; Run keeps waiting even once every Start has panicked. A panic in Start or
+// Stop during shutdown is a stop problem of that Runner under either policy.
+//
 // The whole shutdown shares one deadline, the grace period. For each Runner in turn, Run cancels
 // its Start context, calls its Stop and waits for Stop and then Start to return. Every Runner's
-// Stop is called exactly once, including the one whose Start failed. A Stop that returns an error,
-// or a Stop or Start still running at the deadline, is reported as ErrStopTimeout naming the
-// Runner; the Runners after it are still cancelled and their Stop called, but once the deadline
-// has passed Run no longer waits for them. An abandoned Stop or Start goroutine may still be
-// running when Run returns.
+// Stop is called exactly once, including one whose Start failed or panicked. A Stop that returns
+// an error, or a Stop or Start still running at the deadline, is reported as ErrStopTimeout naming
+// the Runner, and a Stop that panics as its *PanicError; the Runners after it are still cancelled
+// and their Stop called, but once the deadline has passed Run no longer waits for them. An
+// abandoned Stop or Start goroutine may still be running when Run returns.
 //
-// Run returns nil when ctx is cancelled and every Runner stops cleanly. Otherwise it returns the
-// failure that began shutdown first, then each stop problem in stop order, joined with
-// errors.Join. An error from a Start that only reports the cancellation of its context during
-// shutdown is not a problem and is dropped.
+// Run returns nil when ctx is cancelled, no Start panicked and every Runner stops cleanly.
+// Otherwise it returns, joined with errors.Join, the failure that began shutdown first, then each
+// Start panic isolated under PanicIsolate in start order, then each stop problem in stop order. An
+// error from a Start that only reports the cancellation of its context during shutdown is not a
+// problem and is dropped.
 //
 // Run may be called once; a second call returns ErrAlreadyRan.
 func (s *Supervisor) Run(ctx context.Context) error {
@@ -104,21 +113,58 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		runs = append(runs, launch(ctx, r, exited))
 	}
 
-	var failure error
-	select {
-	case <-ctx.Done():
-	case l := <-exited:
-		failure = l.failure(<-l.result)
-	}
+	failure := s.wait(ctx, exited)
 
 	stopCtx, cancel := s.newStopContext()
 	defer cancel()
 
 	errs := []error{failure}
+	for _, l := range runs {
+		errs = append(errs, l.isolated)
+	}
 	for _, l := range slices.Backward(runs) {
 		errs = append(errs, l.stop(stopCtx)...)
 	}
 	return errors.Join(errs...)
+}
+
+// wait blocks until shutdown begins: ctx is done, or a Start returns in a way that fails its
+// Runner. It returns that failure, or nil when ctx began it. A Start panic under PanicIsolate is
+// recorded on its Runner and does not end the wait.
+func (s *Supervisor) wait(ctx context.Context, exited <-chan *launched) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case l := <-exited:
+			o := <-l.result
+			if o.panicked && s.policy == PanicIsolate {
+				l.returned = true
+				l.isolated = o.err
+				continue
+			}
+			return l.failure(o)
+		}
+	}
+}
+
+// outcome is what a Runner's Start or Stop came to: the error it returned, or, with panicked set,
+// the *PanicError recovered from it.
+type outcome struct {
+	err      error
+	panicked bool
+}
+
+// guard calls f, a Start or Stop of the Runner called name, and returns its outcome. A panic in f
+// is recovered into a *PanicError carrying the panic value and the stack of the panicking
+// goroutine, so guard must run in the goroutine that calls f.
+func guard(name string, f func() error) (o outcome) {
+	defer func() {
+		if v := recover(); v != nil {
+			o = outcome{err: &PanicError{Runner: name, Value: v, Stack: debug.Stack()}, panicked: true}
+		}
+	}()
+	return outcome{err: f()}
 }
 
 // launched is one Runner whose Start is running under Run. Its fields other than result are
@@ -128,60 +174,74 @@ type launched struct {
 	name   string
 	cancel context.CancelFunc
 
-	// result receives what Start returned. Its capacity of one means the Start goroutine never
+	// result receives what Start came to. Its capacity of one means the Start goroutine never
 	// blocks on it, even once Run has stopped listening.
-	result chan error
+	result chan outcome
 
 	// returned records that Run has received Start's result.
 	returned bool
+
+	// isolated is the *PanicError of a Start that panicked before shutdown under PanicIsolate.
+	isolated error
 }
 
 // launch runs r's Start in a goroutine under a context that keeps the values of parent but not
-// its cancellation. When Start returns, its result goes to the launched Runner's result channel
-// and the launched Runner itself to exited, which must have room for every Runner.
+// its cancellation. When Start returns or panics, its outcome goes to the launched Runner's result
+// channel and the launched Runner itself to exited, which must have room for every Runner.
 func launch(parent context.Context, r Runner, exited chan<- *launched) *launched {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
-	l := &launched{runner: r, name: r.Name(), cancel: cancel, result: make(chan error, 1)}
+	l := &launched{runner: r, name: r.Name(), cancel: cancel, result: make(chan outcome, 1)}
 	go func() {
-		l.result <- r.Start(ctx)
+		l.result <- guard(l.name, func() error { return r.Start(ctx) })
 		exited <- l
 	}()
 	return l
 }
 
-// failure turns the result of a Start that returned before shutdown into the error that begins
-// it. The Runner's context is not cancelled at that point, so every result is a failure.
-func (l *launched) failure(err error) error {
+// failure turns the outcome of a Start that returned or panicked before shutdown into the error
+// that begins it. The Runner's context is not cancelled at that point, so every outcome is a
+// failure. A *PanicError already names the Runner and is returned as it is.
+func (l *launched) failure(o outcome) error {
 	l.returned = true
-	if err == nil {
+	switch {
+	case o.panicked:
+		return o.err
+	case o.err == nil:
 		return fmt.Errorf("daemon: runner %q: %w", l.name, ErrRunnerExited)
+	default:
+		return fmt.Errorf("daemon: runner %q: %w", l.name, o.err)
 	}
-	return fmt.Errorf("daemon: runner %q: %w", l.name, err)
 }
 
 // stop cancels the Runner's Start context, calls its Stop and waits, under ctx, for Stop and then
-// Start to return. It reports what went wrong, at most one ErrStopTimeout per Runner: a Stop error
-// with its cause, or a Stop or Start still running when ctx is done; and a Start error other than
-// the cancellation it was asked for, as itself. Once ctx is done it still cancels and calls Stop,
+// Start to return. It reports what went wrong, at most one problem with Stop per Runner: a Stop
+// error as ErrStopTimeout with its cause, a Stop panic as its *PanicError, or a Stop or Start
+// still running when ctx is done as ErrStopTimeout; and a Start error other than the cancellation
+// it was asked for, or a Start panic, as itself. Once ctx is done it still cancels and calls Stop,
 // but reports a timeout without waiting.
 func (l *launched) stop(ctx context.Context) []error {
 	l.cancel()
-	stopped := make(chan error, 1)
-	go func() { stopped <- l.runner.Stop(ctx) }()
+	stopped := make(chan outcome, 1)
+	go func() { stopped <- guard(l.name, func() error { return l.runner.Stop(ctx) }) }()
 
 	if ctx.Err() != nil {
 		return []error{l.timeout()}
 	}
+	var problem error
 	select {
-	case err := <-stopped:
-		if err != nil {
-			return append([]error{fmt.Errorf("daemon: runner %q: %w: %w", l.name, ErrStopTimeout, err)},
-				l.waitStart(ctx, false)...)
+	case o := <-stopped:
+		switch {
+		case o.panicked:
+			problem = o.err
+		case o.err != nil:
+			problem = fmt.Errorf("daemon: runner %q: %w: %w", l.name, ErrStopTimeout, o.err)
+		default:
+			return l.waitStart(ctx, true)
 		}
 	case <-ctx.Done():
 		return []error{l.timeout()}
 	}
-	return l.waitStart(ctx, true)
+	return append([]error{problem}, l.waitStart(ctx, false)...)
 }
 
 // waitStart waits, under ctx, for the Runner's Start to return after its context was cancelled.
@@ -191,10 +251,13 @@ func (l *launched) waitStart(ctx context.Context, reportTimeout bool) []error {
 		return nil
 	}
 	select {
-	case err := <-l.result:
+	case o := <-l.result:
 		l.returned = true
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return []error{fmt.Errorf("daemon: runner %q: %w", l.name, err)}
+		switch {
+		case o.panicked:
+			return []error{o.err}
+		case o.err != nil && !errors.Is(o.err, context.Canceled):
+			return []error{fmt.Errorf("daemon: runner %q: %w", l.name, o.err)}
 		}
 	case <-ctx.Done():
 		if reportTimeout {
