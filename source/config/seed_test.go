@@ -410,3 +410,17 @@ func TestSeedRemovesAFileItCannotFinish(t *testing.T) {
 		})
 	}
 }
+
+func TestSeedCreatesAtAnUncleanPath(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + string(filepath.Separator) + "." + string(filepath.Separator) + string(filepath.Separator) + "config.yaml"
+	created, err := Seed(path, seedDefaults())
+	if err != nil || !created {
+		t.Fatalf("Seed = %v, %v; want true, nil", created, err)
+	}
+	assertRoundTrip(t, filepath.Join(dir, "config.yaml"), seedDefaults())
+	created, err = Seed(path, seedDefaults())
+	if err != nil || created {
+		t.Fatalf("second Seed = %v, %v; want false, nil", created, err)
+	}
+}

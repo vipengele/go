@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -46,9 +47,10 @@ func Seed[T any](path string, defaults T) (created bool, err error) {
 }
 
 // createExclusive creates the file at path for writing with mode 0600, failing with an error
-// matching fs.ErrExist when anything, a dangling symbolic link included, is already at path.
+// matching fs.ErrExist when anything, a dangling symbolic link included, is already at path. The
+// file is opened at filepath.Clean(path).
 func createExclusive(path string) (io.WriteCloser, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	return os.OpenFile(filepath.Clean(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 }
 
 // writeNew writes data to a file create makes at path, and reports whether it made one. An error
