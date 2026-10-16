@@ -29,11 +29,13 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   the process (`os.Args[1:]`, standard streams, working directory, environment) and returns the exit
   code; `ExecuteArgs(env, root, args)` is the same against a given `*spec.Env`, for tests. Both
   validate the tree on every call. Exit codes: 0 success and `--help`, 1 a run error or an invalid
-  tree, 2 a command line the tree does not accept, 130 interrupted (the run's context, derived from
+  tree, 2 a command line the tree does not accept or a `spec.UsageError` a run function returns
+  (ADR-0015), 130 interrupted (the run's context, derived from
   the `executeArgsCtx` context, done and `context.Canceled`, nothing printed; also a second
   interrupt); 3-125 are registrable. Order, first match wins: 130,
   `spec.Coded` (1 or 3-125), `WithExitCode(code, sentinel)` / `WithExitCodeAs(fn)` in option order,
-  usage 2, else 1. The registry is per-`App`, read-only after `New` (a bad code panics there); the
+  2 for a `*cobra.UsageError` or a `spec.UsageError` found by `errors.As`, else 1. `spec.Coded(2)` is
+  ignored and 2 is not registrable; `spec.ErrAborted` exits 1. The registry is per-`App`, read-only after `New` (a bad code panics there); the
   package-level `Execute` / `ExecuteArgs` have none. Every error is written to stderr as a tree
   (`internal/errrender`, ADR-0011) unless it carries `spec.Reported` (the code is still chosen as
   above; the `invalid command tree` tree, `fmt.Errorf("invalid command tree: %w", err)` with a row per
