@@ -189,6 +189,16 @@ What a **Command** exists to produce: the text or JSON a user or a script reads 
 output. It is written as given, unstyled, and no **Output mode** suppresses it (ADR-0013).
 _Avoid_: result, output (the **Output mode** covers both streams)
 
+**Envelope**:
+The JSON object a **Command** writes as **Data** in a JSON **Output mode**: a flat object whose first
+key is the **Schema** and whose remaining keys are the Command's own (ADR-0014).
+_Avoid_: wrapper, payload
+
+**Schema**:
+The integer first key of an **Envelope**, the version of the shape of its keys. Adding a key keeps
+it; renaming, removing or retyping a key increments it (ADR-0007, ADR-0014).
+_Avoid_: version (a key of its own in some payloads)
+
 **Hook**:
 A function the **App** runs before or after every **Command** it runs, given the **Invocation** and
 the Command's path and **Annotation**s. It belongs to the tool, not to the Command, so a Command
