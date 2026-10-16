@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 )
@@ -24,9 +25,19 @@ var ErrSchema = errors.New("config: invalid schema")
 // A key holds a bool, a signed or unsigned integer, a float, a string or a time.Duration, or a
 // slice of one of these. A pointer field, an embedded field, a map and any other type is a schema
 // error, as is a nested struct with no keys.
+//
+// A `doc:"..."` tag describes a key, and is returned by [Field.Doc]; on a field of struct type it
+// describes the group, and is returned by [Schema.GroupDoc]. A `doc` tag on a field with no key, one
+// tagged `config:"-"` or unexported, is a schema error, since nothing would ever show it.
+//
+// When the struct, or a pointer to it, has a method RemovedKeys() map[string]string, each entry is a
+// key the struct no longer accepts, mapped to a hint telling the user what to write instead; see
+// [Schema.Removed]. Only the top-level struct is asked, never a nested one.
 type Schema struct {
-	fields []Field
-	byKey  map[string]int
+	fields    []Field
+	byKey     map[string]int
+	groupDocs map[string]string // keyed by the matchKey of the group's key
+	removed   map[string]string // keyed by the matchKey of the removed key
 }
 
 // Field is one key of a Schema.
@@ -34,8 +45,15 @@ type Field struct {
 	key   string
 	env   string
 	flag  string
+	doc   string
 	typ   reflect.Type
 	index []int
+}
+
+// removedKeyer is the method a configuration struct implements to name the keys it no longer
+// accepts, each mapped to a migration hint.
+type removedKeyer interface {
+	RemovedKeys() map[string]string
 }
 
 // Key returns the canonical dotted key: snake_case segments joined by ".", such as
@@ -54,6 +72,9 @@ func (f Field) Flag() string { return f.flag }
 // Type returns the Go type of the struct field the key binds to.
 func (f Field) Type() reflect.Type { return f.typ }
 
+// Doc returns the `doc:"..."` tag of the struct field the key binds to, or "" without one.
+func (f Field) Doc() string { return f.doc }
+
 // NewSchema reflects the Schema of target, a struct or a pointer to a struct, whose environment
 // variables start with envPrefix. envPrefix is empty, or an upper-case ASCII letter followed by
 // upper-case letters, digits and underscores, not ending in an underscore.
@@ -61,7 +82,9 @@ func (f Field) Type() reflect.Type { return f.typ }
 // Every problem is reported in one error: each unsupported field, and each set of fields that
 // collide. Fields collide when their keys match, ignoring case, "-" and "_"; when they derive the
 // same environment variable or flag; or when one key is the group of another ("server" and
-// "server.port"), which a nested source such as a file cannot hold at once.
+// "server.port"), which a nested source such as a file cannot hold at once. A `doc` tag on a field
+// with no key is a problem, and so is each RemovedKeys entry that is not a valid dotted key, that
+// matches a key or the group of a key, or that matches another entry, matching as Lookup does.
 func NewSchema(target any, envPrefix string) (*Schema, error) {
 	t := reflect.TypeOf(target)
 	if t != nil && t.Kind() == reflect.Pointer {
@@ -85,13 +108,25 @@ func NewSchema(target any, envPrefix string) (*Schema, error) {
 		b.fields[i].flag = flagName(b.fields[i].key)
 	}
 	b.collisions()
+	var removed map[string]string
+	if r, ok := reflect.New(t).Interface().(removedKeyer); ok {
+		removed = b.removedKeys(root, r.RemovedKeys())
+	}
 	if len(b.problems) > 0 {
 		return nil, errors.Join(b.problems...)
 	}
 
-	s := &Schema{fields: b.fields, byKey: make(map[string]int, len(b.fields))}
+	s := &Schema{
+		fields:    b.fields,
+		byKey:     make(map[string]int, len(b.fields)),
+		groupDocs: make(map[string]string, len(b.groupDocs)),
+		removed:   removed,
+	}
 	for i, f := range b.fields {
 		s.byKey[matchKey(f.key)] = i
+	}
+	for key, doc := range b.groupDocs {
+		s.groupDocs[matchKey(key)] = doc
 	}
 	return s, nil
 }
@@ -115,11 +150,26 @@ func (s *Schema) Lookup(key string) (Field, bool) {
 	return s.fields[i], true
 }
 
+// GroupDoc returns the `doc:"..."` tag of the nested struct field whose group key matches key, as
+// Lookup matches: GroupDoc("rate-limit") is the doc of the field holding the "rate_limit.*" keys.
+// It returns "" for a group without a doc tag and for a key that names no group.
+func (s *Schema) GroupDoc(key string) string {
+	return s.groupDocs[matchKey(key)]
+}
+
+// Removed reports whether key matches, as Lookup matches, a key the configuration struct names in
+// its RemovedKeys method, and returns the hint the method maps it to.
+func (s *Schema) Removed(key string) (hint string, ok bool) {
+	hint, ok = s.removed[matchKey(key)]
+	return hint, ok
+}
+
 // schemaBuilder collects the fields of a struct and every problem found while reflecting it.
 type schemaBuilder struct {
-	fields   []Field
-	paths    []string // paths[i] is the Go path of fields[i], such as Config.Server.Port.
-	problems []error
+	fields    []Field
+	paths     []string          // paths[i] is the Go path of fields[i], such as Config.Server.Port.
+	groupDocs map[string]string // the doc tag of each nested struct field, by its canonical key
+	problems  []error
 }
 
 func (b *schemaBuilder) fail(msg string) {
@@ -132,15 +182,22 @@ func (b *schemaBuilder) walk(t reflect.Type, path, prefix string, index []int) {
 	for i := range t.NumField() {
 		sf := t.Field(i)
 		tag, tagged := sf.Tag.Lookup("config")
+		doc, documented := sf.Tag.Lookup("doc")
+		fieldPath := path + "." + sf.Name
 		if tag == "-" {
+			if documented {
+				b.fail(fmt.Sprintf("field %s: a doc tag on a field tagged config:\"-\" describes no key", fieldPath))
+			}
 			continue
 		}
-		fieldPath := path + "." + sf.Name
 		if sf.Anonymous {
 			b.fail(fmt.Sprintf("field %s: embedded fields are not supported; give the field a name", fieldPath))
 			continue
 		}
 		if !sf.IsExported() {
+			if documented {
+				b.fail(fmt.Sprintf("field %s: a doc tag on an unexported field describes no key", fieldPath))
+			}
 			continue
 		}
 
@@ -171,8 +228,14 @@ func (b *schemaBuilder) walk(t reflect.Type, path, prefix string, index []int) {
 			if len(b.fields) == before && len(b.problems) == problems {
 				b.fail(fmt.Sprintf("field %s: type %v is not supported: a nested struct needs at least one key", fieldPath, ft))
 			}
+			if doc != "" {
+				if b.groupDocs == nil {
+					b.groupDocs = make(map[string]string)
+				}
+				b.groupDocs[key] = doc
+			}
 		case supportedValue(ft) || (ft.Kind() == reflect.Slice && supportedValue(ft.Elem())):
-			b.fields = append(b.fields, Field{key: key, typ: ft, index: fieldIndex})
+			b.fields = append(b.fields, Field{key: key, doc: doc, typ: ft, index: fieldIndex})
 			b.paths = append(b.paths, fieldPath)
 		default:
 			b.fail(fmt.Sprintf("field %s: type %v is not supported", fieldPath, ft))
@@ -247,4 +310,70 @@ func (b *schemaBuilder) collide(what string, name func(Field) string) {
 // describe names field i by its Go path and its key.
 func (b *schemaBuilder) describe(i int) string {
 	return fmt.Sprintf("%s (key %q)", b.paths[i], b.fields[i].key)
+}
+
+// removedKeys validates the entries of the RemovedKeys method of root and returns them keyed by
+// matchKey. An entry is a problem when a segment of it is not a valid key segment, or when it
+// matches a key or the group of a key; entries matching each other are one problem naming them all.
+// Entries are checked in sorted order, so that the problems are reported in the same order on every
+// run.
+func (b *schemaBuilder) removedKeys(root string, entries map[string]string) map[string]string {
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	live := make(map[string]int, len(b.fields))
+	groups := make(map[string]int, len(b.fields))
+	for i, f := range b.fields {
+		m := matchKey(f.key)
+		if _, ok := live[m]; !ok {
+			live[m] = i
+		}
+		segments := strings.Split(m, ".")
+		for n := 1; n < len(segments); n++ {
+			g := strings.Join(segments[:n], ".")
+			if _, ok := groups[g]; !ok {
+				groups[g] = i
+			}
+		}
+	}
+
+	matching := make(map[string][]string, len(keys))
+	var order []string
+	for _, k := range keys {
+		what := fmt.Sprintf("removed key %q of %s.RemovedKeys", k, root)
+		if !validDottedKey(k) {
+			b.fail(fmt.Sprintf("%s is not a dotted key: each \".\"-separated segment must start with an ASCII letter and hold only ASCII letters, digits, \"-\" and \"_\"", what))
+			continue
+		}
+		m := matchKey(k)
+		if i, ok := live[m]; ok {
+			b.fail(fmt.Sprintf("%s matches the key of %s", what, b.describe(i)))
+			continue
+		}
+		if i, ok := groups[m]; ok {
+			b.fail(fmt.Sprintf("%s matches the group of %s", what, b.describe(i)))
+			continue
+		}
+		if _, ok := matching[m]; !ok {
+			order = append(order, m)
+		}
+		matching[m] = append(matching[m], k)
+	}
+
+	removed := make(map[string]string, len(order))
+	for _, m := range order {
+		if ks := matching[m]; len(ks) > 1 {
+			quoted := make([]string, len(ks))
+			for i, k := range ks {
+				quoted[i] = fmt.Sprintf("%q", k)
+			}
+			b.fail(fmt.Sprintf("removed keys %s of %s.RemovedKeys match each other, ignoring case, \"-\" and \"_\"", strings.Join(quoted, ", "), root))
+			continue
+		}
+		removed[m] = entries[matching[m][0]]
+	}
+	return removed
 }
