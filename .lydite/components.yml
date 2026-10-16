@@ -10,8 +10,9 @@
 # released version in strict mode, ADR-0006), so it needs no `setup` and no
 # `depends_on` to build the sibling first.
 #
-# Every project under source/ has one component with `name` (the project), `dir` (its directory),
-# `runner: go-test` and `args: ["-race", "./..."]`.
+# Every project under source/ that holds Go code has one component with `name` (the project), `dir`
+# (its directory), `runner: go-test` and `args: ["-race", "./..."]`. A project with no code has no
+# coverable statements, so it has no component until its first package lands.
 #
 # tools/ holds repository tooling rather than projects (ADR-0004); each tool under it is a component
 # of its own, run by the runner of its language. vanity-worker is a TypeScript Worker tested with
@@ -23,10 +24,6 @@ components:
     args: ["-race", "./..."]
   - name: update
     dir: source/update
-    runner: go-test
-    args: ["-race", "./..."]
-  - name: daemon
-    dir: source/daemon
     runner: go-test
     args: ["-race", "./..."]
   - name: commons
