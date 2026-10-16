@@ -50,4 +50,35 @@
 // key no provider set.
 //
 // Any type with the methods of [Provider] is a layer of its own.
+//
+// # Documentation
+//
+// A `doc:"..."` tag describes a key; on a field of struct type it describes the group of keys below
+// it. [Field.Doc] and [Schema.GroupDoc] return the text, and [Seed] writes it as a comment above the
+// key. A `doc` tag on a field that has no key is a schema error.
+//
+// # Validation
+//
+// A configuration type may implement [Validator]. [Load] calls Validate on a pointer to the bound
+// value once every provider has loaded and every value has converted, so a value receiver and a
+// pointer receiver both work. Only the top-level type is asked, never a nested struct. Validate
+// must not change the value: Load returns it as Validate leaves it, with the Sources recorded
+// before the call. A problem with one key is a [*FieldError] naming the key, alone or within the
+// error Validate returns; Load reports it with the value and origin of the key.
+//
+// # Removed keys
+//
+// A configuration type may have a method RemovedKeys() map[string]string, mapping each removed key
+// to a hint telling the user what to write instead. A removed key in a file, among
+// the flags, or in a [Provider] that asks [Schema.Removed], is reported with its hint rather than
+// as an unknown key. The method is found on the type or a pointer to it, and only on the top-level
+// type. A removed key that is a live key, the group of one, or another removed key is a schema
+// error.
+//
+// # Default file
+//
+// [Seed] writes a commented configuration file holding every key at its default, for a tool to
+// create on first run. It is the one write the package makes: it creates the file with mode 0600,
+// never replaces an existing one and creates no directory. A tool that wants no default file does
+// not call it.
 package config

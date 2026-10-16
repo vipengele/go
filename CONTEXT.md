@@ -143,6 +143,18 @@ name it (ADR-0012). The report lists, for each **Key**, its effective value and 
 of the report is a Source, a **Key**'s value together with its Origin, never a **Provider**.
 _Avoid_: location, provenance
 
+**Default file**:
+A commented file holding every **Key** of a **Configuration** at its default value, written for the
+user to edit. A tool creates it on first run or not at all, and an existing file is never replaced
+(ADR-0012).
+_Avoid_: template, sample config, example file
+
+**Removed key**:
+A **Key** a **Configuration** has dropped, paired with a hint telling the user what to write
+instead. A **Provider** that finds one reports the hint in place of the generic unknown-key error
+(ADR-0012).
+_Avoid_: deprecated key, renamed key, legacy key
+
 **Command**:
 One named action of a tool (`version`, `update`), described as data in `cli/spec`: its name,
 descriptions, **Flag**s, subcommands and what it does when run. Any project contributes Commands
