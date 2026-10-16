@@ -391,3 +391,265 @@ func TestNewSchemaReportsEveryProblemTogether(t *testing.T) {
 func problems(err error) []string {
 	return strings.Split(err.Error(), "\n")
 }
+
+type docConfig struct {
+	Verbose bool `doc:"Print every step."`
+	Quiet   bool
+	Server  struct {
+		Port int `doc:"Port to listen on."`
+	} `config:"httpServer" doc:"The HTTP server."`
+	Rate struct {
+		Burst float64
+	}
+}
+
+func TestSchemaDoc(t *testing.T) {
+	s, err := NewSchema(docConfig{}, "")
+	if err != nil {
+		t.Fatalf("NewSchema: %v", err)
+	}
+	fields := []struct{ key, want string }{
+		{"verbose", "Print every step."},
+		{"quiet", ""},
+		{"http_server.port", "Port to listen on."},
+		{"rate.burst", ""},
+	}
+	for _, tc := range fields {
+		f, ok := s.Lookup(tc.key)
+		if !ok {
+			t.Fatalf("Lookup(%q) found no field", tc.key)
+		}
+		if got := f.Doc(); got != tc.want {
+			t.Errorf("Lookup(%q).Doc() = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+	groups := []struct{ key, want string }{
+		{"http_server", "The HTTP server."},
+		{"HTTP-Server", "The HTTP server."},
+		{"rate", ""},
+		{"verbose", ""},
+		{"http_server.port", ""},
+		{"nope", ""},
+	}
+	for _, tc := range groups {
+		if got := s.GroupDoc(tc.key); got != tc.want {
+			t.Errorf("GroupDoc(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+}
+
+type docOnSkipped struct {
+	Port    int
+	Skipped int `config:"-" doc:"Never shown."`
+}
+
+type docOnUnexported struct {
+	Port   int
+	hidden int `doc:"Never shown."`
+}
+
+type docEmptyOnSkipped struct {
+	Port    int
+	Skipped int `config:"-" doc:""`
+}
+
+func TestNewSchemaRejectsADocTagWithNoKey(t *testing.T) {
+	cases := []struct {
+		name   string
+		target any
+		want   string
+	}{
+		{name: "config:\"-\" field", target: docOnSkipped{}, want: `field docOnSkipped.Skipped: a doc tag on a field tagged config:"-" describes no key`},
+		{name: "empty doc on a config:\"-\" field", target: docEmptyOnSkipped{}, want: `field docEmptyOnSkipped.Skipped: a doc tag on a field tagged config:"-" describes no key`},
+		{name: "unexported field", target: docOnUnexported{hidden: 1}, want: "field docOnUnexported.hidden: a doc tag on an unexported field describes no key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewSchema(tc.target, "")
+			if !errors.Is(err, ErrSchema) {
+				t.Fatalf("NewSchema error = %v, want ErrSchema", err)
+			}
+			want := []string{"config: invalid schema: " + tc.want}
+			if got := problems(err); !reflect.DeepEqual(got, want) {
+				t.Errorf("problems =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+type removedByValue struct {
+	Server struct{ Port int }
+}
+
+func (removedByValue) RemovedKeys() map[string]string {
+	return map[string]string{
+		"legacy":           "drop it",
+		"server.max_conns": "use server.port",
+	}
+}
+
+type removedByPointer struct {
+	Port int
+}
+
+func (*removedByPointer) RemovedKeys() map[string]string {
+	return map[string]string{"oldPort": "use port"}
+}
+
+type removedNested struct {
+	Inner removedByPointer
+}
+
+func TestSchemaRemoved(t *testing.T) {
+	cases := []struct {
+		name   string
+		target any
+		key    string
+		want   string
+	}{
+		{name: "value receiver, value target", target: removedByValue{}, key: "legacy", want: "drop it"},
+		{name: "value receiver, pointer target", target: &removedByValue{}, key: "legacy", want: "drop it"},
+		{name: "pointer receiver, value target", target: removedByPointer{}, key: "old_port", want: "use port"},
+		{name: "pointer receiver, pointer target", target: &removedByPointer{}, key: "old_port", want: "use port"},
+		{name: "nil pointer target", target: (*removedByPointer)(nil), key: "old_port", want: "use port"},
+		{name: "nested key", target: removedByValue{}, key: "server.max_conns", want: "use server.port"},
+		{name: "relaxed in every segment", target: removedByValue{}, key: "Server.MAX-CONNS", want: "use server.port"},
+		{name: "camelCase entry, kebab-case key", target: removedByPointer{}, key: "old-port", want: "use port"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := NewSchema(tc.target, "")
+			if err != nil {
+				t.Fatalf("NewSchema: %v", err)
+			}
+			hint, ok := s.Removed(tc.key)
+			if !ok || hint != tc.want {
+				t.Errorf("Removed(%q) = %q %v, want %q true", tc.key, hint, ok, tc.want)
+			}
+		})
+	}
+}
+
+func TestSchemaRemovedFindsNothing(t *testing.T) {
+	cases := []struct {
+		name   string
+		target any
+		key    string
+	}{
+		{name: "live key", target: removedByValue{}, key: "server.port"},
+		{name: "group of a removed key", target: removedByValue{}, key: "server"},
+		{name: "below a removed key", target: removedByValue{}, key: "legacy.x"},
+		{name: "dot replaced by underscore", target: removedByValue{}, key: "server_max_conns"},
+		{name: "unknown key", target: removedByValue{}, key: "nope"},
+		{name: "type without RemovedKeys", target: schemaServer{}, key: "legacy"},
+		{name: "RemovedKeys of a nested struct", target: removedNested{}, key: "inner.old_port"},
+		{name: "RemovedKeys of a nested struct, top-level key", target: removedNested{}, key: "old_port"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := NewSchema(tc.target, "")
+			if err != nil {
+				t.Fatalf("NewSchema: %v", err)
+			}
+			if hint, ok := s.Removed(tc.key); ok {
+				t.Errorf("Removed(%q) = %q true, want no removed key", tc.key, hint)
+			}
+		})
+	}
+}
+
+type removedLive struct {
+	Server struct{ MaxRetries int }
+}
+
+func (removedLive) RemovedKeys() map[string]string {
+	return map[string]string{"Server.max-retries": "it is live"}
+}
+
+type removedGroup struct {
+	Server struct{ Port int }
+}
+
+func (removedGroup) RemovedKeys() map[string]string {
+	return map[string]string{"SERVER": "it is a group"}
+}
+
+type removedCollide struct {
+	Port int
+}
+
+func (removedCollide) RemovedKeys() map[string]string {
+	return map[string]string{"old_port": "a", "oldPort": "b", "old-port": "c", "legacy": "d", "LEGACY": "e"}
+}
+
+type removedInvalid struct {
+	Port int
+}
+
+func (removedInvalid) RemovedKeys() map[string]string {
+	return map[string]string{
+		"":          "empty",
+		"a..b":      "empty segment",
+		".a":        "leading dot",
+		"a.":        "trailing dot",
+		"a.2b":      "segment starting with a digit",
+		"a b":       "space",
+		"server.ok": "valid",
+	}
+}
+
+func TestNewSchemaRejectsRemovedKeys(t *testing.T) {
+	cases := []struct {
+		name   string
+		target any
+		want   []string
+	}{
+		{
+			name:   "live key",
+			target: removedLive{},
+			want:   []string{`removed key "Server.max-retries" of removedLive.RemovedKeys matches the key of removedLive.Server.MaxRetries (key "server.max_retries")`},
+		},
+		{
+			name:   "group of a live key",
+			target: &removedGroup{},
+			want:   []string{`removed key "SERVER" of removedGroup.RemovedKeys matches the group of removedGroup.Server.Port (key "server.port")`},
+		},
+		{
+			name:   "entries matching each other",
+			target: removedCollide{},
+			want: []string{
+				`removed keys "LEGACY", "legacy" of removedCollide.RemovedKeys match each other, ignoring case, "-" and "_"`,
+				`removed keys "old-port", "oldPort", "old_port" of removedCollide.RemovedKeys match each other, ignoring case, "-" and "_"`,
+			},
+		},
+		{
+			name:   "not a dotted key",
+			target: removedInvalid{},
+			want: []string{
+				`removed key "" of removedInvalid.RemovedKeys is not a dotted key`,
+				`removed key ".a" of removedInvalid.RemovedKeys is not a dotted key`,
+				`removed key "a b" of removedInvalid.RemovedKeys is not a dotted key`,
+				`removed key "a." of removedInvalid.RemovedKeys is not a dotted key`,
+				`removed key "a..b" of removedInvalid.RemovedKeys is not a dotted key`,
+				`removed key "a.2b" of removedInvalid.RemovedKeys is not a dotted key`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewSchema(tc.target, "")
+			if !errors.Is(err, ErrSchema) {
+				t.Fatalf("NewSchema error = %v, want ErrSchema", err)
+			}
+			got := problems(err)
+			if len(got) != len(tc.want) {
+				t.Fatalf("error reports %d problems, want %d:\n%s", len(got), len(tc.want), strings.Join(got, "\n"))
+			}
+			for i, w := range tc.want {
+				if !strings.HasPrefix(got[i], "config: invalid schema: "+w) {
+					t.Errorf("problem %d = %q, want it to start with %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}

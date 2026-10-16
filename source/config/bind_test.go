@@ -137,3 +137,32 @@ func TestBindConversionErrors(t *testing.T) {
 		})
 	}
 }
+
+type bindRemovedConfig struct {
+	Name string
+}
+
+func (bindRemovedConfig) RemovedKeys() map[string]string {
+	return map[string]string{"legacy": "drop it"}
+}
+
+func TestBindRemovedKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "removed key", key: "legacy", want: "legacy: key was removed: drop it from custom"},
+		{name: "removed key, other spelling", key: "LEGACY", want: "LEGACY: key was removed: drop it from custom"},
+		{name: "unknown key", key: "nope", want: "nope: unknown key from custom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubProvider{entries: []Entry{{Key: tt.key, Value: "1", Origin: "custom"}}}
+			_, err := Load(bindRemovedConfig{}, p)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Load error = %v, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}

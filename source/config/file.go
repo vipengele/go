@@ -48,7 +48,8 @@ type FileProvider struct {
 // reached through one is read as written at its anchor, origin included. A merge key "<<" is not
 // interpreted: it is an unknown key.
 //
-// Load reports every problem in one error: a key with no Schema field, a key set twice under any
+// Load reports every problem in one error: a key with no Schema field, a key the Schema lists as
+// removed (reported with its hint, whatever value it holds), a key set twice under any
 // two spellings, a mapping or list where the field holds a single value, a value where the key
 // names a group of keys, a list element that is not a single value, and an explicit null ("key:"
 // with no value, or "~"), which sets nothing and is therefore refused rather than ignored.
@@ -163,6 +164,10 @@ func (l *fileLoader) pair(key string, k, v *yaml.Node) {
 		case group:
 			l.fail(k.Line, "key %q names a group of keys, not a value; it takes a mapping, not %s", key, kindName(v))
 		default:
+			if hint, removed := l.schema.Removed(key); removed {
+				l.fail(k.Line, "key %q was removed: %s", key, hint)
+				return
+			}
 			l.fail(k.Line, "unknown key %q", key)
 		}
 		return

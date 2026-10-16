@@ -23,6 +23,16 @@ func validName(name string) bool {
 	return true
 }
 
+// validDottedKey reports whether key is one or more "."-separated segments validName accepts.
+func validDottedKey(key string) bool {
+	for _, segment := range strings.Split(key, ".") {
+		if !validName(segment) {
+			return false
+		}
+	}
+	return true
+}
+
 // snakeCase returns the canonical segment for a name validName accepts. A word boundary is a "-" or
 // "_", a lower-case letter or digit followed by an upper-case letter ("maxRetries"), or the last
 // upper-case letter of a run followed by a lower-case one ("HTTPServer" is "http_server").

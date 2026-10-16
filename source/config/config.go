@@ -64,7 +64,17 @@ func (r Result[T]) Sources() []Source {
 // then each value that does not convert, naming its key, its text and its origin, such as
 // `server.max_retries: invalid int "abc" from env APP_SERVER_MAX_RETRIES`. A provider whose Load
 // fails sets nothing, and the providers after it are still loaded so that their problems are
-// reported too. A nil provider is an error. On any problem Load returns the zero Result.
+// reported too. A nil provider is an error.
+//
+// When every value is bound and T, or a pointer to T, implements Validator, Load calls Validate on
+// the bound value, and an error it returns is the error of Load. Each *FieldError in that error's
+// tree, reached through Unwrap() error and Unwrap() []error, whose Key matches a key as
+// Schema.Lookup matches is reported with the value and origin of its key, such as
+// `server.port: must be below 1024: "8080" from config.yaml:3`, and errors.As finds that copy
+// before the FieldError Validate returned, which Load leaves unchanged. Every other error in the
+// tree is reported as Validate returned it.
+//
+// On any problem Load returns the zero Result.
 func Load[T any](defaults T, providers ...Provider) (Result[T], error) {
 	if t := reflect.TypeFor[T](); t.Kind() != reflect.Struct {
 		return Result[T]{}, fmt.Errorf("%w: configuration type is %v, not a struct", ErrSchema, t)
@@ -105,7 +115,13 @@ func Load[T any](defaults T, providers ...Provider) (Result[T], error) {
 	if len(problems) > 0 {
 		return Result[T]{}, errors.Join(problems...)
 	}
-	return Result[T]{value: value, sources: b.sources()}, nil
+	sources := b.sources()
+	if v, ok := any(&value).(Validator); ok {
+		if err := v.Validate(); err != nil {
+			return Result[T]{}, annotate(err, schema, sources)
+		}
+	}
+	return Result[T]{value: value, sources: sources}, nil
 }
 
 // cloneSlices gives every slice field of schema in v a backing array of its own, holding the same

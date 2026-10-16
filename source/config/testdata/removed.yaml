@@ -1,0 +1,9 @@
+name: app
+legacy: true
+server:
+  max_conns: 4
+  host: h
+Old-Settings:
+  a: 1
+  b: [x, y]
+colour: red
