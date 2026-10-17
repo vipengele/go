@@ -227,9 +227,6 @@ func (a *App) version(flags standardFlags) *spec.Command {
 		opts = append(opts, version.WithOutputJSON())
 	}
 	cmd := version.New(*a.settings.buildInfo, opts...)
-	if cmd.Annotations == nil {
-		cmd.Annotations = map[string]string{}
-	}
 	cmd.Annotations[spec.SkipConfig] = ""
 	return cmd
 }

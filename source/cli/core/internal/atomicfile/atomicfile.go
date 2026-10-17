@@ -62,17 +62,11 @@ func WriteFile(path string, data []byte, mode os.FileMode) error {
 
 	tmp := f.Name()
 
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
+	_, writeErr := f.Write(data)
+	if err := errors.Join(writeErr, f.Close()); err != nil {
 		_ = os.Remove(tmp)
 
 		return fmt.Errorf("atomicfile: write %s: %w", tmp, err)
-	}
-
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-
-		return fmt.Errorf("atomicfile: close %s: %w", tmp, err)
 	}
 
 	return Replace(tmp, path, mode)
@@ -81,7 +75,7 @@ func WriteFile(path string, data []byte, mode os.FileMode) error {
 // prepare opens tmp by path, sets its mode and syncs its content. Opening before chmod means a
 // mode without read permission for the owner cannot prevent the sync.
 func prepare(tmp string, mode os.FileMode) error {
-	f, err := os.Open(tmp)
+	f, err := os.Open(filepath.Clean(tmp))
 	if err != nil {
 		return fmt.Errorf("atomicfile: open %s: %w", tmp, err)
 	}
@@ -98,11 +92,7 @@ func prepare(tmp string, mode os.FileMode) error {
 		return fmt.Errorf("atomicfile: sync %s: %w", tmp, err)
 	}
 
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("atomicfile: close %s: %w", tmp, err)
-	}
-
-	return nil
+	return f.Close()
 }
 
 // syncDir makes a rename into dir durable. Some filesystems cannot sync a directory and answer
@@ -110,7 +100,7 @@ func prepare(tmp string, mode os.FileMode) error {
 // already in place, so reporting the replace as failed would be wrong and the error is ignored.
 // Any other error is returned.
 func syncDir(dir string) error {
-	d, err := os.Open(dir)
+	d, err := os.Open(filepath.Clean(dir))
 	if err != nil {
 		return fmt.Errorf("atomicfile: open directory %s: %w", dir, err)
 	}
@@ -122,9 +112,5 @@ func syncDir(dir string) error {
 		return fmt.Errorf("atomicfile: sync directory %s: %w", dir, syncErr)
 	}
 
-	if closeErr != nil {
-		return fmt.Errorf("atomicfile: close directory %s: %w", dir, closeErr)
-	}
-
-	return nil
+	return closeErr
 }

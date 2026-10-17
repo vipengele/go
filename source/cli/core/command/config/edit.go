@@ -106,7 +106,7 @@ func edit[T any](ctx context.Context, inv *spec.Invocation, opts Options[T], edi
 		if err := editor(ctx, inv.Env, temp); err != nil {
 			return fmt.Errorf("config edit: editor: %w", err)
 		}
-		edited, err := os.ReadFile(temp)
+		edited, err := os.ReadFile(filepath.Clean(temp))
 		if err != nil {
 			return fmt.Errorf("config edit: %w", err)
 		}
@@ -140,7 +140,7 @@ func prepareCopy[T any](opts Options[T], temp string) ([]byte, error) {
 	data, err := os.ReadFile(opts.Path)
 	switch {
 	case err == nil:
-		if err := os.WriteFile(temp, data, editMode); err != nil {
+		if err := os.WriteFile(filepath.Clean(temp), data, editMode); err != nil {
 			return nil, err
 		}
 		return data, nil
@@ -148,7 +148,7 @@ func prepareCopy[T any](opts Options[T], temp string) ([]byte, error) {
 		if _, err := cfg.Seed(temp, opts.Defaults); err != nil {
 			return nil, err
 		}
-		return os.ReadFile(temp)
+		return os.ReadFile(filepath.Clean(temp))
 	default:
 		return nil, err
 	}
