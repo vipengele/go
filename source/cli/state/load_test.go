@@ -163,6 +163,7 @@ func TestLoadYAMLRefusesAnythingButOneDocument(t *testing.T) {
 	}{
 		{name: "comments only", content: "# nothing here\n"},
 		{name: "second document", content: "name: alpha\ncount: 3\n---\nname: beta\n"},
+		{name: "malformed second document", content: "name: alpha\ncount: 3\n---\n[bad\n"},
 	}
 
 	for _, tt := range tests {
