@@ -29,7 +29,8 @@ import (
 //
 // Every execution assembles its own root command, named by the identity's Name and holding the
 // added commands as its subcommands, and leaves the added commands as they are, so a built App
-// may run any number of times, concurrently. Adding a command while the App runs is not safe.
+// may run any number of times, concurrently, with the process-wide logger of [WithLogging] shared
+// as that option describes. Adding a command while the App runs is not safe.
 type App struct {
 	identity spec.Identity
 	settings settings

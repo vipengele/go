@@ -23,9 +23,13 @@ public package `go.vipengele.org/cli/core/logging`.
 - **Usage errors.** They are the internal usage error type of `internal/cobra`, not
   `spec.UsageError`: that type is for a run function that needs a prompt, and its text reads
   "requires interactive input".
-- **Setup.** `logging.Setup` builds the logger, calls `slog.SetDefault` and returns it, so a host
-  that runs two Apps in one process gets the logger of the one that ran last. The hook also stores
-  the logger in the context (ADR-0016).
+- **Setup.** `logging.Setup` builds the logger, calls `slog.SetDefault` and returns it. The hook
+  also stores the logger in the context (ADR-0016), where `cli.LoggerFrom(ctx)` reads it.
+- **One default per process.** The default is process-wide, so executions that overlap in one
+  process, of one App or of two, share the logger installed last, and a record written through the
+  default may go to the stderr of another execution. Code that needs the logger of its own
+  execution reads it with `cli.LoggerFrom`. A per-execution default is not possible: `slog` holds a
+  single one.
 - **Writer.** The records go to the stderr of the App's resolved `Env`, not to `os.Stderr`, so a
   test that substitutes the `Env` reads them.
 - **Format.** `logging.Options.Format` is `spec.Format`, the type `--output` resolves to, so there is

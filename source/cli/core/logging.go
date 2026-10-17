@@ -22,12 +22,17 @@ import (
 //
 // Before every run function, after the configuration hook of [WithConfig] and ahead of every
 // [WithPreRun] hook, a pre-run hook installs the logger with [logging.Setup], writing to the
-// env.Stderr of the execution, and stores it in the context it hands on. The level is info, debug
-// under -v, error under -q, and the one --log-level names when the command line sets it.
-// --log-level set beside -v or -q, a --log-level other than debug, info, warn or error, in any
-// letter case, and a --log-format other than text or json are usage errors: the hook writes the
-// problem, naming the flag, and the execution returns [ExitUsage] without calling the run
-// function.
+// env.Stderr of the execution, and stores it in the context it hands on, where [LoggerFrom] reads
+// it. The level is info, debug under -v, error under -q, and the one --log-level names when the
+// command line sets it. --log-level set beside -v or -q, a --log-level other than debug, info,
+// warn or error, in any letter case, and a --log-format other than text or json are usage errors:
+// the hook writes the problem, naming the flag, and the execution returns [ExitUsage] without
+// calling the run function.
+//
+// The logger the hook installs is the process-wide [slog.Default], so executions that overlap in
+// one process, of one App or of two, share the one installed last, and a record written through
+// the default may reach the env.Stderr of another execution. Code that needs the logger of its own
+// execution reads it with [LoggerFrom].
 //
 // The App also needs [WithVerbose] and [WithQuiet]: without either, every execution returns
 // [ExitError] after writing "<name>: invalid command tree" to env.Stderr, followed by a row naming
@@ -117,6 +122,14 @@ func (f loggingFlags) options(inv *spec.Invocation, verbose, quiet *spec.FlagOf[
 // loggerKey is the context key under which the hook of [WithLogging] stores the [*slog.Logger] it
 // installs.
 type loggerKey struct{}
+
+// LoggerFrom returns the logger the hook of [WithLogging] installed for the command that runs,
+// from the context its run function, a later [PreRunHook] or a [PostRunHook] receives, and whether
+// the context carries one. It reports false when the App has no [WithLogging].
+func LoggerFrom(ctx context.Context) (*slog.Logger, bool) {
+	logger, ok := ctx.Value(loggerKey{}).(*slog.Logger)
+	return logger, ok
+}
 
 // commandPath returns the path of cmd with the root's name left out, as a usage error of the
 // command line names the command: "" for the root, "remote add" for a grandchild.

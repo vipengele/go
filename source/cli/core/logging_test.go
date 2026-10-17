@@ -216,6 +216,52 @@ func TestWithLoggingUsageErrors(t *testing.T) {
 	}
 }
 
+func TestLoggerFromReturnsTheInstalledDefault(t *testing.T) {
+	restoreDefaultLogger(t)
+	var (
+		got *slog.Logger
+		ok  bool
+		def *slog.Logger
+	)
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging())
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		got, ok = cli.LoggerFrom(ctx)
+		def = slog.Default()
+		return nil
+	}})
+	res := runApp(t, app, "run")
+	if res.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", res)
+	}
+	if !ok || got == nil {
+		t.Fatalf("LoggerFrom = %v, %t; want a logger and true", got, ok)
+	}
+	if got != def {
+		t.Error("LoggerFrom returned a logger other than slog.Default")
+	}
+}
+
+func TestLoggerFromWithoutWithLogging(t *testing.T) {
+	if got, ok := cli.LoggerFrom(t.Context()); ok || got != nil {
+		t.Errorf("LoggerFrom = %v, %t; want nil and false", got, ok)
+	}
+	var (
+		got *slog.Logger
+		ok  = true
+	)
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet())
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		got, ok = cli.LoggerFrom(ctx)
+		return nil
+	}})
+	if res := runApp(t, app, "run"); res.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", res)
+	}
+	if ok || got != nil {
+		t.Errorf("LoggerFrom = %v, %t in a run without WithLogging; want nil and false", got, ok)
+	}
+}
+
 func TestWithLoggingRunsBeforeEveryPreRunHook(t *testing.T) {
 	restoreDefaultLogger(t)
 	var order []string
