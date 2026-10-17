@@ -206,7 +206,8 @@ func launcher(argv []string) Editor {
 			return ErrNotFileStdio
 		}
 		args := append(argv[1:len(argv):len(argv)], path)
-		cmd := exec.CommandContext(ctx, argv[0], args...)
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- argv is the editor the invoking user named in $VISUAL or $EDITOR, run without a shell, with the file path as its own argument
+		cmd := exec.CommandContext(ctx, argv[0], args...) // #nosec G204 -- argv is the editor the invoking user named in $VISUAL or $EDITOR, run without a shell, with the file path as its own argument; launching it is the purpose of config edit
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 		cmd.Dir = env.WorkDir
 		if err := cmd.Run(); err != nil {
