@@ -742,6 +742,52 @@ func TestRedactingWriterOverflowJSONHeaderValueStraddlingCut(t *testing.T) {
 	}
 }
 
+func TestRedactingWriterJSONHeaderValueCutAfterBackslash(t *testing.T) {
+	// A piece ends on the backslash of an escape inside a string nested in a header value that is
+	// not a string, so the quote it escapes arrives with the next write and does not end the
+	// string or the value.
+	r := testRedactor()
+	const rest = `"x","tok"]}`
+	tests := []struct {
+		name, head string
+		flush      bool
+	}{
+		{"overflow", `{"Cookie":["a` + strings.Repeat("S", maxBuffered-len(`{"Cookie":["a`)) + `\`, false},
+		{"flush", `{"Cookie":["a\`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, r)
+			writeAll(t, w, tt.head)
+			if tt.flush {
+				if err := w.Flush(); err != nil {
+					t.Fatalf("Flush: %v", err)
+				}
+			}
+			if out.Len() == 0 {
+				t.Fatal("nothing was written before the rest arrived")
+			}
+			writeAll(t, w, rest+"\n")
+			got := out.String()
+			for _, s := range []string{"tok", `x"`, "SS"} {
+				if strings.Contains(got, s) {
+					t.Fatalf("%q leaked: %q", s, got)
+				}
+			}
+			if want := r.line(tt.head+rest) + "\n"; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+			if want := `{"Cookie":"[REDACTED]"}` + "\n"; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+			if !json.Valid(bytes.TrimSuffix(out.Bytes(), []byte("\n"))) {
+				t.Error("output line is not valid JSON")
+			}
+		})
+	}
+}
+
 func TestRedactingWriterFlushInsideJSONHeaderValue(t *testing.T) {
 	var out bytes.Buffer
 	w := newRedactingWriter(&out, testRedactor())
