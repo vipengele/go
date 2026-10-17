@@ -70,6 +70,7 @@ func postHook(c *calls, name string, err error) cli.Option {
 
 func TestAppHooks(t *testing.T) {
 	usage := spec.ExactArgs(1).Check(nil)
+	needsInput := &spec.UsageError{Question: "Continue?", Flag: "--yes"}
 	tests := []struct {
 		name    string
 		runErr  error
@@ -125,6 +126,14 @@ func TestAppHooks(t *testing.T) {
 				return []cli.Option{preHook(c, "A", usage)}
 			},
 			want:    result{code: cli.ExitError, stderr: "tool: " + usage.Error() + "\n"},
+			wantLog: "preA",
+		},
+		{
+			name: "pre-run spec.UsageError exits 2 and stops the run",
+			hooks: func(c *calls) []cli.Option {
+				return []cli.Option{preHook(c, "A", needsInput), postHook(c, "A", nil)}
+			},
+			want:    result{code: cli.ExitUsage, stderr: "tool: " + needsInput.Error() + "\n"},
 			wantLog: "preA",
 		},
 	}

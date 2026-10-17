@@ -54,6 +54,14 @@
 // hook's error does, with exit code 1. Without [WithConfig] the App has no "config" command and
 // reads no file.
 //
+// [WithLogging] gives the App the flags --log-level and --log-format, and a hook that installs the
+// process-wide [log/slog] logger, built by the logging package, before every run function. The
+// level is info, debug under -v and error under -q, or the one --log-level names; --log-level
+// beside -v or -q is a usage error. The hook runs after the configuration hook and ahead of every
+// other pre-run hook, writes to the standard error of the execution, and hands the logger on in
+// the context, where [LoggerFrom] reads it. The App also needs [WithVerbose] and [WithQuiet].
+// Without [WithLogging] the App declares neither flag and installs no logger.
+//
 // [App.ExecuteArgs] and [ExecuteArgs] run the same commands against a [spec.Env] and arguments
 // the caller gives, and touch nothing else of the process, so a test runs the tool's commands
 // against buffers, a fixed environment and a temporary working directory.
