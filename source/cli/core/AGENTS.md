@@ -30,7 +30,7 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   context for `LoggerFrom(ctx)`, with its redacting writer for `LogWriterFrom(ctx)` (raw or
   subprocess output; the App flushes it on the run's own goroutine when the run ends). Redaction is always on:
   the baseline (headers Authorization, Proxy-Authorization, Cookie, Set-Cookie; `Bearer `/`Basic `
-  values) applies to `WithLogging()` alone, `WithRedaction(logging.Redaction{Prefixes, Headers})`
+  values, the scheme in any letter case; a tool's prefix matches as given) applies to `WithLogging()` alone, `WithRedaction(logging.Redaction{Prefixes, Headers})`
   adds a tool's and cannot remove from it, and needs `WithLogging` (else `invalid command tree`).
   `Env.Stderr`, error rendering and `inv.Info` and friends are not redacted. Level: info, debug
   under `-v`, error under `-q`, or `--log-level`;

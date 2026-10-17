@@ -110,6 +110,51 @@ func TestRedactorPrefixExtendingAnother(t *testing.T) {
 	}
 }
 
+// TestRedactorAuthSchemeInAnyCase pins that the baseline prefixes, HTTP authentication schemes,
+// match in any letter case and keep the scheme as written, while a tool prefix matches only as
+// given.
+func TestRedactorAuthSchemeInAnyCase(t *testing.T) {
+	r := newRedactor(Redaction{Prefixes: []string{"ghp_"}})
+	for in, want := range map[string]string{
+		"Bearer x":                 "Bearer [REDACTED]",
+		"bearer x":                 "bearer [REDACTED]",
+		"BEARER x":                 "BEARER [REDACTED]",
+		"bEaReR tok":               "bEaReR [REDACTED]",
+		"Basic x":                  "Basic [REDACTED]",
+		"basic x":                  "basic [REDACTED]",
+		"BASIC x":                  "BASIC [REDACTED]",
+		`{"auth":"bearer abc123"}`: `{"auth":"bearer [REDACTED]"}`,
+		"ghp_x":                    "ghp_[REDACTED]",
+		"GHP_x":                    "GHP_x",
+		"Ghp_x":                    "Ghp_x",
+		"bearer":                   "bearer",
+		"bearer  x":                "bearer  x",
+	} {
+		got := r.line(in)
+		if got != want {
+			t.Errorf("line(%q) = %q, want %q", in, got, want)
+		}
+		if again := r.line(got); again != got {
+			t.Errorf("line(%q) = %q, not idempotent on %q", got, again, in)
+		}
+	}
+}
+
+// TestRedactorToolPrefixExtendingAScheme pins that a tool prefix that extends a baseline scheme
+// is tried first and matched as given, while the scheme alone still matches in any letter case.
+func TestRedactorToolPrefixExtendingAScheme(t *testing.T) {
+	r := newRedactor(Redaction{Prefixes: []string{"Basic ab_"}})
+	for in, want := range map[string]string{
+		"x Basic ab_XYZ y": "x Basic ab_[REDACTED] y",
+		"x basic ab_XYZ y": "x basic [REDACTED] y",
+		"x BASIC XYZ y":    "x BASIC [REDACTED] y",
+	} {
+		if got := r.lineAs(in, shapeText); got != want {
+			t.Errorf("line(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestRedactorZeroRedactionKeepsBaseline(t *testing.T) {
 	r := newRedactor(Redaction{})
 	for in, want := range map[string]string{
@@ -186,6 +231,7 @@ func TestHandlerRedactsAttributes(t *testing.T) {
 			slog.String("AUTHORIZATION", "s3cret"),
 			slog.Int("count", 3),
 			slog.String("note", "bare ghp_ stays"),
+			slog.String("auth", "bearer abc"),
 		)
 	})
 	assertNoSecret(t, out)
@@ -194,6 +240,7 @@ func TestHandlerRedactsAttributes(t *testing.T) {
 		"AUTHORIZATION": "[REDACTED]",
 		"count":         float64(3),
 		"note":          "bare ghp_ stays",
+		"auth":          "bearer [REDACTED]",
 	} {
 		if got := rec[key]; got != want {
 			t.Errorf("%s = %v, want %v", key, got, want)

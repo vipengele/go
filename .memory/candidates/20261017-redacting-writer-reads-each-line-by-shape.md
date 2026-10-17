@@ -18,6 +18,8 @@ saw:
   alone leaked `{Cookie: sid="abc"` and Go `%+v` dumps.
 - Both layers run over the same bytes (the handler redacts, then the writer sees the formatted line),
   so redaction must be idempotent: `[REDACTED]` is neither a token nor a header name.
-- Known leaks: a header whose JSON value is not a string (`{"Cookie":["sid=abc"]}`), a key written with
-  escaped quotes inside a JSON string, and text after a complete JSON document within one line when the
-  line arrives in pieces.
+- Known leaks: a key written with escapes inside the quotes (the writer matches only the plain string
+  `"Name"`), text after a complete JSON document within one line when the line arrives in pieces, and a
+  `Flush` that ends between `"Name":` and its value. A header whose JSON value is not a string
+  (`{"Cookie":["sid=abc"]}`, an object, a number) is redacted: `jsonKey` finds the key and `jsonSkip`
+  scans the value to its end.

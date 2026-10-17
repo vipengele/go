@@ -32,7 +32,8 @@ public package `go.vipengele.org/cli/core/logging`.
   either: the writer is the backstop for text that reaches the destination without passing the
   handler.
 - **Baseline.** Always on: the header names Authorization, Proxy-Authorization, Cookie and
-  Set-Cookie, and the values `Bearer <token>` and `Basic <token>`. `WithLogging()` alone is valid.
+  Set-Cookie, and the values `Bearer <token>` and `Basic <token>`, the scheme in any letter case (a
+  tool's prefix matches as given). `WithLogging()` alone is valid.
 - **Additions.** A tool adds with `cli.WithRedaction(logging.Redaction{Prefixes, Headers})` and
   cannot remove from the baseline. `WithRedaction` without `WithLogging` is an invalid command tree.
 - **Matching.** A prefix followed by a run of `[A-Za-z0-9_+/=.~-]` becomes the prefix followed by

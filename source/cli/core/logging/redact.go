@@ -19,7 +19,7 @@ import (
 
 // Redaction names the secrets a tool adds to the ones every logger redacts: the header names
 // Authorization, Proxy-Authorization, Cookie and Set-Cookie, and the values "Bearer <token>" and
-// "Basic <token>". A tool adds to that baseline and cannot remove from it, so the zero Redaction
+// "Basic <token>", with the scheme in any letter case, as HTTP reads it. A tool adds to that baseline and cannot remove from it, so the zero Redaction
 // still redacts it.
 //
 // A line of text is read by its shape, whatever the log format. A line that is a JSON object or
@@ -31,9 +31,10 @@ import (
 // is read as plain text: the value after "Name:", and after the quoted key form `"Name":` of a
 // JSON fragment, runs to the end of the line.
 type Redaction struct {
-	// Prefixes are token prefixes, such as "ghp_". The prefix followed by a run of the characters
-	// [A-Za-z0-9_+/=.~-] becomes the prefix followed by "[REDACTED]"; a prefix with none of those
-	// characters after it is left alone. An empty prefix is ignored.
+	// Prefixes are token prefixes, such as "ghp_", matched in the letter case they are written in.
+	// The prefix followed by a run of the characters [A-Za-z0-9_+/=.~-] becomes the prefix followed
+	// by "[REDACTED]"; a prefix with none of those characters after it is left alone. An empty
+	// prefix is ignored.
 	Prefixes []string
 	// Headers are header names, matched in any letter case. The value of an attribute whose key is
 	// one of them, at any group depth, and the value after "Name:" in text, or after the key
@@ -48,7 +49,8 @@ const redacted = "[REDACTED]"
 const suffixChars = `[A-Za-z0-9_+/=.~-]`
 
 // baselinePrefixes and baselineHeaders return what every redactor redacts, whatever its
-// [Redaction].
+// [Redaction]. A baseline prefix is an HTTP authentication scheme, which matches in any letter
+// case.
 func baselinePrefixes() []string { return []string{"Bearer ", "Basic "} }
 
 func baselineHeaders() []string {
@@ -109,7 +111,8 @@ func shapeOfStart(s []byte) lineShape {
 type redactor struct {
 	// headers holds every header name in lower case.
 	headers map[string]struct{}
-	// prefix matches a prefix, in group 1, followed by its token.
+	// prefix matches a prefix, in group 1, followed by its token: a baseline prefix in any letter
+	// case, so group 1 keeps the scheme as it is written, and a prefix of the [Redaction] as given.
 	prefix *regexp.Regexp
 	// textHeader and jsonHeader match a header name and its separator, in group 1, followed by
 	// the value the shape delimits.
@@ -134,8 +137,8 @@ func newRedactor(red Redaction) *redactor {
 
 	// The alternations try the longest literal first, so a prefix or name that extends another
 	// matches whole: Proxy-Authorization ahead of Authorization.
-	prefixAlt := alternation(prefixes)
-	nameAlt := alternation(names)
+	prefixAlt := alternation(prefixes, prefixPattern)
+	nameAlt := alternation(names, regexp.QuoteMeta)
 	return &redactor{
 		headers:    headers,
 		prefix:     regexp.MustCompile(`(` + prefixAlt + `)` + suffixChars + `+`),
@@ -152,14 +155,25 @@ func nonEmpty(ss []string) []string {
 	return slices.Compact(out)
 }
 
-// alternation returns a regular expression alternation of the literals ss, longest first.
-func alternation(ss []string) string {
-	quoted := make([]string, len(ss))
-	for i, s := range ss {
-		quoted[i] = regexp.QuoteMeta(s)
+// alternation returns a regular expression alternation of the literals ss, longest literal first,
+// each written as pattern returns it.
+func alternation(ss []string, pattern func(string) string) string {
+	sorted := slices.Clone(ss)
+	slices.SortStableFunc(sorted, func(a, b string) int { return len(b) - len(a) })
+	patterns := make([]string, len(sorted))
+	for i, s := range sorted {
+		patterns[i] = pattern(s)
 	}
-	slices.SortStableFunc(quoted, func(a, b string) int { return len(b) - len(a) })
-	return strings.Join(quoted, "|")
+	return strings.Join(patterns, "|")
+}
+
+// prefixPattern returns the pattern of the prefix s: a baseline prefix in any letter case, and any
+// other prefix as written.
+func prefixPattern(s string) string {
+	if slices.Contains(baselinePrefixes(), s) {
+		return `(?i:` + regexp.QuoteMeta(s) + `)`
+	}
+	return regexp.QuoteMeta(s)
 }
 
 // isHeader reports whether key is a header name the redactor redacts, in any letter case.

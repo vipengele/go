@@ -41,6 +41,7 @@ func TestRedactingWriterSplitAtEveryOffset(t *testing.T) {
 		in   string
 	}{
 		{"text", "x ghp_abc123 y\nAuthorization: Bearer zzz\nplain\nsent Basic dXNl= ok\n"},
+		{"scheme case", "auth bearer abc\nsent BASIC xyz= ok\n{\"auth\":\"bEaReR tok\"}\nGHP_abc\n"},
 		{"json", `{"msg":"Authorization: Bearer a\"b","k":"ghp_q1"}` + "\n" +
 			`{"X-Api-Key":"v\\\"w","n":1}` + "\n"},
 		{"mixed shapes", `Set-Cookie: sid="abc123"; Path=/` + "\n" + `{"Cookie":"sid=abc"}` + "\n" +
@@ -75,6 +76,7 @@ func TestRedactingWriterSplitAtPrefixBoundary(t *testing.T) {
 		{"after tool prefix", []string{"token ghp_", "abc123 end\n"}, "token ghp_[REDACTED] end\n"},
 		{"inside tool prefix", []string{"token ghp", "_abc123 end\n"}, "token ghp_[REDACTED] end\n"},
 		{"after bearer prefix", []string{"Bearer ", "abc\n"}, "Bearer [REDACTED]\n"},
+		{"inside lower-case scheme", []string{"bea", "rer abc\n"}, "bearer [REDACTED]\n"},
 		{"after header separator", []string{"Cookie: ", "a=b\n"}, "Cookie: [REDACTED]\n"},
 		{"inside header name", []string{"Set-Coo", "kie: sid=1\n"}, "Set-Cookie: [REDACTED]\n"},
 	}
@@ -107,6 +109,19 @@ func TestRedactingWriterHoldsPartialLine(t *testing.T) {
 	writeAll(t, w, "def more\n")
 	if got, want := out.String(), "first\nsecond ghp_[REDACTED] more\n"; got != want {
 		t.Fatalf("after continuation: got %q, want %q", got, want)
+	}
+}
+
+func TestRedactingWriterFlushInsideMixedCaseSchemeToken(t *testing.T) {
+	var out bytes.Buffer
+	w := newRedactingWriter(&out, testRedactor())
+	writeAll(t, w, "x bEaReR tok")
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	writeAll(t, w, "en more\n")
+	if got, want := out.String(), "x bEaReR [REDACTED] more\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -200,6 +215,7 @@ func TestRedactingWriterOverflowTokenStraddlingCut(t *testing.T) {
 		want   string
 	}{
 		{"prefixed token", false, "ghp_", "SECRET", " end\n", "#ghp_[REDACTED] end\n"},
+		{"mixed-case scheme", false, "bEaReR ", "SECRET", " end\n", "#bEaReR [REDACTED] end\n"},
 		{"text header", false, "Authorization: ", "SECRET", "\n", "#Authorization: [REDACTED]\n"},
 		{"json header value", true, `"msg":"Cookie: `, `SECRET\"Q`, `","n":1}` + "\n",
 			`",` + `"msg":"Cookie: [REDACTED]","n":1}` + "\n"},
