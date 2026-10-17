@@ -28,7 +28,7 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   that installs the logger with `logging.Setup` on `inv.Env.Stderr` as the process-wide
   `slog.Default` (overlapping executions share the last one installed) and stores it in the
   context for `LoggerFrom(ctx)`, with its redacting writer for `LogWriterFrom(ctx)` (raw or
-  subprocess output; `ExecuteArgs` flushes it when the execution ends). Redaction is always on:
+  subprocess output; the App flushes it on the run's own goroutine when the run ends). Redaction is always on:
   the baseline (headers Authorization, Proxy-Authorization, Cookie, Set-Cookie; `Bearer `/`Basic `
   values) applies to `WithLogging()` alone, `WithRedaction(logging.Redaction{Prefixes, Headers})`
   adds a tool's and cannot remove from it, and needs `WithLogging` (else `invalid command tree`).
@@ -127,8 +127,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `*RedactingWriter` beneath it. One redactor, from `Options.Redaction` (`Redaction{Prefixes,
   Headers}`, added to the baseline), serves a handler wrapper (message and attributes, any group
   depth) and `RedactingWriter` (line-buffered, 64 KiB cap with a 256-byte trailing window, a final
-  line without newline held until `Flush`/`Close`; JSON mode ends a header value at the closing
-  unescaped quote). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
+  line without newline held until `Flush`/`Close`; each line is read by its shape, not the log format: a line that is valid JSON
+  (first non-space byte `{` or `[`) ends a header value at the closing unescaped quote, any other
+  line runs it to end of line and also matches `"Name": value`). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
   A leaf package that never imports `cli`; `cli.WithLogging` drives it from the flags.
 - `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over
   `final` and syncs the directory, removing the temp on failure; `WriteFile(path, data, mode)`.

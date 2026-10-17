@@ -37,16 +37,22 @@ public package `go.vipengele.org/cli/core/logging`.
   cannot remove from the baseline. `WithRedaction` without `WithLogging` is an invalid command tree.
 - **Matching.** A prefix followed by a run of `[A-Za-z0-9_+/=.~-]` becomes the prefix followed by
   `[REDACTED]`; a bare prefix is left alone. A header matches by attribute key, in any letter case
-  and at any group depth, or as `Name: value` in text. In JSON mode the value ends at the closing
-  unescaped quote, so a line stays valid JSON.
+  and at any group depth, or as `Name: value` in text. Each line is read by its own shape, whatever the
+  log format: a whole line that is valid JSON (it starts with `{` or `[`) is read as JSON, where a
+  header value ends at the closing unescaped quote so the line stays valid JSON; any other line is
+  read as text, where the value runs to end of line and the quoted form `"Name": value` also
+  matches. A line written in pieces takes its shape from its first non-space byte.
+- **Shape, not format, selects the pattern.** The writer also carries raw and subprocess output,
+  which is not in the format the logger was given.
 - **Writer scope.** Only the log writer is redacted, plus that same writer exposed by
   `cli.LogWriterFrom(ctx)` for raw or subprocess output. `Env.Stderr`, error rendering, `inv.Info`
   and the other message helpers, and the cobra error stream are untouched: wrapping `Env.Stderr`
   would hide the `*os.File` the editor launcher needs (ADR-0017) and change the golden-pinned error
   output and ADR-0013's streams.
 - **Buffering.** The writer is line-buffered with a 64 KiB cap and a 256-byte trailing window kept
-  on overflow. A final line without a newline is held until `Flush` or `Close`, or until `Execute`
-  returns, when the App flushes it.
+  on overflow. A final line without a newline is held until `Flush` or `Close`, or until the run ends, when the
+  App flushes it on the run's own goroutine. A run abandoned on a second interrupt flushes when
+  that run ends, never earlier, so the flush cannot race a write.
 - **One default per process.** The default is process-wide, so executions that overlap in one
   process, of one App or of two, share the logger installed last, and a record written through the
   default may go to the stderr of another execution. Code that needs the logger of its own
