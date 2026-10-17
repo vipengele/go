@@ -21,8 +21,8 @@ golangci-lint run
   `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
   env lookup and user home dir seams; only the state kind is resolved, so the home directory is
   needed only when the state directory itself falls back to it.
-- `source.go` — `Source`, `Release` and `Asset`. The library ships no `Source` implementation; a nil
-  `Source` is the one thing a zero `Config` cannot default (`ErrNoSource`).
+- `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
+  `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
 
 ## Conventions
 

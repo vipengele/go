@@ -1,7 +1,6 @@
 package update
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,7 +9,6 @@ import (
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/paths"
-	"go.vipengele.org/commons/validate"
 )
 
 // optOutSuffix is the suffix of the environment variable that turns update checks off. The
@@ -29,14 +27,9 @@ const defaultChecksumsAsset = "checksums.txt"
 // tempPrefixSuffix follows the binary name in the default [Config.TempPrefix].
 const tempPrefixSuffix = "-update-"
 
-// ErrNoSource is reported by [Config.Validate] for a Config whose Source is nil: the one field a
-// zero Config cannot default.
-var ErrNoSource = errors.New("update: no release source: Config.Source is nil")
-
 // Config is everything the update library needs to know about a tool, and every seam through
 // which it reaches the outside world. Any field left at its zero value takes its production
-// default, documented on the field, except Source: a nil Source cannot default, so
-// [Config.Validate] reports it. The embedded [spec.Identity] is required in full.
+// default, documented on the field. The embedded [spec.Identity] is required in full.
 //
 // Config holds func fields, so it is not comparable.
 type Config struct {
@@ -86,14 +79,9 @@ type Config struct {
 
 // Validate returns nil when the Config can be used. Otherwise it returns one error listing every
 // problem at once: each [validate.FieldError] of [spec.Identity.Validate], which wraps
-// [validate.ErrEmpty] or [validate.ErrInvalid], and [ErrNoSource] when Source is nil, the one
-// field a zero Config cannot default. Every other field is optional.
+// [validate.ErrEmpty] or [validate.ErrInvalid]. Every other field is optional.
 func (c Config) Validate() error {
-	var noSource error
-	if c.Source == nil {
-		noSource = ErrNoSource
-	}
-	return validate.Join(c.Identity.Validate(), noSource)
+	return c.Identity.Validate()
 }
 
 // resolve validates c and returns a copy with every zero field set to its production default.
@@ -121,6 +109,9 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.HTTPClient == nil {
 		r.HTTPClient = &http.Client{}
+	}
+	if r.Source == nil {
+		r.Source = NewGitHubSource(r.Identity, r.HTTPClient)
 	}
 	if r.Now == nil {
 		r.Now = time.Now
