@@ -23,7 +23,8 @@ import (
 // The App owns the "version" command, which prints its build information as the version
 // package describes: every root it runs holds it after the added commands, so every tool
 // answers "version --json". A tool does not add a command named "version"; one it adds makes
-// the tree invalid.
+// the tree invalid. Under [WithConfig] it owns the "config" group as well, as that option
+// describes.
 //
 // Every execution assembles its own root command, named by the identity's Name and holding the
 // added commands as its subcommands, and leaves the added commands as they are, so a built App
@@ -56,6 +57,9 @@ type settings struct {
 	// errorRenderers are the renderers [WithErrorRenderer] adds, in the order they were added.
 	// Nothing changes them after [New], so concurrent executions share them.
 	errorRenderers []errrender.Renderer
+	// config binds the configuration [WithConfig] gives to each execution, and is nil without
+	// that option.
+	config configurer
 }
 
 // Option configures an [App] when [New] builds it.
@@ -153,7 +157,8 @@ func (a *App) Execute() int {
 // ExecuteArgs runs the App with args against env, and returns the exit code, as the
 // package-level [ExecuteArgs] runs the App's root command: a root named by the identity's Name,
 // with no run function of its own and the added commands, in the order they were added, as its
-// subcommands followed by the "version" command, and the standard flags the App's options opt
+// subcommands followed by the "config" group under [WithConfig] and the "version" command, and
+// the standard flags the App's options opt
 // into as its inherited flags. Given no argument, the root writes its help to env.Stdout and
 // returns [ExitOK].
 // The root is checked on every call, so an App with two commands of one name, "version"
@@ -189,29 +194,42 @@ func (a *App) Execute() int {
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	flags := newStandardFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
-	pre, post := a.settings.hookFuncs()
+	conf := a.configFor(env.Resolved().LookupEnv)
+	pre, post := a.settings.hookFuncs(conf.hook)
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
-	return executeArgsCtx(context.Background(), env, a.root(flags), args, cfg, a.settings.exitMatchers,
-		a.settings.errorRenderers...)
+	return executeArgsCtx(context.Background(), env, a.root(flags, conf.group), args, cfg,
+		a.settings.exitMatchers, a.settings.errorRenderers...)
 }
 
 // root returns a fresh root command for one execution, declaring flags as its inherited flags.
-// Its Commands is a copy of the added commands followed by a "version" command of its own, so
-// no execution shares a slice the App appends to or a flag handle another execution reads.
-func (a *App) root(flags standardFlags) *spec.Command {
+// Its Commands is a copy of the added commands followed by configGroup, when it is not nil, and
+// a "version" command of its own, so no execution shares a slice the App appends to or a flag
+// handle another execution reads.
+func (a *App) root(flags standardFlags, configGroup *spec.Command) *spec.Command {
+	commands := append([]*spec.Command(nil), a.commands...)
+	if configGroup != nil {
+		commands = append(commands, configGroup)
+	}
 	return &spec.Command{
 		Name:     a.identity.Name,
 		Flags:    flags.list(),
-		Commands: append(append([]*spec.Command(nil), a.commands...), a.version(flags)),
+		Commands: append(commands, a.version(flags)),
 	}
 }
 
-// version returns the "version" command for one execution. It declares a local --json unless
-// flags holds the standard --json, which it then reads through the invocation's Output.
+// version returns the "version" command for one execution, annotated [spec.SkipConfig] beside
+// the annotations of [version.New], so it runs whatever the configuration file holds. It declares
+// a local --json unless flags holds the standard --json, which it then reads through the
+// invocation's Output.
 func (a *App) version(flags standardFlags) *spec.Command {
 	var opts []version.Option
 	if flags.json != nil {
 		opts = append(opts, version.WithOutputJSON())
 	}
-	return version.New(*a.settings.buildInfo, opts...)
+	cmd := version.New(*a.settings.buildInfo, opts...)
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[spec.SkipConfig] = ""
+	return cmd
 }

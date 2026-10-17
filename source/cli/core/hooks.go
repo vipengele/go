@@ -58,11 +58,16 @@ func WithPostRun(h PostRunHook) Option {
 	}
 }
 
-// hookFuncs returns the hooks s holds as the adapter takes them.
-func (s settings) hookFuncs() (
+// hookFuncs returns first, when it is not nil, followed by the hooks s holds, as the adapter
+// takes them. first runs ahead of every [WithPreRun] hook whatever the order of the options, as
+// the configuration hook of [WithConfig] does.
+func (s settings) hookFuncs(first PreRunHook) (
 	pre []func(context.Context, *spec.Invocation, spec.CommandInfo) (context.Context, error),
 	post []func(context.Context, *spec.Invocation, spec.CommandInfo, error) error,
 ) {
+	if first != nil {
+		pre = append(pre, first)
+	}
 	for _, h := range s.preRun {
 		pre = append(pre, h)
 	}
