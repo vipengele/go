@@ -1,0 +1,5 @@
+path
+schema
+values[].key
+values[].origin
+values[].value
