@@ -75,14 +75,14 @@ func (f loggingFlags) hook(verbose, quiet *spec.FlagOf[bool]) PreRunHook {
 		// Setup fails only on a format other than text or json, which is a problem of the command
 		// line like every one options reports, so both are one usage error.
 		opts, err := f.options(inv, verbose, quiet)
-		var logger *slog.Logger
+		var result logging.Result
 		if err == nil {
-			logger, err = logging.Setup(opts)
+			result, err = logging.Setup(opts)
 		}
 		if err != nil {
 			return ctx, &cobra.UsageError{Path: commandPath(cmd), Err: err}
 		}
-		return context.WithValue(ctx, loggerKey{}, logger), nil
+		return context.WithValue(ctx, loggerKey{}, result.Logger), nil
 	}
 }
 

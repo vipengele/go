@@ -2,6 +2,8 @@ package logging_test
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -75,10 +77,11 @@ func TestSetupWritesAtLevel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			restoreDefault(t)
 			var buf bytes.Buffer
-			logger, err := logging.Setup(logging.Options{Level: tt.level, Format: tt.format, Writer: &buf})
+			res, err := logging.Setup(logging.Options{Level: tt.level, Format: tt.format, Writer: &buf})
 			if err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
+			logger := res.Logger
 			logger.Debug("hidden")
 			logger.Info("shown", "k", "v")
 			logger.Error("failed")
@@ -100,11 +103,11 @@ func TestSetupWritesAtLevel(t *testing.T) {
 func TestSetupInstallsDefault(t *testing.T) {
 	restoreDefault(t)
 	var buf bytes.Buffer
-	logger, err := logging.Setup(logging.Options{Writer: &buf})
+	res, err := logging.Setup(logging.Options{Writer: &buf})
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if slog.Default() != logger {
+	if slog.Default() != res.Logger {
 		t.Error("slog.Default() is not the returned logger")
 	}
 	slog.Info("via default")
@@ -116,12 +119,12 @@ func TestSetupInstallsDefault(t *testing.T) {
 func TestSetupRejectsUnsupportedFormat(t *testing.T) {
 	restoreDefault(t)
 	before := slog.Default()
-	logger, err := logging.Setup(logging.Options{Format: spec.Format(99), Writer: io.Discard})
+	res, err := logging.Setup(logging.Options{Format: spec.Format(99), Writer: io.Discard})
 	if err == nil {
 		t.Fatal("Setup accepted an unsupported format")
 	}
-	if logger != nil {
-		t.Errorf("logger = %v, want nil", logger)
+	if res.Logger != nil || res.Writer != nil {
+		t.Errorf("result = %+v, want the zero Result", res)
 	}
 	if slog.Default() != before {
 		t.Error("default logger changed on error")
@@ -138,12 +141,12 @@ func TestSetupNilWriterUsesStderr(t *testing.T) {
 	os.Stderr = w
 	t.Cleanup(func() { os.Stderr = orig })
 
-	logger, err := logging.Setup(logging.Options{})
+	res, err := logging.Setup(logging.Options{})
 	if err != nil {
 		os.Stderr = orig
 		t.Fatalf("Setup: %v", err)
 	}
-	logger.Info("to stderr")
+	res.Logger.Info("to stderr")
 	os.Stderr = orig
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
@@ -154,5 +157,151 @@ func TestSetupNilWriterUsesStderr(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "to stderr") {
 		t.Errorf("stderr received %q", out)
+	}
+}
+
+// baselineSecrets are secrets of the baseline every [logging.Redaction] redacts, each with the
+// header name or prefix that stays in the output.
+var baselineSecrets = []struct { //nolint:gochecknoglobals // read-only test table
+	key, value, kept string
+}{
+	{"Authorization", "s3cret-authorization", ""},
+	{"Proxy-Authorization", "s3cret-proxy", ""},
+	{"Cookie", "s3cret-cookie", ""},
+	{"Set-Cookie", "s3cret-set-cookie", ""},
+	{"token", "Bearer s3cret-bearer", "Bearer "},
+	{"basic", "Basic s3cret-basic", "Basic "},
+}
+
+func formats() []spec.Format { return []spec.Format{spec.FormatText, spec.FormatJSON} }
+
+// checkRedacted fails t when out holds a secret value or, in JSON, a line that is not valid
+// JSON.
+func checkRedacted(t *testing.T, format spec.Format, out string, secrets ...string) {
+	t.Helper()
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("output %q holds no [REDACTED]", out)
+	}
+	for _, s := range secrets {
+		if strings.Contains(out, s) {
+			t.Errorf("output %q leaks %q", out, s)
+		}
+	}
+	if format != spec.FormatJSON {
+		return
+	}
+	for line := range strings.Lines(out) {
+		if !json.Valid([]byte(line)) {
+			t.Errorf("line %q is not valid JSON", line)
+		}
+	}
+}
+
+// secretPart returns the part of value a redactor removes: all of it for a header, the token
+// after kept for a prefix.
+func secretPart(value, kept string) string { return strings.TrimPrefix(value, kept) }
+
+func TestSetupRedactsBaselineThroughHandler(t *testing.T) {
+	for _, format := range formats() {
+		for _, sec := range baselineSecrets {
+			t.Run(format.String()+"/"+sec.key, func(t *testing.T) {
+				restoreDefault(t)
+				var buf bytes.Buffer
+				res, err := logging.Setup(logging.Options{Format: format, Writer: &buf})
+				if err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
+				res.Logger.Info("request", sec.key, sec.value)
+				res.Logger.Info("sent " + sec.key + ": " + sec.value)
+				res.Logger.With(sec.key, sec.value).WithGroup("g").Info("grouped", sec.key, sec.value)
+				out := buf.String()
+				checkRedacted(t, format, out, secretPart(sec.value, sec.kept))
+				if !strings.Contains(out, sec.key) {
+					t.Errorf("output %q lost the key %q", out, sec.key)
+				}
+			})
+		}
+	}
+}
+
+func TestSetupRedactsBaselineThroughWriter(t *testing.T) {
+	for _, format := range formats() {
+		for _, sec := range baselineSecrets {
+			t.Run(format.String()+"/"+sec.key, func(t *testing.T) {
+				restoreDefault(t)
+				var buf bytes.Buffer
+				res, err := logging.Setup(logging.Options{Format: format, Writer: &buf})
+				if err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
+				var lines []string
+				if format == spec.FormatJSON {
+					lines = []string{
+						`{"msg":"raw","` + sec.key + `":"` + sec.value + `"}` + "\n",
+						`{"msg":"` + sec.key + `: ` + sec.value + `"}`,
+					}
+				} else {
+					lines = []string{
+						"raw " + sec.key + ": " + sec.value + "\n",
+						"tail " + sec.key + ": " + sec.value,
+					}
+				}
+				for _, l := range lines {
+					if _, err := io.WriteString(res.Writer, l); err != nil {
+						t.Fatalf("Write: %v", err)
+					}
+				}
+				if err := res.Writer.Flush(); err != nil {
+					t.Fatalf("Flush: %v", err)
+				}
+				checkRedacted(t, format, buf.String(), secretPart(sec.value, sec.kept))
+			})
+		}
+	}
+}
+
+func TestSetupRedactsToolAdditions(t *testing.T) {
+	red := logging.Redaction{Prefixes: []string{"ghp_"}, Headers: []string{"X-Api-Key"}}
+	for _, format := range formats() {
+		t.Run(format.String(), func(t *testing.T) {
+			restoreDefault(t)
+			var buf bytes.Buffer
+			res, err := logging.Setup(logging.Options{Format: format, Writer: &buf, Redaction: red})
+			if err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			res.Logger.Info("pushed with ghp_handlerToken1", "x-api-key", "handler-key", "auth", "Bearer handler-bearer")
+			line := "raw ghp_writerToken2 X-Api-Key: writer-key\n"
+			if format == spec.FormatJSON {
+				line = `{"msg":"raw ghp_writerToken2","X-Api-Key":"writer-key"}` + "\n"
+			}
+			if _, err := io.WriteString(res.Writer, line); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			out := buf.String()
+			checkRedacted(t, format, out,
+				"handlerToken1", "handler-key", "handler-bearer", "writerToken2", "writer-key")
+			if !strings.Contains(out, "ghp_[REDACTED]") {
+				t.Errorf("output %q does not keep the prefix before [REDACTED]", out)
+			}
+		})
+	}
+}
+
+// failingWriter fails every write.
+type failingWriter struct{}
+
+var errWrite = errors.New("write failed") //nolint:gochecknoglobals // sentinel
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errWrite }
+
+func TestSetupWriterReportsDestinationError(t *testing.T) {
+	restoreDefault(t)
+	res, err := logging.Setup(logging.Options{Writer: failingWriter{}})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := io.WriteString(res.Writer, "line\n"); !errors.Is(err, errWrite) {
+		t.Errorf("Write error = %v, want %v", err, errWrite)
 	}
 }
