@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/core/command/version"
@@ -28,7 +29,8 @@ import (
 //
 // Every execution assembles its own root command, named by the identity's Name and holding the
 // added commands as its subcommands, and leaves the added commands as they are, so a built App
-// may run any number of times, concurrently. Adding a command while the App runs is not safe.
+// may run any number of times, concurrently, with the process-wide logger of [WithLogging] shared
+// as that option describes. Adding a command while the App runs is not safe.
 type App struct {
 	identity spec.Identity
 	settings settings
@@ -44,6 +46,8 @@ type settings struct {
 	noColor bool
 	json    bool
 	output  bool
+	// logging opts the App into the flags of [WithLogging], which needs verbose and quiet.
+	logging bool
 	// preRun and postRun are the hooks [WithPreRun] and [WithPostRun] add, in the order they
 	// were added. Nothing changes them after [New], so concurrent executions share them.
 	preRun  []PreRunHook
@@ -165,7 +169,8 @@ func (a *App) Execute() int {
 // The root is checked on every call, so an App with two commands of one name, "version"
 // included, returns [ExitError] after writing "<name>: invalid command tree" to env.Stderr,
 // followed by one row per problem found. So does a command that declares a flag with the name or
-// the shorthand of a standard flag the App takes.
+// the shorthand of a standard flag the App takes, and an App given [WithLogging] without both
+// [WithVerbose] and [WithQuiet].
 //
 // Every error is written to env.Stderr as [ExecuteArgs] writes one, with each error of its tree
 // offered to the renderers [WithErrorRenderer] adds, in the order they were added.
@@ -193,27 +198,34 @@ func (a *App) Execute() int {
 // [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept, and for
 // an error that carries a [spec.UsageError]; [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
+	if err := loggingProblem(a.settings); err != nil {
+		errrender.Render(env.Resolved().Stderr, a.identity.Name,
+			fmt.Errorf("invalid command tree: %w", err), a.settings.errorRenderers)
+		return ExitError
+	}
 	flags := newStandardFlags(a.settings)
+	logFlags := newLoggingFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	conf := a.configFor(env.Resolved().LookupEnv)
-	pre, post := a.settings.hookFuncs(conf.hook)
+	pre, post := a.settings.hookFuncs(chainHooks(conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
-	return executeArgsCtx(context.Background(), env, a.root(flags, conf.group), args, cfg,
+	return executeArgsCtx(context.Background(), env, a.root(flags, logFlags, conf.group), args, cfg,
 		a.settings.exitMatchers, a.settings.errorRenderers...)
 }
 
-// root returns a fresh root command for one execution, declaring flags as its inherited flags.
+// root returns a fresh root command for one execution, declaring flags followed by logFlags as
+// its inherited flags.
 // Its Commands is a copy of the added commands followed by configGroup, when it is not nil, and
 // a "version" command of its own, so no execution shares a slice the App appends to or a flag
 // handle another execution reads.
-func (a *App) root(flags standardFlags, configGroup *spec.Command) *spec.Command {
+func (a *App) root(flags standardFlags, logFlags loggingFlags, configGroup *spec.Command) *spec.Command {
 	commands := append([]*spec.Command(nil), a.commands...)
 	if configGroup != nil {
 		commands = append(commands, configGroup)
 	}
 	return &spec.Command{
 		Name:     a.identity.Name,
-		Flags:    flags.list(),
+		Flags:    append(flags.list(), logFlags.list()...),
 		Commands: append(commands, a.version(flags)),
 	}
 }

@@ -184,6 +184,13 @@ as opposed to what it produces. It goes to the standard error, styled by the **O
 quiet silences it except for errors (ADR-0013).
 _Avoid_: log, print
 
+**Log level**:
+The minimum severity a log record needs to be written by the process-wide logger: debug, info, warn
+or error. An **App** has a logger only when it opts in, and the level is the one setting of it that
+a user chooses. It is not the **Output mode**, which governs what a **Command** presents of its
+**Message**s and **Data**, and a **Message** is not a log record (ADR-0018).
+_Avoid_: verbosity, output mode (the **Output mode** is how a **Command** presents its output)
+
 **Data**:
 What a **Command** exists to produce: the text or JSON a user or a script reads from the standard
 output. It is written as given, unstyled, and no **Output mode** suppresses it (ADR-0013).

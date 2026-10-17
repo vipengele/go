@@ -21,6 +21,14 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   cannot be resolved makes the hook and every group run function return that error. `version`
   carries `SkipConfig` (set in `App.version`); annotations are per command, never inherited. No
   `--config` flag, no per-key flags, no seeded file;
+  `WithLogging()` (`logging.go`, ADR-0018) is opt-in and needs `WithVerbose` and `WithQuiet` (else
+  every execution is an `invalid command tree`, exit 1): it declares inherited `--log-level`
+  (no default, so unset is told from set by `IsSet`) and `--log-format` (`text`|`json`, default
+  `text`), and adds a pre-run hook, after the config hook and ahead of every `WithPreRun` hook,
+  that installs the logger with `logging.Setup` on `inv.Env.Stderr` as the process-wide
+  `slog.Default` (overlapping executions share the last one installed) and stores it in the
+  context for `LoggerFrom(ctx)`. Level: info, debug under `-v`, error under `-q`, or `--log-level`;
+  `--log-level` beside `-v`/`-q` or an unknown level or format is a usage error (exit 2);
   `WithBuildInfo` fixes what `version` prints (tests),
   otherwise `buildinfo.Read()`. A run function reads the standard flags and colour (per stream,
   `Output.Color(stream)`) from `inv.Output` (`spec.Output`, resolved in `output.go`), never from a
@@ -108,6 +116,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `SkipConfig`; `show` does not. JSON follows `inv.Output.Format()` (no flag of its own), so `show
   --json` needs `WithJSON` or `WithOutput`. Errors are plain (exit 1), including the non-terminal
   refusal of `edit`: the usage-error type is in `internal/cobra`.
+- `logging` — `Setup(Options)` builds the `slog` logger (text or JSON handler, level, writer) and
+  installs it as `slog.Default`; `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
+  A leaf package that never imports `cli`; `cli.WithLogging` drives it from the flags.
 - `edit` replaces the file with `Replace` from `go.vipengele.org/cli/state`, which chmods, syncs and
   renames the validated copy and syncs the directory.
 
