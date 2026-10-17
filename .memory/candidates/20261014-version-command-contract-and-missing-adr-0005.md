@@ -17,4 +17,4 @@ ADR-0005 (`docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-
 supersedes ADR-0003's rule on where cobra is allowed: commands are `cli/spec` data and cobra is
 imported only by `source/cli/core/internal/cobra`, enforced by the `cobra-stays-in-internal-cobra`
 depguard rule in `source/cli/core/.golangci.yml` and a `github.com/spf13/cobra` deny in
-`source/cli/spec/.golangci.yml`. `versioncmd.New` returns a `*spec.Command`.
+`source/cli/spec/.golangci.yml`. `version.New` returns a `*spec.Command`.

@@ -10,7 +10,7 @@ saw:
   - source/cli/core/output.go
   - source/cli/core/app.go
   - source/cli/core/internal/cobra/cobra.go
-  - source/cli/core/versioncmd/versioncmd.go
+  - source/cli/core/command/version/version.go
   - docs/adr/0014-json-output-envelope.md
 ---
 
@@ -30,7 +30,7 @@ Facts that break silently or panic if changed:
   not pass them makes every flag read as unset.
 - JSON data is written by `spec.WriteJSON(inv.Env.Stdout, schema, v)` (ADR-0013: data on stdout): indented, `schema`
   first, error for a non-object, `schema < 1`, or a value that already has `schema`. `buildinfo.Info.MarshalJSON`
-  emits no `schema`; `versioncmd` supplies 1.
+  emits no `schema`; `command/version` supplies 1.
 - `speccheck.AssertJSONKeys` rewrites its golden file from the env var `SPECCHECK_UPDATE=1`, not a flag:
   `gochecknoglobals` is on in `cli/spec`, and `cli/core` already registers `-update` in its `TestMain`
   (`source/cli/core/execute_test.go`), so a second `-update` in one test binary panics.
