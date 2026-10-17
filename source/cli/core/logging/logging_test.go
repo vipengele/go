@@ -535,6 +535,63 @@ func TestSetupTextRedactsNestedByteSlices(t *testing.T) {
 	}
 }
 
+// keyBytes is a named byte-array type, which the JSON handler writes as decimal byte values as it
+// does a [10]byte.
+type keyBytes [10]byte
+
+// arrayHolder holds a byte array, which the JSON handler writes as decimal byte values.
+type arrayHolder struct{ A [10]byte }
+
+// TestSetupJSONRedactsNestedByteArrays pins that under the JSON format a secret in the bytes of a
+// byte array inside a slog.Any value, which the JSON handler writes as decimal byte values, is
+// written redacted as a JSON string, neither in clear nor as its decimal form, while clean bytes
+// beside it keep their decimal form and the record stays one JSON object. An unexported field is
+// not written at all, and a map with an array key is not written as JSON.
+func TestSetupJSONRedactsNestedByteArrays(t *testing.T) {
+	secret := [10]byte([]byte("Bearer tok"))
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"array", secret, `"v":"Bearer [REDACTED]"`},
+		{"struct field", arrayHolder{A: secret}, `"v":{"A":"Bearer [REDACTED]"}`},
+		{"map value", map[string][10]byte{"a": secret, "b": {'o', 'k'}},
+			`"v":{"a":"Bearer [REDACTED]","b":[111,107,0,0,0,0,0,0,0,0]}`},
+		{"slice of structs", []arrayHolder{{A: [10]byte{'x'}}, {A: secret}},
+			`"v":[{"A":[120,0,0,0,0,0,0,0,0,0]},{"A":"Bearer [REDACTED]"}]`},
+		{"pointer", &arrayHolder{A: secret}, `"v":{"A":"Bearer [REDACTED]"}`},
+		{"pointer below the top", struct{ P *[10]byte }{P: &secret}, `"v":{"P":"Bearer [REDACTED]"}`},
+		{"named type", struct{ K keyBytes }{K: keyBytes(secret)}, `"v":{"K":"Bearer [REDACTED]"}`},
+		{"interface field", struct{ X any }{X: secret}, `"v":{"X":"Bearer [REDACTED]"}`},
+		{"unexported field", struct{ a [10]byte }{a: secret}, `"v":{}`},
+		{"map key", map[[10]byte]int{secret: 1}, `"v":"!ERROR:json: unsupported value`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreDefault(t)
+			var buf bytes.Buffer
+			res, err := logging.Setup(logging.Options{Format: spec.FormatJSON, Writer: &buf})
+			if err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			res.Logger.Info("m", slog.Any("v", tt.value))
+			out := buf.String()
+			for _, s := range []string{"tok", strings.ReplaceAll(strings.Trim(fmt.Sprintf("%d", secret), "[]"), " ", ",")} {
+				if strings.Contains(out, s) {
+					t.Errorf("output %q leaks %q", out, s)
+				}
+			}
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output %q lacks %q", out, tt.want)
+			}
+			if !json.Valid(buf.Bytes()) {
+				t.Errorf("output %q is not valid JSON", out)
+			}
+		})
+	}
+}
+
 // TestSetupTextRedactsNestedHeaderBytes pins that a header in the bytes of a nested byte slice
 // has its value redacted under the text format, through both layers.
 func TestSetupTextRedactsNestedHeaderBytes(t *testing.T) {

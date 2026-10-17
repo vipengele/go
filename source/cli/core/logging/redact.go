@@ -383,6 +383,10 @@ func (r *redactor) attrs(as []slog.Attr, format spec.Format) []slog.Attr {
 // replaced by those bytes as a JSON string, redacted, by [redactor.decodeBytes]: a [json.Encoder]
 // writes a byte slice in base64, at any depth, unless its type is a [json.Marshaler] or a
 // [encoding.TextMarshaler], and whatever the value's own marshaling writes is read the same way.
+// A byte array the encoder writes as a JSON array of its decimal byte values, at any depth, is
+// checked as its bytes, and when they hold a secret that array is replaced by those bytes as a
+// JSON string, redacted, by [redactor.jsonBytes]; a value with no such secret is written exactly
+// as the encoder writes it.
 // For [spec.FormatText] the form is the text of a [encoding.TextAppender] or
 // [encoding.TextMarshaler], and the %+v form otherwise, which is the Error or String of an error
 // or a [fmt.Stringer]; it is handed on as a string, which the text handler writes as it would
@@ -417,6 +421,9 @@ func (r *redactor) jsonAny(v slog.Value) slog.Value {
 	s, err := render(func() (string, error) { return encodeJSON(a) })
 	if err != nil {
 		return r.failed(v, err)
+	}
+	for _, sub := range r.jsonBytes(a) {
+		s = replaceOutsideStrings(s, sub.form, sub.clean)
 	}
 	clean := r.lineAs(r.decodeBytes(s), shapeJSON)
 	if clean != s && !json.Valid([]byte(clean)) {
@@ -482,8 +489,9 @@ func (r *redactor) textAny(v slog.Value) slog.Value {
 	return slog.StringValue(r.text(s))
 }
 
-// bytesSub replaces, in the %+v form of a value, the decimal form of a byte slice or byte array
-// whose bytes hold a secret, such as "[67 111 111]", by clean, those bytes redacted and quoted.
+// bytesSub replaces, in the %+v or JSON form of a value, the decimal form of a byte slice or byte
+// array whose bytes hold a secret, such as "[67 111 111]" or "[67,111,111]", by clean, those bytes
+// redacted and quoted.
 type bytesSub struct{ form, clean string }
 
 // secretBytes returns a [bytesSub] for each byte slice and byte array inside a, the value %+v
@@ -510,15 +518,7 @@ func (r *redactor) walkBytes(v reflect.Value, subs *[]bytesSub) {
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
-			// Each element is copied by SetUint, which stores the value of a uint8 element whole.
-			// Bytes and Copy do not read every such slice or array: Bytes refuses an array that is
-			// not addressable, and Copy one read through an unexported field.
-			b := make([]byte, v.Len())
-			dst := reflect.ValueOf(b)
-			for i := range b {
-				dst.Index(i).SetUint(v.Index(i).Uint())
-			}
-			if clean := r.text(string(b)); clean != string(b) {
+			if b, clean, ok := r.heldSecret(v); ok {
 				*subs = append(*subs, bytesSub{form: fmt.Sprintf("%d", b), clean: strconv.Quote(clean)})
 			}
 			return
@@ -539,6 +539,171 @@ func (r *redactor) walkBytes(v reflect.Value, subs *[]bytesSub) {
 		r.walkBytes(v.Elem(), subs)
 	default:
 	}
+}
+
+// heldSecret returns the bytes of v, a byte slice or byte array, and those bytes redacted by
+// [redactor.text], and reports whether they hold a secret. Each element is copied by SetUint, which
+// stores the value of a uint8 element whole. Bytes and Copy do not read every such slice or array:
+// Bytes refuses an array that is not addressable, and Copy one read through an unexported field.
+func (r *redactor) heldSecret(v reflect.Value) (b []byte, clean string, ok bool) {
+	b = make([]byte, v.Len())
+	dst := reflect.ValueOf(b)
+	for i := range b {
+		dst.Index(i).SetUint(v.Index(i).Uint())
+	}
+	clean = r.text(string(b))
+	return b, clean, clean != string(b)
+}
+
+// jsonBytes returns a [bytesSub] for each byte array inside a whose bytes hold a secret and which
+// a [json.Encoder] writes as a JSON array of its decimal byte values, such as "[67,111,111]",
+// with clean those bytes, redacted, as a JSON string. No pattern matches the decimal form. The
+// walk reads what the encoder writes, by [jsonWalk.walk].
+func (r *redactor) jsonBytes(a any) []bytesSub {
+	w := jsonWalk{r: r}
+	w.walk(reflect.ValueOf(a))
+	return w.subs
+}
+
+// jsonWalk is the state of [redactor.jsonBytes]'s walk.
+type jsonWalk struct {
+	r    *redactor
+	subs []bytesSub
+	// visited holds every pointer, map and slice the walk has read, so it reads each once and
+	// ends on a value that holds itself.
+	visited map[jsonVisit]bool
+}
+
+// jsonVisit identifies a pointer, map or slice by its address, its type and, for a slice, its
+// length: a pointer to a struct and one to its first field share an address, as do two slices of
+// one array, and each holds what the other does not.
+type jsonVisit struct {
+	ptr uintptr
+	n   int
+	t   reflect.Type
+}
+
+// walk appends to w.subs a [bytesSub] for each byte array in v that a [json.Encoder] writes as its
+// decimal byte values, following the encoder's rules. A value whose type is a [json.Marshaler]
+// or a [encoding.TextMarshaler], or whose pointer type is one when v is addressable, is written by
+// its method and not read. A byte slice is written in base64, which [redactor.decodeBytes] reads,
+// or element by element by the methods of its element type. A byte array is written as its
+// decimal byte values unless its element type has those methods, the pointer's when the array is
+// addressable. A struct is read through the fields the encoder writes, by [jsonField]; a map
+// through its values, as a key the encoder accepts is a string, a number or the text of a
+// [encoding.TextMarshaler]; a pointer and an interface through what they hold.
+func (w *jsonWalk) walk(v reflect.Value) {
+	if !v.IsValid() || marshals(v.Type(), v.CanAddr()) || w.seen(v) {
+		return
+	}
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array:
+		t := v.Type()
+		if t.Elem().Kind() != reflect.Uint8 {
+			for i := range v.Len() {
+				w.walk(v.Index(i))
+			}
+		} else if t.Kind() == reflect.Array && !marshals(t.Elem(), v.CanAddr()) {
+			if b, clean, ok := w.r.heldSecret(v); ok {
+				quoted, _ := encodeJSON(clean)
+				w.subs = append(w.subs, bytesSub{form: strings.ReplaceAll(fmt.Sprintf("%d", b), " ", ","), clean: quoted})
+			}
+		}
+	case reflect.Map:
+		for it := v.MapRange(); it.Next(); {
+			w.walk(it.Value())
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			if jsonField(v.Type().Field(i)) {
+				w.walk(v.Field(i))
+			}
+		}
+	case reflect.Pointer, reflect.Interface:
+		w.walk(v.Elem())
+	default:
+	}
+}
+
+// seen reports whether v, a pointer, a map or a slice, was read before, and records it as read.
+// It reports false for a value of any other kind.
+func (w *jsonWalk) seen(v reflect.Value) bool {
+	key := jsonVisit{t: v.Type()}
+	switch v.Kind() {
+	case reflect.Slice:
+		key.n = v.Len()
+		key.ptr = v.Pointer()
+	case reflect.Pointer, reflect.Map:
+		key.ptr = v.Pointer()
+	default:
+		return false
+	}
+	if w.visited[key] {
+		return true
+	}
+	if w.visited == nil {
+		w.visited = map[jsonVisit]bool{}
+	}
+	w.visited[key] = true
+	return false
+}
+
+// marshals reports whether a [json.Encoder] writes a value of type t by its own MarshalJSON or
+// MarshalText: when t has the method, or when the value is addressable and t's pointer type has
+// it.
+func marshals(t reflect.Type, addressable bool) bool {
+	jm := reflect.TypeFor[json.Marshaler]()
+	tm := reflect.TypeFor[encoding.TextMarshaler]()
+	if t.Implements(jm) || t.Implements(tm) {
+		return true
+	}
+	p := reflect.PointerTo(t)
+	return addressable && (p.Implements(jm) || p.Implements(tm))
+}
+
+// jsonField reports whether a [json.Encoder] reads the struct field f: an exported field, and an
+// embedded struct or pointer to a struct whatever its name, whose exported fields the encoder
+// writes, unless the field's tag is `json:"-"`. Where the encoder drops a field whose name
+// another field at a shallower depth shares, the walk reads it still, and only finds bytes the
+// encoded text does not hold.
+func jsonField(f reflect.StructField) bool {
+	if f.Tag.Get("json") == "-" {
+		return false
+	}
+	t := f.Type
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return f.IsExported() || f.Anonymous && t.Kind() == reflect.Struct
+}
+
+// replaceOutsideStrings returns the JSON text s with every occurrence of old that starts outside
+// a string replaced by repl; an occurrence inside a string is text the value holds, not a value of
+// its own.
+func replaceOutsideStrings(s, old, repl string) string {
+	var b strings.Builder
+	last := 0
+	inString, escaped := false, false
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case !inString && strings.HasPrefix(s[i:], old):
+			b.WriteString(s[last:i])
+			b.WriteString(repl)
+			i += len(old)
+			last = i
+			continue
+		}
+		i++
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // failed returns v, whose rendering failed with err, replaced by the "!ERROR:" text a handler

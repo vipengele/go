@@ -392,15 +392,29 @@ func TestWithRedactionRedactsToolPrefixes(t *testing.T) {
 	}
 }
 
+// TestWithRedactionAccumulates pins that the prefixes of every WithRedaction are redacted, each
+// read from a copy taken when the option is given.
 func TestWithRedactionAccumulates(t *testing.T) {
 	restoreDefaultLogger(t)
 	prefixes := []string{"tkn_"}
-	app := secretApp("", cli.WithRedaction(logging.Redaction{Prefixes: prefixes}),
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging(),
+		cli.WithRedaction(logging.Redaction{Prefixes: prefixes}),
 		cli.WithRedaction(logging.Redaction{Prefixes: []string{"other_"}}))
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		slog.InfoContext(ctx, "token tkn_"+toolTokenRun+" auth Bearer basesecret99", "second", "other_secondtoken")
+		return nil
+	}})
 	prefixes[0] = "zzz_"
 	got := runApp(t, app, "run")
-	if strings.Contains(got.stderr, toolTokenRun) || strings.Contains(got.stderr, "basesecret99") {
-		t.Errorf("stderr holds a secret:\n%s", got.stderr)
+	for _, secret := range []string{toolTokenRun, "basesecret99", "secondtoken"} {
+		if strings.Contains(got.stderr, secret) {
+			t.Errorf("stderr holds %q:\n%s", secret, got.stderr)
+		}
+	}
+	for _, want := range []string{"tkn_[REDACTED]", "second=other_[REDACTED]"} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
+		}
 	}
 }
 

@@ -132,7 +132,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   a non-string value of a header key, at any depth, with `"[REDACTED]"`, any other
   line runs it to end of line and also matches `"Name": value`; a header name matches whole, so
   `X-Cookie` is not `Cookie`, and under JSON a base64 string in an encoded `slog.Any` value, a byte
-  slice at any depth, is checked as its bytes, as under text is a byte slice or array nested in a
+  slice at any depth, is checked as its bytes, as is a byte array the encoder writes as decimal
+  bytes (not one a `MarshalJSON`/`MarshalText` of its type or element type writes), which becomes
+  the redacted bytes as a JSON string, and under text is a byte slice or array nested in a
   `slog.Any` value, which `%+v` writes as decimal bytes and which becomes the redacted bytes quoted). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
   A leaf package that never imports `cli`; `cli.WithLogging` drives it from the flags.
 - `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over

@@ -572,6 +572,13 @@ func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
 			X any
 			s []struct{ B []byte }
 		}{M: map[string]namedBytes{"k": namedBytes("v")}, A: [4]byte{1, 2, 3, 4}, X: []byte("x"), s: []struct{ B []byte }{{B: []byte("b")}}}),
+		slog.Any("array", [3]byte{'a', 'b', 'c'}),
+		slog.Any("arrays", &struct {
+			K [10]byte
+			P *[3]byte
+			M map[string][2]byte
+			X any
+		}{K: [10]byte{'k'}, P: &[3]byte{1, 2, 3}, M: map[string][2]byte{"m": {4, 5}}, X: [1]byte{6}}),
 		slog.Any("raw", json.RawMessage(`{"k": [1, 2]}`)),
 		slog.Any("nil", nil),
 		slog.Any("text", textToken{id: 1}),
@@ -646,6 +653,189 @@ func TestRedactorDecodeBytes(t *testing.T) {
 			}
 			if !json.Valid([]byte(got)) {
 				t.Errorf("decodeBytes(%q) = %q, not valid JSON", tt.in, got)
+			}
+		})
+	}
+}
+
+// arrayCodes is a byte array whose elements are of a named byte type with no methods, which the
+// JSON encoder writes as decimal byte values.
+type arrayCodes [10]octet
+
+type octet byte
+
+// textOctet is a byte type with MarshalText, which the JSON encoder writes element by element.
+type textOctet byte
+
+func (textOctet) MarshalText() ([]byte, error) { return []byte("o"), nil }
+
+// ptrOctet is a byte type with MarshalText on its pointer, which the JSON encoder uses only for
+// an addressable element.
+type ptrOctet byte
+
+func (*ptrOctet) MarshalText() ([]byte, error) { return []byte("o"), nil }
+
+// ptrArray is a byte array with MarshalText on its pointer, which the JSON encoder uses only for
+// an addressable array.
+type ptrArray [10]byte
+
+func (*ptrArray) MarshalText() ([]byte, error) { return []byte("ptr-array"), nil }
+
+// valueArray is a byte array with MarshalJSON, which the JSON encoder writes by that method.
+type valueArray [10]byte
+
+func (valueArray) MarshalJSON() ([]byte, error) { return []byte(`"value-array"`), nil }
+
+// arrayField holds a byte array behind an exported field.
+type arrayField struct{ A [10]byte }
+
+// marshalsArrays holds a byte array the JSON encoder never reads, as MarshalJSON writes the value.
+type marshalsArrays struct{ A [10]byte }
+
+func (marshalsArrays) MarshalJSON() ([]byte, error) { return []byte(`"own"`), nil }
+
+// ptrMarshalsArrays is marshalsArrays with MarshalJSON on its pointer. A struct that embeds it has
+// the method on its own pointer, and the JSON encoder writes the embedded fields of a value that
+// is not addressable.
+type ptrMarshalsArrays struct{ A [10]byte }
+
+func (*ptrMarshalsArrays) MarshalJSON() ([]byte, error) { return []byte(`"own"`), nil }
+
+type embedsPtrMarshalsArrays struct{ ptrMarshalsArrays }
+
+// unexportedArray is a byte array type of an unexported name, which the JSON encoder skips when it
+// is embedded, as it is not a struct.
+type unexportedArray [10]byte
+
+// selfEmbed embeds a pointer to its own type, whose fields the JSON encoder drops as the shallower
+// field A shares their names, so a value that holds itself through it still encodes.
+type selfEmbed struct {
+	*selfEmbed
+	A [10]byte
+}
+
+// shadowed is embedded by shadows, whose field X hides shadowed's X from the JSON encoder.
+type shadowed struct{ X any }
+
+type shadows struct {
+	shadowed
+	X int
+	A [10]byte
+}
+
+// firstField and holdsFirst share an address: a pointer to a holdsFirst and one to its first field.
+type firstField struct{ A [10]byte }
+
+type holdsFirst struct {
+	F firstField
+	B [10]byte
+}
+
+// TestRedactorJSONBytes pins which byte arrays the walk of a value finds holding a secret: those
+// the JSON encoder writes as decimal byte values, through the fields, elements, map values,
+// pointers and interfaces it reads, and none it writes through a method, in base64 or not at all.
+// The encoded value holds the decimal form exactly when the walk finds it.
+func TestRedactorJSONBytes(t *testing.T) {
+	r := newRedactor(Redaction{})
+	secret := [10]byte([]byte("Bearer tok"))
+	codes := "[66,101,97,114,101,114,32,116,111,107]"
+	var octets arrayCodes
+	var ptrOctets [10]ptrOctet
+	var textOctets [10]textOctet
+	for i, c := range secret {
+		octets[i], ptrOctets[i], textOctets[i] = octet(c), ptrOctet(c), textOctet(c)
+	}
+	self := &selfEmbed{A: secret}
+	self.selfEmbed = self
+	selfMap := map[string]any{}
+	selfMap["m"] = selfMap
+	selfSlice := []any{nil}
+	selfSlice[0] = selfSlice
+	shared := make([][10]byte, 2)
+	shared[1] = secret
+	holder := &holdsFirst{B: secret}
+	tests := []struct {
+		name  string
+		value any
+		found int
+	}{
+		{"array", secret, 1},
+		{"clean array", [10]byte{1, 2}, 0},
+		{"named element type", octets, 1},
+		{"element with pointer method, not addressable", ptrOctets, 1},
+		{"element with pointer method, addressable", &ptrOctets, 0},
+		{"element with value method", textOctets, 0},
+		{"array with pointer method, not addressable", ptrArray(secret), 1},
+		{"array with pointer method, addressable", new(ptrArray(secret)), 0},
+		{"array with value method", valueArray(secret), 0},
+		{"byte slice", secret[:], 0},
+		{"struct field", arrayField{A: secret}, 1},
+		{"unexported field", struct{ a [10]byte }{a: secret}, 0},
+		{"field tagged -", struct {
+			A [10]byte `json:"-"`
+		}{A: secret}, 0},
+		{"embedded unexported struct", struct{ firstField }{firstField{A: secret}}, 1},
+		{"embedded unexported pointer to struct", struct{ *firstField }{&firstField{A: secret}}, 1},
+		{"embedded unexported array type", struct{ unexportedArray }{unexportedArray(secret)}, 0},
+		{"struct with value method", marshalsArrays{A: secret}, 0},
+		{"embedded pointer method, not addressable", embedsPtrMarshalsArrays{ptrMarshalsArrays{A: secret}}, 1},
+		{"embedded pointer method, addressable", &embedsPtrMarshalsArrays{ptrMarshalsArrays{A: secret}}, 0},
+		{"map value", map[string][10]byte{"a": secret, "b": {}}, 1},
+		{"map value with pointer method", map[string]ptrArray{"a": ptrArray(secret)}, 1},
+		{"slice of structs", []arrayField{{}, {A: secret}}, 1},
+		{"interface", struct{ X any }{X: secret}, 1},
+		{"pointer below the top", struct{ P *[10]byte }{P: &secret}, 1},
+		{"nil pointer", (*arrayField)(nil), 0},
+		{"nil interface", struct{ X any }{}, 0},
+		{"value holding itself through an embedded pointer", self, 1},
+		{"map holding itself in a shadowed field", shadows{shadowed: shadowed{X: selfMap}, A: secret}, 1},
+		{"slice holding itself in a shadowed field", shadows{shadowed: shadowed{X: selfSlice}, A: secret}, 1},
+		{"shorter slice of one array first", struct{ A, B [][10]byte }{A: shared[:1], B: shared}, 1},
+		{"pointer to the first field first", struct {
+			F *firstField
+			H *holdsFirst
+		}{F: &holder.F, H: holder}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := encodeJSON(tt.value)
+			if err != nil {
+				t.Fatalf("encode %#v: %v", tt.value, err)
+			}
+			if written := strings.Contains(encoded, codes); written != (tt.found > 0) {
+				t.Fatalf("encoded %s, want the decimal form written %v", encoded, tt.found > 0)
+			}
+			subs := r.jsonBytes(tt.value)
+			if len(subs) != tt.found {
+				t.Fatalf("jsonBytes(%#v) = %v, want %d", tt.value, subs, tt.found)
+			}
+			for _, sub := range subs {
+				if sub.form != codes || sub.clean != `"Bearer [REDACTED]"` {
+					t.Errorf("sub = %+v, want form %s and clean %q", sub, codes, `"Bearer [REDACTED]"`)
+				}
+			}
+		})
+	}
+}
+
+// TestReplaceOutsideStrings pins that only an occurrence starting outside a JSON string is
+// replaced, whatever escapes the strings before it hold.
+func TestReplaceOutsideStrings(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"value", `[1,2]`, `"x"`},
+		{"each value", `{"a":[1,2],"b":[[1,2],3]}`, `{"a":"x","b":["x",3]}`},
+		{"inside a string", `{"a":"[1,2]"}`, `{"a":"[1,2]"}`},
+		{"after an escaped quote", `{"a":"\"[1,2]"}`, `{"a":"\"[1,2]"}`},
+		{"after an escaped backslash", `{"a":"\\","b":[1,2]}`, `{"a":"\\","b":"x"}`},
+		{"longer array", `[1,2,3]`, `[1,2,3]`},
+		{"at the end after text", `{"a":[1,2]}`, `{"a":"x"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := replaceOutsideStrings(tt.in, "[1,2]", `"x"`); got != tt.want {
+				t.Errorf("replaceOutsideStrings(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
