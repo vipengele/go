@@ -35,7 +35,7 @@ func TestRedactorLineText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := r.line(tt.in, redactText); got != tt.want {
+			if got := r.lineAs(tt.in, shapeText); got != tt.want {
 				t.Errorf("line(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
@@ -72,7 +72,7 @@ func TestRedactorLineJSON(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := r.line(tt.in, redactJSON)
+			got := r.lineAs(tt.in, shapeJSON)
 			if got != tt.want {
 				t.Errorf("line(%q) = %q, want %q", tt.in, got, tt.want)
 			}
@@ -93,7 +93,7 @@ func TestRedactorZeroRedactionKeepsBaseline(t *testing.T) {
 		"Bearer abc":             "Bearer [REDACTED]",
 		"Basic abc":              "Basic [REDACTED]",
 	} {
-		if got := r.line(in, redactText); got != want {
+		if got := r.lineAs(in, shapeText); got != want {
 			t.Errorf("line(%q) = %q, want %q", in, got, want)
 		}
 	}
@@ -276,5 +276,36 @@ func TestHandlerTextOutput(t *testing.T) {
 	assertNoSecret(t, out)
 	if !strings.Contains(out, "Cookie=[REDACTED]") || !strings.Contains(out, `auth="Basic [REDACTED]"`) {
 		t.Errorf("output %q does not carry the redacted attributes", out)
+	}
+}
+
+func TestRedactorLineByShape(t *testing.T) {
+	r := newRedactor(Redaction{Prefixes: []string{"ghp_"}, Headers: []string{"X-Api-Key"}})
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain quoted cookie", `Set-Cookie: sid="abc123"; Path=/`, "Set-Cookie: [REDACTED]"},
+		{"json cookie key", `{"Cookie":"sid=abc"}`, `{"Cookie":"[REDACTED]"}`},
+		{"json tool header key", `{"X-Api-Key":"k1","n":1}`, `{"X-Api-Key":"[REDACTED]","n":1}`},
+		{"json with spaces", `  {"x-api-key" : "k1"} `, `  {"x-api-key" : "[REDACTED]"} `},
+		{"json header in a string", `{"msg":"Cookie: a=\"b\" c","n":1}`, `{"msg":"Cookie: [REDACTED]","n":1}`},
+		{"invalid json is text", `{"Cookie":"cut`, `{"Cookie":[REDACTED]`},
+		{"quoted key in text", `plain "X-Api-Key":"k2" tail`, `plain "X-Api-Key":[REDACTED]`},
+		{"json array", `[{"Cookie":"a"}]`, `[{"Cookie":"[REDACTED]"}]`},
+		{"bracketed text", `[INFO] Cookie: a="b" c`, `[INFO] Cookie: [REDACTED]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.line(tt.in)
+			if got != tt.want {
+				t.Errorf("line(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if again := r.line(got); again != got {
+				t.Errorf("line(%q) = %q, want it unchanged", got, again)
+			}
+			if json.Valid([]byte(tt.in)) && !json.Valid([]byte(got)) {
+				t.Errorf("line(%q) = %q, not valid JSON", tt.in, got)
+			}
+		})
 	}
 }

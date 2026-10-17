@@ -305,3 +305,72 @@ func TestSetupWriterReportsDestinationError(t *testing.T) {
 		t.Errorf("Write error = %v, want %v", err, errWrite)
 	}
 }
+
+// TestSetupWriterReadsLinesByShape pins that the writer reads a raw line by its own shape, whatever
+// the log format: a plain line under JSON keeps no part of a quoted cookie value, and a JSON line
+// under text has its header keys redacted and stays valid JSON.
+func TestSetupWriterReadsLinesByShape(t *testing.T) {
+	red := logging.Redaction{Headers: []string{"X-Api-Key"}}
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain quoted cookie", `Set-Cookie: sid="abc123"; Path=/` + "\n", "Set-Cookie: [REDACTED]\n"},
+		{"json cookie key", `{"Cookie":"sid=abc"}` + "\n", `{"Cookie":"[REDACTED]"}` + "\n"},
+		{"json tool header key", `{"X-Api-Key":"k-123","n":1}` + "\n", `{"X-Api-Key":"[REDACTED]","n":1}` + "\n"},
+		{"json fragment", `cut {"Cookie":"sid=abc"` + "\n", `cut {"Cookie":[REDACTED]` + "\n"},
+	}
+	for _, format := range formats() {
+		for _, tt := range tests {
+			t.Run(format.String()+"/"+tt.name, func(t *testing.T) {
+				restoreDefault(t)
+				var buf bytes.Buffer
+				res, err := logging.Setup(logging.Options{Format: format, Writer: &buf, Redaction: red})
+				if err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
+				if _, err := io.WriteString(res.Writer, tt.in); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+				if got := buf.String(); got != tt.want {
+					t.Errorf("got %q, want %q", got, tt.want)
+				}
+			})
+		}
+	}
+}
+
+// TestSetupJSONLinesStayValidThroughBothLayers pins that a JSON line stays valid JSON after the
+// handler and then the writer redact it, and that a raw JSON line written beside the records stays
+// valid in either format.
+func TestSetupJSONLinesStayValidThroughBothLayers(t *testing.T) {
+	red := logging.Redaction{Prefixes: []string{"ghp_"}, Headers: []string{"X-Api-Key"}}
+	raw := `{"msg":"Authorization: Bearer abc \"q\" end","Cookie":"a=\"b\"","x":"ghp_tok"}` + "\n"
+	for _, format := range formats() {
+		t.Run(format.String(), func(t *testing.T) {
+			restoreDefault(t)
+			var buf bytes.Buffer
+			res, err := logging.Setup(logging.Options{Format: format, Writer: &buf, Redaction: red})
+			if err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			if format == spec.FormatJSON {
+				res.Logger.Info(`Set-Cookie: sid="abc"; Path=/`, "Cookie", "abc", "body", `{"X-Api-Key":"abc"}`,
+					"note", "Authorization: Bearer abc", "tok", "ghp_abc")
+			}
+			if _, err := io.WriteString(res.Writer, raw); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			for line := range strings.Lines(buf.String()) {
+				line = strings.TrimSuffix(line, "\n")
+				if !json.Valid([]byte(line)) {
+					t.Errorf("line %q is not valid JSON", line)
+				}
+				for _, secret := range []string{"abc", `\"b`, "ghp_tok"} {
+					if strings.Contains(line, secret) {
+						t.Errorf("line %q leaks %q", line, secret)
+					}
+				}
+			}
+		})
+	}
+}

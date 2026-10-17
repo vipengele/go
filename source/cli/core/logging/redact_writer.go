@@ -37,9 +37,11 @@ const (
 )
 
 // RedactingWriter is an [io.Writer] that redacts every secret of a [Redaction], and of the
-// baseline, from the lines written to it before they reach its destination. It reads its input
-// in the format of the handler that writes to it: in text, a header value runs to the end of the
-// line; in JSON, it ends at the closing unescaped quote, so every redacted line stays valid JSON.
+// baseline, from the lines written to it before they reach its destination. It reads each line by
+// its shape, as [Redaction] describes, whatever the format of the handler above it, so the raw
+// output of a tool or a subprocess written beside the records is redacted as well: a line that is
+// a JSON document has a header value end at the closing unescaped quote and stays valid JSON, and
+// any other line has a header value run to the end of the line.
 //
 // It is line-buffered: a complete line is redacted whole and written with the Write that
 // completes it, and the bytes after the last newline are held. A line longer than 64 KiB is
@@ -47,27 +49,36 @@ const (
 // the last 256 bytes, never splitting a UTF-8 sequence, and extends the piece over any secret
 // that crosses its end. When a secret runs to the end of what is held, the piece ends with the
 // redacted secret and the rest of it is dropped as it arrives. A piece is therefore not a line
-// on its own, and in JSON mode not a JSON document, but the destination's lines are the
-// redacted lines: the pieces of one line concatenate to that line redacted whole.
+// on its own, and not a JSON document, but the destination's lines are the redacted lines: the
+// pieces of one line concatenate to that line redacted whole.
+//
+// A line written in pieces, by an overflow or by [RedactingWriter.Flush], cannot be checked as a
+// JSON document before its end arrives, so its shape is decided by its start when its first piece
+// is written: JSON when its first byte that is not white space is "{", plain text otherwise, a
+// JSON array included, and every later piece of that line is read the same way. A plain-text line that starts with "{" and
+// grows past 64 KiB is therefore read as JSON, and a header value in it ends at the first
+// unescaped quote rather than at the end of the line.
 //
 // A RedactingWriter is safe for concurrent use; each Write is redacted and written whole before
 // the next starts.
 type RedactingWriter struct {
-	mu   sync.Mutex
-	dst  io.Writer
-	r    *redactor
-	mode redactMode
+	mu  sync.Mutex
+	dst io.Writer
+	r   *redactor
 	// buf holds the bytes after the last newline written.
 	buf []byte
 	// cont is what of a flushed secret is still dropped. It is continueNone whenever buf holds
 	// anything.
 	cont continuation
+	// pieced reports that a piece of the current line has been written, and shape is then the
+	// shape every later piece of that line is read as.
+	pieced bool
+	shape  lineShape
 }
 
-// newRedactingWriter returns a writer that redacts with r, reading lines as mode, and writes to
-// dst.
-func newRedactingWriter(dst io.Writer, r *redactor, mode redactMode) *RedactingWriter {
-	return &RedactingWriter{dst: dst, r: r, mode: mode}
+// newRedactingWriter returns a writer that redacts with r and writes to dst.
+func newRedactingWriter(dst io.Writer, r *redactor) *RedactingWriter {
+	return &RedactingWriter{dst: dst, r: r}
 }
 
 // Write redacts and writes every line p completes and holds the rest. It returns len(p), the
@@ -81,7 +92,7 @@ func (w *RedactingWriter) Write(p []byte) (int, error) {
 	var out []byte
 	if i := bytes.LastIndexByte(w.buf, '\n'); i >= 0 {
 		for line := range bytes.Lines(w.buf[:i+1]) {
-			out = append(out, w.r.line(string(line[:len(line)-1]), w.mode)...)
+			out = append(out, w.redactLineEnd(line[:len(line)-1])...)
 			out = append(out, '\n')
 		}
 		w.buf = w.buf[:copy(w.buf, w.buf[i+1:])]
@@ -108,6 +119,17 @@ func (w *RedactingWriter) Flush() error {
 // destination, which stays the caller's to close.
 func (w *RedactingWriter) Close() error { return w.Flush() }
 
+// redactLineEnd returns line, the bytes of the current line up to its newline, redacted: by the
+// shape its pieces were read as when a piece of it has been written, and by its own shape
+// otherwise. The next line starts unpieced.
+func (w *RedactingWriter) redactLineEnd(line []byte) string {
+	if w.pieced {
+		w.pieced = false
+		return w.r.lineAs(string(line), w.shape)
+	}
+	return w.r.line(string(line))
+}
+
 // windowStart returns where the window an overflow flush retains begins, moved back to the start
 // of the UTF-8 sequence it would split.
 func (w *RedactingWriter) windowStart() int {
@@ -120,8 +142,12 @@ func (w *RedactingWriter) windowStart() int {
 
 // appendPiece appends to out the redacted bytes of buf up to cut, extended over every secret
 // that crosses it, removes them from buf and records what of a secret that runs to the end of
-// buf is still to be dropped.
+// buf is still to be dropped. The first piece of a line decides the shape of the line from its
+// start.
 func (w *RedactingWriter) appendPiece(out []byte, cut int) []byte {
+	if !w.pieced {
+		w.pieced, w.shape = true, shapeOfStart(w.buf)
+	}
 	end, cont := w.pieceEnd(cut)
 	head := w.buf[:end]
 	if cont == continueJSONEscape {
@@ -129,18 +155,18 @@ func (w *RedactingWriter) appendPiece(out []byte, cut int) []byte {
 		// escape the next byte of the output instead.
 		head = head[:len(head)-1]
 	}
-	out = append(out, w.r.line(string(head), w.mode)...)
+	out = append(out, w.r.lineAs(string(head), w.shape)...)
 	w.buf = w.buf[:copy(w.buf, w.buf[end:])]
 	w.cont = cont
 	return out
 }
 
 // pieceEnd returns cut extended to the end of every header value and prefixed token in buf
-// that starts before it and does not end before it, and what to drop of one that runs to the
-// end of buf.
+// that starts before it and does not end before it, read as the shape of the line, and what to
+// drop of one that runs to the end of buf.
 func (w *RedactingWriter) pieceEnd(cut int) (int, continuation) {
 	header, headerCont := w.r.textHeader, continueText
-	if w.mode == redactJSON {
+	if w.shape == shapeJSON {
 		header, headerCont = w.r.jsonHeader, continueJSON
 	}
 	cont := continueNone
@@ -149,7 +175,7 @@ func (w *RedactingWriter) pieceEnd(cut int) (int, continuation) {
 		for _, m := range header.FindAllIndex(w.buf, -1) {
 			start, stop, kind := m[0], m[1], headerCont
 			// The value pattern stops short of an escape whose escaped byte is not held yet.
-			if w.mode == redactJSON && stop == len(w.buf)-1 && w.buf[stop] == '\\' {
+			if w.shape == shapeJSON && stop == len(w.buf)-1 && w.buf[stop] == '\\' {
 				stop, kind = len(w.buf), continueJSONEscape
 			}
 			if start < cut && stop >= cut {

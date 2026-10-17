@@ -1,7 +1,9 @@
 package logging
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -13,14 +15,20 @@ import (
 // Authorization, Proxy-Authorization, Cookie and Set-Cookie, and the values "Bearer <token>" and
 // "Basic <token>". A tool adds to that baseline and cannot remove from it, so the zero Redaction
 // still redacts it.
+//
+// A line of text is read by its shape, whatever the log format. A line that is a JSON object or
+// array, starting with "{" or "[" after any leading white space, is read as JSON: the value after "Name:" inside
+// a string, and the string value of the key "Name", end at the closing unescaped quote, so the
+// line stays valid JSON. Any other line is read as plain text: the value after "Name:", and after
+// the quoted key form `"Name":` of a JSON fragment, runs to the end of the line.
 type Redaction struct {
 	// Prefixes are token prefixes, such as "ghp_". The prefix followed by a run of the characters
 	// [A-Za-z0-9_+/=.~-] becomes the prefix followed by "[REDACTED]"; a prefix with none of those
 	// characters after it is left alone. An empty prefix is ignored.
 	Prefixes []string
 	// Headers are header names, matched in any letter case. The value of an attribute whose key is
-	// one of them, at any group depth, and the value after "Name:" in text become "[REDACTED]". An
-	// empty name is ignored.
+	// one of them, at any group depth, and the value after "Name:" in text, or after the key
+	// "Name" in JSON, become "[REDACTED]". An empty name is ignored.
 	Headers []string
 }
 
@@ -38,17 +46,39 @@ func baselineHeaders() []string {
 	return []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie"}
 }
 
-// redactMode selects how [redactor.line] reads a line.
-type redactMode int
+// lineShape selects how [redactor.lineAs] reads a line.
+type lineShape int
 
 const (
-	// redactText reads a line as plain text: the value of "Name: value" runs to the end of the
-	// line.
-	redactText redactMode = iota
-	// redactJSON reads a line as JSON: the value of "Name: value" inside a string, and the string
+	// shapeText reads a line as plain text: the value of "Name: value", and of the quoted key form
+	// `"Name": value` a fragment of JSON carries, runs to the end of the line.
+	shapeText lineShape = iota
+	// shapeJSON reads a line as JSON: the value of "Name: value" inside a string, and the string
 	// value of the key "Name", end at the closing unescaped quote, so the line stays valid JSON.
-	redactJSON
+	shapeJSON
 )
+
+// shapeOf returns the shape of the whole line s: [shapeJSON] when s, without its surrounding
+// white space, starts with "{" or "[" and is valid JSON, and [shapeText] otherwise.
+func shapeOf(s []byte) lineShape {
+	s = bytes.TrimSpace(s)
+	if len(s) > 0 && (s[0] == '{' || s[0] == '[') && json.Valid(s) {
+		return shapeJSON
+	}
+	return shapeText
+}
+
+// shapeOfStart returns the shape of a line known only by its start s: [shapeJSON] when the first
+// byte of s that is not white space is "{", and [shapeText] otherwise, including when s is all
+// white space. "[" is not enough, as it starts many plain log lines, such as "[INFO] ...", and a
+// header value in a plain line read as JSON would end at its first quote.
+func shapeOfStart(s []byte) lineShape {
+	s = bytes.TrimLeft(s, " \t\r")
+	if len(s) > 0 && s[0] == '{' {
+		return shapeJSON
+	}
+	return shapeText
+}
 
 // redactor redacts the secrets of a [Redaction] and the baseline from text and from [slog]
 // attributes. It is immutable after [newRedactor] and safe for concurrent use.
@@ -58,7 +88,7 @@ type redactor struct {
 	// prefix matches a prefix, in group 1, followed by its token.
 	prefix *regexp.Regexp
 	// textHeader and jsonHeader match a header name and its separator, in group 1, followed by
-	// the value the mode delimits.
+	// the value the shape delimits.
 	textHeader *regexp.Regexp
 	jsonHeader *regexp.Regexp
 }
@@ -80,7 +110,7 @@ func newRedactor(red Redaction) *redactor {
 	return &redactor{
 		headers:    headers,
 		prefix:     regexp.MustCompile(`(` + prefixAlt + `)` + tokenChars + `+`),
-		textHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)\s*:\s*)[^\r\n]*`),
+		textHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)"?\s*:\s*)[^\r\n]*`),
 		jsonHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)(?:"\s*:\s*"|\s*:\s*))(?:[^"\\]|\\.)*`),
 	}
 }
@@ -108,19 +138,24 @@ func (r *redactor) isHeader(key string) bool {
 	return ok
 }
 
-// line returns s with every secret replaced, reading s as the given mode: header values first,
-// then prefixed tokens.
-func (r *redactor) line(s string, mode redactMode) string {
+// line returns the whole line s with every secret replaced, reading s by its [shapeOf].
+func (r *redactor) line(s string) string { return r.lineAs(s, shapeOf([]byte(s))) }
+
+// lineAs returns s with every secret replaced, reading s as shape: header values first, then
+// prefixed tokens. Redacting its own output again changes nothing, as "[REDACTED]" is neither a
+// token nor a header name.
+func (r *redactor) lineAs(s string, shape lineShape) string {
 	header := r.textHeader
-	if mode == redactJSON {
+	if shape == shapeJSON {
 		header = r.jsonHeader
 	}
 	s = header.ReplaceAllString(s, "${1}"+redacted)
 	return r.prefix.ReplaceAllString(s, "${1}"+redacted)
 }
 
-// text returns s, a message or an attribute's string value, with every secret replaced.
-func (r *redactor) text(s string) string { return r.line(s, redactText) }
+// text returns s, a message or an attribute's string value, with every secret replaced, read by
+// its shape as a line is.
+func (r *redactor) text(s string) string { return r.line(s) }
 
 // attr returns a with its value resolved and every secret in it replaced, at any group depth. The
 // whole value of an attribute whose key is a header name becomes "[REDACTED]". A value of kind

@@ -211,13 +211,12 @@ func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	}
 	flags := newStandardFlags(a.settings)
 	logFlags := newLoggingFlags(a.settings)
-	defer logFlags.flush()
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	conf := a.configFor(env.Resolved().LookupEnv)
 	pre, post := a.settings.hookFuncs(chainHooks(conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
-	return executeArgsCtx(context.Background(), env, a.root(flags, logFlags, conf.group), args, cfg,
-		a.settings.exitMatchers, a.settings.errorRenderers...)
+	return executeArgsEnded(context.Background(), env, a.root(flags, logFlags, conf.group), args, cfg,
+		logFlags.flush, a.settings.exitMatchers, a.settings.errorRenderers...)
 }
 
 // root returns a fresh root command for one execution, declaring flags followed by logFlags as

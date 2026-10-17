@@ -34,8 +34,9 @@ type Options struct {
 type Result struct {
 	// Logger is the logger Setup installs as the [slog] default.
 	Logger *slog.Logger
-	// Writer is the redacting writer between Logger's handler and Options.Writer, reading lines
-	// in Options.Format. Text written to it is redacted like the records of Logger; it holds the
+	// Writer is the redacting writer between Logger's handler and Options.Writer, reading each
+	// line by its shape, whatever Options.Format, as [RedactingWriter] describes. Text written to
+	// it is redacted like the records of Logger; it holds the
 	// bytes after the last newline until a later write completes the line or until
 	// [RedactingWriter.Flush].
 	Writer *RedactingWriter
@@ -59,16 +60,10 @@ func ParseLevel(s string) (slog.Level, error) {
 // Setup builds a logger from opts, installs it as the [slog] default and returns it with the
 // redacting writer it writes through. One redactor, built from opts.Redaction, serves both
 // layers: the handler redacts each record's message and attributes, and the writer redacts each
-// line on its way to opts.Writer. Setup returns an error, and leaves the default untouched, when
+// line on its way to opts.Writer, read by its shape whatever opts.Format. Setup returns an error, and leaves the default untouched, when
 // opts.Format is not [spec.FormatText] or [spec.FormatJSON].
 func Setup(opts Options) (Result, error) {
-	var mode redactMode
-	switch opts.Format {
-	case spec.FormatText:
-		mode = redactText
-	case spec.FormatJSON:
-		mode = redactJSON
-	default:
+	if opts.Format != spec.FormatText && opts.Format != spec.FormatJSON {
 		return Result{}, fmt.Errorf("unsupported log format %q", opts.Format.String())
 	}
 
@@ -77,10 +72,10 @@ func Setup(opts Options) (Result, error) {
 		dst = os.Stderr
 	}
 	r := newRedactor(opts.Redaction)
-	w := newRedactingWriter(dst, r, mode)
+	w := newRedactingWriter(dst, r)
 	handlerOpts := &slog.HandlerOptions{Level: opts.Level}
 	var h slog.Handler
-	if mode == redactJSON {
+	if opts.Format == spec.FormatJSON {
 		h = slog.NewJSONHandler(w, handlerOpts)
 	} else {
 		h = slog.NewTextHandler(w, handlerOpts)

@@ -38,23 +38,24 @@ func TestRedactingWriterSplitAtEveryOffset(t *testing.T) {
 	r := testRedactor()
 	tests := []struct {
 		name string
-		mode redactMode
 		in   string
 	}{
-		{"text", redactText, "x ghp_abc123 y\nAuthorization: Bearer zzz\nplain\nsent Basic dXNl= ok\n"},
-		{"json", redactJSON, `{"msg":"Authorization: Bearer a\"b","k":"ghp_q1"}` + "\n" +
+		{"text", "x ghp_abc123 y\nAuthorization: Bearer zzz\nplain\nsent Basic dXNl= ok\n"},
+		{"json", `{"msg":"Authorization: Bearer a\"b","k":"ghp_q1"}` + "\n" +
 			`{"X-Api-Key":"v\\\"w","n":1}` + "\n"},
+		{"mixed shapes", `Set-Cookie: sid="abc123"; Path=/` + "\n" + `{"Cookie":"sid=abc"}` + "\n" +
+			`  {"x-api-key" : "k1", "n":1}` + "\n" + `{"Cookie":"cut` + "\n" + `plain "X-Api-Key":"k2"` + "\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var want strings.Builder
 			for line := range strings.Lines(tt.in) {
-				want.WriteString(r.line(strings.TrimSuffix(line, "\n"), tt.mode) + "\n")
+				want.WriteString(r.line(strings.TrimSuffix(line, "\n")) + "\n")
 			}
 			for i := range len(tt.in) + 1 {
 				for j := i; j <= len(tt.in); j++ {
 					var out bytes.Buffer
-					w := newRedactingWriter(&out, r, tt.mode)
+					w := newRedactingWriter(&out, r)
 					writeAll(t, w, tt.in[:i], tt.in[i:j], tt.in[j:])
 					if got := out.String(); got != want.String() {
 						t.Fatalf("split at %d,%d: got %q, want %q", i, j, got, want.String())
@@ -80,7 +81,7 @@ func TestRedactingWriterSplitAtPrefixBoundary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
-			w := newRedactingWriter(&out, testRedactor(), redactText)
+			w := newRedactingWriter(&out, testRedactor())
 			writeAll(t, w, tt.chunks...)
 			if got := out.String(); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
@@ -91,7 +92,7 @@ func TestRedactingWriterSplitAtPrefixBoundary(t *testing.T) {
 
 func TestRedactingWriterHoldsPartialLine(t *testing.T) {
 	var out bytes.Buffer
-	w := newRedactingWriter(&out, testRedactor(), redactText)
+	w := newRedactingWriter(&out, testRedactor())
 	writeAll(t, w, "first\nsecond ghp_abc")
 	if got := out.String(); got != "first\n" {
 		t.Fatalf("before Flush: got %q, want %q", got, "first\n")
@@ -111,7 +112,7 @@ func TestRedactingWriterHoldsPartialLine(t *testing.T) {
 
 func TestRedactingWriterCloseEmitsRemainder(t *testing.T) {
 	var out bytes.Buffer
-	w := newRedactingWriter(&out, testRedactor(), redactText)
+	w := newRedactingWriter(&out, testRedactor())
 	writeAll(t, w, "line\nAuthorization: secret")
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -131,7 +132,7 @@ func (c *closeRecorder) Close() error { c.closed = true; return nil }
 
 func TestRedactingWriterCloseLeavesDestinationOpen(t *testing.T) {
 	dst := &closeRecorder{}
-	w := newRedactingWriter(dst, testRedactor(), redactText)
+	w := newRedactingWriter(dst, testRedactor())
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestRedactingWriterCloseLeavesDestinationOpen(t *testing.T) {
 
 func TestRedactingWriterFlushEmptyWritesNothing(t *testing.T) {
 	dst := &countingWriter{}
-	w := newRedactingWriter(dst, testRedactor(), redactText)
+	w := newRedactingWriter(dst, testRedactor())
 	if err := w.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
@@ -158,7 +159,7 @@ func (c *countingWriter) Write(p []byte) (int, error) { c.calls++; return len(p)
 
 func TestRedactingWriterCapAndWindow(t *testing.T) {
 	var out bytes.Buffer
-	w := newRedactingWriter(&out, testRedactor(), redactText)
+	w := newRedactingWriter(&out, testRedactor())
 	writeAll(t, w, filler(maxBuffered))
 	if out.Len() != 0 {
 		t.Fatalf("at the cap: %d bytes written, want 0", out.Len())
@@ -178,7 +179,7 @@ func TestRedactingWriterCapAndWindow(t *testing.T) {
 func TestRedactingWriterOverflowKeepsTokenInWindow(t *testing.T) {
 	// The token starts inside the retained window, so it is redacted whole once the line ends.
 	var out bytes.Buffer
-	w := newRedactingWriter(&out, testRedactor(), redactText)
+	w := newRedactingWriter(&out, testRedactor())
 	head := filler(maxBuffered + 1 - overflowWindow + 10)
 	writeAll(t, w, head+"ghp_SECRET", "MORE", filler(overflowWindow-20)+" end\n")
 	want := head + "ghp_[REDACTED]" + filler(overflowWindow-20) + " end\n"
@@ -192,17 +193,17 @@ func TestRedactingWriterOverflowTokenStraddlingCut(t *testing.T) {
 	cut := maxBuffered + 1 - overflowWindow
 	tests := []struct {
 		name   string
-		mode   redactMode
+		json   bool
 		before string
 		secret string
 		after  string
 		want   string
 	}{
-		{"prefixed token", redactText, "ghp_", "SECRET", " end\n", "#ghp_[REDACTED] end\n"},
-		{"text header", redactText, "Authorization: ", "SECRET", "\n", "#Authorization: [REDACTED]\n"},
-		{"json header value", redactJSON, `"msg":"Cookie: `, `SECRET\"Q`, `","n":1}` + "\n",
+		{"prefixed token", false, "ghp_", "SECRET", " end\n", "#ghp_[REDACTED] end\n"},
+		{"text header", false, "Authorization: ", "SECRET", "\n", "#Authorization: [REDACTED]\n"},
+		{"json header value", true, `"msg":"Cookie: `, `SECRET\"Q`, `","n":1}` + "\n",
 			`",` + `"msg":"Cookie: [REDACTED]","n":1}` + "\n"},
-		{"json header key", redactJSON, `"X-Api-Key":"`, `SECRET`, `"}` + "\n",
+		{"json header key", true, `"X-Api-Key":"`, `SECRET`, `"}` + "\n",
 			`",` + `"X-Api-Key":"[REDACTED]"}` + "\n"},
 	}
 	for _, tt := range tests {
@@ -210,13 +211,13 @@ func TestRedactingWriterOverflowTokenStraddlingCut(t *testing.T) {
 			// The secret starts before the cut and runs past the end of the buffer, so the
 			// overflow flush emits a redacted head and the rest of the secret arrives later.
 			head := filler(cut-10-len(tt.before)) + tt.before
-			if tt.mode == redactJSON {
+			if tt.json {
 				// The filler sits inside a first string value, so the line is valid JSON.
 				head = `{"pad":"` + filler(cut-10) + `",` + tt.before
 			}
 			body := strings.Repeat("S", overflowWindow+20)
 			var out bytes.Buffer
-			w := newRedactingWriter(&out, r, tt.mode)
+			w := newRedactingWriter(&out, r)
 			writeAll(t, w, head+body)
 			if out.Len() == 0 {
 				t.Fatal("overflow flushed nothing")
@@ -229,7 +230,7 @@ func TestRedactingWriterOverflowTokenStraddlingCut(t *testing.T) {
 			if !strings.HasSuffix(got, tt.want) {
 				t.Errorf("got suffix %q, want suffix %q", got[max(0, len(got)-len(tt.want)-20):], tt.want)
 			}
-			if tt.mode == redactJSON && !json.Valid(bytes.TrimSuffix(out.Bytes(), []byte("\n"))) {
+			if tt.json && !json.Valid(bytes.TrimSuffix(out.Bytes(), []byte("\n"))) {
 				t.Errorf("output line is not valid JSON")
 			}
 		})
@@ -242,7 +243,7 @@ func TestRedactingWriterOverflowJSONTrailingEscape(t *testing.T) {
 	r := testRedactor()
 	pad := filler(maxBuffered - overflowWindow)
 	var out bytes.Buffer
-	w := newRedactingWriter(&out, r, redactJSON)
+	w := newRedactingWriter(&out, r)
 	writeAll(t, w, `{"pad":"`+pad+`","msg":"Authorization: `+strings.Repeat("S", overflowWindow)+`\`)
 	writeAll(t, w, `"LEAK","n":1}`+"\n")
 	got := out.String()
@@ -262,7 +263,7 @@ func TestRedactingWriterOverflowKeepsRunesWhole(t *testing.T) {
 	for _, lead := range []int{0, 1} {
 		t.Run(fmt.Sprint(lead), func(t *testing.T) {
 			var out bytes.Buffer
-			w := newRedactingWriter(&out, testRedactor(), redactText)
+			w := newRedactingWriter(&out, testRedactor())
 			writeAll(t, w, filler(lead)+strings.Repeat("é", maxBuffered/2+1))
 			if out.Len() == 0 {
 				t.Fatal("overflow flushed nothing")
@@ -285,7 +286,7 @@ func TestRedactingWriterJSONLinesStayValid(t *testing.T) {
 	for _, size := range []int{1, 2, 3, 7, 64} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			var out bytes.Buffer
-			w := newRedactingWriter(&out, testRedactor(), redactJSON)
+			w := newRedactingWriter(&out, testRedactor())
 			for i := 0; i < len(in); i += size {
 				writeAll(t, w, in[i:min(i+size, len(in))])
 			}
@@ -309,7 +310,7 @@ func TestRedactingWriterJSONLinesStayValid(t *testing.T) {
 
 func TestRedactingWriterConcurrentWriters(t *testing.T) {
 	var out bytes.Buffer
-	w := newRedactingWriter(&out, testRedactor(), redactText)
+	w := newRedactingWriter(&out, testRedactor())
 	const writers, perWriter = 8, 200
 	var wg sync.WaitGroup
 	for g := range writers {
@@ -349,35 +350,62 @@ func (f *failingWriter) Write(p []byte) (int, error) { return min(f.n, len(p)), 
 func TestRedactingWriterDestinationError(t *testing.T) {
 	errBoom := errors.New("boom")
 	t.Run("write", func(t *testing.T) {
-		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor(), redactText)
+		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor())
 		if _, err := w.Write([]byte("line\n")); !errors.Is(err, errBoom) {
 			t.Errorf("Write error = %v, want %v", err, errBoom)
 		}
 	})
 	t.Run("partial line is not written", func(t *testing.T) {
-		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor(), redactText)
+		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor())
 		if n, err := w.Write([]byte("held")); err != nil || n != 4 {
 			t.Errorf("Write = %d, %v; want 4, nil", n, err)
 		}
 	})
 	t.Run("flush", func(t *testing.T) {
-		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor(), redactText)
+		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor())
 		writeAll(t, w, "held")
 		if err := w.Flush(); !errors.Is(err, errBoom) {
 			t.Errorf("Flush error = %v, want %v", err, errBoom)
 		}
 	})
 	t.Run("close", func(t *testing.T) {
-		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor(), redactText)
+		w := newRedactingWriter(&failingWriter{err: errBoom}, testRedactor())
 		writeAll(t, w, "held")
 		if err := w.Close(); !errors.Is(err, errBoom) {
 			t.Errorf("Close error = %v, want %v", err, errBoom)
 		}
 	})
 	t.Run("short write", func(t *testing.T) {
-		w := newRedactingWriter(&failingWriter{n: 2}, testRedactor(), redactText)
+		w := newRedactingWriter(&failingWriter{n: 2}, testRedactor())
 		if _, err := w.Write([]byte("line\n")); !errors.Is(err, io.ErrShortWrite) {
 			t.Errorf("Write error = %v, want %v", err, io.ErrShortWrite)
 		}
 	})
+}
+
+// TestRedactingWriterPiecedLineKeepsItsShape pins that a line flushed before its end is read in
+// every piece by the shape of its start: a JSON object stays valid JSON, and a plain line drops a
+// quoted value to its end.
+func TestRedactingWriterPiecedLineKeepsItsShape(t *testing.T) {
+	tests := []struct {
+		name, head, rest, want string
+	}{
+		{"json object", ` {"Cookie":"ab`, `c\"d","n":1}` + "\n", ` {"Cookie":"[REDACTED]","n":1}` + "\n"},
+		{"plain line", `Set-Cookie: sid="ab`, `c"; Path=/` + "\n", "Set-Cookie: [REDACTED]\n"},
+		{"json array is text", `[{"Cookie":"ab`, `c"}]` + "\n", `[{"Cookie":[REDACTED]` + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, testRedactor())
+			writeAll(t, w, tt.head)
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+			writeAll(t, w, tt.rest, "next Cookie: x\n")
+			if want := tt.want + "next Cookie: [REDACTED]\n"; out.String() != want {
+				t.Errorf("got %q, want %q", out.String(), want)
+			}
+		})
+	}
 }

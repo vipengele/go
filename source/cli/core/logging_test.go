@@ -1,11 +1,14 @@
 package cli_test
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/core/logging"
@@ -470,5 +473,73 @@ func TestExecuteFlushesTheLogWriter(t *testing.T) {
 	}
 	if strings.Contains(got.stderr, "basesecret99") {
 		t.Errorf("stderr holds the secret of the unterminated line:\n%s", got.stderr)
+	}
+}
+
+// lockedBuffer is a [bytes.Buffer] safe for a run that writes to it while the test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestAbandonedRunIsFlushedWhenItEnds pins that a run abandoned on a second interrupt keeps its
+// held bytes until it ends: a flush when ExecuteArgs returns would write the header name the run
+// has only begun, and the rest of the name with its secret would then match nothing.
+func TestAbandonedRunIsFlushedWhenItEnds(t *testing.T) {
+	restoreDefaultLogger(t)
+	started, resume := make(chan struct{}), make(chan struct{})
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging())
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		w, _ := cli.LogWriterFrom(ctx)
+		_, _ = w.Write([]byte("Author"))
+		close(started)
+		<-resume
+		_, _ = w.Write([]byte("ization: secret\nend "))
+		_, _ = w.Write([]byte("Bearer tok123"))
+		return nil
+	}})
+
+	var stderr lockedBuffer
+	ch := make(chan struct{}, 2)
+	codes := make(chan int, 1)
+	go func() {
+		codes <- app.ExecuteArgs(&spec.Env{Stderr: &stderr, WorkDir: t.TempDir(), Interrupts: ch}, []string{"run"})
+	}()
+	<-started
+	ch <- struct{}{}
+	ch <- struct{}{}
+	select {
+	case code := <-codes:
+		if code != cli.ExitInterrupted {
+			t.Fatalf("code %d, want %d", code, cli.ExitInterrupted)
+		}
+	case <-time.After(10 * time.Second):
+		close(resume)
+		t.Fatal("ExecuteArgs did not return after the second interrupt")
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("stderr %q when ExecuteArgs returns, want the held bytes still held", got)
+	}
+	close(resume)
+
+	const want = "Authorization: [REDACTED]\nend Bearer [REDACTED]"
+	deadline := time.Now().Add(10 * time.Second)
+	for stderr.String() != want && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := stderr.String(); got != want {
+		t.Errorf("stderr %q after the abandoned run ends, want %q", got, want)
 	}
 }

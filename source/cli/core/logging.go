@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/core/logging"
@@ -70,8 +69,8 @@ func WithRedaction(r logging.Redaction) Option {
 type loggingFlags struct {
 	// redaction is the tool's addition to the baseline, a copy of the App's.
 	redaction logging.Redaction
-	// writer holds the redacting writer the hook installs, for flush to find when the execution
-	// ends. It is nil when the App does not take the option.
+	// writer holds the redacting writer the hook installs, for flush to find when the run ends.
+	// It is nil when the App does not take the option.
 	writer *writerSlot
 
 	// level declares no default: the level a command line that does not set --log-level runs at
@@ -81,12 +80,10 @@ type loggingFlags struct {
 	format *spec.FlagOf[string]
 }
 
-// writerSlot holds the [*logging.RedactingWriter] of one execution. The hook stores it on the
-// goroutine that runs the command and flush reads it on the one that called Execute, which may
-// have abandoned the run.
+// writerSlot holds the [*logging.RedactingWriter] of one execution. The hook stores it and flush
+// reads it, both on the goroutine that runs the command.
 type writerSlot struct {
-	mu sync.Mutex
-	w  *logging.RedactingWriter
+	w *logging.RedactingWriter
 }
 
 // newLoggingFlags returns the handles of the flags [WithLogging] declares, or none when s does
@@ -125,28 +122,26 @@ func (f loggingFlags) hook(verbose, quiet *spec.FlagOf[bool]) PreRunHook {
 		if err != nil {
 			return ctx, &cobra.UsageError{Path: commandPath(cmd), Err: err}
 		}
-		f.writer.mu.Lock()
 		f.writer.w = result.Writer
-		f.writer.mu.Unlock()
 		ctx = context.WithValue(ctx, loggerKey{}, result.Logger)
 		return context.WithValue(ctx, logWriterKey{}, result.Writer), nil
 	}
 }
 
 // flush writes the bytes the execution's redacting writer still holds after the last newline to
-// the env.Stderr it wraps, or does nothing when the hook installed none. The App calls it when the
-// execution ends, whatever the outcome. An error of the destination is dropped: the execution is
-// over and has nowhere to report it.
+// the env.Stderr it wraps, or does nothing when the hook installed none. The App calls it on the
+// goroutine of the run once the run function and every PostRun hook have returned, whatever the
+// outcome, and never when [App.ExecuteArgs] returns: a run abandoned on a second interrupt goes on
+// writing, and a flush in the middle of it would write held bytes that end inside a header name
+// or a prefix as they stand, leaving the rest of the secret to arrive in a later line that matches
+// nothing. The abandoned run's last line is flushed when that run ends, after ExecuteArgs has
+// returned, and is lost when the process exits first. An error of the destination is dropped: the
+// run is over and has nowhere to report it.
 func (f loggingFlags) flush() {
-	if f.writer == nil {
+	if f.writer == nil || f.writer.w == nil {
 		return
 	}
-	f.writer.mu.Lock()
-	w := f.writer.w
-	f.writer.mu.Unlock()
-	if w != nil {
-		_ = w.Flush()
-	}
+	_ = f.writer.w.Flush()
 }
 
 // options returns the [logging.Options] the command line of inv selects, writing to the
@@ -202,9 +197,11 @@ type logWriterKey struct{}
 
 // LogWriterFrom returns the redacting writer beneath the logger the hook of [WithLogging]
 // installed, and whether the context carries one, from the same contexts as [LoggerFrom]. It
-// reports false when the App has no [WithLogging]. Text written to it is redacted like the records
-// of the logger and reaches the env.Stderr of the execution in the log format, line by line; the
-// App flushes what it still holds, a line without its newline, when the execution returns.
+// reports false when the App has no [WithLogging]. Text written to it, raw or subprocess output
+// included, is redacted like the records of the logger, each line read as JSON or as plain text by
+// its own shape whatever --log-format, and reaches the env.Stderr of the execution line by line; the
+// App flushes what it still holds, a line without its newline, when the run ends, which for a run
+// abandoned on a second interrupt is after the execution returns.
 func LogWriterFrom(ctx context.Context) (*logging.RedactingWriter, bool) {
 	w, ok := ctx.Value(logWriterKey{}).(*logging.RedactingWriter)
 	return w, ok
