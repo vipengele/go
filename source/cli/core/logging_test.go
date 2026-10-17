@@ -477,6 +477,49 @@ func TestExecuteFlushesTheLogWriter(t *testing.T) {
 	}
 }
 
+// TestExecuteFlushesTheLogWriterWhenTheRunPanics pins that the held bytes of an unterminated line
+// reach stderr, redacted, while a run's panic unwinds to the caller of ExecuteArgs, on the
+// caller's goroutine without Interrupts and on the run's own goroutine with them.
+func TestExecuteFlushesTheLogWriterWhenTheRunPanics(t *testing.T) {
+	type panicValue struct{ msg string }
+	want := &panicValue{msg: "run panicked"}
+	tests := []struct {
+		name       string
+		interrupts chan struct{}
+	}{
+		{name: "without interrupts"},
+		{name: "with interrupts", interrupts: make(chan struct{})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreDefaultLogger(t)
+			app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging(),
+				cli.WithRedaction(logging.Redaction{Prefixes: []string{"tkn_"}}))
+			app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+				w, _ := cli.LogWriterFrom(ctx)
+				_, _ = w.Write([]byte("partial tkn_" + toolTokenRun))
+				panic(want)
+			}})
+			var stderr bytes.Buffer
+			env := &spec.Env{Stderr: &stderr, WorkDir: t.TempDir(), Interrupts: tt.interrupts}
+			got := func() (v any) {
+				defer func() { v = recover() }()
+				app.ExecuteArgs(env, []string{"run"})
+				return nil
+			}()
+			if got != want {
+				t.Fatalf("recovered %v, want %v", got, want)
+			}
+			if !strings.Contains(stderr.String(), "partial ") {
+				t.Errorf("stderr lacks the unterminated line:\n%s", stderr.String())
+			}
+			if strings.Contains(stderr.String(), toolTokenRun) {
+				t.Errorf("stderr holds the secret of the unterminated line:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
 // lockedBuffer is a [bytes.Buffer] safe for a run that writes to it while the test reads it.
 type lockedBuffer struct {
 	mu  sync.Mutex
