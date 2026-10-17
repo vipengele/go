@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 // biome-ignore lint/correctness/noNodejsModules: the test runs in Node, never in the Worker
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { renderModuleList } from "../src/module-list";
 import { findGoModDirs, moduleDirs, renderModules } from "./generate-modules";
 
 describe("moduleDirs", () => {
@@ -78,5 +79,22 @@ describe("find go.mod directories", () => {
     touch("cli/go.mod");
     touch("cli/core/go.mod");
     expect(() => moduleDirs(findGoModDirs(root))).toThrow(/nested/);
+  });
+
+  it("reports a directory outside the project path shape so moduleDirs can reject it", () => {
+    touch("commons/go.mod");
+    touch("cli/Core/go.mod");
+    expect(() => moduleDirs(findGoModDirs(root))).toThrow(/"cli\/Core" does not match/);
+  });
+
+  it("renders the JSON module list of a source tree", () => {
+    touch("update/go.mod");
+    touch("commons/go.mod");
+    touch("cli/spec/go.mod");
+    touch("cli/core/go.mod");
+    touch("cli/core/testdata/x/go.mod");
+    expect(renderModuleList(moduleDirs(findGoModDirs(root)))).toBe(
+      '["cli/core","cli/spec","commons","update"]\n',
+    );
   });
 });

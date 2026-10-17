@@ -7,26 +7,16 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 // biome-ignore lint/correctness/noNodejsModules: the generator runs in Node at build time, never in the Worker
 import { fileURLToPath } from "node:url";
+import { renderModuleList, validateModuleList } from "../src/module-list.ts";
 
 const skippedDirs = new Set(["node_modules", ".git", "vendor", "testdata"]);
 
 /**
- * Returns the sorted project directories for the given directories that hold a go.mod.
- * A go.mod directory inside another one is rejected: the module proxy resolves a nested
- * module by its directory prefix, so the outer module would swallow the inner one.
+ * Returns the sorted project directories for the given directories that hold a go.mod,
+ * validated by validateModuleList.
  */
 export function moduleDirs(goModDirs: readonly string[]): string[] {
-  const dirs = [...new Set(goModDirs)].sort();
-  for (const outer of dirs) {
-    for (const inner of dirs) {
-      if (inner !== outer && inner.startsWith(`${outer}/`)) {
-        throw new Error(
-          `go.mod in "${inner}" is nested inside the module in "${outer}"; a module directory must not contain another module`,
-        );
-      }
-    }
-  }
-  return dirs;
+  return validateModuleList(goModDirs);
 }
 
 /** Finds every directory under root, at any depth, that holds a go.mod, relative to root with forward slashes. */
@@ -58,8 +48,11 @@ function main(): void {
   const here = dirname(fileURLToPath(import.meta.url));
   const sourceRoot = resolve(here, "../../../source");
   const out = resolve(here, "../src/modules.generated.ts");
+  const jsonOut = resolve(here, "../src/modules.generated.json");
   try {
-    writeFileSync(out, renderModules(moduleDirs(findGoModDirs(sourceRoot))));
+    const modules = moduleDirs(findGoModDirs(sourceRoot));
+    writeFileSync(out, renderModules(modules));
+    writeFileSync(jsonOut, renderModuleList(modules));
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);
     process.exit(1);
