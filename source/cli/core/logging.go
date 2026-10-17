@@ -72,13 +72,15 @@ func (f loggingFlags) hook(verbose, quiet *spec.FlagOf[bool]) PreRunHook {
 		return nil
 	}
 	return func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
+		// Setup fails only on a format other than text or json, which is a problem of the command
+		// line like every one options reports, so both are one usage error.
 		opts, err := f.options(inv, verbose, quiet)
+		var logger *slog.Logger
+		if err == nil {
+			logger, err = logging.Setup(opts)
+		}
 		if err != nil {
 			return ctx, &cobra.UsageError{Path: commandPath(cmd), Err: err}
-		}
-		logger, err := logging.Setup(opts)
-		if err != nil {
-			return ctx, fmt.Errorf("set up logging: %w", err)
 		}
 		return context.WithValue(ctx, loggerKey{}, logger), nil
 	}
@@ -132,13 +134,12 @@ func LoggerFrom(ctx context.Context) (*slog.Logger, bool) {
 }
 
 // commandPath returns the path of cmd with the root's name left out, as a usage error of the
-// command line names the command: "" for the root, "remote add" for a grandchild.
+// command line names the command: "" for the root, "remote add" for a grandchild. Every name of
+// a valid tree is a slug, so the first space of the joined path ends the root's name; a path of
+// the root alone, or the empty path of a zero [spec.CommandInfo], has none and yields "".
 func commandPath(cmd spec.CommandInfo) string {
-	path := cmd.Path()
-	if len(path) == 0 {
-		return ""
-	}
-	return strings.Join(path[1:], " ")
+	_, rest, _ := strings.Cut(cmd.String(), " ")
+	return rest
 }
 
 // chainHooks returns a pre-run hook that calls the non-nil hooks of hs in order, each receiving
