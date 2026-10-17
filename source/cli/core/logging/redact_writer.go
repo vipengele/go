@@ -140,11 +140,13 @@ func (w *RedactingWriter) Close() error { return w.Flush() }
 // shape its pieces were read as when a piece of it has been written, and by its own shape
 // otherwise. The next line starts unpieced.
 func (w *RedactingWriter) redactLineEnd(line []byte) string {
+	shape := w.shape
 	if w.pieced {
 		w.pieced = false
-		return w.r.lineAs(string(line), w.shape)
+	} else {
+		shape = shapeOf(line)
 	}
-	return w.r.line(string(line))
+	return w.r.lineAs(string(line), shape)
 }
 
 // windowStart returns where the window an overflow flush retains begins, moved back to the start
