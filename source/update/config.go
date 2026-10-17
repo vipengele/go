@@ -52,7 +52,8 @@ type Config struct {
 	// that variable is set. Only the state directory is resolved, so the home directory is needed
 	// only when the state directory itself falls back to it. An explicit StateDir is used as given.
 	StateDir string
-	// Source reports the releases the tool can update to. It is required.
+	// Source reports the releases the tool can update to. Nil means the [GitHubSource] for the
+	// Identity's Owner and Repo, making its requests through HTTPClient.
 	Source Source
 
 	// HTTPClient makes every HTTP request. Nil means a new [http.Client] of the Config's own,
