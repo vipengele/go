@@ -840,3 +840,26 @@ func TestReplaceOutsideStrings(t *testing.T) {
 		})
 	}
 }
+
+// TestEncodeJSONError pins that a value json cannot encode yields no text alongside the error.
+func TestEncodeJSONError(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{"channel", make(chan int)},
+		{"func", func() {}},
+		{"channel below the top", map[string]any{"a": make(chan int)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := encodeJSON(tt.value)
+			if err == nil {
+				t.Fatalf("encodeJSON(%T) = %q, want an error", tt.value, s)
+			}
+			if s != "" {
+				t.Errorf("encodeJSON(%T) = %q with an error, want no text", tt.value, s)
+			}
+		})
+	}
+}
