@@ -154,8 +154,8 @@ func (s *GitHubSource) latestByRedirect(ctx context.Context) (rel Release, found
 			return nil
 		}
 
-		tag, ok := tagFromLocation(resp.Request.URL, loc)
-		if !ok {
+		tag := tagFromLocation(resp.Request.URL, loc)
+		if tag == "" {
 			return nil
 		}
 
@@ -378,24 +378,20 @@ func isRedirect(code int) bool {
 	}
 }
 
-// tagFromLocation returns the tag a redirect from the latest-release page at requested names. The
-// location's path must be the requested page's directory followed by /tag/<tag>, compared without
-// regard to case, as GitHub matches owner and repository names; the tag is everything after it,
-// unescaped. ok is false when the location does not have that form or names an empty tag.
-func tagFromLocation(requested, location *url.URL) (tag string, ok bool) {
-	prefix := path.Dir(requested.EscapedPath()) + "/tag/"
-	escaped := location.EscapedPath()
+// tagFromLocation returns the tag a redirect from the latest-release page at requested names, or
+// "" when it names none. The location's path must be the requested page's directory followed by
+// /tag/<tag>, compared without regard to case, as GitHub matches owner and repository names; the
+// tag is everything after it. A location with an empty tag names none.
+func tagFromLocation(requested, location *url.URL) string {
+	prefix := path.Dir(requested.Path) + "/tag/"
 
-	if len(escaped) <= len(prefix) || !strings.EqualFold(escaped[:len(prefix)], prefix) {
-		return "", false
+	// A path shorter than prefix, or equal to it, leaves nothing after the cut and so names no tag.
+	cut := min(len(prefix), len(location.Path))
+	if !strings.EqualFold(location.Path[:cut], prefix) {
+		return ""
 	}
 
-	tag, err := url.PathUnescape(escaped[len(prefix):])
-	if err != nil || tag == "" {
-		return "", false
-	}
-
-	return tag, true
+	return location.Path[cut:]
 }
 
 // checkStableTag returns nil for a release version without a pre-release suffix, a [*TagError]

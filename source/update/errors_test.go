@@ -35,6 +35,7 @@ func TestNewStatusError_Body(t *testing.T) {
 			body:     strings.Repeat("a", 1023) + "é" + "tail",
 			wantBody: strings.Repeat("a", 1023),
 		},
+		{name: "only continuation bytes", body: strings.Repeat("\x80", 5000), wantBody: ""},
 	}
 
 	for _, tc := range tests {
@@ -72,6 +73,82 @@ func TestStatusError_As(t *testing.T) {
 		if !strings.Contains(statusErr.Error(), want) {
 			t.Errorf("Error() = %q, missing %q", statusErr.Error(), want)
 		}
+	}
+}
+
+func TestStatusError_Error(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  *StatusError
+		want string
+	}{
+		{
+			name: "empty body",
+			err:  &StatusError{URL: "https://example.test/x", StatusCode: 502},
+			want: "update: GET https://example.test/x: unexpected status 502",
+		},
+		{
+			name: "with body",
+			err:  &StatusError{URL: "https://example.test/x", StatusCode: 404, Body: "gone"},
+			want: "update: GET https://example.test/x: unexpected status 404: gone",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTimeoutError(t *testing.T) {
+	t.Parallel()
+
+	err := &TimeoutError{URL: "https://example.test/x", Err: context.DeadlineExceeded}
+
+	if want := "update: GET https://example.test/x: timed out: context deadline exceeded"; err.Error() != want {
+		t.Errorf("Error() = %q, want %q", err.Error(), want)
+	}
+
+	if !err.Timeout() {
+		t.Error("Timeout() = false")
+	}
+
+	if !err.Temporary() {
+		t.Error("Temporary() = false")
+	}
+}
+
+func TestTagError_Error(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  *TagError
+		want string
+	}{
+		{name: "without a cause", err: &TagError{Tag: "x"}, want: `update: invalid release tag "x"`},
+		{
+			name: "with a cause",
+			err:  &TagError{Tag: "x", Err: errors.New("bad")},
+			want: `update: invalid release tag "x": bad`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

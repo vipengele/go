@@ -1337,3 +1337,56 @@ func TestGitHubSource_ListCallerCancellation(t *testing.T) {
 		t.Errorf("Latest() error = %v, want no *TimeoutError", err)
 	}
 }
+
+// truncatedBody declares a body longer than it writes, so the client's read of it fails with an
+// unexpected EOF.
+func truncatedBody(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Length", "1000")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("{"))
+}
+
+func TestGitHubSource_APIBodyReadError(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeGitHub(t, respond(http.StatusOK, ""), truncatedBody)
+
+	_, err := f.source().Latest(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reading response") {
+		t.Errorf("Latest() error = %v, want a read error", err)
+	}
+}
+
+func TestGitHubSource_ListBodyReadError(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeGitHubList(t, truncatedBody)
+
+	_, err := f.listSource().Latest(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reading response") {
+		t.Errorf("Latest() error = %v, want a read error", err)
+	}
+}
+
+func TestGitHubSource_UnbuildableRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		source *GitHubSource
+	}{
+		{name: "redirect then API", source: &GitHubSource{Owner: testOwner, Repo: testRepo, WebURL: "://bad", APIURL: "://bad"}},
+		{name: "list", source: &GitHubSource{Owner: testOwner, Repo: testRepo, APIURL: "://bad", IncludePrereleases: true}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := tc.source.Latest(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "://bad") {
+				t.Errorf("Latest() error = %v, want one naming the address", err)
+			}
+		})
+	}
+}
