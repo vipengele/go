@@ -1,4 +1,4 @@
-package atomicfile_test
+package state_test
 
 import (
 	"errors"
@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"go.vipengele.org/cli/core/internal/atomicfile"
+	"go.vipengele.org/cli/state"
 )
 
 // TestReplaceFailsWhenTempCannotBeChmodded names a file of /proc as the temporary file: it opens,
@@ -25,12 +25,12 @@ func TestReplaceFailsWhenTempCannotBeChmodded(t *testing.T) {
 	final := filepath.Join(dir, "config.toml")
 	writeAt(t, final, "old", 0o644)
 
-	err := atomicfile.Replace(tmp, final, 0o600)
+	err := state.Replace(tmp, final, 0o600)
 	if err == nil {
 		t.Fatal("Replace: want an error, got nil")
 	}
 
-	if want := "atomicfile: chmod " + tmp + ": "; !strings.HasPrefix(err.Error(), want) {
+	if want := "state: chmod " + tmp + ": "; !strings.HasPrefix(err.Error(), want) {
 		t.Errorf("error %q does not start with %q", err, want)
 	}
 
@@ -61,12 +61,12 @@ func TestReplaceFailsWhenTempCannotBeSynced(t *testing.T) {
 
 	t.Cleanup(func() { _ = holder.Close() })
 
-	err = atomicfile.Replace(tmp, final, 0o600)
+	err = state.Replace(tmp, final, 0o600)
 	if !errors.Is(err, syscall.EINVAL) {
 		t.Fatalf("Replace = %v, want an error matching EINVAL", err)
 	}
 
-	if want := "atomicfile: sync " + tmp + ": "; !strings.HasPrefix(err.Error(), want) {
+	if want := "state: sync " + tmp + ": "; !strings.HasPrefix(err.Error(), want) {
 		t.Errorf("error %q does not start with %q", err, want)
 	}
 

@@ -64,7 +64,7 @@ _Avoid_: scripts, utilities
 
 ## Library vocabulary
 
-These name what the `cli/core`, `cli/spec`, `update` and `daemon` projects build (ADR-0003). They describe the tools
+These name what the `cli/core`, `cli/spec`, `cli/state`, `update` and `daemon` projects build (ADR-0003, ADR-0018). They describe the tools
 a consumer writes with the library, not this repo; **Release** above is a version of a project here,
 and a tool's own releases are reached through a **Release source**.
 
