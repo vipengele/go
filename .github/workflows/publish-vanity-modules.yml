@@ -1,0 +1,118 @@
+# publish-vanity-modules — publishes the vanity module list to R2.
+#
+# The list is the JSON array of project paths relative to source/, one for
+# every source/**/go.mod on main, generated and validated by
+# tools/vanity-worker/scripts/publish-modules.ts. It is stored as the object
+# `modules.json` in the R2 bucket named by R2_BUCKET, written through R2's
+# S3-compatible API.
+#
+# A push to main that changes a go.mod, the generator, the list's schema, the
+# publisher or this workflow publishes the list from that commit. A
+# `workflow_dispatch` on main republishes it from main's head. No other branch
+# is ever published.
+#
+# The upload is one PutObject of the whole list: an unchanged list overwrites
+# the object with identical content, and a failed upload fails the run and
+# leaves the previous object in place.
+#
+# The job runs in the GitHub Environment `vanity-modules`, which holds the
+# secrets R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and the variables
+# CLOUDFLARE_ACCOUNT_ID and R2_BUCKET. Without all four, the job logs a notice
+# and succeeds without uploading, so a repository that has not configured R2
+# sees a green run rather than a failure on every push.
+name: publish-vanity-modules
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'source/**/go.mod'
+      - 'tools/vanity-worker/scripts/generate-modules.ts'
+      - 'tools/vanity-worker/scripts/publish-modules.ts'
+      - 'tools/vanity-worker/src/module-list.ts'
+      - '.github/workflows/publish-vanity-modules.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    environment:
+      name: vanity-modules
+    permissions:
+      contents: read
+    # One upload at a time, and never cancel one in flight: a later run uploads
+    # afterwards, so the last one started is the list left published.
+    concurrency:
+      group: publish-vanity-modules
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: tools/vanity-worker
+    steps:
+      # A dispatch can name any branch; only main's list is ever published.
+      - name: The ref is main
+        working-directory: .
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" != "refs/heads/main" ]]; then
+            echo "::error::${REF} is not refs/heads/main; only main's module list is published"
+            exit 1
+          fi
+
+      # The secrets are tested for presence only and never printed. A step
+      # cannot read `secrets` in its `if:`, so the answer is a step output.
+      - name: R2 credentials are configured
+        id: credentials
+        working-directory: .
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [ -n "$R2_ACCESS_KEY_ID" ] && [ -n "$R2_SECRET_ACCESS_KEY" ] \
+            && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] && [ -n "$R2_BUCKET" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, CLOUDFLARE_ACCOUNT_ID or R2_BUCKET is not set; the vanity module list is not published"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.credentials.outputs.present == 'true'
+        with:
+          persist-credentials: false
+
+      # The same Node line ci-tools checks the publisher's dry run on.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.credentials.outputs.present == 'true'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/vanity-worker/package-lock.json
+
+      # The credentials are absent from the environment of the install step and
+      # present only in the upload step. The job shares one runner and
+      # filesystem, so this narrows where the keys are visible without
+      # isolating the upload from the installed dependencies; the lockfile and
+      # exact version pins are what constrain those.
+      - name: Install
+        if: steps.credentials.outputs.present == 'true'
+        run: npm ci
+
+      # The publisher generates the list from source/**/go.mod at the checked
+      # out commit and validates it before anything is sent.
+      - name: Upload
+        if: steps.credentials.outputs.present == 'true'
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: npm run publish-modules
