@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"go.vipengele.org/cli/core/command/config"
 	"go.vipengele.org/cli/spec"
@@ -144,7 +147,7 @@ func TestEditWritesAValidChange(t *testing.T) {
 }
 
 func TestEditReEditsAnInvalidChangeUntilValid(t *testing.T) {
-	for _, answer := range []string{"\n", "y\n", " YES \n"} {
+	for _, answer := range []string{"\n", "y\n", " YES \n", "yes"} {
 		t.Run(strings.TrimSpace(answer), func(t *testing.T) {
 			opts, fake := editWith(t, "name: tool\n", invalidEdit, validEdit)
 			r := runEdit(t, opts, terminalEnv(answer))
@@ -171,6 +174,7 @@ func TestEditDeclinedLeavesTheOriginalUntouched(t *testing.T) {
 		{"NO", "NO\n"},
 		{"end of input", ""},
 		{"no after an unknown answer", "maybe\nno\n"},
+		{"an unknown answer ending the input", "maybe"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			const original = "name: tool\nport: 1234\n"
@@ -471,5 +475,210 @@ func TestEditDefaultEditorRefusesStreamsThatAreNotFiles(t *testing.T) {
 	if string(got) != original {
 		t.Errorf("file holds %q, want the original", got)
 	}
+	assertNoTempDir(t, opts.Path)
+}
+
+// errWriter is a writer whose every write fails with err.
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// neverCalled returns an Editor that fails t when it runs.
+func neverCalled(t *testing.T) config.Editor {
+	t.Helper()
+	return func(context.Context, *spec.Env, string) error {
+		t.Error("the editor ran, want it not to")
+		return nil
+	}
+}
+
+// assertContent fails t unless the file at path holds want.
+func assertContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(got) != want {
+		t.Errorf("%s holds %q, want %q", path, got, want)
+	}
+}
+
+// TestEditFailsWhenTheDirectoryCannotBeCreated places the configuration file under a regular
+// file, so that its directory cannot be created.
+func TestEditFailsWhenTheDirectoryCannotBeCreated(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	opts := config.Options[testConfig]{
+		Path:     filepath.Join(parent, "sub", "config.yaml"),
+		Defaults: defaults(),
+		Editor:   neverCalled(t),
+	}
+	r := runEdit(t, opts, terminalEnv(""))
+	if r.err == nil {
+		t.Fatal("Run succeeded, want the directory error")
+	}
+	if !strings.HasPrefix(r.err.Error(), "config edit: ") {
+		t.Errorf("error %q does not start with %q", r.err, "config edit: ")
+	}
+	assertContent(t, parent, "x")
+}
+
+// TestEditFailsWhenNoTemporaryDirectoryCanBeMade uses /proc/self, a directory that exists and in
+// which no directory can be created, whoever runs the test.
+func TestEditFailsWhenNoTemporaryDirectoryCanBeMade(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("needs the Linux /proc filesystem")
+	}
+	if info, err := os.Stat("/proc/self"); err != nil || !info.IsDir() {
+		t.Skip("no /proc/self directory")
+	}
+	opts := config.Options[testConfig]{
+		Path:     "/proc/self/config.yaml",
+		Defaults: defaults(),
+		Editor:   neverCalled(t),
+	}
+	r := runEdit(t, opts, terminalEnv(""))
+	if r.err == nil {
+		t.Fatal("Run succeeded, want the temporary directory error")
+	}
+	if !strings.HasPrefix(r.err.Error(), "config edit: ") {
+		t.Errorf("error %q does not start with %q", r.err, "config edit: ")
+	}
+}
+
+func TestEditFailsWhenTheFileCannotBeRead(t *testing.T) {
+	opts := options(t, "")
+	if err := os.Mkdir(opts.Path, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	opts.Editor = neverCalled(t)
+	r := runEdit(t, opts, terminalEnv(""))
+	if r.err == nil {
+		t.Fatal("Run succeeded, want the read error")
+	}
+	if errors.Is(r.err, fs.ErrNotExist) {
+		t.Errorf("Run = %v, want an error other than the file not existing", r.err)
+	}
+	if !strings.HasPrefix(r.err.Error(), "config edit: ") {
+		t.Errorf("error %q does not start with %q", r.err, "config edit: ")
+	}
+	if info, err := os.Stat(opts.Path); err != nil || !info.IsDir() {
+		t.Errorf("Stat of %s = %v, %v, want the directory left in place", opts.Path, info, err)
+	}
+	assertNoTempDir(t, opts.Path)
+}
+
+// TestEditFailsWhenTheDefaultCannotBeSeeded edits a missing file of a configuration type that is
+// not a struct, for which no default file can be written.
+func TestEditFailsWhenTheDefaultCannotBeSeeded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	called := false
+	opts := config.Options[string]{
+		Path:     path,
+		Defaults: "tool",
+		Editor:   func(context.Context, *spec.Env, string) error { called = true; return nil },
+	}
+	var errOut bytes.Buffer
+	inv := spec.NewInvocation(&spec.Env{Stdin: strings.NewReader(""), Stderr: &errOut, Terminal: stdinTerminal}, nil, nil)
+	err := subcommand(t, config.New(opts), "edit").Run(context.Background(), inv)
+	if !errors.Is(err, cfg.ErrSchema) {
+		t.Fatalf("Run = %v, want an error matching cfg.ErrSchema", err)
+	}
+	if called {
+		t.Error("the editor ran, want it not to")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("Stat = %v, want no file created", err)
+	}
+	assertNoTempDir(t, path)
+}
+
+func TestEditFailsWhenTheEditorRemovesTheCopy(t *testing.T) {
+	const original = "name: tool\n"
+	opts := options(t, original)
+	opts.Editor = func(_ context.Context, _ *spec.Env, path string) error { return os.Remove(path) }
+	r := runEdit(t, opts, terminalEnv(""))
+	if !errors.Is(r.err, fs.ErrNotExist) {
+		t.Fatalf("Run = %v, want an error matching fs.ErrNotExist", r.err)
+	}
+	if !strings.HasPrefix(r.err.Error(), "config edit: ") {
+		t.Errorf("error %q does not start with %q", r.err, "config edit: ")
+	}
+	assertContent(t, opts.Path, original)
+	assertNoTempDir(t, opts.Path)
+}
+
+// TestEditReportsAFailedReplace has the editor turn the configuration file into a non-empty
+// directory, which a valid copy cannot be renamed over.
+func TestEditReportsAFailedReplace(t *testing.T) {
+	opts := options(t, "name: tool\n")
+	opts.Editor = func(_ context.Context, _ *spec.Env, path string) error {
+		if err := os.WriteFile(path, []byte(validEdit), 0o600); err != nil {
+			return err
+		}
+		if err := os.Remove(opts.Path); err != nil {
+			return err
+		}
+		if err := os.Mkdir(opts.Path, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(opts.Path, "inside"), []byte("x"), 0o600)
+	}
+	r := runEdit(t, opts, terminalEnv(""))
+	if r.err == nil {
+		t.Fatal("Run succeeded, want the replace error")
+	}
+	if want := "config edit: atomicfile: rename "; !strings.HasPrefix(r.err.Error(), want) {
+		t.Errorf("error %q does not start with %q", r.err, want)
+	}
+	if strings.Contains(r.stderr, "updated") {
+		t.Errorf("stderr = %q, want no update reported", r.stderr)
+	}
+	assertContent(t, filepath.Join(opts.Path, "inside"), "x")
+	assertNoTempDir(t, opts.Path)
+}
+
+func TestEditReportsAPromptItCannotWrite(t *testing.T) {
+	const original = "name: tool\n"
+	opts, fake := editWith(t, original, invalidEdit)
+	failure := errors.New("stderr closed")
+	env := terminalEnv("y\n")
+	env.Stderr = errWriter{err: failure}
+	r := runEdit(t, opts, env)
+	if !errors.Is(r.err, failure) {
+		t.Fatalf("Run = %v, want the write error", r.err)
+	}
+	if errors.Is(r.err, config.ErrEditAbandoned) {
+		t.Errorf("Run = %v, want the write error, not an abandoned edit", r.err)
+	}
+	if len(fake.seen) != 1 {
+		t.Errorf("editor opened %d times, want once", len(fake.seen))
+	}
+	assertContent(t, opts.Path, original)
+	assertNoTempDir(t, opts.Path)
+}
+
+func TestEditReportsAnAnswerItCannotRead(t *testing.T) {
+	const original = "name: tool\n"
+	opts, fake := editWith(t, original, invalidEdit)
+	failure := errors.New("stdin broken")
+	env := &spec.Env{Stdin: iotest.ErrReader(failure), Terminal: stdinTerminal}
+	r := runEdit(t, opts, env)
+	if !errors.Is(r.err, failure) {
+		t.Fatalf("Run = %v, want the read error", r.err)
+	}
+	if errors.Is(r.err, config.ErrEditAbandoned) {
+		t.Errorf("Run = %v, want the read error, not an abandoned edit", r.err)
+	}
+	if got := strings.Count(r.stderr, "re-edit? [Y/n]"); got != 1 {
+		t.Errorf("prompted %d times, want once; stderr %q", got, r.stderr)
+	}
+	if len(fake.seen) != 1 {
+		t.Errorf("editor opened %d times, want once", len(fake.seen))
+	}
+	assertContent(t, opts.Path, original)
 	assertNoTempDir(t, opts.Path)
 }

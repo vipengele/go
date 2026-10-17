@@ -160,6 +160,31 @@ func TestRunFlagNamedHelp(t *testing.T) {
 	}
 }
 
+func TestRunFlagNamedHelpOnASubcommand(t *testing.T) {
+	ran := false
+	root := &spec.Command{
+		Name: "tool",
+		Commands: []*spec.Command{{
+			Name:  "leaf",
+			Flags: []spec.Flag{spec.BoolFlag("help", "a flag of the tool's own")},
+			Run: func(context.Context, *spec.Invocation) error {
+				ran = true
+				return nil
+			},
+		}},
+	}
+	_, _, err := run(t, root, "leaf")
+	if err == nil {
+		t.Fatal("Run succeeded, want the reserved --help refused")
+	}
+	if want := `command "leaf": flag --help is reserved for help`; err.Error() != want {
+		t.Errorf("Run = %q, want %q", err, want)
+	}
+	if ran {
+		t.Error("the run function ran")
+	}
+}
+
 func TestRunFlagDefaults(t *testing.T) {
 	b := spec.BoolFlag("b", "", spec.Default(true))
 	s := spec.StringFlag("s", "", spec.Default("def"))

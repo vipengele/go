@@ -1,10 +1,13 @@
 package atomicfile_test
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"go.vipengele.org/cli/core/internal/atomicfile"
@@ -254,4 +257,22 @@ func TestWriteFileRelativePath(t *testing.T) {
 
 	assertFile(t, filepath.Join(dir, "config.toml"), "key = 1\n", 0o600)
 	assertEntries(t, dir, "config.toml")
+}
+
+func TestWriteFileInAMissingDirectoryFails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "config.toml")
+
+	err := atomicfile.WriteFile(path, []byte("new"), 0o600)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("WriteFile = %v, want an error matching fs.ErrNotExist", err)
+	}
+
+	if want := "atomicfile: create temp for " + path + ": "; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error %q does not start with %q", err, want)
+	}
+
+	assertEntries(t, dir)
 }

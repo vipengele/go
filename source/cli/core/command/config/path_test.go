@@ -3,8 +3,11 @@ package config_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.vipengele.org/cli/core/command/config"
@@ -71,5 +74,28 @@ func TestPathCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("Stat of the config directory = %v, want it not to exist", err)
+	}
+}
+
+// TestPathJSONReportsAPathItCannotStat names a file whose parent directory is a regular file, so
+// that the stat fails with an error other than the file not existing.
+func TestPathJSONReportsAPathItCannotStat(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	opts := config.Options[testConfig]{Path: filepath.Join(parent, "config.yaml"), Defaults: defaults()}
+	r := run(t, context.Background(), opts, "path", true)
+	if r.err == nil {
+		t.Fatal("Run succeeded, want the stat error")
+	}
+	if errors.Is(r.err, fs.ErrNotExist) {
+		t.Errorf("Run = %v, want an error other than the file not existing", r.err)
+	}
+	if want := "config file " + opts.Path + ": "; !strings.HasPrefix(r.err.Error(), want) {
+		t.Errorf("error %q does not start with %q", r.err, want)
+	}
+	if r.stdout != "" {
+		t.Errorf("stdout = %q, want empty", r.stdout)
 	}
 }

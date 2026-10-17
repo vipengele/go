@@ -1,13 +1,17 @@
 package config_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"go.vipengele.org/cli/core/command/config"
+	"go.vipengele.org/cli/spec"
 )
 
 func TestValidateAcceptsAValidFile(t *testing.T) {
@@ -102,5 +106,47 @@ func TestValidateCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("Stat of the config directory = %v, want it not to exist", err)
+	}
+}
+
+// hookedConfig is a configuration whose Validator runs hook, so that a test can change the
+// filesystem between the load of the file and anything that follows it.
+type hookedConfig struct {
+	Name string
+	hook func()
+}
+
+func (c *hookedConfig) Validate() error {
+	c.hook()
+	return nil
+}
+
+// TestValidateReportsAPathItCannotStatAfterTheLoad loads a missing file and then, from the
+// Validator, puts a regular file where its directory was, so that the stat that follows the load
+// fails with an error other than the file not existing.
+func TestValidateReportsAPathItCannotStatAfterTheLoad(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "dir")
+	path := filepath.Join(dir, "config.yaml")
+	hook := func() {
+		if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	}
+	opts := config.Options[hookedConfig]{Path: path, Defaults: hookedConfig{Name: "tool", hook: hook}}
+	var out, errOut bytes.Buffer
+	inv := spec.NewInvocation(&spec.Env{Stdout: &out, Stderr: &errOut}, nil, nil)
+	inv.Output = spec.NewOutput(spec.OutputOptions{NoColorStdout: true, NoColorStderr: true})
+	err := subcommand(t, config.New(opts), "validate").Run(context.Background(), inv)
+	if err == nil {
+		t.Fatal("Run succeeded, want the stat error")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Run = %v, want an error other than the file not existing", err)
+	}
+	if want := "config file " + path + ": "; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error %q does not start with %q", err, want)
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("stderr = %q, want no success line", errOut.String())
 	}
 }
