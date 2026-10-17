@@ -5,8 +5,7 @@
 // its releases. Every way the library reaches the outside world — HTTP, the clock, the target
 // platform, the running executable, the environment and the user's home directory — is a
 // field of Config, so a test substitutes any of them. A field left at its zero value takes its
-// production default; Source is the one field with none, and [Config.Validate] reports a nil
-// Source as [ErrNoSource].
+// production default; a nil Source is the [GitHubSource] for the Identity's Owner and Repo.
 //
 // The package depends on no command-line framework.
 package update

@@ -2,8 +2,8 @@ package update
 
 import "context"
 
-// Source reports the releases a tool can update to. The library ships no implementation: every
-// [Config] names its own, and [Config.Validate] rejects a nil one.
+// Source reports the releases a tool can update to. A [Config] without one uses the [GitHubSource]
+// for its Identity.
 type Source interface {
 	// Latest returns the release the tool should consider updating to. It returns an error when
 	// the source cannot be reached or holds no release; ctx bounds the whole lookup.

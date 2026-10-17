@@ -435,6 +435,70 @@ func TestResolveDoesNotModifyItsReceiver(t *testing.T) {
 	}
 }
 
+func TestResolveDefaultsSourceToTheGitHubSource(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		client *http.Client
+	}{
+		{"default client", nil},
+		{"supplied client", &http.Client{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(t.TempDir())
+			c.Source = nil
+			c.HTTPClient = tc.client
+
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			gh, ok := r.Source.(*GitHubSource)
+			if !ok {
+				t.Fatalf("Source = %T, want *GitHubSource", r.Source)
+			}
+			if gh.Owner != "pedromvgomes" || gh.Repo != "agentic-toolkit" {
+				t.Errorf("Source = %s/%s, want the Identity's pedromvgomes/agentic-toolkit", gh.Owner, gh.Repo)
+			}
+			if gh.HTTPClient == nil || gh.HTTPClient != r.HTTPClient {
+				t.Errorf("Source.HTTPClient = %p, want the resolved HTTPClient %p", gh.HTTPClient, r.HTTPClient)
+			}
+			if tc.client != nil && gh.HTTPClient != tc.client {
+				t.Errorf("Source.HTTPClient = %p, want the Config's client %p", gh.HTTPClient, tc.client)
+			}
+		})
+	}
+}
+
+func TestResolveKeepsASuppliedSource(t *testing.T) {
+	t.Parallel()
+	src := &stubSource{}
+	c := validConfig(t.TempDir())
+	c.Source = src
+
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if r.Source != Source(src) {
+		t.Errorf("Source = %v, want the supplied source", r.Source)
+	}
+}
+
+func TestResolveDoesNotSetTheSourceOnItsReceiver(t *testing.T) {
+	t.Parallel()
+	c := validConfig(t.TempDir())
+	c.Source = nil
+
+	if _, err := c.resolve(); err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if c.Source != nil || c.HTTPClient != nil {
+		t.Error("resolve set Source or HTTPClient on its receiver, want them left nil")
+	}
+}
+
 func TestResolveRejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -442,7 +506,6 @@ func TestResolveRejectsInvalidConfig(t *testing.T) {
 		set  func(*Config)
 		want error
 	}{
-		{"nil Source", func(c *Config) { c.Source = nil }, ErrNoSource},
 		{"empty Name", func(c *Config) { c.Name = "" }, validate.ErrEmpty},
 		{"invalid DirName", func(c *Config) { c.DirName = ".." }, validate.ErrInvalid},
 	}
@@ -500,7 +563,6 @@ func TestValidateReportsEachProblem(t *testing.T) {
 		set  func(*Config)
 		want error
 	}{
-		{"nil Source", func(c *Config) { c.Source = nil }, ErrNoSource},
 		{"empty Name", func(c *Config) { c.Name = "" }, validate.ErrEmpty},
 		{"invalid Name", func(c *Config) { c.Name = "Atk" }, validate.ErrInvalid},
 		{"empty Owner", func(c *Config) { c.Owner = "" }, validate.ErrEmpty},
@@ -531,7 +593,7 @@ func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 	c.DirName = ".."
 
 	err := c.Validate()
-	for _, want := range []error{ErrNoSource, validate.ErrEmpty, validate.ErrInvalid} {
+	for _, want := range []error{validate.ErrEmpty, validate.ErrInvalid} {
 		if !errors.Is(err, want) {
 			t.Errorf("Validate() = %v, want one wrapping %v", err, want)
 		}
