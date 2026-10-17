@@ -764,7 +764,8 @@ func TestGitHubSource_Defaults(t *testing.T) {
 	if got := zero.client(); got == nil || got == http.DefaultClient {
 		t.Errorf("client() = %p, want a new client", got)
 	}
-	if zero.client() == zero.client() {
+	first, second := zero.client(), zero.client()
+	if first == second {
 		t.Error("client() returned the same client twice, want a new one each time")
 	}
 
