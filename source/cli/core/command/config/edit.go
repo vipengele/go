@@ -140,10 +140,7 @@ func prepareCopy[T any](opts Options[T], temp string) ([]byte, error) {
 	data, err := os.ReadFile(opts.Path)
 	switch {
 	case err == nil:
-		if err := os.WriteFile(filepath.Clean(temp), data, editMode); err != nil {
-			return nil, err
-		}
-		return data, nil
+		return data, atomicfile.WriteFile(temp, data, editMode)
 	case errors.Is(err, fs.ErrNotExist):
 		if _, err := cfg.Seed(temp, opts.Defaults); err != nil {
 			return nil, err
@@ -161,11 +158,11 @@ func prepareCopy[T any](opts Options[T], temp string) ([]byte, error) {
 func askReEdit(w io.Writer, r *bufio.Reader) (bool, error) {
 	for {
 		if _, err := io.WriteString(w, "re-edit? [Y/n] "); err != nil {
-			return false, err
+			return false, err // [lydite:exclude_from_mutation][edit returns the error without reading the answer, so the bool returned with it is unobservable]
 		}
 		line, err := r.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
-			return false, err
+			return false, err // [lydite:exclude_from_mutation][edit returns the error without reading the answer, so the bool returned with it is unobservable]
 		}
 		answer := strings.ToLower(strings.TrimSpace(line))
 		switch {

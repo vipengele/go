@@ -276,3 +276,26 @@ func TestWriteFileInAMissingDirectoryFails(t *testing.T) {
 
 	assertEntries(t, dir)
 }
+
+func TestSyncDirMissingDirectory(t *testing.T) {
+	t.Parallel()
+
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	err := atomicfile.SyncDir(missing)
+	if err == nil {
+		t.Fatal("SyncDir: want an error for a missing directory, got nil")
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SyncDir: want an error matching os.ErrNotExist, got %v", err)
+	}
+}
+
+func TestSyncDirExistingDirectory(t *testing.T) {
+	t.Parallel()
+
+	if err := atomicfile.SyncDir(t.TempDir()); err != nil {
+		t.Fatalf("SyncDir: %v", err)
+	}
+}

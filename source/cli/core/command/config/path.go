@@ -49,6 +49,6 @@ func fileExists(path string) (bool, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return false, nil
 	default:
-		return false, fmt.Errorf("config file %s: %w", path, err)
+		return false, fmt.Errorf("config file %s: %w", path, err) // [lydite:exclude_from_mutation][path and validate return the error without reading the bool returned with it, so it is unobservable]
 	}
 }
