@@ -23,6 +23,12 @@ golangci-lint run
   needed only when the state directory itself falls back to it.
 - `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
+- `github.go` — `GitHubSource`: reads the `releases/latest` redirect without following it, falls back
+  to the REST API, and with `IncludePrereleases` reads the first page of the release list instead.
+  Tags must be plain release versions; `WebURL`, `APIURL` and `Timeout` are overridable for tests.
+- `errors.go` — `StatusError`, `TimeoutError` (a `net.Error`), `TagError` and `ErrPrerelease`, the
+  typed errors a source returns; `classifyError` maps deadline and timeout failures to `TimeoutError`
+  and passes cancellation through unchanged.
 
 ## Conventions
 
