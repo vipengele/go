@@ -62,11 +62,13 @@
 //
 //	0        success, and --help ([ExitOK])
 //	1        a general error ([ExitError])
-//	2        a usage error: a command line the tree does not accept ([ExitUsage])
+//	2        a usage error: a command line the tree does not accept, or a [spec.UsageError]
+//	         a run function returns ([ExitUsage])
 //	3-125    registrable: a tool gives them to its own errors
 //	130      interrupted ([ExitInterrupted])
 //
-// 0, 2 and 130 are reserved for the runs they describe, and no error can be given them. 1 can also
+// 0, 2 and 130 are reserved for the runs they describe, and no registration or [spec.Coded] can
+// give them to an error; a run function exits 2 by returning a [spec.UsageError]. 1 can also
 // be given to an error by registration. 125 is the highest registrable code, because a shell
 // reports 126 and above for its own failures and a code above 255 does not survive the exit
 // status.
@@ -79,7 +81,7 @@
 //     code is ignored;
 //  3. the code of the first match among the [WithExitCode] and [WithExitCodeAs] registrations, in
 //     the order the options were given, also for an error that is a join of several;
-//  4. 2 for a usage error;
+//  4. 2 for a usage error, the command line's or a [spec.UsageError] the error carries;
 //  5. 1 otherwise.
 //
 // The root context is cancelled by an interrupt. The first value [spec.Env.Interrupts] delivers

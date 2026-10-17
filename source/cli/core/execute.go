@@ -23,7 +23,9 @@ const (
 	ExitError = 1
 	// ExitUsage is the exit code of a command line the tree does not accept: an unknown flag, a
 	// flag value that does not parse, an unknown subcommand, or a number of positional arguments
-	// the command's [spec.ArgPolicy] rejects.
+	// the command's [spec.ArgPolicy] rejects. It is also the exit code of a [spec.UsageError] a
+	// run function or a hook returns, for a command line that cannot proceed without input the
+	// user cannot give interactively.
 	ExitUsage = 2
 )
 
@@ -154,14 +156,15 @@ func processEnv() (*spec.Env, error) {
 //
 // A layer is the text an error adds before ": " and the message of the error it wraps; an error
 // whose message does not end that way prints whole, with nothing beneath it. An error that
-// neither wraps nor joins, and a usage error, print on the first line alone, as "<name>: <error>".
-// An [App] can render an error of its own type in its own way with [WithErrorRenderer]. The exit
-// code of an error is, first match wins:
+// neither wraps nor joins, a usage error and a [spec.UsageError], print on the first line alone,
+// as "<name>: <error>". An [App] can render an error of its own type in its own way with
+// [WithErrorRenderer]. The exit code of an error is, first match wins:
 //   - [ExitInterrupted], written nowhere, when an interrupt cancelled the run's context and the
 //     error is [context.Canceled];
 //   - the code of a [spec.CodedError] the error carries, when it is 1 or 3 through 125; a code
 //     outside that range is ignored;
-//   - [ExitUsage] for a command line the tree does not accept;
+//   - [ExitUsage] for a command line the tree does not accept, and for an error that carries a
+//     [spec.UsageError];
 //   - [ExitError] otherwise.
 //
 // A nil env.Terminal is filled with [terminal.Detect] of the resolved env's Stdin, Stdout and
@@ -191,9 +194,11 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 //     or times out a context of its own while the run's context is not done is not interrupted;
 //  2. the code of a [spec.CodedError] the error carries, when [registrableExitCode] accepts it;
 //  3. the code of the first matcher of registry that matches the error;
-//  4. [ExitUsage] for a [*cobra.UsageError];
+//  4. [ExitUsage] for a [*cobra.UsageError], and for a [spec.UsageError] the error carries;
 //  5. [ExitError].
 //
+// A [spec.UsageError] ranks as a [*cobra.UsageError] does: a [spec.CodedError] that carries it, or
+// a matcher of registry that matches it, decides its code first, as for any other error.
 // Outside rule 1, the error is written to env.Stderr by [errrender.Render] unless it carries a
 // [spec.ReportedError], which changes no exit code. The invalid-tree error is written whatever it
 // carries. An error a PostRun returns after the run function succeeds reaches rules 2 to 4 as a
@@ -275,6 +280,10 @@ func exitCode(err error, registry exitMatchers) int {
 	}
 	var usage *cobra.UsageError
 	if errors.As(err, &usage) {
+		return ExitUsage
+	}
+	var runUsage *spec.UsageError
+	if errors.As(err, &runUsage) {
 		return ExitUsage
 	}
 	return ExitError

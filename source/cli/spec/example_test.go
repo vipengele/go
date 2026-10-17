@@ -130,3 +130,37 @@ func ExampleCommandInfo() {
 	// [tool self-update]
 	// true
 }
+
+func ExampleInvocation_Confirm() {
+	remove := func(_ context.Context, inv *spec.Invocation) error {
+		ok, err := inv.Confirm("delete 3 files?", spec.ConfirmOptions{Default: spec.DefaultNo, Flag: "--yes"})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return inv.Data("kept\n")
+		}
+		return inv.Data("deleted\n")
+	}
+
+	for _, interactive := range []bool{true, false} {
+		var stdout, stderr strings.Builder
+		env := &spec.Env{
+			Stdin:    strings.NewReader("y\n"),
+			Stdout:   &stdout,
+			Stderr:   &stderr,
+			Terminal: func(s spec.Stream) bool { return interactive && s == spec.Stdin },
+		}
+		err := remove(context.Background(), spec.NewInvocation(env, nil, nil))
+		fmt.Printf("stderr=%q stdout=%q err=%v\n", stderr.String(), stdout.String(), err)
+	}
+
+	// Required needs a person, so the default does not answer for one.
+	inv := spec.NewInvocation(&spec.Env{}, nil, nil)
+	_, err := inv.Prompt("name", spec.PromptOptions{Default: "web", Required: true, Flag: "--name"})
+	fmt.Println(err)
+	// Output:
+	// stderr="delete 3 files? [y/N] " stdout="deleted\n" err=<nil>
+	// stderr="" stdout="kept\n" err=<nil>
+	// name requires interactive input; pass --name
+}

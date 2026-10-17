@@ -213,7 +213,8 @@ _Avoid_: tag (a **Prefixed tag** is a release), label, metadata
 
 **Exit code**:
 The number a tool's process ends with. 0 is success, 1 a general error, 2 a command line the tool
-does not accept, 130 an interruption; a tool gives 3 through 125 to its own errors (ADR-0010).
+does not accept, 130 an interruption; a tool gives 3 through 125 to its own errors (ADR-0010). A run
+function reaches 2 only by returning a `spec.UsageError`, never by a code it chooses (ADR-0015).
 _Avoid_: status, return code, error code (a code inside an error's own text)
 
 **Reported error**:

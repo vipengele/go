@@ -492,6 +492,24 @@ func TestAppExitCodes(t *testing.T) {
 			want: 9,
 		},
 		{
+			name: "run usage",
+			err:  fmt.Errorf("deploy: %w", &spec.UsageError{Question: "continue?", Flag: "--yes"}),
+			opts: []cli.Option{cli.WithExitCode(7, errExitSentinel), byType},
+			want: cli.ExitUsage,
+		},
+		{
+			name: "registration wins over run usage",
+			err:  &spec.UsageError{Question: "continue?", Flag: "--yes"},
+			opts: []cli.Option{cli.WithExitCodeAs(func(*spec.UsageError) int { return 6 })},
+			want: 6,
+		},
+		{
+			name: "coded wins over run usage",
+			err:  spec.Coded(4, &spec.UsageError{Question: "continue?"}),
+			opts: []cli.Option{cli.WithExitCodeAs(func(*spec.UsageError) int { return 6 })},
+			want: 4,
+		},
+		{
 			name: "nil fn is ignored",
 			err:  exitErr{code: 9},
 			opts: []cli.Option{cli.WithExitCodeAs[exitErr](nil)},

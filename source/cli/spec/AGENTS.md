@@ -23,6 +23,22 @@ golangci-lint run
 - `Coded(code, err)` / `Reported(err)` (`exit.go`) — the exit code and the already-shown mark a run
   function returns; they live here so `update` and `daemon` need not import `cli/core`, which maps
   them to an exit code (ADR-0010).
+- `UsageError{Question, Flag}` (`usage.go`) — the error a run function returns when a question needs
+  an answer nobody can type; `cli/core` exits 2 for it, found by `errors.As` (ADR-0015). It is
+  returned by pointer, wraps nothing, and `Coded(2, err)` stays ignored: a run function claims exit 2
+  only through this type. Bare it renders as one line, `<Question> requires interactive input; pass
+  <Flag>` (without the `; pass` clause when `Flag` is empty); wrapped it renders as a two-row tree.
+- `Invocation.Confirm(question, ConfirmOptions)` and `Invocation.Prompt(question, PromptOptions)`
+  (`prompt.go`) — ask on `Env.Stderr` and read one line from `Env.Stdin`, byte by byte so nothing
+  after the newline is consumed. They ask only when `Env.IsTerminal(Stdin)`; quiet and the JSON output mode
+  do not change that, and nothing is written to stdout. Not a terminal: a question with a default and
+  not `Required` answers with the default and writes nothing; any other returns a bare
+  `*UsageError` naming `Flag`. `ConfirmDefault` is `NoDefault` (hint `[y/n]`, the zero value),
+  `DefaultYes` (`[Y/n]`) or `DefaultNo` (`[y/N]`); `Confirm` accepts y, yes, n and no in any case.
+  End of input before any byte returns `ErrAborted` (exit 1, printed as `<tool>: aborted`; 130 stays
+  signal-only), after some bytes it takes them as the answer. A refused answer is an error, never
+  asked twice. The Invocation has no run context, so an interrupt is not seen until Enter: a run
+  function checks its context after the answer. A nil `Env` never asks.
 - `ColorAllowed(noColor, identity, env, stream)` (`colour.go`) — the colour decision for one stream
   and its precedence; `Output.Styler(stream)`, `Styler` and the `Glyph*` constants (`style.go`) —
   coloured text and role glyphs that follow `Output.Color(stream)`.
