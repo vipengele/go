@@ -515,3 +515,119 @@ func TestShapeOfStart(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactorJSONHeaderValueOfAnyType(t *testing.T) {
+	r := testRedactor()
+	tests := []struct {
+		name, in, want string
+	}{
+		{"array", `{"Cookie":["sid=abc"]}`, `{"Cookie":"[REDACTED]"}`},
+		{"object", `{"Cookie":{"a":"b"}}`, `{"Cookie":"[REDACTED]"}`},
+		{"number", `{"Cookie":123,"n":1}`, `{"Cookie":"[REDACTED]","n":1}`},
+		{"negative number", `{"x-api-key":-1.5e3}`, `{"x-api-key":"[REDACTED]"}`},
+		{"bool", `{"Cookie":true}`, `{"Cookie":"[REDACTED]"}`},
+		{"null", `{"Cookie":null}`, `{"Cookie":"[REDACTED]"}`},
+		{"spacing kept", `{ "Cookie" : [ "a" , "b" ] , "n" : 1 }`, `{ "Cookie" : "[REDACTED]" , "n" : 1 }`},
+		{"nested", `{"req":{"In":{"Header":{"Cookie":["sid=abc"],"Accept":["*/*"]}}}}`,
+			`{"req":{"In":{"Header":{"Cookie":"[REDACTED]","Accept":["*/*"]}}}}`},
+		{"in an array", `[{"Set-Cookie":["a=1","b=2"]},{"Cookie":{"x":[1,{"y":"]"}]}}]`,
+			`[{"Set-Cookie":"[REDACTED]"},{"Cookie":"[REDACTED]"}]`},
+		{"brackets and quotes in strings", `{"Cookie":["a]\"}","{"],"n":1}`, `{"Cookie":"[REDACTED]","n":1}`},
+		{"repeated key", `{"Cookie":1,"cookie":[2],"COOKIE":"3"}`,
+			`{"Cookie":"[REDACTED]","cookie":"[REDACTED]","COOKIE":"[REDACTED]"}`},
+		{"escaped key text in a string", `{"msg":"see \"Cookie\": [1]"}`, `{"msg":"see \"Cookie\": [1]"}`},
+		{"key after an escaped backslash", `{"a":"x\\","Cookie":[1]}`, `{"a":"x\\","Cookie":"[REDACTED]"}`},
+		{"other key ending in a name", `{"X-Cookie":[1]}`, `{"X-Cookie":[1]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.line(tt.in)
+			if got != tt.want {
+				t.Errorf("line(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if !json.Valid([]byte(got)) {
+				t.Errorf("line(%q) = %q, not valid JSON", tt.in, got)
+			}
+			if again := r.line(got); again != got {
+				t.Errorf("line(%q) = %q, want it unchanged", got, again)
+			}
+		})
+	}
+}
+
+func TestRedactingWriterJSONHeaderValueSplitAtEveryOffset(t *testing.T) {
+	r := testRedactor()
+	in := `{"Cookie":["sid=abc","x\"]"],"n":1}` + "\n" +
+		`{"h":{"Cookie":{"a":{"b":"c"}},"X-Api-Key":12345}}` + "\n" +
+		`{"Set-Cookie":true,"Cookie":null}` + "\n"
+	var want strings.Builder
+	for line := range strings.Lines(in) {
+		want.WriteString(r.line(strings.TrimSuffix(line, "\n")) + "\n")
+	}
+	for i := range len(in) + 1 {
+		for j := i; j <= len(in); j++ {
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, r)
+			writeAll(t, w, in[:i], in[i:j], in[j:])
+			if got := out.String(); got != want.String() {
+				t.Fatalf("split at %d,%d: got %q, want %q", i, j, got, want.String())
+			}
+		}
+	}
+}
+
+func TestRedactingWriterOverflowJSONHeaderValueStraddlingCut(t *testing.T) {
+	r := testRedactor()
+	cut := maxBuffered + 1 - overflowWindow
+	tests := []struct {
+		name, open, more, after, want string
+	}{
+		{"array", `["SECRET","S`, `MORE\"]"]`, `,"n":1}`, `"Cookie":"[REDACTED]","n":1}`},
+		{"object", `{"a":{"b":"SECRET\\`, `MORE"}}`, `,"n":1}`, `"Cookie":"[REDACTED]","n":1}`},
+		{"number", `1234`, `5678`, `,"n":1}`, `"Cookie":"[REDACTED]","n":1}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The value starts before the cut and runs past the end of the buffer, so the overflow
+			// flush emits the redacted value and the rest of it is dropped as it arrives.
+			head := `{"pad":"` + filler(cut-20) + `","Cookie":` + tt.open
+			body := strings.Repeat("S", overflowWindow+20)
+			if tt.name == "number" {
+				body = strings.Repeat("9", overflowWindow+20)
+			}
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, r)
+			writeAll(t, w, head+body)
+			if out.Len() == 0 {
+				t.Fatal("overflow flushed nothing")
+			}
+			writeAll(t, w, tt.more, tt.after+"\n")
+			got := out.String()
+			for _, s := range []string{"SECRET", "MORE", "SS", "99", "1234", "5678"} {
+				if strings.Contains(got, s) {
+					t.Fatalf("%q leaked: %q", s, got[max(0, len(got)-200):])
+				}
+			}
+			if !strings.HasSuffix(got, tt.want+"\n") {
+				t.Errorf("got suffix %q, want suffix %q", got[max(0, len(got)-len(tt.want)-20):], tt.want)
+			}
+			if !json.Valid(bytes.TrimSuffix(out.Bytes(), []byte("\n"))) {
+				t.Error("output line is not valid JSON")
+			}
+		})
+	}
+}
+
+func TestRedactingWriterFlushInsideJSONHeaderValue(t *testing.T) {
+	var out bytes.Buffer
+	w := newRedactingWriter(&out, testRedactor())
+	writeAll(t, w, `{"Cookie":["sid=a`)
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	writeAll(t, w, `bc","[\"]"],"n":1}`+"\n", `{"Cookie":["x"]}`+"\n")
+	want := `{"Cookie":"[REDACTED]","n":1}` + "\n" + `{"Cookie":"[REDACTED]"}` + "\n"
+	if got := out.String(); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

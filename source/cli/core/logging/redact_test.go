@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"go.vipengele.org/cli/spec"
 )
 
 func TestRedactorLineText(t *testing.T) {
@@ -123,7 +125,7 @@ type plain struct{ Token string }
 func logJSON(t *testing.T, red Redaction, use func(*slog.Logger)) (string, map[string]any) {
 	t.Helper()
 	var buf bytes.Buffer
-	h := newRedactingHandler(slog.NewJSONHandler(&buf, nil), newRedactor(red))
+	h := newRedactingHandler(slog.NewJSONHandler(&buf, nil), newRedactor(red), spec.FormatJSON)
 	use(slog.New(h))
 	out := buf.String()
 	var rec map[string]any
@@ -188,8 +190,9 @@ func TestHandlerRedactsFormattedValues(t *testing.T) {
 	if got, want := rec["err"], "failed with ghp_[REDACTED]"; got != want {
 		t.Errorf("err = %v, want %v", got, want)
 	}
-	if got, want := rec["str"], "via ghp_[REDACTED]"; got != want {
-		t.Errorf("str = %v, want %v", got, want)
+	// The JSON handler encodes a Stringer as JSON, not by its String method.
+	if str, ok := rec["str"].(map[string]any); !ok || len(str) != 0 {
+		t.Errorf("str = %v, want an empty object", rec["str"])
 	}
 	val, ok := rec["val"].(map[string]any)
 	if !ok {
@@ -201,8 +204,9 @@ func TestHandlerRedactsFormattedValues(t *testing.T) {
 	if got, want := val["cookie"], "[REDACTED]"; got != want {
 		t.Errorf("val.cookie = %v, want %v", got, want)
 	}
-	if got, want := rec["plain"], "{Token:ghp_[REDACTED]}"; got != want {
-		t.Errorf("plain = %v, want %v", got, want)
+	plainRec, ok := rec["plain"].(map[string]any)
+	if !ok || plainRec["Token"] != "ghp_[REDACTED]" {
+		t.Errorf("plain = %v, want an object with Token ghp_[REDACTED]", rec["plain"])
 	}
 	clean, ok := rec["clean"].(map[string]any)
 	if !ok || clean["Token"] != "nothing" {
@@ -259,7 +263,7 @@ func TestHandlerWithAttrsAndWithGroup(t *testing.T) {
 
 func TestHandlerEnabledDelegates(t *testing.T) {
 	next := slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelWarn})
-	h := newRedactingHandler(next, newRedactor(Redaction{}))
+	h := newRedactingHandler(next, newRedactor(Redaction{}), spec.FormatText)
 	if h.Enabled(context.Background(), slog.LevelInfo) {
 		t.Error("Enabled(info) = true under a warn handler, want false")
 	}
@@ -270,7 +274,7 @@ func TestHandlerEnabledDelegates(t *testing.T) {
 
 func TestHandlerTextOutput(t *testing.T) {
 	var buf bytes.Buffer
-	h := newRedactingHandler(slog.NewTextHandler(&buf, nil), newRedactor(Redaction{}))
+	h := newRedactingHandler(slog.NewTextHandler(&buf, nil), newRedactor(Redaction{}), spec.FormatText)
 	slog.New(h).Info("m", slog.String("Cookie", "abc"), slog.String("auth", "Basic abc"))
 	out := buf.String()
 	assertNoSecret(t, out)
@@ -305,6 +309,113 @@ func TestRedactorLineByShape(t *testing.T) {
 			}
 			if json.Valid([]byte(tt.in)) && !json.Valid([]byte(got)) {
 				t.Errorf("line(%q) = %q, not valid JSON", tt.in, got)
+			}
+		})
+	}
+}
+
+// headers nests a header map behind a pointer, which %+v prints as an address and the JSON
+// encoder follows.
+type headers struct {
+	In *struct{ H map[string][]string }
+}
+
+// textToken writes a token through MarshalText that its %+v form does not show.
+type textToken struct{ id int }
+
+func (textToken) MarshalText() ([]byte, error) { return []byte("ghp_text"), nil }
+
+// failingText fails MarshalText with a token in the error.
+type failingText struct{}
+
+func (failingText) MarshalText() ([]byte, error) { return nil, errors.New("bad ghp_fail") }
+
+// nilErr panics in Error on a nil receiver.
+type nilErr struct{ msg string }
+
+func (e *nilErr) Error() string { return e.msg }
+
+func TestHandlerJSONRedactsTheEncodedForm(t *testing.T) {
+	out, rec := logJSON(t, Redaction{Prefixes: []string{"ghp_"}}, func(l *slog.Logger) {
+		l.Info("m",
+			slog.Any("req", headers{In: &struct{ H map[string][]string }{H: map[string][]string{"Cookie": {"abc"}}}}),
+			slog.Any("text", textToken{}),
+			slog.Any("fail", failingText{}),
+		)
+	})
+	assertNoSecret(t, out)
+	for _, s := range []string{"ghp_text", "ghp_fail"} {
+		if strings.Contains(out, s) {
+			t.Errorf("output %q leaks %q", out, s)
+		}
+	}
+	req, _ := rec["req"].(map[string]any)
+	in, _ := req["In"].(map[string]any)
+	h, _ := in["H"].(map[string]any)
+	if h["Cookie"] != "[REDACTED]" {
+		t.Errorf("req = %v, want In.H.Cookie redacted", rec["req"])
+	}
+	if got, want := rec["text"], "ghp_[REDACTED]"; got != want {
+		t.Errorf("text = %v, want %v", got, want)
+	}
+}
+
+func TestHandlerTextRedactsTheWrittenForm(t *testing.T) {
+	var buf bytes.Buffer
+	h := newRedactingHandler(slog.NewTextHandler(&buf, nil), newRedactor(Redaction{Prefixes: []string{"ghp_"}}), spec.FormatText)
+	slog.New(h).Info("m",
+		slog.Any("text", textToken{}),
+		slog.Any("bytes", []byte("Bearer abc")),
+		slog.Any("fail", failingText{}),
+	)
+	out := buf.String()
+	for _, s := range []string{"ghp_text", "abc", "ghp_fail"} {
+		if strings.Contains(out, s) {
+			t.Errorf("output %q leaks %q", out, s)
+		}
+	}
+	for _, want := range []string{"text=ghp_[REDACTED]", `bytes="Bearer [REDACTED]"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q lacks %q", out, want)
+		}
+	}
+}
+
+// TestHandlerKeepsCleanValuesAsWritten pins that a value with no secret is written by the
+// redacting handler exactly as the handler beneath it writes it alone.
+func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
+	noTime := &slog.HandlerOptions{ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey && len(groups) == 0 {
+			return slog.Attr{}
+		}
+		return a
+	}}
+	attrs := []any{
+		slog.Any("struct", plain{Token: "x <&> y"}),
+		slog.Any("ptr", &plain{Token: "p"}),
+		slog.Any("map", map[string]any{"b": []int{1, 2}, "a": nil}),
+		slog.Any("err", errors.New("plain failure")),
+		slog.Any("nilerr", (*nilErr)(nil)),
+		slog.Any("str", stringer{}),
+		slog.Any("bytes", []byte("raw bytes")),
+		slog.Any("raw", json.RawMessage(`{"k": [1, 2]}`)),
+		slog.Any("nil", nil),
+		slog.Any("text", textToken{id: 1}),
+	}
+	for _, tt := range []struct {
+		format spec.Format
+		next   func(*bytes.Buffer) slog.Handler
+	}{
+		{spec.FormatJSON, func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, noTime) }},
+		{spec.FormatText, func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, noTime) }},
+	} {
+		t.Run(tt.format.String(), func(t *testing.T) {
+			var plainOut, redactedOut bytes.Buffer
+			slog.New(tt.next(&plainOut)).Info("m", attrs...)
+			r := newRedactor(Redaction{Prefixes: []string{"zzz_"}})
+			slog.New(newRedactingHandler(tt.next(&redactedOut), r, tt.format)).Info("m", attrs...)
+			if got, want := redactedOut.String(), plainOut.String(); got != want {
+				t.Errorf("redacting handler wrote\n%s\nwant\n%s", got, want)
 			}
 		})
 	}

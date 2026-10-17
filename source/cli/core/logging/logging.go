@@ -80,7 +80,7 @@ func Setup(opts Options) (Result, error) {
 	} else {
 		h = slog.NewTextHandler(w, handlerOpts)
 	}
-	logger := slog.New(newRedactingHandler(h, r))
+	logger := slog.New(newRedactingHandler(h, r, opts.Format))
 	slog.SetDefault(logger)
 	return Result{Logger: logger, Writer: w}, nil
 }

@@ -39,7 +39,9 @@ public package `go.vipengele.org/cli/core/logging`.
   `[REDACTED]`; a bare prefix is left alone. A header matches by attribute key, in any letter case
   and at any group depth, or as `Name: value` in text. Each line is read by its own shape, whatever the
   log format: a whole line that is valid JSON (it starts with `{` or `[`) is read as JSON, where a
-  header value ends at the closing unescaped quote so the line stays valid JSON; any other line is
+  header value ends at the closing unescaped quote, and the value of a header key that is an array,
+  an object, a number, a boolean or null becomes the string `"[REDACTED]"`, so the line stays valid
+  JSON; any other line is
   read as text, where the value runs to end of line and the quoted form `"Name": value` also
   matches. A line written in pieces, past the 64 KiB cap or by a flush, takes its shape from the
   bytes held when its first piece is written: JSON when they are a whole JSON line or start with

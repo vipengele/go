@@ -128,7 +128,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   Headers}`, added to the baseline), serves a handler wrapper (message and attributes, any group
   depth) and `RedactingWriter` (line-buffered, 64 KiB cap with a 256-byte trailing window, a final
   line without newline held until `Flush`/`Close`; each line is read by its shape, not the log format: a line that is valid JSON
-  (first non-space byte `{` or `[`) ends a header value at the closing unescaped quote, any other
+  (first non-space byte `{` or `[`) ends a header value at the closing unescaped quote and replaces
+  a non-string value of a header key, at any depth, with `"[REDACTED]"`, any other
   line runs it to end of line and also matches `"Name": value`). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
   A leaf package that never imports `cli`; `cli.WithLogging` drives it from the flags.
 - `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over

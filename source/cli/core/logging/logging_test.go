@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -370,6 +371,57 @@ func TestSetupJSONLinesStayValidThroughBothLayers(t *testing.T) {
 						t.Errorf("line %q leaks %q", line, secret)
 					}
 				}
+			}
+		})
+	}
+}
+
+// headerHolder and request nest an http.Header behind two pointers, which %+v prints as an
+// address and the JSON encoder follows.
+type headerHolder struct{ Header http.Header }
+
+type request struct{ In *headerHolder }
+
+func TestSetupRedactsHeaderBehindNestedPointers(t *testing.T) {
+	for _, format := range formats() {
+		t.Run(format.String(), func(t *testing.T) {
+			restoreDefault(t)
+			var buf bytes.Buffer
+			res, err := logging.Setup(logging.Options{Format: format, Writer: &buf})
+			if err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			req := &request{In: &headerHolder{Header: http.Header{
+				"Cookie": {"sid=abc"}, "Set-Cookie": {"a=1", "b=2"}, "Accept": {"*/*"},
+			}}}
+			res.Logger.Info("m", slog.Any("req", req), slog.Any("map", map[string]any{"Cookie": 9876543210}))
+			out := buf.String()
+			for _, secret := range []string{"sid=abc", "a=1", "b=2", "9876543210"} {
+				if strings.Contains(out, secret) {
+					t.Errorf("output %q leaks %q", out, secret)
+				}
+			}
+			if format != spec.FormatJSON {
+				return
+			}
+			line := strings.TrimSuffix(out, "\n")
+			if !json.Valid([]byte(line)) {
+				t.Fatalf("line %q is not valid JSON", line)
+			}
+			var rec struct {
+				Req struct {
+					In struct{ Header map[string]any }
+				}
+			}
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatalf("decode %q: %v", line, err)
+			}
+			h := rec.Req.In.Header
+			if h["Cookie"] != "[REDACTED]" || h["Set-Cookie"] != "[REDACTED]" {
+				t.Errorf("header = %v, want Cookie and Set-Cookie redacted", h)
+			}
+			if accept, _ := h["Accept"].([]any); len(accept) != 1 || accept[0] != "*/*" {
+				t.Errorf("header Accept = %v, want it kept as an array", h["Accept"])
 			}
 		})
 	}

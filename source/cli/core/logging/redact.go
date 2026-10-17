@@ -3,14 +3,18 @@ package logging
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
+
+	"go.vipengele.org/cli/spec"
 )
 
 // Redaction names the secrets a tool adds to the ones every logger redacts: the header names
@@ -19,10 +23,13 @@ import (
 // still redacts it.
 //
 // A line of text is read by its shape, whatever the log format. A line that is a JSON object or
-// array, starting with "{" or "[" after any leading white space, is read as JSON: the value after "Name:" inside
-// a string, and the string value of the key "Name", end at the closing unescaped quote, so the
-// line stays valid JSON. Any other line is read as plain text: the value after "Name:", and after
-// the quoted key form `"Name":` of a JSON fragment, runs to the end of the line.
+// array, starting with "{" or "[" after any leading white space, is read as JSON: the value after
+// "Name:" inside a string, and the string value of the key "Name", end at the closing unescaped
+// quote, and a value of the key "Name" of any other type, an array, an object, a number, a boolean
+// or null, becomes the string "[REDACTED]" whole, so the line stays valid JSON. The key is
+// recognised when it is written as the plain string "Name", with no escape in it. Any other line
+// is read as plain text: the value after "Name:", and after the quoted key form `"Name":` of a
+// JSON fragment, runs to the end of the line.
 type Redaction struct {
 	// Prefixes are token prefixes, such as "ghp_". The prefix followed by a run of the characters
 	// [A-Za-z0-9_+/=.~-] becomes the prefix followed by "[REDACTED]"; a prefix with none of those
@@ -56,7 +63,8 @@ const (
 	// `"Name": value` a fragment of JSON carries, runs to the end of the line.
 	shapeText lineShape = iota
 	// shapeJSON reads a line as JSON: the value of "Name: value" inside a string, and the string
-	// value of the key "Name", end at the closing unescaped quote, so the line stays valid JSON.
+	// value of the key "Name", end at the closing unescaped quote, and a value of the key "Name"
+	// of any other type becomes the string "[REDACTED]" whole, so the line stays valid JSON.
 	shapeJSON
 )
 
@@ -107,6 +115,11 @@ type redactor struct {
 	// the value the shape delimits.
 	textHeader *regexp.Regexp
 	jsonHeader *regexp.Regexp
+	// jsonKey matches a header name written as a JSON object key, the quoted name and the colon
+	// and white space after it, in group 1. The opening quote follows the start of the text or a
+	// byte other than a backslash and then an even run of backslashes, so it is not an escaped
+	// quote inside a string.
+	jsonKey *regexp.Regexp
 }
 
 // newRedactor returns a redactor for the baseline and the additions of red.
@@ -128,6 +141,7 @@ func newRedactor(red Redaction) *redactor {
 		prefix:     regexp.MustCompile(`(` + prefixAlt + `)` + tokenChars + `+`),
 		textHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)"?\s*:\s*)[^\r\n]*`),
 		jsonHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)(?:"\s*:\s*"|\s*:\s*))(?:[^"\\]|\\.)*`),
+		jsonKey:    regexp.MustCompile(`(?i)(?:^|[^\\])(?:\\\\)*("(?:` + nameAlt + `)"\s*:\s*)`),
 	}
 }
 
@@ -164,21 +178,124 @@ func (r *redactor) lineAs(s string, shape lineShape) string {
 	header := r.textHeader
 	if shape == shapeJSON {
 		header = r.jsonHeader
+		s = r.jsonValues(s)
 	}
 	s = header.ReplaceAllString(s, "${1}"+redacted)
 	return r.prefix.ReplaceAllString(s, "${1}"+redacted)
+}
+
+// headerValue is the value of a header key in JSON text that is not a string.
+type headerValue struct {
+	// start is where the key's match starts, value where the value starts and end where it ends.
+	start, value, end int
+	// open holds the state of the skip over the value when it runs to the end of the text, and is
+	// nil when the value ends inside it.
+	open *jsonSkip
+}
+
+// headerValues returns, in order, the values of the header keys in the JSON text s that are not
+// strings: an array, an object, a number, a boolean or null, including one that runs to the end
+// of s. A key whose value has not started before the end of s has none. A string value is left to
+// the jsonHeader pattern, which ends it at its closing unescaped quote.
+func (r *redactor) headerValues(s string) []headerValue {
+	var out []headerValue
+	for from := 0; from < len(s); {
+		m := r.jsonKey.FindStringSubmatchIndex(s[from:])
+		if m == nil {
+			break
+		}
+		start, value := from+m[2], from+m[3]
+		if value == len(s) || s[value] == '"' {
+			from = value
+			continue
+		}
+		end, open := skipJSONValue(s, value)
+		out = append(out, headerValue{start: start, value: value, end: end, open: open})
+		from = end
+	}
+	return out
+}
+
+// jsonValues returns the JSON text s with every value [redactor.headerValues] finds replaced by
+// the string "[REDACTED]".
+func (r *redactor) jsonValues(s string) string {
+	values := r.headerValues(s)
+	if len(values) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, v := range values {
+		b.WriteString(s[last:v.value])
+		b.WriteString(`"` + redacted + `"`)
+		last = v.end
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// jsonSkip is the state of a skip over one JSON value that is not a string, a byte at a time.
+type jsonSkip struct {
+	// scalar reports a number, a boolean or null, which ends before the first delimiter; any
+	// other value is an array or an object, which ends with the bracket that closes it.
+	scalar bool
+	// depth is the number of arrays and objects open, inString reports a position inside a
+	// string of the value, and escaped one right after a backslash in that string.
+	depth             int
+	inString, escaped bool
+}
+
+// next advances the skip over c and reports whether the value ends at c, and if so whether c is
+// its last byte or the first byte after it. A newline ends the value, as it ends the line.
+func (k *jsonSkip) next(c byte) (done, last bool) {
+	if c == '\n' {
+		return true, false
+	}
+	if k.scalar {
+		return strings.IndexByte(",}] \t\r", c) >= 0, false
+	}
+	switch {
+	case k.inString && k.escaped:
+		k.escaped = false
+	case k.inString && c == '\\':
+		k.escaped = true
+	case k.inString:
+		k.inString = c != '"'
+	case c == '"':
+		k.inString = true
+	case c == '{' || c == '[':
+		k.depth++
+	case c == '}' || c == ']':
+		k.depth--
+		return k.depth == 0, true
+	}
+	return false, false
+}
+
+// skipJSONValue returns where the value that starts at s[i], not a string, ends: after its
+// closing bracket, before the delimiter that ends a scalar, or at the end of s, together with
+// the state of the skip when the value runs to the end of s.
+func skipJSONValue(s string, i int) (int, *jsonSkip) {
+	k := &jsonSkip{scalar: s[i] != '{' && s[i] != '['}
+	for j := i; j < len(s); j++ {
+		if done, last := k.next(s[j]); done {
+			if last {
+				return j + 1, nil
+			}
+			return j, nil
+		}
+	}
+	return len(s), k
 }
 
 // text returns s, a message or an attribute's string value, with every secret replaced, read by
 // its shape as a line is.
 func (r *redactor) text(s string) string { return r.line(s) }
 
-// attr returns a with its value resolved and every secret in it replaced, at any group depth. The
-// whole value of an attribute whose key is a header name becomes "[REDACTED]". A value of kind
-// [slog.KindAny] is redacted through its formatted form: Error for an error, String for a
-// [fmt.Stringer], and %+v otherwise; it is replaced by the redacted string only when that differs
-// from the formatted form, so a value with no secret reaches the handler unchanged.
-func (r *redactor) attr(a slog.Attr) slog.Attr {
+// attr returns a with its value resolved and every secret in it replaced, at any group depth,
+// for a handler of format. The whole value of an attribute whose key is a header name becomes
+// "[REDACTED]". A value of kind [slog.KindAny] is redacted by [redactor.anyValue].
+func (r *redactor) attr(a slog.Attr, format spec.Format) slog.Attr {
 	a.Value = a.Value.Resolve()
 	if r.isHeader(a.Key) {
 		return slog.String(a.Key, redacted)
@@ -187,36 +304,151 @@ func (r *redactor) attr(a slog.Attr) slog.Attr {
 	case slog.KindString:
 		a.Value = slog.StringValue(r.text(a.Value.String()))
 	case slog.KindGroup:
-		a.Value = slog.GroupValue(r.attrs(a.Value.Group())...)
+		a.Value = slog.GroupValue(r.attrs(a.Value.Group(), format)...)
 	case slog.KindAny:
-		formatted := format(a.Value.Any())
-		if clean := r.text(formatted); clean != formatted {
-			a.Value = slog.StringValue(clean)
-		}
+		a.Value = r.anyValue(a.Value, format)
 	default:
 	}
 	return a
 }
 
 // attrs returns as with every attribute redacted by [redactor.attr].
-func (r *redactor) attrs(as []slog.Attr) []slog.Attr {
+func (r *redactor) attrs(as []slog.Attr, format spec.Format) []slog.Attr {
 	out := make([]slog.Attr, len(as))
 	for i, a := range as {
-		out[i] = r.attr(a)
+		out[i] = r.attr(a, format)
 	}
 	return out
 }
 
-// format returns the text form of v that a handler writes: Error for an error, String for a
-// [fmt.Stringer], %+v otherwise. Formatting goes through fmt, which turns a panicking Error or
-// String, such as one on a nil receiver, into text instead of a panic in the handler.
-func format(v any) string {
-	switch v.(type) {
-	case error, fmt.Stringer:
-		return fmt.Sprintf("%v", v)
-	default:
-		return fmt.Sprintf("%+v", v)
+// anyValue returns v, of kind [slog.KindAny], rendered once in the form the [slog] handler of
+// format writes and redacted in that form, so the text checked is the text written.
+//
+// For [spec.FormatJSON] the form is the error text of an error that is not a [json.Marshaler],
+// and the value as a [json.Encoder] encodes it otherwise, a [encoding.TextMarshaler] as its text
+// in a JSON string; the encoded value is read as JSON, so a header key at any depth has its value
+// redacted whatever its type, and it is handed on as a [json.RawMessage], so an object stays an
+// object. For [spec.FormatText] the form is the text of a [encoding.TextAppender] or
+// [encoding.TextMarshaler], and the %+v form otherwise, which is the Error or String of an error
+// or a [fmt.Stringer]; it is handed on as a string, which the text handler writes as it would
+// have written v. A byte slice, which the text handler writes quoted, is checked as its bytes and
+// replaced only when they hold a secret.
+//
+// A value whose rendering panics is handed on unchanged, and the handler writes its own panic
+// text. A value whose rendering fails has the "!ERROR:" text the handler writes for the failure
+// checked, and is replaced by it, redacted, only when that text holds a secret.
+func (r *redactor) anyValue(v slog.Value, format spec.Format) slog.Value {
+	if format == spec.FormatJSON {
+		return r.jsonAny(v)
 	}
+	return r.textAny(v)
+}
+
+// jsonAny is [redactor.anyValue] for [spec.FormatJSON].
+func (r *redactor) jsonAny(v slog.Value) slog.Value {
+	a := v.Any()
+	if err, ok := a.(error); ok {
+		if _, jm := a.(json.Marshaler); !jm {
+			s, err := render(func() (string, error) { return err.Error(), nil })
+			if err != nil {
+				return v
+			}
+			return slog.StringValue(r.text(s))
+		}
+	}
+	s, err := render(func() (string, error) { return encodeJSON(a) })
+	if err != nil {
+		return r.failed(v, err)
+	}
+	clean := r.lineAs(s, shapeJSON)
+	if clean != s && !json.Valid([]byte(clean)) {
+		return slog.StringValue(clean)
+	}
+	return slog.AnyValue(json.RawMessage(clean))
+}
+
+// textAny is [redactor.anyValue] for [spec.FormatText].
+func (r *redactor) textAny(v slog.Value) slog.Value {
+	a := v.Any()
+	var text func() (string, error)
+	switch t := a.(type) {
+	case encoding.TextAppender:
+		text = func() (string, error) {
+			b, err := t.AppendText(nil)
+			return string(b), err
+		}
+	case encoding.TextMarshaler:
+		text = func() (string, error) {
+			b, err := t.MarshalText()
+			return string(b), err
+		}
+	default:
+		if bs, ok := byteSlice(a); ok {
+			if clean := r.text(string(bs)); clean != string(bs) {
+				return slog.StringValue(clean)
+			}
+			return v
+		}
+		return slog.StringValue(r.text(fmt.Sprintf("%+v", a)))
+	}
+	s, err := render(text)
+	if err != nil {
+		return r.failed(v, err)
+	}
+	return slog.StringValue(r.text(s))
+}
+
+// failed returns v, whose rendering failed with err, replaced by the "!ERROR:" text a handler
+// writes for the failure, redacted, when that text holds a secret, and v unchanged otherwise. A
+// rendering that panicked leaves v unchanged.
+func (r *redactor) failed(v slog.Value, err error) slog.Value {
+	if errors.Is(err, errRenderPanic) {
+		return v
+	}
+	s := "!ERROR:" + err.Error()
+	if clean := r.text(s); clean != s {
+		return slog.StringValue(clean)
+	}
+	return v
+}
+
+// errRenderPanic is the error of a rendering that panicked.
+var errRenderPanic = errors.New("rendering panicked")
+
+// render returns what f returns, and [errRenderPanic] when f panics: the handler then renders the
+// value itself and writes its own text for the panic.
+func render(f func() (string, error)) (s string, err error) {
+	defer func() {
+		if recover() != nil {
+			s, err = "", errRenderPanic
+		}
+	}()
+	return f()
+}
+
+// encodeJSON returns v encoded as the [slog] JSON handler encodes it, by a [json.Encoder] that
+// does not escape HTML, without the trailing newline.
+func encodeJSON(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(buf.String(), "\n"), nil
+}
+
+// byteSlice returns a as a byte slice when its underlying type is one, as the [slog] text
+// handler tests it.
+func byteSlice(a any) ([]byte, bool) {
+	if bs, ok := a.([]byte); ok {
+		return bs, true
+	}
+	t := reflect.TypeOf(a)
+	if t != nil && t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+		return reflect.ValueOf(a).Bytes(), true
+	}
+	return nil, false
 }
 
 // redactingHandler is a [slog.Handler] that redacts the message and every attribute of a record,
@@ -224,11 +456,15 @@ func format(v any) string {
 type redactingHandler struct {
 	next slog.Handler
 	r    *redactor
+	// format is the format next writes, which decides the form a value of kind [slog.KindAny]
+	// is rendered and redacted in.
+	format spec.Format
 }
 
-// newRedactingHandler returns a handler that redacts with r and writes through next.
-func newRedactingHandler(next slog.Handler, r *redactor) slog.Handler {
-	return &redactingHandler{next: next, r: r}
+// newRedactingHandler returns a handler that redacts with r and writes through next, a [slog]
+// handler of format: [slog.JSONHandler] for [spec.FormatJSON] and [slog.TextHandler] otherwise.
+func newRedactingHandler(next slog.Handler, r *redactor, format spec.Format) slog.Handler {
+	return &redactingHandler{next: next, r: r, format: format}
 }
 
 // Enabled reports whether next handles records at level.
@@ -240,7 +476,7 @@ func (h *redactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
 func (h *redactingHandler) Handle(ctx context.Context, rec slog.Record) error {
 	out := slog.NewRecord(rec.Time, rec.Level, h.r.text(rec.Message), rec.PC)
 	rec.Attrs(func(a slog.Attr) bool {
-		out.AddAttrs(h.r.attr(a))
+		out.AddAttrs(h.r.attr(a, h.format))
 		return true
 	})
 	return h.next.Handle(ctx, out)
@@ -248,10 +484,10 @@ func (h *redactingHandler) Handle(ctx context.Context, rec slog.Record) error {
 
 // WithAttrs returns a handler whose next carries attrs, redacted.
 func (h *redactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &redactingHandler{next: h.next.WithAttrs(h.r.attrs(attrs)), r: h.r}
+	return &redactingHandler{next: h.next.WithAttrs(h.r.attrs(attrs, h.format)), r: h.r, format: h.format}
 }
 
 // WithGroup returns a handler whose next opens the group name.
 func (h *redactingHandler) WithGroup(name string) slog.Handler {
-	return &redactingHandler{next: h.next.WithGroup(name), r: h.r}
+	return &redactingHandler{next: h.next.WithGroup(name), r: h.r, format: h.format}
 }

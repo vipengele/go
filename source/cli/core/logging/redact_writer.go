@@ -34,21 +34,30 @@ const (
 	// continueJSONEscape drops the byte a flushed backslash escapes, then continues as
 	// continueJSON.
 	continueJSONEscape
+	// continueJSONValue drops the rest of a JSON header value other than a string, such as an
+	// array, an object or a number, up to its end or the end of the line, by the skip state held.
+	continueJSONValue
 )
 
 // RedactingWriter is an [io.Writer] that redacts every secret of a [Redaction], and of the
 // baseline, from the lines written to it before they reach its destination. It reads each line by
 // its shape, as [Redaction] describes, whatever the format of the handler above it, so the raw
 // output of a tool or a subprocess written beside the records is redacted as well: a line that is
-// a JSON document has a header value end at the closing unescaped quote and stays valid JSON, and
-// any other line has a header value run to the end of the line.
+// a JSON document has a header value end at the closing unescaped quote, and the value of a header
+// key that is an array, an object, a number, a boolean or null replaced whole by the string
+// "[REDACTED]", so it stays valid JSON; any other line has a header value run to the end of the
+// line.
 //
 // It is line-buffered: a complete line is redacted whole and written with the Write that
 // completes it, and the bytes after the last newline are held. A line longer than 64 KiB is
 // written in pieces: once more than that is held, the writer redacts and writes everything but
 // the last 256 bytes, never splitting a UTF-8 sequence, and extends the piece over any secret
 // that crosses its end. When a secret runs to the end of what is held, the piece ends with the
-// redacted secret and the rest of it is dropped as it arrives. A piece is therefore not a line
+// redacted secret and the rest of it is dropped as it arrives, a JSON header value that is not a
+// string up to the bracket that closes it or the delimiter after a scalar, following the strings
+// and nesting inside it. A JSON header key is recognised in a piece only when its value has
+// started there: a [RedactingWriter.Flush] that ends between the key and its value writes both
+// unredacted. A piece is therefore not a line
 // on its own, and not a JSON document, but the destination's lines are the redacted lines: the
 // pieces of one line concatenate to that line redacted whole.
 //
@@ -72,6 +81,8 @@ type RedactingWriter struct {
 	// cont is what of a flushed secret is still dropped. It is continueNone whenever buf holds
 	// anything.
 	cont continuation
+	// skip is the state of the skip over the value continueJSONValue drops.
+	skip jsonSkip
 	// pieced reports that a piece of the current line has been written, and shape is then the
 	// shape every later piece of that line is read as.
 	pieced bool
@@ -167,7 +178,8 @@ func (w *RedactingWriter) appendPiece(out []byte, cut int) []byte {
 
 // pieceEnd returns cut extended to the end of every header value and prefixed token in buf
 // that starts before it and does not end before it, read as the shape of the line, and what to
-// drop of one that runs to the end of buf.
+// drop of one that runs to the end of buf. A JSON header value that is not a string and runs to
+// the end of buf takes precedence over a string inside it, and its skip state is kept in skip.
 func (w *RedactingWriter) pieceEnd(cut int) (int, continuation) {
 	header, headerCont := w.r.textHeader, continueText
 	if w.shape == shapeJSON {
@@ -186,6 +198,16 @@ func (w *RedactingWriter) pieceEnd(cut int) (int, continuation) {
 				end = max(end, stop)
 				if stop == len(w.buf) {
 					cont = kind
+				}
+			}
+		}
+		if w.shape == shapeJSON {
+			for _, v := range w.r.headerValues(string(w.buf)) {
+				if v.start < cut && v.end >= cut {
+					end = max(end, v.end)
+					if v.open != nil {
+						cont, w.skip = continueJSONValue, *v.open
+					}
 				}
 			}
 		}
@@ -227,6 +249,14 @@ func (w *RedactingWriter) skipContinuation(p []byte) []byte {
 				return p[i:]
 			}
 			w.cont = continueJSON
+		case continueJSONValue:
+			if done, last := w.skip.next(c); done {
+				w.cont = continueNone
+				if last {
+					return p[i+1:]
+				}
+				return p[i:]
+			}
 		case continueJSON:
 			switch c {
 			case '\\':
