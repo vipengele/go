@@ -41,6 +41,9 @@ func TestParseLevel(t *testing.T) {
 				t.Fatalf("ParseLevel(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
 			}
 			if err != nil {
+				if got != 0 {
+					t.Errorf("ParseLevel(%q) = %v on error, want the zero level", tt.in, got)
+				}
 				for _, name := range []string{"debug", "info", "warn", "error"} {
 					if !strings.Contains(err.Error(), name) {
 						t.Errorf("error %q does not name %q", err, name)

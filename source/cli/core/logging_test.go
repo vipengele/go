@@ -262,6 +262,69 @@ func TestLoggerFromWithoutWithLogging(t *testing.T) {
 	}
 }
 
+func TestWithLoggingAndWithConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		code    int
+		ran     bool
+	}{
+		{name: "config loads", content: "port: 9090\n", code: cli.ExitOK, ran: true},
+		{name: "config fails", content: "port: [1]\n", code: cli.ExitError, ran: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreDefaultLogger(t)
+			before := slog.Default()
+			var (
+				ran       bool
+				logger    *slog.Logger
+				hasLogger bool
+				def       *slog.Logger
+				conf      toolConfig
+			)
+			app := cli.New(identity(), cli.WithConfig(toolDefaults()), cli.WithLogging(),
+				cli.WithVerbose(), cli.WithQuiet())
+			app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+				ran = true
+				logger, hasLogger = cli.LoggerFrom(ctx)
+				def = slog.Default()
+				r, _ := cli.ConfigFrom[toolConfig](ctx)
+				conf = r.Value()
+				return nil
+			}})
+			got := newConfigEnv(t, tt.content).run(t, app, "run")
+			if got.code != tt.code {
+				t.Fatalf("result %+v, want code %d", got, tt.code)
+			}
+			if ran != tt.ran {
+				t.Fatalf("run function called %t, want %t", ran, tt.ran)
+			}
+			if !tt.ran {
+				if !strings.Contains(got.stderr, "config.yaml:1") {
+					t.Errorf("stderr %q, want the configuration error", got.stderr)
+				}
+				if slog.Default() != before {
+					t.Error("default logger replaced after a configuration failure, want it left as it was")
+				}
+				return
+			}
+			if conf.Port != 9090 {
+				t.Errorf("run saw port %d, want 9090 from the file", conf.Port)
+			}
+			if !hasLogger || logger == nil {
+				t.Fatalf("LoggerFrom = %v, %t; want a logger and true", logger, hasLogger)
+			}
+			if logger != def {
+				t.Error("LoggerFrom returned a logger other than slog.Default")
+			}
+			if def == before {
+				t.Error("default logger not replaced, want the one WithLogging installs")
+			}
+		})
+	}
+}
+
 func TestWithLoggingRunsBeforeEveryPreRunHook(t *testing.T) {
 	restoreDefaultLogger(t)
 	var order []string
