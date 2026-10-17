@@ -108,8 +108,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `SkipConfig`; `show` does not. JSON follows `inv.Output.Format()` (no flag of its own), so `show
   --json` needs `WithJSON` or `WithOutput`. Errors are plain (exit 1), including the non-terminal
   refusal of `edit`: the usage-error type is in `internal/cobra`.
-- `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over
-  `final` and syncs the directory, removing the temp on failure; `WriteFile(path, data, mode)`.
+- `edit` replaces the file with `Replace` from `go.vipengele.org/cli/state`, which chmods, syncs and
+  renames the validated copy and syncs the directory.
 
 ## Gotchas
 
