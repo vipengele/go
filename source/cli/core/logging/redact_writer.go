@@ -53,11 +53,13 @@ const (
 // pieces of one line concatenate to that line redacted whole.
 //
 // A line written in pieces, by an overflow or by [RedactingWriter.Flush], cannot be checked as a
-// JSON document before its end arrives, so its shape is decided by its start when its first piece
-// is written: JSON when its first byte that is not white space is "{", plain text otherwise, a
-// JSON array included, and every later piece of that line is read the same way. A plain-text line that starts with "{" and
-// grows past 64 KiB is therefore read as JSON, and a header value in it ends at the first
-// unescaped quote rather than at the end of the line.
+// JSON document before its end arrives, so its shape is decided by the bytes held when its first
+// piece is written, and every later piece of that line is read the same way. It is JSON when
+// those bytes are a whole JSON line, an object or an array, or when they start with "{" and are
+// the start of a JSON document, every token in them well formed; it is plain text otherwise, so a
+// line that starts with "{" but is not JSON, such as a Go %+v dump, has a header value run to the
+// end of the line. Only text that follows a complete JSON document on the same line, after a
+// piece of the line has been written, is read as JSON without being JSON.
 //
 // A RedactingWriter is safe for concurrent use; each Write is redacted and written whole before
 // the next starts.
@@ -103,9 +105,11 @@ func (w *RedactingWriter) Write(p []byte) (int, error) {
 	return len(p), w.emit(out)
 }
 
-// Flush redacts and writes the bytes held after the last newline, as a piece of their line.
-// What it writes is redacted as it stands: a prefix or header name the held bytes end inside is
-// not recognised once the rest of it arrives.
+// Flush redacts and writes the bytes held after the last newline, as a piece of their line, read
+// by the shape of the line: the shape its earlier pieces were read as, or, for its first piece,
+// the shape of the held bytes as [RedactingWriter] describes. What it writes is redacted as it
+// stands: a prefix or header name the held bytes end inside is not recognised once the rest of it
+// arrives.
 func (w *RedactingWriter) Flush() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -142,8 +146,8 @@ func (w *RedactingWriter) windowStart() int {
 
 // appendPiece appends to out the redacted bytes of buf up to cut, extended over every secret
 // that crosses it, removes them from buf and records what of a secret that runs to the end of
-// buf is still to be dropped. The first piece of a line decides the shape of the line from its
-// start.
+// buf is still to be dropped. The first piece of a line decides the shape of the line from the
+// bytes held, by [shapeOfStart].
 func (w *RedactingWriter) appendPiece(out []byte, cut int) []byte {
 	if !w.pieced {
 		w.pieced, w.shape = true, shapeOfStart(w.buf)

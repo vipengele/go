@@ -409,3 +409,109 @@ func TestRedactingWriterPiecedLineKeepsItsShape(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactingWriterFlushBraceLineThatIsNotJSON pins that a held line starting with "{" that is
+// not JSON is flushed as text, so a header value in it runs to the end of the line instead of
+// stopping at its first quote.
+func TestRedactingWriterFlushBraceLineThatIsNotJSON(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+		secrets        []string
+	}{
+		{"cookie", `{Cookie: sid="abc"; Path=/`, "{Cookie: [REDACTED]", []string{"abc", "Path"}},
+		{"go value dump", `{Header:map[Authorization:[Token "s3cr3t"]]}`,
+			"{Header:map[Authorization:[REDACTED]", []string{"s3cr3t", "Token"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, testRedactor())
+			writeAll(t, w, tt.in)
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+			got := out.String()
+			for _, s := range tt.secrets {
+				if strings.Contains(got, s) {
+					t.Errorf("%q leaked: %q", s, got)
+				}
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRedactingWriterFlushWholeJSONLineStaysValid(t *testing.T) {
+	for _, in := range []string{
+		`{"msg":"Authorization: Bearer abc","Cookie":"a=\"b\"","n":1}`,
+		`  [{"Cookie":"a=b"},"Proxy-Authorization: Basic dXNl"]`,
+	} {
+		t.Run(in, func(t *testing.T) {
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, testRedactor())
+			writeAll(t, w, in)
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+			got := out.String()
+			if !json.Valid([]byte(got)) {
+				t.Errorf("not valid JSON: %q", got)
+			}
+			for _, s := range []string{"abc", "a=", "dXNl"} {
+				if strings.Contains(got, s) {
+					t.Errorf("%q leaked: %q", s, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRedactingWriterOverflowBraceLineThatIsNotJSON(t *testing.T) {
+	// The line starts with "{" but is not JSON, and its header value straddles the overflow cut.
+	head := "{Header:map[" + filler(maxBuffered-overflowWindow) + " Authorization:[Token \"s3cr3t"
+	var out bytes.Buffer
+	w := newRedactingWriter(&out, testRedactor())
+	writeAll(t, w, head+strings.Repeat("S", overflowWindow))
+	if out.Len() == 0 {
+		t.Fatal("overflow flushed nothing")
+	}
+	writeAll(t, w, `MORE"]]}`+"\n")
+	got := out.String()
+	if strings.Contains(got, "s3cr3t") || strings.Contains(got, "MORE") || strings.Contains(got, "SS") {
+		t.Fatalf("secret leaked: %q", got[max(0, len(got)-200):])
+	}
+	if want := " Authorization:[REDACTED]\n"; !strings.HasSuffix(got, want) {
+		t.Errorf("got suffix %q, want %q", got[max(0, len(got)-len(want)-20):], want)
+	}
+}
+
+func TestShapeOfStart(t *testing.T) {
+	tests := []struct {
+		in   string
+		want lineShape
+	}{
+		{`{"a":1}`, shapeJSON},
+		{`[1,"x"]`, shapeJSON},
+		{` {"Cookie":"ab`, shapeJSON},
+		{`{"a":"x\`, shapeJSON},
+		{`{"a":tr`, shapeJSON},
+		{`{"a":12`, shapeJSON},
+		{`{ "a" : { "b" :`, shapeJSON},
+		{`{`, shapeJSON},
+		{`{Cookie: sid="abc"`, shapeText},
+		{`{Header:map[Authorization:[Token "s3cr3t"]]}`, shapeText},
+		{`{"a":1} Cookie: "x"`, shapeText},
+		{`{"a" 1`, shapeText},
+		{`[{"Cookie":"ab`, shapeText},
+		{`[INFO] Cookie: "x"`, shapeText},
+		{"", shapeText},
+		{" \t", shapeText},
+	}
+	for _, tt := range tests {
+		if got := shapeOfStart([]byte(tt.in)); got != tt.want {
+			t.Errorf("shapeOfStart(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}

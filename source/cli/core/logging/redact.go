@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"regexp"
 	"slices"
@@ -68,16 +70,30 @@ func shapeOf(s []byte) lineShape {
 	return shapeText
 }
 
-// shapeOfStart returns the shape of a line known only by its start s: [shapeJSON] when the first
-// byte of s that is not white space is "{", and [shapeText] otherwise, including when s is all
-// white space. "[" is not enough, as it starts many plain log lines, such as "[INFO] ...", and a
-// header value in a plain line read as JSON would end at its first quote.
+// shapeOfStart returns the shape of a line known only by its start s: [shapeJSON] when s is a
+// whole JSON line by [shapeOf], or when s, without its leading white space, starts with "{" and is
+// the start of a JSON document, every token in it well formed and only the rest of the document
+// missing; [shapeText] otherwise, including when s is all white space. A line that merely starts
+// with "{", such as a Go %+v dump or "{Cookie: ...", is text: read as JSON, a header value in it
+// would end at its first quote and the rest of the secret would be written. An unfinished "[" is
+// text too, as "[" starts many plain log lines, such as "[INFO] ...".
 func shapeOfStart(s []byte) lineShape {
-	s = bytes.TrimLeft(s, " \t\r")
-	if len(s) > 0 && s[0] == '{' {
+	if shapeOf(s) == shapeJSON {
 		return shapeJSON
 	}
-	return shapeText
+	s = bytes.TrimLeft(s, " \t\r")
+	if len(s) == 0 || s[0] != '{' {
+		return shapeText
+	}
+	dec := json.NewDecoder(bytes.NewReader(s))
+	for {
+		if _, err := dec.Token(); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return shapeJSON
+			}
+			return shapeText
+		}
+	}
 }
 
 // redactor redacts the secrets of a [Redaction] and the baseline from text and from [slog]

@@ -41,7 +41,10 @@ public package `go.vipengele.org/cli/core/logging`.
   log format: a whole line that is valid JSON (it starts with `{` or `[`) is read as JSON, where a
   header value ends at the closing unescaped quote so the line stays valid JSON; any other line is
   read as text, where the value runs to end of line and the quoted form `"Name": value` also
-  matches. A line written in pieces takes its shape from its first non-space byte.
+  matches. A line written in pieces, past the 64 KiB cap or by a flush, takes its shape from the
+  bytes held when its first piece is written: JSON when they are a whole JSON line or start with
+  `{` and are the start of a JSON document, every token well formed; text otherwise, so a line
+  that only starts with `{`, such as a Go `%+v` dump, never has a header value end at a quote.
 - **Shape, not format, selects the pattern.** The writer also carries raw and subprocess output,
   which is not in the format the logger was given.
 - **Writer scope.** Only the log writer is redacted, plus that same writer exposed by
