@@ -10,7 +10,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `identity.Name`. Options: `WithVerbose`, `WithQuiet`, `WithNoColor`, `WithJSON`, `WithOutput` opt
   into the standard flags, declared as inherited flags on the root (`flags.go`); `WithPreRun` / `WithPostRun`
   add `PreRunHook` / `PostRunHook`s (`hooks.go`), which receive the `Invocation` and a
-  `spec.CommandInfo` (path and `Annotations`); `WithBuildInfo` fixes what `version` prints (tests),
+  `spec.CommandInfo` (path and `Annotations`); a `PreRunHook` returns the context later pre-run
+  hooks, the run function and post-run hooks receive (nil keeps the one it got; ADR-0016);
+  `WithBuildInfo` fixes what `version` prints (tests),
   otherwise `buildinfo.Read()`. A run function reads the standard flags and colour (per stream,
   `Output.Color(stream)`) from `inv.Output` (`spec.Output`, resolved in `output.go`), never from a
   handle. `Output.Format()` is resolved by `outputResolver.format`: `WithJSON`'s `--json` or

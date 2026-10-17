@@ -358,9 +358,9 @@ func hookRoot(log *[]string, runErr error) *spec.Command {
 func hooks(log *[]string, preErrs, postErrs []error) cobra.Config {
 	var cfg cobra.Config
 	for i, e := range preErrs {
-		cfg.PreRun = append(cfg.PreRun, func(context.Context, *spec.Invocation, spec.CommandInfo) error {
+		cfg.PreRun = append(cfg.PreRun, func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
 			*log = append(*log, fmt.Sprintf("pre%d", i))
-			return e
+			return ctx, e
 		})
 	}
 	for i, e := range postErrs {
@@ -509,10 +509,10 @@ func TestRunConfigHooksReceiveTheCommand(t *testing.T) {
 		Output: func(*spec.Invocation) (spec.Output, error) {
 			return spec.NewOutput(spec.OutputOptions{Quiet: true}), nil
 		},
-		PreRun: []func(context.Context, *spec.Invocation, spec.CommandInfo) error{
-			func(_ context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error {
+		PreRun: []func(context.Context, *spec.Invocation, spec.CommandInfo) (context.Context, error){
+			func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
 				pre, preOutput = cmd, inv.Output
-				return nil
+				return ctx, nil
 			},
 		},
 		PostRun: []func(context.Context, *spec.Invocation, spec.CommandInfo, error) error{
@@ -540,5 +540,86 @@ func TestRunConfigHooksReceiveTheCommand(t *testing.T) {
 	pre.Annotations()["k"] = "changed"
 	if v := root.Commands[0].Commands[0].Annotations["k"]; v != "v" {
 		t.Errorf("command annotation %q after a hook changed its copy, want %q", v, "v")
+	}
+}
+
+// trail returns the string ctx carries under ctxKey, empty when it carries none.
+func trail(ctx context.Context) string {
+	s, _ := ctx.Value(ctxKey{}).(string)
+	return s
+}
+
+func TestRunConfigPreRunContextReachesWhatFollows(t *testing.T) {
+	errPre := errors.New("pre")
+	// pre returns a PreRun that records the trail it receives as "pre<name>[<trail>]" and returns
+	// err with a context whose trail gains name, or with a nil context when name is empty.
+	pre := func(log *[]string, i int, name string, err error) func(context.Context, *spec.Invocation, spec.CommandInfo) (context.Context, error) {
+		return func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+			*log = append(*log, fmt.Sprintf("pre%d[%s]", i, trail(ctx)))
+			if name == "" {
+				return nil, err
+			}
+			return context.WithValue(ctx, ctxKey{}, trail(ctx)+name), err
+		}
+	}
+	tests := []struct {
+		name    string
+		names   []string
+		errs    []error
+		wantLog string
+		wantErr error
+	}{
+		{
+			name:    "each context reaches the next pre-run, the run and every post-run",
+			names:   []string{"a", "b"},
+			errs:    []error{nil, nil},
+			wantLog: "pre0[] pre1[a] run[ab] post1[ab] post0[ab]",
+		},
+		{
+			name:    "a nil context keeps the one the hook received",
+			names:   []string{"a", "", "c"},
+			errs:    []error{nil, nil, nil},
+			wantLog: "pre0[] pre1[a] pre2[a] run[ac] post1[ac] post0[ac]",
+		},
+		{
+			name:    "an error stops the run and its context reaches nothing",
+			names:   []string{"a", "b", "c"},
+			errs:    []error{nil, errPre, nil},
+			wantLog: "pre0[] pre1[a]",
+			wantErr: errPre,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var log []string
+			root := &spec.Command{
+				Name: "tool",
+				Commands: []*spec.Command{{
+					Name: "go",
+					Run: func(ctx context.Context, _ *spec.Invocation) error {
+						log = append(log, fmt.Sprintf("run[%s]", trail(ctx)))
+						return nil
+					},
+				}},
+			}
+			var cfg cobra.Config
+			for i, name := range tt.names {
+				cfg.PreRun = append(cfg.PreRun, pre(&log, i, name, tt.errs[i]))
+			}
+			for i := range 2 {
+				cfg.PostRun = append(cfg.PostRun, func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo, _ error) error {
+					log = append(log, fmt.Sprintf("post%d[%s]", i, trail(ctx)))
+					return nil
+				})
+			}
+			env := (&spec.Env{}).Resolved()
+			err := cobra.Run(context.Background(), env, root, []string{"go"}, cfg)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("Run = %v, want %v", err, tt.wantErr)
+			}
+			if got := strings.Join(log, " "); got != tt.wantLog {
+				t.Errorf("calls %q, want %q", got, tt.wantLog)
+			}
+		})
 	}
 }

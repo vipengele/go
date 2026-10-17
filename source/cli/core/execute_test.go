@@ -1449,9 +1449,11 @@ func TestExecuteArgsContextReachesTheRun(t *testing.T) {
 
 func TestExecuteArgsContextHooks(t *testing.T) {
 	registry := []func(error) (int, bool){registerSentinel(9)}
-	pre := func(err error) []func(context.Context, *spec.Invocation, spec.CommandInfo) error {
-		return []func(context.Context, *spec.Invocation, spec.CommandInfo) error{
-			func(context.Context, *spec.Invocation, spec.CommandInfo) error { return err },
+	pre := func(err error) []func(context.Context, *spec.Invocation, spec.CommandInfo) (context.Context, error) {
+		return []func(context.Context, *spec.Invocation, spec.CommandInfo) (context.Context, error){
+			func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+				return ctx, err
+			},
 		}
 	}
 	post := func(err error) []func(context.Context, *spec.Invocation, spec.CommandInfo, error) error {

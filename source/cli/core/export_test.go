@@ -12,7 +12,7 @@ type ExecuteConfig struct {
 	// Registry are the exit-code matchers, in registration order.
 	Registry []func(err error) (int, bool)
 	// PreRun are the hooks called before the run function.
-	PreRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error
+	PreRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error)
 	// PostRun are the hooks called after the run function.
 	PostRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo, runErr error) error
 }

@@ -40,7 +40,9 @@
 // command that runs, whose annotations, the Annotations of its [spec.Command], let a hook skip
 // a command: an update check skips one annotated with [spec.SkipUpdateCheck], as "version" is.
 // This package does not import the update project; the tool's main wires its update check as a
-// hook.
+// hook. A pre-run hook returns the context that every later pre-run hook, the run function and
+// every post-run hook receive, so a hook that loads state, such as configuration, hands it on
+// as a value of that context.
 //
 // [App.ExecuteArgs] and [ExecuteArgs] run the same commands against a [spec.Env] and arguments
 // the caller gives, and touch nothing else of the process, so a test runs the tool's commands

@@ -9,12 +9,19 @@ import (
 // PreRunHook is called before the run function of the command an [App] executes. It receives
 // the context and the [spec.Invocation] the run function is about to receive, with the command
 // line parsed and its Output set, and cmd, the command that runs: its path from the root,
-// the root's name included, and its own annotations. An error it returns stops the execution:
-// neither the run function nor any [PostRunHook] is called, and the error is reported as a run
-// error: it is mapped to an exit code as a run function's error is, so it may carry a
+// the root's name included, and its own annotations.
+//
+// The context it returns is the one every later [PreRunHook], the run function and every
+// [PostRunHook] receive, so a hook hands what it loads, such as configuration, to the code after
+// it with [context.WithValue]. A hook derives that context from ctx, so the run's cancellation
+// reaches it; one that has nothing to add returns ctx. A nil context keeps ctx.
+//
+// An error it returns stops the execution, and the context it returns with the error is
+// ignored: neither the run function nor any [PostRunHook] is called, and the error is reported
+// as a run error: it is mapped to an exit code as a run function's error is, so it may carry a
 // [spec.CodedError] or match a registered exit code, and is [ExitInterrupted] when the run's
 // context is done and the error is [context.Canceled].
-type PreRunHook func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error
+type PreRunHook func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error)
 
 // PostRunHook is called after the run function of the command an [App] executes returns. It
 // receives what a [PreRunHook] receives and runErr, the error the run function returned. When
@@ -26,8 +33,8 @@ type PreRunHook func(ctx context.Context, inv *spec.Invocation, cmd spec.Command
 type PostRunHook func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo, runErr error) error
 
 // WithPreRun adds h to the hooks the App calls before every run function, after the ones added
-// before it. The hooks run in the order they were added, and the first that returns an error
-// stops the execution. No hook runs for --help, for a command without a run function, or for a
+// before it. The hooks run in the order they were added, each receiving the context the one
+// before it returned, and the first that returns an error stops the execution. No hook runs for --help, for a command without a run function, or for a
 // command line the tree does not accept, --verbose with --quiet included. A nil h is ignored.
 func WithPreRun(h PreRunHook) Option {
 	return func(s *settings) {
@@ -53,7 +60,7 @@ func WithPostRun(h PostRunHook) Option {
 
 // hookFuncs returns the hooks s holds as the adapter takes them.
 func (s settings) hookFuncs() (
-	pre []func(context.Context, *spec.Invocation, spec.CommandInfo) error,
+	pre []func(context.Context, *spec.Invocation, spec.CommandInfo) (context.Context, error),
 	post []func(context.Context, *spec.Invocation, spec.CommandInfo, error) error,
 ) {
 	for _, h := range s.preRun {

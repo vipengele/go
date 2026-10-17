@@ -254,10 +254,10 @@ func TestAppInterruptCancelsTheContextOfHooksAndRun(t *testing.T) {
 	preCtx := make(chan context.Context, 1)
 	var runErr, postErr error
 	app := cli.New(identity(),
-		cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) error {
+		cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
 			preCtx <- ctx
 			<-ctx.Done()
-			return nil
+			return ctx, nil
 		}),
 		cli.WithPostRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo, _ error) error {
 			postErr = ctx.Err()
@@ -402,9 +402,9 @@ func TestAppVersionWithoutAddedCommands(t *testing.T) {
 func TestAppVersionSkipsUpdateCheck(t *testing.T) {
 	var annotated bool
 	app := cli.New(identity(), cli.WithBuildInfo(versionInfo()),
-		cli.WithPreRun(func(_ context.Context, _ *spec.Invocation, cmd spec.CommandInfo) error {
+		cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
 			_, annotated = cmd.Annotation(spec.SkipUpdateCheck)
-			return nil
+			return ctx, nil
 		}))
 	if got := runApp(t, app, "version"); got.code != cli.ExitOK {
 		t.Fatalf("version = %+v, want 0", got)
