@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	cli "go.vipengele.org/cli/core"
+	"go.vipengele.org/cli/core/logging"
 	"go.vipengele.org/cli/spec"
 )
 
@@ -344,5 +345,130 @@ func TestWithLoggingRunsBeforeEveryPreRunHook(t *testing.T) {
 	}
 	if !slices.Equal(order, []string{"pre-run", "run"}) {
 		t.Errorf("order %v, want [pre-run run]", order)
+	}
+}
+
+// toolSecret is a token of a tool's own prefix, which only [cli.WithRedaction] redacts.
+const toolSecret = "tkn_abcdef123456"
+
+// secretApp returns an App taking WithLogging, -v and -q and opts, with a "run" command that logs
+// toolSecret and a baseline bearer token, and writes tail, a line without its newline, to the
+// writer LogWriterFrom returns.
+func secretApp(tail string, opts ...cli.Option) *cli.App {
+	app := cli.New(identity(), append([]cli.Option{cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging()}, opts...)...)
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		slog.InfoContext(ctx, "token "+toolSecret+" auth Bearer basesecret99")
+		if tail != "" {
+			w, _ := cli.LogWriterFrom(ctx)
+			_, _ = w.Write([]byte(tail))
+		}
+		return nil
+	}})
+	return app
+}
+
+func TestWithRedactionRedactsToolPrefixes(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			restoreDefaultLogger(t)
+			app := secretApp("", cli.WithRedaction(logging.Redaction{Prefixes: []string{"tkn_"}}))
+			got := runApp(t, app, "run", "--log-format", format)
+			if got.code != cli.ExitOK {
+				t.Fatalf("result %+v, want 0", got)
+			}
+			for _, secret := range []string{"abcdef123456", "basesecret99"} {
+				if strings.Contains(got.stderr, secret) {
+					t.Errorf("stderr holds %q:\n%s", secret, got.stderr)
+				}
+			}
+			if !strings.Contains(got.stderr, "token") {
+				t.Errorf("stderr lacks the record:\n%s", got.stderr)
+			}
+		})
+	}
+}
+
+func TestWithRedactionAccumulates(t *testing.T) {
+	restoreDefaultLogger(t)
+	prefixes := []string{"tkn_"}
+	app := secretApp("", cli.WithRedaction(logging.Redaction{Prefixes: prefixes}),
+		cli.WithRedaction(logging.Redaction{Prefixes: []string{"other_"}}))
+	prefixes[0] = "zzz_"
+	got := runApp(t, app, "run")
+	if strings.Contains(got.stderr, "abcdef123456") || strings.Contains(got.stderr, "basesecret99") {
+		t.Errorf("stderr holds a secret:\n%s", got.stderr)
+	}
+}
+
+func TestBaselineRedactedWithoutWithRedaction(t *testing.T) {
+	restoreDefaultLogger(t)
+	got := runApp(t, secretApp(""), "run")
+	if strings.Contains(got.stderr, "basesecret99") {
+		t.Errorf("stderr holds the baseline secret:\n%s", got.stderr)
+	}
+	if !strings.Contains(got.stderr, "abcdef123456") {
+		t.Errorf("stderr lacks the unregistered token, want it kept:\n%s", got.stderr)
+	}
+}
+
+func TestWithRedactionRequiresWithLogging(t *testing.T) {
+	var ran bool
+	app := loggingApp(&ran, cli.WithVerbose(), cli.WithQuiet(), cli.WithRedaction(logging.Redaction{}))
+	got := runApp(t, app, "run")
+	want := "tool: invalid command tree\n  → WithRedaction requires WithLogging\n"
+	if got.code != cli.ExitError || got.stdout != "" || got.stderr != want {
+		t.Errorf("result %+v, want code 1 and stderr %q", got, want)
+	}
+	if ran {
+		t.Error("run function called, want none")
+	}
+}
+
+func TestLogWriterFrom(t *testing.T) {
+	if w, ok := cli.LogWriterFrom(t.Context()); ok || w != nil {
+		t.Errorf("LogWriterFrom = %v, %t on a bare context; want nil and false", w, ok)
+	}
+	restoreDefaultLogger(t)
+	var (
+		with, without     *logging.RedactingWriter
+		okWith, okWithout bool
+	)
+	app := loggingApp(new(bool), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging())
+	app.Add(&spec.Command{Name: "probe", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		with, okWith = cli.LogWriterFrom(ctx)
+		return nil
+	}})
+	plain := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet())
+	plain.Add(&spec.Command{Name: "probe", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		without, okWithout = cli.LogWriterFrom(ctx)
+		return nil
+	}})
+	if res := runApp(t, app, "probe"); res.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", res)
+	}
+	if res := runApp(t, plain, "probe"); res.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", res)
+	}
+	if !okWith || with == nil {
+		t.Errorf("LogWriterFrom = %v, %t under WithLogging; want a writer and true", with, okWith)
+	}
+	if okWithout || without != nil {
+		t.Errorf("LogWriterFrom = %v, %t without WithLogging; want nil and false", without, okWithout)
+	}
+}
+
+func TestExecuteFlushesTheLogWriter(t *testing.T) {
+	restoreDefaultLogger(t)
+	app := secretApp("partial Bearer basesecret99",
+		cli.WithRedaction(logging.Redaction{Prefixes: []string{"tkn_"}}))
+	got := runApp(t, app, "run")
+	if got.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", got)
+	}
+	if !strings.Contains(got.stderr, "partial Bearer ") {
+		t.Errorf("stderr lacks the unterminated line:\n%s", got.stderr)
+	}
+	if strings.Contains(got.stderr, "basesecret99") {
+		t.Errorf("stderr holds the secret of the unterminated line:\n%s", got.stderr)
 	}
 }

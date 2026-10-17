@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/core/logging"
@@ -41,14 +42,47 @@ func WithLogging() Option {
 	return func(s *settings) { s.logging = true }
 }
 
+// WithRedaction adds the secrets of a tool to the ones the logger of [WithLogging] redacts: the
+// prefixes of its tokens and the names of its headers, as [logging.Redaction] describes. The
+// baseline of [logging.Redaction] is redacted whether or not the option is given, and a tool adds
+// to it and cannot remove from it. The option can be given more than once; the prefixes and the
+// header names of every call apply, in the order given. r is copied, so a caller changing its
+// slices afterwards changes nothing.
+//
+// The option needs [WithLogging]: without it, every execution returns [ExitError] after writing
+// "<name>: invalid command tree" to env.Stderr, followed by a row naming the option it lacks, and
+// calls no run function. The redaction covers the records of the logger and whatever a run function
+// writes to the writer [LogWriterFrom] returns.
+func WithRedaction(r logging.Redaction) Option {
+	return func(s *settings) {
+		s.redaction.Prefixes = append(s.redaction.Prefixes, r.Prefixes...)
+		s.redaction.Headers = append(s.redaction.Headers, r.Headers...)
+		s.redactionSet = true
+	}
+}
+
 // loggingFlags holds the handles of the flags [WithLogging] declares for one execution. Both
 // handles are nil when the App does not take the option.
 type loggingFlags struct {
+	// redaction is the tool's addition to the baseline, a copy of the App's.
+	redaction logging.Redaction
+	// writer holds the redacting writer the hook installs, for flush to find when the execution
+	// ends. It is nil when the App does not take the option.
+	writer *writerSlot
+
 	// level declares no default: the level a command line that does not set --log-level runs at
 	// follows -v and -q, so a declared default would show in --help as a level that does not
 	// apply, and "" reads unambiguously as not given beside [spec.FlagOf.IsSet].
 	level  *spec.FlagOf[string]
 	format *spec.FlagOf[string]
+}
+
+// writerSlot holds the [*logging.RedactingWriter] of one execution. The hook stores it on the
+// goroutine that runs the command and flush reads it on the one that called Execute, which may
+// have abandoned the run.
+type writerSlot struct {
+	mu sync.Mutex
+	w  *logging.RedactingWriter
 }
 
 // newLoggingFlags returns the handles of the flags [WithLogging] declares, or none when s does
@@ -58,6 +92,11 @@ func newLoggingFlags(s settings) loggingFlags {
 		return loggingFlags{}
 	}
 	return loggingFlags{
+		redaction: logging.Redaction{
+			Prefixes: append([]string(nil), s.redaction.Prefixes...),
+			Headers:  append([]string(nil), s.redaction.Headers...),
+		},
+		writer: &writerSlot{},
 		level: spec.StringFlag("log-level", "write log records at or above debug, info, warn or error",
 			spec.Inherited()),
 		format: spec.StringFlag("log-format", "write log records as text or json",
@@ -82,7 +121,27 @@ func (f loggingFlags) hook(verbose, quiet *spec.FlagOf[bool]) PreRunHook {
 		if err != nil {
 			return ctx, &cobra.UsageError{Path: commandPath(cmd), Err: err}
 		}
-		return context.WithValue(ctx, loggerKey{}, result.Logger), nil
+		f.writer.mu.Lock()
+		f.writer.w = result.Writer
+		f.writer.mu.Unlock()
+		ctx = context.WithValue(ctx, loggerKey{}, result.Logger)
+		return context.WithValue(ctx, logWriterKey{}, result.Writer), nil
+	}
+}
+
+// flush writes the bytes the execution's redacting writer still holds after the last newline to
+// the env.Stderr it wraps, or does nothing when the hook installed none. The App calls it when the
+// execution ends, whatever the outcome. An error of the destination is dropped: the execution is
+// over and has nowhere to report it.
+func (f loggingFlags) flush() {
+	if f.writer == nil {
+		return
+	}
+	f.writer.mu.Lock()
+	w := f.writer.w
+	f.writer.mu.Unlock()
+	if w != nil {
+		_ = w.Flush()
 	}
 }
 
@@ -90,7 +149,7 @@ func (f loggingFlags) hook(verbose, quiet *spec.FlagOf[bool]) PreRunHook {
 // execution's env.Stderr, or the problem of a command line that sets a level twice or names a
 // level or a format that does not exist.
 func (f loggingFlags) options(inv *spec.Invocation, verbose, quiet *spec.FlagOf[bool]) (logging.Options, error) {
-	opts := logging.Options{Level: slog.LevelInfo, Writer: inv.Env.Stderr}
+	opts := logging.Options{Level: slog.LevelInfo, Writer: inv.Env.Stderr, Redaction: f.redaction}
 	switch {
 	case f.level.IsSet(inv):
 		if isSet(verbose, inv) {
@@ -131,6 +190,20 @@ type loggerKey struct{}
 func LoggerFrom(ctx context.Context) (*slog.Logger, bool) {
 	logger, ok := ctx.Value(loggerKey{}).(*slog.Logger)
 	return logger, ok
+}
+
+// logWriterKey is the context key under which the hook of [WithLogging] stores the
+// [*logging.RedactingWriter] beneath the logger it installs.
+type logWriterKey struct{}
+
+// LogWriterFrom returns the redacting writer beneath the logger the hook of [WithLogging]
+// installed, and whether the context carries one, from the same contexts as [LoggerFrom]. It
+// reports false when the App has no [WithLogging]. Text written to it is redacted like the records
+// of the logger and reaches the env.Stderr of the execution in the log format, line by line; the
+// App flushes what it still holds, a line without its newline, when the execution returns.
+func LogWriterFrom(ctx context.Context) (*logging.RedactingWriter, bool) {
+	w, ok := ctx.Value(logWriterKey{}).(*logging.RedactingWriter)
+	return w, ok
 }
 
 // commandPath returns the path of cmd with the root's name left out, as a usage error of the
@@ -179,10 +252,14 @@ func (f loggingFlags) list() []spec.Flag {
 }
 
 // loggingProblem returns the problem of options s that hold [WithLogging] without both
-// [WithVerbose] and [WithQuiet], and nil for any other options.
+// [WithVerbose] and [WithQuiet], or [WithRedaction] without [WithLogging], and nil for any other
+// options. The two cannot apply together, as the first needs the logging the second lacks.
 func loggingProblem(s settings) error {
-	if !s.logging || (s.verbose && s.quiet) {
-		return nil
+	switch {
+	case s.logging && (!s.verbose || !s.quiet):
+		return errors.New("WithLogging requires WithVerbose and WithQuiet")
+	case s.redactionSet && !s.logging:
+		return errors.New("WithRedaction requires WithLogging")
 	}
-	return errors.New("WithLogging requires WithVerbose and WithQuiet")
+	return nil
 }

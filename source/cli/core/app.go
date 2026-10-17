@@ -8,6 +8,7 @@ import (
 	"go.vipengele.org/cli/core/command/version"
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/core/internal/errrender"
+	"go.vipengele.org/cli/core/logging"
 	"go.vipengele.org/cli/spec"
 )
 
@@ -48,6 +49,11 @@ type settings struct {
 	output  bool
 	// logging opts the App into the flags of [WithLogging], which needs verbose and quiet.
 	logging bool
+	// redaction holds the prefixes and header names every [WithRedaction] adds to the baseline, in
+	// the order given, and redactionSet reports that the option was given at all, which needs
+	// logging. Nothing changes them after [New], so concurrent executions share them.
+	redaction    logging.Redaction
+	redactionSet bool
 	// preRun and postRun are the hooks [WithPreRun] and [WithPostRun] add, in the order they
 	// were added. Nothing changes them after [New], so concurrent executions share them.
 	preRun  []PreRunHook
@@ -170,7 +176,7 @@ func (a *App) Execute() int {
 // included, returns [ExitError] after writing "<name>: invalid command tree" to env.Stderr,
 // followed by one row per problem found. So does a command that declares a flag with the name or
 // the shorthand of a standard flag the App takes, and an App given [WithLogging] without both
-// [WithVerbose] and [WithQuiet].
+// [WithVerbose] and [WithQuiet], or [WithRedaction] without [WithLogging].
 //
 // Every error is written to env.Stderr as [ExecuteArgs] writes one, with each error of its tree
 // offered to the renderers [WithErrorRenderer] adds, in the order they were added.
@@ -205,6 +211,7 @@ func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	}
 	flags := newStandardFlags(a.settings)
 	logFlags := newLoggingFlags(a.settings)
+	defer logFlags.flush()
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	conf := a.configFor(env.Resolved().LookupEnv)
 	pre, post := a.settings.hookFuncs(chainHooks(conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
