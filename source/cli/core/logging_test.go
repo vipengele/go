@@ -2,6 +2,8 @@ package cli_test
 
 import (
 	"context"
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,6 +80,7 @@ func TestWithLoggingRequiresVerboseAndQuiet(t *testing.T) {
 }
 
 func TestWithLoggingWithVerboseAndQuietRuns(t *testing.T) {
+	restoreDefaultLogger(t)
 	var ran bool
 	app := loggingApp(&ran, cli.WithLogging(), cli.WithVerbose(), cli.WithQuiet())
 	got := runApp(t, app, "run", "--log-level", "debug", "--log-format", "json")
@@ -86,5 +89,151 @@ func TestWithLoggingWithVerboseAndQuietRuns(t *testing.T) {
 	}
 	if !ran {
 		t.Error("run function not called")
+	}
+}
+
+// restoreDefaultLogger puts back, when t ends, the default logger a WithLogging App replaces.
+func restoreDefaultLogger(t *testing.T) {
+	t.Helper()
+	saved := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(saved) })
+}
+
+// recordingApp returns an App taking WithLogging, -v and -q, with a "run" command that writes one
+// record at each of the levels debug, info, warn and error to the default logger.
+func recordingApp() *cli.App {
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging())
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		slog.DebugContext(ctx, "debug record")
+		slog.InfoContext(ctx, "info record")
+		slog.WarnContext(ctx, "warn record")
+		slog.ErrorContext(ctx, "error record")
+		return nil
+	}})
+	return app
+}
+
+// textRecord and jsonRecord return the part of a record of level that names it and its message
+// in the text and the JSON format.
+func textRecord(level string) string {
+	return "level=" + strings.ToUpper(level) + ` msg="` + level + ` record"`
+}
+
+func jsonRecord(level string) string {
+	return `"level":"` + strings.ToUpper(level) + `","msg":"` + level + ` record"`
+}
+
+func TestWithLoggingWritesRecordsToStderr(t *testing.T) {
+	levels := []string{"debug", "info", "warn", "error"}
+	tests := []struct {
+		name   string
+		args   []string
+		record func(string) string
+		want   []string
+	}{
+		{name: "default", args: nil, record: textRecord,
+			want: []string{"info", "warn", "error"}},
+		{name: "-v", args: []string{"-v"}, record: textRecord,
+			want: []string{"debug", "info", "warn", "error"}},
+		{name: "--verbose", args: []string{"--verbose"}, record: textRecord,
+			want: []string{"debug", "info", "warn", "error"}},
+		{name: "-q", args: []string{"-q"}, record: textRecord,
+			want: []string{"error"}},
+		{name: "--log-level warn", args: []string{"--log-level", "warn"}, record: textRecord,
+			want: []string{"warn", "error"}},
+		{name: "--log-level DEBUG", args: []string{"--log-level=DEBUG"}, record: textRecord,
+			want: []string{"debug", "info", "warn", "error"}},
+		{name: "--log-level error", args: []string{"--log-level", "error"}, record: textRecord,
+			want: []string{"error"}},
+		{name: "--log-format text", args: []string{"--log-format", "text"}, record: textRecord,
+			want: []string{"info", "warn", "error"}},
+		{name: "json default", args: []string{"--log-format", "json"}, record: jsonRecord,
+			want: []string{"info", "warn", "error"}},
+		{name: "json -v", args: []string{"--log-format=json", "-v"}, record: jsonRecord,
+			want: []string{"debug", "info", "warn", "error"}},
+		{name: "json -q", args: []string{"-q", "--log-format", "json"}, record: jsonRecord,
+			want: []string{"error"}},
+		{name: "json --log-level warn", args: []string{"--log-format", "json", "--log-level", "warn"},
+			record: jsonRecord, want: []string{"warn", "error"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreDefaultLogger(t)
+			got := runApp(t, recordingApp(), append([]string{"run"}, tt.args...)...)
+			if got.code != cli.ExitOK || got.stdout != "" {
+				t.Fatalf("code %d, stdout %q, stderr %q; want 0 and no stdout", got.code, got.stdout, got.stderr)
+			}
+			lines := strings.Split(strings.TrimSuffix(got.stderr, "\n"), "\n")
+			if len(lines) != len(tt.want) {
+				t.Fatalf("stderr holds %d records, want %d:\n%s", len(lines), len(tt.want), got.stderr)
+			}
+			for _, level := range levels {
+				wanted := slices.Contains(tt.want, level)
+				if found := strings.Contains(got.stderr, tt.record(level)); found != wanted {
+					t.Errorf("%s record written %t, want %t:\n%s", level, found, wanted, got.stderr)
+				}
+			}
+		})
+	}
+}
+
+func TestWithLoggingUsageErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "--log-level with -v", args: []string{"--log-level", "debug", "-v"},
+			want: "tool: run: --log-level and --verbose cannot be used together\n"},
+		{name: "--log-level=info with -v", args: []string{"--log-level=info", "-v"},
+			want: "tool: run: --log-level and --verbose cannot be used together\n"},
+		{name: "--log-level with -q", args: []string{"-q", "--log-level", "warn"},
+			want: "tool: run: --log-level and --quiet cannot be used together\n"},
+		{name: "invalid --log-level", args: []string{"--log-level", "loud"},
+			want: "tool: run: --log-level must be debug, info, warn or error, not \"loud\"\n"},
+		{name: "empty --log-level", args: []string{"--log-level="},
+			want: "tool: run: --log-level must be debug, info, warn or error, not \"\"\n"},
+		{name: "invalid --log-format", args: []string{"--log-format", "yaml"},
+			want: "tool: run: --log-format must be text or json, not \"yaml\"\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreDefaultLogger(t)
+			before := slog.Default()
+			var ran bool
+			app := loggingApp(&ran, cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging())
+			got := runApp(t, app, append([]string{"run"}, tt.args...)...)
+			if got.code != cli.ExitUsage || got.stdout != "" || got.stderr != tt.want {
+				t.Errorf("result %+v, want code %d, no stdout and stderr %q", got, cli.ExitUsage, tt.want)
+			}
+			if ran {
+				t.Error("run function called, want none")
+			}
+			if slog.Default() != before {
+				t.Error("default logger replaced, want it left as it was")
+			}
+		})
+	}
+}
+
+func TestWithLoggingRunsBeforeEveryPreRunHook(t *testing.T) {
+	restoreDefaultLogger(t)
+	var order []string
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging(),
+		cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+			slog.DebugContext(ctx, "pre-run record")
+			order = append(order, "pre-run")
+			return ctx, nil
+		}))
+	app.Add(&spec.Command{Name: "run", Run: func(context.Context, *spec.Invocation) error {
+		order = append(order, "run")
+		return nil
+	}})
+	got := runApp(t, app, "run", "-v")
+	if got.code != cli.ExitOK || !strings.Contains(got.stderr, `msg="pre-run record"`) {
+		t.Errorf("result %+v, want 0 and the pre-run hook's record on stderr", got)
+	}
+	if !slices.Equal(order, []string{"pre-run", "run"}) {
+		t.Errorf("order %v, want [pre-run run]", order)
 	}
 }
