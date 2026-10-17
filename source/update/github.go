@@ -37,9 +37,18 @@ const gitHubAccept = "application/vnd.github+json"
 // REST API version the response shapes below are read against.
 const gitHubAPIVersion = "2022-11-28"
 
-// maxResponseBody is the most bytes a GitHubSource reads from a successful response. A longer
-// body is an error rather than a truncated document.
+// maxResponseBody is the most bytes a GitHubSource reads from a successful response for one
+// release. A longer body is an error rather than a truncated document.
 const maxResponseBody = 8 << 20
+
+// maxListResponseBody is the most bytes a GitHubSource reads from a successful response listing
+// releases. A page holds up to listPageSize releases, and each carries its notes, up to 125,000
+// characters, and an object of about 2 KB per asset, so a page of releases with long notes passes
+// maxResponseBody. A longer body is an error rather than a truncated document.
+const maxListResponseBody = 32 << 20
+
+// listPageSize is the per_page of the release list request: the most GitHub returns in one page.
+const listPageSize = 100
 
 // maxDrainBody is the most bytes a GitHubSource discards from a response it has finished with,
 // so that a short unread remainder does not cost the connection while a long one is not read
@@ -58,9 +67,15 @@ const maxDrainBody = 64 << 10
 //
 // The tag must be a release version as [version.IsRelease] defines it, or Latest returns a
 // [*TagError]; a prefixed tag such as "source/update/v1.2.3" is one. A tag with a pre-release
-// suffix, such as "v1.2.3-rc.1", gives [ErrPrerelease] on either path. A response with a
-// non-success status gives a [*StatusError], an expired deadline a [*TimeoutError], and a
-// cancelled ctx an error matching [context.Canceled].
+// suffix, such as "v1.2.3-rc.1", gives [ErrPrerelease] on either path.
+//
+// With IncludePrereleases set, Latest makes neither of those requests. It reads the first page of
+// APIURL/repos/<Owner>/<Repo>/releases, up to 100 releases, drops drafts and releases whose tag is
+// not a release version, and returns the highest remaining tag in version order, pre-releases
+// included, with every asset. A page with no such release is an error.
+//
+// A response with a non-success status gives a [*StatusError], an expired deadline a
+// [*TimeoutError], and a cancelled ctx an error matching [context.Canceled].
 type GitHubSource struct {
 	// Owner is the GitHub user or organization that owns the repository.
 	Owner string
@@ -74,8 +89,9 @@ type GitHubSource struct {
 	WebURL string
 	// APIURL is the base address of GitHub's REST API. Empty means "https://api.github.com".
 	APIURL string
-	// IncludePrereleases asks Latest to consider pre-releases. Latest reports an error when it
-	// is set: only the latest stable release can be looked up.
+	// IncludePrereleases makes pre-releases eligible: Latest returns the highest release on the
+	// first page of the REST API's release list, pre-release or not, instead of the release
+	// GitHub marks as latest. False means a pre-release tag gives [ErrPrerelease].
 	IncludePrereleases bool
 	// Timeout bounds each request Latest makes, through its context; a shorter deadline on the
 	// caller's context wins. Zero or negative means 10 seconds.
@@ -96,7 +112,7 @@ func NewGitHubSource(identity spec.Identity, httpClient *http.Client) *GitHubSou
 // further bounded by Timeout.
 func (s *GitHubSource) Latest(ctx context.Context) (Release, error) {
 	if s.IncludePrereleases {
-		return Release{}, errors.New("update: GitHubSource.IncludePrereleases is not supported")
+		return s.highestListed(ctx)
 	}
 
 	return s.latestStable(ctx)
@@ -171,7 +187,19 @@ func isTimeoutOrCanceled(err error) bool {
 type gitHubRelease struct {
 	TagName string        `json:"tag_name"`
 	HTMLURL string        `json:"html_url"`
+	Draft   bool          `json:"draft"`
 	Assets  []gitHubAsset `json:"assets"`
+}
+
+// release returns the Release gr describes. Its Assets are never nil: an empty slice is a release
+// published without assets.
+func (gr gitHubRelease) release() Release {
+	assets := make([]Asset, 0, len(gr.Assets))
+	for _, a := range gr.Assets {
+		assets = append(assets, Asset{Name: a.Name, URL: a.BrowserDownloadURL, Size: a.Size})
+	}
+
+	return Release{Tag: gr.TagName, URL: gr.HTMLURL, Assets: assets}
 }
 
 // gitHubAsset is the part of a REST API release asset object a GitHubSource reads.
@@ -193,7 +221,7 @@ func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 			return statusError(apiURL, resp)
 		}
 
-		body, err := readLimited(resp.Body)
+		body, err := readLimited(resp.Body, maxResponseBody)
 		if err != nil {
 			return fmt.Errorf("update: GET %s: %w", apiURL, err)
 		}
@@ -207,12 +235,61 @@ func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 			return err
 		}
 
-		assets := make([]Asset, 0, len(gr.Assets))
-		for _, a := range gr.Assets {
-			assets = append(assets, Asset{Name: a.Name, URL: a.BrowserDownloadURL, Size: a.Size})
+		rel = gr.release()
+
+		return nil
+	})
+	if err != nil {
+		return Release{}, err
+	}
+
+	return rel, nil
+}
+
+// errNoListedRelease reports a release list with no release Latest may return: every entry is a
+// draft or has a tag that is not a release version, or the list is empty.
+var errNoListedRelease = errors.New("no release with a release-version tag")
+
+// highestListed reads the first page of the REST API's release list and returns the release with
+// the highest tag in version order, pre-releases included. Drafts and releases whose tag is not a
+// release version are skipped; list order does not matter.
+func (s *GitHubSource) highestListed(ctx context.Context) (Release, error) {
+	listURL := fmt.Sprintf("%s/repos/%s/releases?per_page=%d",
+		strings.TrimSuffix(s.apiURL(), "/"), s.repoPath(), listPageSize)
+
+	var rel Release
+
+	err := s.get(ctx, s.client(), listURL, func(resp *http.Response) error {
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return statusError(listURL, resp)
 		}
 
-		rel = Release{Tag: gr.TagName, URL: gr.HTMLURL, Assets: assets}
+		body, err := readLimited(resp.Body, maxListResponseBody)
+		if err != nil {
+			return fmt.Errorf("update: GET %s: %w", listURL, err)
+		}
+
+		var list []gitHubRelease
+		if err := json.Unmarshal(body, &list); err != nil {
+			return fmt.Errorf("update: GET %s: decoding releases: %w", listURL, err)
+		}
+
+		var best *gitHubRelease
+		for i := range list {
+			gr := &list[i]
+			if gr.Draft || !version.IsRelease(gr.TagName) {
+				continue
+			}
+			if best == nil || version.Newer(best.TagName, gr.TagName) {
+				best = gr
+			}
+		}
+
+		if best == nil {
+			return fmt.Errorf("update: GET %s: %w", listURL, errNoListedRelease)
+		}
+
+		rel = best.release()
 
 		return nil
 	})
@@ -344,15 +421,15 @@ func statusError(rawURL string, resp *http.Response) error {
 	return newStatusError(rawURL, resp.StatusCode, string(body))
 }
 
-// readLimited reads r to its end, failing when it holds more than maxResponseBody bytes.
-func readLimited(r io.Reader) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, maxResponseBody+1))
+// readLimited reads r to its end, failing when it holds more than limit bytes.
+func readLimited(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
 
-	if len(body) > maxResponseBody {
-		return nil, fmt.Errorf("response body exceeds %d bytes", maxResponseBody)
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("response body exceeds %d bytes", limit)
 	}
 
 	return body, nil

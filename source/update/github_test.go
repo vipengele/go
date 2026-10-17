@@ -20,6 +20,8 @@ const (
 	webPath     = "/octo/tool/releases/latest"
 	apiPath     = "/repos/octo/tool/releases/latest"
 	tagPagePath = "/octo/tool/releases/tag/"
+	listPath    = "/repos/octo/tool/releases"
+	listQuery   = "per_page=100"
 )
 
 // apiReleaseJSON is a REST API latest-release document for tag with two assets.
@@ -47,9 +49,10 @@ func apiAssets() []Asset {
 // fakeGitHub is an httptest server answering the latest-release web page with web and the REST
 // API latest release with api, counting the requests each receives.
 type fakeGitHub struct {
-	server   *httptest.Server
-	webCalls atomic.Int32
-	apiCalls atomic.Int32
+	server    *httptest.Server
+	webCalls  atomic.Int32
+	apiCalls  atomic.Int32
+	listCalls atomic.Int32
 }
 
 func newFakeGitHub(t *testing.T, web, api http.HandlerFunc) *fakeGitHub {
@@ -748,18 +751,6 @@ func TestGitHubSource_TrailingSlashInBaseURLs(t *testing.T) {
 	}
 }
 
-func TestGitHubSource_IncludePrereleasesIsAnError(t *testing.T) {
-	t.Parallel()
-
-	f := newFakeGitHub(t, unexpected(t, "web"), unexpected(t, "API"))
-	s := f.source()
-	s.IncludePrereleases = true
-
-	if _, err := s.Latest(context.Background()); err == nil {
-		t.Fatal("Latest() error = nil, want an error")
-	}
-}
-
 func TestGitHubSource_Defaults(t *testing.T) {
 	t.Parallel()
 
@@ -833,5 +824,515 @@ func TestIsRedirect(t *testing.T) {
 		if got := isRedirect(code); got != want {
 			t.Errorf("isRedirect(%d) = %v, want %v", code, got, want)
 		}
+	}
+}
+
+// newFakeGitHubList is an httptest server answering the REST API release list with list. A
+// request to the latest-release web page or REST API endpoint fails the test.
+func newFakeGitHubList(t *testing.T, list http.HandlerFunc) *fakeGitHub {
+	t.Helper()
+
+	f := &fakeGitHub{}
+	web := unexpected(t, "web")
+	api := unexpected(t, "API")
+	mux := http.NewServeMux()
+	mux.HandleFunc(webPath, func(w http.ResponseWriter, r *http.Request) {
+		f.webCalls.Add(1)
+		web(w, r)
+	})
+	mux.HandleFunc(apiPath, func(w http.ResponseWriter, r *http.Request) {
+		f.apiCalls.Add(1)
+		api(w, r)
+	})
+	mux.HandleFunc(listPath, func(w http.ResponseWriter, r *http.Request) {
+		f.listCalls.Add(1)
+		list(w, r)
+	})
+	f.server = httptest.NewServer(mux)
+	t.Cleanup(f.server.Close)
+
+	return f
+}
+
+// listSource returns a GitHubSource with IncludePrereleases set whose addresses are the fake
+// server.
+func (f *fakeGitHub) listSource() *GitHubSource {
+	s := f.source()
+	s.IncludePrereleases = true
+
+	return s
+}
+
+// listedRelease is one entry of a REST API release list document.
+type listedRelease struct {
+	tag   string
+	draft bool
+}
+
+// apiListJSON is a REST API release list document holding entries in order. Each entry's html_url
+// is the release page of its tag and its one asset is named after its tag.
+func apiListJSON(entries ...listedRelease) string {
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		parts = append(parts, fmt.Sprintf(`{
+			"tag_name": %q,
+			"html_url": "https://example.test/octo/tool/releases/tag/%s",
+			"draft": %t,
+			"prerelease": false,
+			"assets": [{"name": "tool_%s.tar.gz", "browser_download_url": "https://example.test/%s.tar.gz", "size": 10}]
+		}`, e.tag, e.tag, e.draft, e.tag, e.tag))
+	}
+
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// listedReleaseOf is the Release apiListJSON describes for tag.
+func listedReleaseOf(tag string) Release {
+	return Release{
+		Tag: tag,
+		URL: "https://example.test/octo/tool/releases/tag/" + tag,
+		Assets: []Asset{
+			{Name: "tool_" + tag + ".tar.gz", URL: "https://example.test/" + tag + ".tar.gz", Size: 10},
+		},
+	}
+}
+
+func TestGitHubSource_ListReturnsHighestEligible(t *testing.T) {
+	t.Parallel()
+
+	stable := func(tag string) listedRelease { return listedRelease{tag: tag} }
+	draft := func(tag string) listedRelease { return listedRelease{tag: tag, draft: true} }
+
+	tests := []struct {
+		name    string
+		entries []listedRelease
+		want    string
+	}{
+		{name: "only entry", entries: []listedRelease{stable("v1.0.0")}, want: "v1.0.0"},
+		{
+			name:    "highest in the middle",
+			entries: []listedRelease{stable("v1.2.0"), stable("v1.10.0"), stable("v1.9.0")},
+			want:    "v1.10.0",
+		},
+		{
+			name:    "highest last",
+			entries: []listedRelease{stable("v0.9.0"), stable("v1.0.0"), stable("v2.0.0")},
+			want:    "v2.0.0",
+		},
+		{
+			name:    "highest first",
+			entries: []listedRelease{stable("v3.0.0"), stable("v1.0.0"), stable("v2.0.0")},
+			want:    "v3.0.0",
+		},
+		{
+			name:    "pre-release above the highest stable",
+			entries: []listedRelease{stable("v1.2.0"), stable("v1.3.0-rc.1"), stable("v1.2.9")},
+			want:    "v1.3.0-rc.1",
+		},
+		{
+			name:    "stable above its own pre-release",
+			entries: []listedRelease{stable("v1.3.0-rc.1"), stable("v1.3.0"), stable("v1.3.0-rc.2")},
+			want:    "v1.3.0",
+		},
+		{
+			name:    "later pre-release above an earlier one",
+			entries: []listedRelease{stable("v2.0.0-alpha"), stable("v2.0.0-beta"), stable("v1.0.0")},
+			want:    "v2.0.0-beta",
+		},
+		{
+			name:    "highest draft skipped",
+			entries: []listedRelease{stable("v1.0.0"), draft("v9.0.0"), stable("v1.1.0")},
+			want:    "v1.1.0",
+		},
+		{
+			name:    "draft pre-release skipped",
+			entries: []listedRelease{draft("v2.0.0-rc.1"), stable("v1.0.0")},
+			want:    "v1.0.0",
+		},
+		{
+			name: "odd tags skipped",
+			entries: []listedRelease{
+				stable("9.0.0"),
+				stable("source/update/v9.0.0"),
+				stable("v9.0.0+dirty"),
+				stable("v9.0"),
+				stable("latest"),
+				stable("v0.0.0-20990101000000-abcdefabcdef"),
+				stable("v1.0.0"),
+				stable(""),
+			},
+			want: "v1.0.0",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, respond(http.StatusOK, apiListJSON(tc.entries...)))
+
+			got, err := f.listSource().Latest(context.Background())
+			if err != nil {
+				t.Fatalf("Latest() error = %v", err)
+			}
+
+			if want := listedReleaseOf(tc.want); !reflect.DeepEqual(got, want) {
+				t.Errorf("Latest() = %#v, want %#v", got, want)
+			}
+			if n := f.listCalls.Load(); n != 1 {
+				t.Errorf("list requests = %d, want 1", n)
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListAssets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want []Asset
+	}{
+		{name: "no assets field", body: `[{"tag_name": "v1.0.0", "html_url": "u"}]`, want: []Asset{}},
+		{name: "empty assets", body: `[{"tag_name": "v1.0.0", "html_url": "u", "assets": []}]`, want: []Asset{}},
+		{
+			name: "two assets",
+			body: `[{"tag_name": "v1.0.0", "html_url": "u", "assets": [
+				{"name": "a", "browser_download_url": "da", "size": 1},
+				{"name": "b", "browser_download_url": "db", "size": 2}
+			]}]`,
+			want: []Asset{{Name: "a", URL: "da", Size: 1}, {Name: "b", URL: "db", Size: 2}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, respond(http.StatusOK, tc.body))
+
+			got, err := f.listSource().Latest(context.Background())
+			if err != nil {
+				t.Fatalf("Latest() error = %v", err)
+			}
+
+			want := Release{Tag: "v1.0.0", URL: "u", Assets: tc.want}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Latest() = %#v, want %#v", got, want)
+			}
+			if got.Assets == nil {
+				t.Error("Latest().Assets = nil, want a non-nil slice")
+			}
+		})
+	}
+}
+
+func TestGitHubSource_PrereleaseOnlyWhenIncluded(t *testing.T) {
+	t.Parallel()
+
+	const tag = "v2.0.0-rc.1"
+
+	t.Run("included", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeGitHubList(t, respond(http.StatusOK, apiListJSON(listedRelease{tag: tag})))
+
+		got, err := f.listSource().Latest(context.Background())
+		if err != nil {
+			t.Fatalf("Latest() error = %v", err)
+		}
+		if want := listedReleaseOf(tag); !reflect.DeepEqual(got, want) {
+			t.Errorf("Latest() = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("not included", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeGitHub(t, redirectTo(http.StatusFound, tagPagePath+tag), unexpected(t, "API"))
+
+		_, err := f.source().Latest(context.Background())
+		if !errors.Is(err, ErrPrerelease) {
+			t.Fatalf("Latest() error = %v, want ErrPrerelease", err)
+		}
+	})
+}
+
+func TestGitHubSource_ListWithoutEligibleRelease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty list", body: `[]`},
+		{name: "null", body: `null`},
+		{name: "only drafts", body: apiListJSON(listedRelease{tag: "v1.0.0", draft: true})},
+		{
+			name: "only odd tags",
+			body: apiListJSON(listedRelease{tag: "1.0.0"}, listedRelease{tag: "source/update/v1.0.0"}),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, respond(http.StatusOK, tc.body))
+
+			got, err := f.listSource().Latest(context.Background())
+			if !errors.Is(err, errNoListedRelease) {
+				t.Fatalf("Latest() error = %v, want errNoListedRelease", err)
+			}
+			if want := f.server.URL + listPath + "?" + listQuery; !strings.Contains(err.Error(), want) {
+				t.Errorf("Latest() error = %q, want it to name %q", err, want)
+			}
+			if !reflect.DeepEqual(got, Release{}) {
+				t.Errorf("Latest() = %#v, want the zero Release", got)
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListRequest(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu      sync.Mutex
+		path    string
+		query   string
+		headers http.Header
+	)
+	f := newFakeGitHubList(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		path, query, headers = r.URL.Path, r.URL.RawQuery, r.Header.Clone()
+		mu.Unlock()
+		respond(http.StatusOK, apiListJSON(listedRelease{tag: "v1.0.0"}))(w, r)
+	})
+	s := f.listSource()
+	s.APIURL += "/"
+
+	if _, err := s.Latest(context.Background()); err != nil {
+		t.Fatalf("Latest() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if path != listPath {
+		t.Errorf("list request path = %q, want %q", path, listPath)
+	}
+	if query != listQuery {
+		t.Errorf("list request query = %q, want %q", query, listQuery)
+	}
+	want := map[string]string{
+		"User-Agent":           "go.vipengele.org/update",
+		"Accept":               "application/vnd.github+json",
+		"X-GitHub-Api-Version": "2022-11-28",
+	}
+	for name, value := range want {
+		if got := headers.Values(name); len(got) != 1 || got[0] != value {
+			t.Errorf("list request %s = %q, want [%q]", name, got, value)
+		}
+	}
+	if n := f.listCalls.Load(); n != 1 {
+		t.Errorf("list requests = %d, want 1", n)
+	}
+	if n := f.webCalls.Load(); n != 0 {
+		t.Errorf("web requests = %d, want 0", n)
+	}
+	if n := f.apiCalls.Load(); n != 0 {
+		t.Errorf("latest-release API requests = %d, want 0", n)
+	}
+}
+
+func TestGitHubSource_ListStatusError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "404", status: http.StatusNotFound, body: `{"message":"Not Found"}`},
+		{name: "500", status: http.StatusInternalServerError, body: "boom"},
+		{name: "300", status: http.StatusMultipleChoices, body: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, respond(tc.status, tc.body))
+
+			_, err := f.listSource().Latest(context.Background())
+
+			var statusErr *StatusError
+			if !errors.As(err, &statusErr) {
+				t.Fatalf("Latest() error = %v, want a *StatusError", err)
+			}
+			want := StatusError{URL: f.server.URL + listPath + "?" + listQuery, StatusCode: tc.status, Body: tc.body}
+			if *statusErr != want {
+				t.Errorf("StatusError = %#v, want %#v", *statusErr, want)
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListSuccessStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusOK, http.StatusCreated, 299} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, respond(status, apiListJSON(listedRelease{tag: "v1.0.0"})))
+
+			got, err := f.listSource().Latest(context.Background())
+			if err != nil {
+				t.Fatalf("Latest() error = %v", err)
+			}
+			if got.Tag != "v1.0.0" {
+				t.Errorf("Latest().Tag = %q, want %q", got.Tag, "v1.0.0")
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListInvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	for _, body := range []string{"[{not json", `{"tag_name": "v1.0.0"}`, ""} {
+		t.Run(fmt.Sprintf("%q", body), func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, respond(http.StatusOK, body))
+
+			_, err := f.listSource().Latest(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "decoding releases") {
+				t.Fatalf("Latest() error = %v, want a decoding error", err)
+			}
+			if errors.Is(err, errNoListedRelease) {
+				t.Errorf("Latest() error = %v, want a decoding error, not errNoListedRelease", err)
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListBodyLimit(t *testing.T) {
+	t.Parallel()
+
+	doc := `[{"tag_name": "v1.0.0", "html_url": "u"}]`
+
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "larger than a single release may be", size: maxResponseBody + 1, wantErr: false},
+		{name: "exactly the limit", size: maxListResponseBody, wantErr: false},
+		{name: "one byte over", size: maxListResponseBody + 1, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := doc + strings.Repeat(" ", tc.size-len(doc))
+			f := newFakeGitHubList(t, respond(http.StatusOK, body))
+
+			got, err := f.listSource().Latest(context.Background())
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Latest() error = %v", err)
+				}
+				if got.Tag != "v1.0.0" {
+					t.Errorf("Latest().Tag = %q, want %q", got.Tag, "v1.0.0")
+				}
+				return
+			}
+
+			if want := fmt.Sprintf("exceeds %d bytes", maxListResponseBody); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("Latest() error = %v, want it to contain %q", err, want)
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		timeout              time.Duration
+		ctxTimeout           time.Duration
+		client               func(*http.Client)
+		wantDeadlineExceeded bool // whether errors.Is(err, context.DeadlineExceeded) is asserted
+	}{
+		{name: "source timeout", timeout: 50 * time.Millisecond, wantDeadlineExceeded: true},
+		{name: "shorter caller deadline", ctxTimeout: 50 * time.Millisecond, wantDeadlineExceeded: true},
+		{name: "HTTP client timeout", client: func(c *http.Client) { c.Timeout = 50 * time.Millisecond }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, blockUntilDone)
+			s := f.listSource()
+			s.Timeout = tc.timeout
+			if tc.client != nil {
+				c := *s.HTTPClient
+				tc.client(&c)
+				s.HTTPClient = &c
+			}
+
+			ctx := context.Background()
+			if tc.ctxTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.ctxTimeout)
+				defer cancel()
+			}
+
+			_, err := s.Latest(ctx)
+
+			var timeoutErr *TimeoutError
+			if !errors.As(err, &timeoutErr) {
+				t.Fatalf("Latest() error = %v, want a *TimeoutError", err)
+			}
+			if want := f.server.URL + listPath + "?" + listQuery; timeoutErr.URL != want {
+				t.Errorf("TimeoutError.URL = %q, want %q", timeoutErr.URL, want)
+			}
+			if tc.wantDeadlineExceeded && !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, want true")
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	arrived := make(chan struct{})
+	f := newFakeGitHubList(t, func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		blockUntilDone(w, r)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-arrived
+		cancel()
+	}()
+
+	_, err := f.listSource().Latest(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Latest() error = %v, want context.Canceled", err)
+	}
+	var timeoutErr *TimeoutError
+	if errors.As(err, &timeoutErr) {
+		t.Errorf("Latest() error = %v, want no *TimeoutError", err)
 	}
 }
