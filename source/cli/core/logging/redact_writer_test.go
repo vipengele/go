@@ -242,36 +242,122 @@ func TestRedactingWriterOverflowJSONTrailingEscape(t *testing.T) {
 	// escapes arrives with the next write and does not end the value.
 	r := testRedactor()
 	pad := filler(maxBuffered - overflowWindow)
-	var out bytes.Buffer
-	w := newRedactingWriter(&out, r)
-	writeAll(t, w, `{"pad":"`+pad+`","msg":"Authorization: `+strings.Repeat("S", overflowWindow)+`\`)
-	writeAll(t, w, `"LEAK","n":1}`+"\n")
-	got := out.String()
-	if strings.Contains(got, "LEAK") || strings.Contains(got, "SS") {
-		t.Fatalf("secret leaked: %q", got[max(0, len(got)-200):])
-	}
-	if want := `"msg":"Authorization: [REDACTED]","n":1}` + "\n"; !strings.HasSuffix(got, want) {
-		t.Errorf("got suffix %q, want %q", got[max(0, len(got)-len(want)):], want)
-	}
-	if !json.Valid(bytes.TrimSuffix(out.Bytes(), []byte("\n"))) {
-		t.Error("output line is not valid JSON")
+	line := `{"pad":"` + pad + `","msg":"Authorization: ` + strings.Repeat("S", overflowWindow) + `\`
+	for _, earlier := range []string{"", filler(len(line)) + "\n"} {
+		t.Run(fmt.Sprint(len(earlier) > 0), func(t *testing.T) {
+			// An earlier line of the same length in the same write leaves its newline in the
+			// buffer's memory just past the held bytes, where a piece that ran one byte past
+			// them would pick it up.
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, r)
+			writeAll(t, w, earlier+line)
+			writeAll(t, w, `"LEAK","n":1}`+"\n")
+			got := strings.TrimPrefix(out.String(), earlier)
+			if strings.Contains(got, "LEAK") || strings.Contains(got, "SS") {
+				t.Fatalf("secret leaked: %q", got[max(0, len(got)-200):])
+			}
+			if want := `"msg":"Authorization: [REDACTED]","n":1}` + "\n"; !strings.HasSuffix(got, want) {
+				t.Errorf("got suffix %q, want %q", got[max(0, len(got)-len(want)):], want)
+			}
+			if !json.Valid([]byte(strings.TrimSuffix(got, "\n"))) {
+				t.Error("output line is not valid JSON")
+			}
+		})
 	}
 }
 
 func TestRedactingWriterOverflowKeepsRunesWhole(t *testing.T) {
-	// "é" is two bytes; an odd number of filler bytes in front puts the raw cut inside a rune.
-	for _, lead := range []int{0, 1} {
-		t.Run(fmt.Sprint(lead), func(t *testing.T) {
-			var out bytes.Buffer
-			w := newRedactingWriter(&out, testRedactor())
-			writeAll(t, w, filler(lead)+strings.Repeat("é", maxBuffered/2+1))
-			if out.Len() == 0 {
-				t.Fatal("overflow flushed nothing")
+	cut := maxBuffered + 1 - overflowWindow
+	for _, r := range []string{"é", "€", "😀"} {
+		for back := 1; back < len(r); back++ {
+			t.Run(fmt.Sprintf("%s/%d", r, back), func(t *testing.T) {
+				// The raw cut falls on the back-th byte of the rune, so the window starts back
+				// bytes earlier, at the rune's first byte.
+				in := filler(cut-back) + r + filler(maxBuffered+1-(cut-back)-len(r))
+				var out bytes.Buffer
+				w := newRedactingWriter(&out, testRedactor())
+				writeAll(t, w, in)
+				if got, want := out.Len(), cut-back; got != want {
+					t.Fatalf("overflow flushed %d bytes, want %d", got, want)
+				}
+				if err := w.Flush(); err != nil {
+					t.Fatalf("Flush: %v", err)
+				}
+				if out.String() != in {
+					t.Error("output differs from the input")
+				}
+			})
+		}
+	}
+}
+
+func TestRedactingWriterOverflowBacksUpAtMostARune(t *testing.T) {
+	// Six continuation bytes end at the raw cut, which no valid UTF-8 holds: the window starts
+	// utf8.UTFMax-1 bytes before the cut, inside the run.
+	cut := maxBuffered + 1 - overflowWindow
+	run := strings.Repeat("\x80", 6)
+	in := filler(cut-5) + run + filler(maxBuffered+1-(cut-5)-len(run))
+	var out bytes.Buffer
+	w := newRedactingWriter(&out, testRedactor())
+	writeAll(t, w, in)
+	if got, want := out.Len(), cut-(utf8.UTFMax-1); got != want {
+		t.Fatalf("overflow flushed %d bytes, want %d", got, want)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if out.String() != in {
+		t.Error("output differs from the input")
+	}
+}
+
+// TestRedactingWriterOverflowSecretAtTheCut pins that a secret that starts exactly at the start
+// of the retained window is left whole in the window: the overflow flush writes nothing past it,
+// and the line is redacted whole when it ends.
+func TestRedactingWriterOverflowSecretAtTheCut(t *testing.T) {
+	r := testRedactor()
+	cut := maxBuffered + 1 - overflowWindow
+	tests := []struct {
+		name, head, secret, end string
+	}{
+		{"prefixed token", filler(cut), "ghp_SECRET ", "\n"},
+		{"text header", filler(cut), "Authorization: SECRET ", "\n"},
+		{"json header key", `{"pad":"` + filler(cut-10) + `",`, `"Cookie":[1],"n":"`, `"}` + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.head) != cut {
+				t.Fatalf("head is %d bytes, want %d", len(tt.head), cut)
 			}
-			if !utf8.Valid(out.Bytes()) {
-				t.Error("overflow flush split a rune")
+			in := tt.head + tt.secret + filler(maxBuffered+1-cut-len(tt.secret))
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, r)
+			writeAll(t, w, in)
+			if got := out.Len(); got != cut {
+				t.Fatalf("overflow flushed %d bytes, want %d", got, cut)
+			}
+			writeAll(t, w, tt.end)
+			whole := in + strings.TrimSuffix(tt.end, "\n")
+			if got, want := out.String(), r.line(whole)+"\n"; got != want {
+				t.Errorf("got suffix %q, want suffix %q", got[max(0, len(got)-300):], want[max(0, len(want)-300):])
 			}
 		})
+	}
+}
+
+// TestRedactingWriterContinuationDropsEveryTokenChar pins that the rest of a flushed token is
+// dropped up to the first byte that is not a token character, including the bytes at each end of
+// every range of them.
+func TestRedactingWriterContinuationDropsEveryTokenChar(t *testing.T) {
+	var out bytes.Buffer
+	w := newRedactingWriter(&out, testRedactor())
+	writeAll(t, w, "x ghp_q")
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	writeAll(t, w, "AZaz09+/=.~-_:@[`{ end\n")
+	if got, want := out.String(), "x ghp_[REDACTED]:@[`{ end\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 

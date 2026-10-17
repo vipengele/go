@@ -44,8 +44,8 @@ type Redaction struct {
 // redacted replaces every secret the redactor finds.
 const redacted = "[REDACTED]"
 
-// tokenChars is the character class of the token that follows a prefix.
-const tokenChars = `[A-Za-z0-9_+/=.~-]`
+// suffixChars is the character class of the run that follows a prefix.
+const suffixChars = `[A-Za-z0-9_+/=.~-]`
 
 // baselinePrefixes and baselineHeaders return what every redactor redacts, whatever its
 // [Redaction].
@@ -138,7 +138,7 @@ func newRedactor(red Redaction) *redactor {
 	nameAlt := alternation(names)
 	return &redactor{
 		headers:    headers,
-		prefix:     regexp.MustCompile(`(` + prefixAlt + `)` + tokenChars + `+`),
+		prefix:     regexp.MustCompile(`(` + prefixAlt + `)` + suffixChars + `+`),
 		textHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)"?\s*:\s*)[^\r\n]*`),
 		jsonHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)(?:"\s*:\s*"|\s*:\s*))(?:[^"\\]|\\.)*`),
 		jsonKey:    regexp.MustCompile(`(?i)(?:^|[^\\])(?:\\\\)*("(?:` + nameAlt + `)"\s*:\s*)`),
@@ -199,7 +199,7 @@ type headerValue struct {
 // the jsonHeader pattern, which ends it at its closing unescaped quote.
 func (r *redactor) headerValues(s string) []headerValue {
 	var out []headerValue
-	for from := 0; from < len(s); {
+	for from := 0; ; {
 		m := r.jsonKey.FindStringSubmatchIndex(s[from:])
 		if m == nil {
 			break
@@ -269,7 +269,7 @@ func (k *jsonSkip) next(c byte) (done, last bool) {
 		k.depth--
 		return k.depth == 0, true
 	}
-	return false, false
+	return false, false // [lydite:exclude_from_mutation][last is read only when done is true, and done is false here]
 }
 
 // skipJSONValue returns where the value that starts at s[i], not a string, ends: after its
@@ -433,7 +433,7 @@ func encodeJSON(v any) (string, error) {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		return "", err
+		return "", err // [lydite:exclude_from_mutation][the only caller discards the string when err is non-nil]
 	}
 	return strings.TrimSuffix(buf.String(), "\n"), nil
 }

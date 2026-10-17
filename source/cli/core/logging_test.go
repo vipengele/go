@@ -351,16 +351,17 @@ func TestWithLoggingRunsBeforeEveryPreRunHook(t *testing.T) {
 	}
 }
 
-// toolSecret is a token of a tool's own prefix, which only [cli.WithRedaction] redacts.
-const toolSecret = "tkn_abcdef123456"
+// toolTokenRun is the run after the prefix "tkn_" of a token of a tool's own, which only
+// [cli.WithRedaction] redacts.
+const toolTokenRun = "fakefakefake"
 
 // secretApp returns an App taking WithLogging, -v and -q and opts, with a "run" command that logs
-// toolSecret and a baseline bearer token, and writes tail, a line without its newline, to the
+// a "tkn_" token and a baseline bearer token, and writes tail, a line without its newline, to the
 // writer LogWriterFrom returns.
 func secretApp(tail string, opts ...cli.Option) *cli.App {
 	app := cli.New(identity(), append([]cli.Option{cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging()}, opts...)...)
 	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
-		slog.InfoContext(ctx, "token "+toolSecret+" auth Bearer basesecret99")
+		slog.InfoContext(ctx, "token tkn_"+toolTokenRun+" auth Bearer basesecret99")
 		if tail != "" {
 			w, _ := cli.LogWriterFrom(ctx)
 			_, _ = w.Write([]byte(tail))
@@ -379,7 +380,7 @@ func TestWithRedactionRedactsToolPrefixes(t *testing.T) {
 			if got.code != cli.ExitOK {
 				t.Fatalf("result %+v, want 0", got)
 			}
-			for _, secret := range []string{"abcdef123456", "basesecret99"} {
+			for _, secret := range []string{toolTokenRun, "basesecret99"} {
 				if strings.Contains(got.stderr, secret) {
 					t.Errorf("stderr holds %q:\n%s", secret, got.stderr)
 				}
@@ -398,7 +399,7 @@ func TestWithRedactionAccumulates(t *testing.T) {
 		cli.WithRedaction(logging.Redaction{Prefixes: []string{"other_"}}))
 	prefixes[0] = "zzz_"
 	got := runApp(t, app, "run")
-	if strings.Contains(got.stderr, "abcdef123456") || strings.Contains(got.stderr, "basesecret99") {
+	if strings.Contains(got.stderr, toolTokenRun) || strings.Contains(got.stderr, "basesecret99") {
 		t.Errorf("stderr holds a secret:\n%s", got.stderr)
 	}
 }
@@ -409,7 +410,7 @@ func TestBaselineRedactedWithoutWithRedaction(t *testing.T) {
 	if strings.Contains(got.stderr, "basesecret99") {
 		t.Errorf("stderr holds the baseline secret:\n%s", got.stderr)
 	}
-	if !strings.Contains(got.stderr, "abcdef123456") {
+	if !strings.Contains(got.stderr, toolTokenRun) {
 		t.Errorf("stderr lacks the unregistered token, want it kept:\n%s", got.stderr)
 	}
 }

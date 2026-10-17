@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -82,6 +83,30 @@ func TestRedactorLineJSON(t *testing.T) {
 				t.Errorf("line(%q) = %q, not valid JSON", tt.in, got)
 			}
 		})
+	}
+}
+
+func TestNonEmptyDropsEmptyAndDuplicates(t *testing.T) {
+	got := nonEmpty([]string{"b", "", "a", "b", "", "a"})
+	if len(got) != 2 || !slices.Contains(got, "a") || !slices.Contains(got, "b") {
+		t.Errorf("nonEmpty = %q, want a and b once each", got)
+	}
+}
+
+// TestRedactorPrefixExtendingAnother pins that a prefix that extends another is matched whole,
+// whatever order the prefixes are given in: the run after the shorter prefix would otherwise keep
+// the rest of the longer one in front of "[REDACTED]".
+func TestRedactorPrefixExtendingAnother(t *testing.T) {
+	for _, prefixes := range [][]string{{"ab_", "ab_long_"}, {"ab_long_", "ab_"}} {
+		r := newRedactor(Redaction{Prefixes: prefixes})
+		for in, want := range map[string]string{
+			"x ab_long_XYZ y": "x ab_long_[REDACTED] y",
+			"x ab_XYZ y":      "x ab_[REDACTED] y",
+		} {
+			if got := r.lineAs(in, shapeText); got != want {
+				t.Errorf("prefixes %q: line(%q) = %q, want %q", prefixes, in, got, want)
+			}
+		}
 	}
 }
 
@@ -360,24 +385,45 @@ func TestHandlerJSONRedactsTheEncodedForm(t *testing.T) {
 	}
 }
 
+// namedBytes is a type whose underlying type is a byte slice, which the text handler writes as
+// the quoted bytes.
+type namedBytes []byte
+
 func TestHandlerTextRedactsTheWrittenForm(t *testing.T) {
 	var buf bytes.Buffer
 	h := newRedactingHandler(slog.NewTextHandler(&buf, nil), newRedactor(Redaction{Prefixes: []string{"ghp_"}}), spec.FormatText)
 	slog.New(h).Info("m",
 		slog.Any("text", textToken{}),
 		slog.Any("bytes", []byte("Bearer abc")),
+		slog.Any("named", namedBytes("Bearer abc")),
+		slog.Any("plain", plain{Token: "ghp_plain"}),
 		slog.Any("fail", failingText{}),
 	)
 	out := buf.String()
-	for _, s := range []string{"ghp_text", "abc", "ghp_fail"} {
+	for _, s := range []string{"ghp_text", "abc", "ghp_plain", "ghp_fail"} {
 		if strings.Contains(out, s) {
 			t.Errorf("output %q leaks %q", out, s)
 		}
 	}
-	for _, want := range []string{"text=ghp_[REDACTED]", `bytes="Bearer [REDACTED]"`} {
+	for _, want := range []string{
+		"text=ghp_[REDACTED]", `bytes="Bearer [REDACTED]"`, `named="Bearer [REDACTED]"`,
+		"plain={Token:ghp_[REDACTED]}",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q lacks %q", out, want)
 		}
+	}
+}
+
+// TestHandlerJSONHandsOnAnInvalidRedactionAsAString pins that a value whose redacted encoding is
+// not valid JSON, here a prefix matched inside a number, is written as a string, so the record
+// stays valid JSON and carries the redacted text.
+func TestHandlerJSONHandsOnAnInvalidRedactionAsAString(t *testing.T) {
+	_, rec := logJSON(t, Redaction{Prefixes: []string{"1."}}, func(l *slog.Logger) {
+		l.Info("m", slog.Any("v", map[string]float64{"n": 1.5}))
+	})
+	if got, want := rec["v"], `{"n":1.[REDACTED]}`; got != want {
+		t.Errorf("v = %v, want %q", got, want)
 	}
 }
 

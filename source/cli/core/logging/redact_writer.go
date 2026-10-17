@@ -146,10 +146,11 @@ func (w *RedactingWriter) redactLineEnd(line []byte) string {
 }
 
 // windowStart returns where the window an overflow flush retains begins, moved back to the start
-// of the UTF-8 sequence it would split.
+// of the UTF-8 sequence it would split, by at most [utf8.UTFMax]-1 bytes. It runs only once buf
+// holds more than [maxBuffered] bytes, so the window starts far past the start of buf.
 func (w *RedactingWriter) windowStart() int {
 	cut := len(w.buf) - overflowWindow
-	for i := 0; i < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(w.buf[cut]); i++ {
+	for i := 0; i < utf8.UTFMax-1 && !utf8.RuneStart(w.buf[cut]); i++ {
 		cut--
 	}
 	return cut
@@ -273,7 +274,7 @@ func (w *RedactingWriter) skipContinuation(p []byte) []byte {
 	return nil
 }
 
-// isTokenChar reports whether c is in [tokenChars], the characters of a prefixed token.
+// isTokenChar reports whether c is in [suffixChars], the characters of a prefixed token.
 func isTokenChar(c byte) bool {
 	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' ||
 		strings.IndexByte("_+/=.~-", c) >= 0
