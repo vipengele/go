@@ -475,6 +475,39 @@ func TestHandlerJSONRedactsTheEncodedForm(t *testing.T) {
 	}
 }
 
+// marshalingError is an error that is also a json.Marshaler, which the JSON handler writes by its
+// MarshalJSON and not by its Error text.
+type marshalingError struct{ body string }
+
+func (marshalingError) Error() string { return "marshaling failure text" }
+
+func (e marshalingError) MarshalJSON() ([]byte, error) { return []byte(e.body), nil }
+
+// TestHandlerJSONRedactsTheMarshalingOfAnError pins that an error that is a json.Marshaler keeps
+// the JSON object its MarshalJSON writes, redacted, and is not replaced by its Error text.
+func TestHandlerJSONRedactsTheMarshalingOfAnError(t *testing.T) {
+	out, rec := logJSON(t, Redaction{Prefixes: []string{"ghp_"}}, func(l *slog.Logger) {
+		l.Info("m", slog.Any("err", marshalingError{body: `{"code":7,"token":"ghp_abc","Cookie":"abc"}`}))
+	})
+	assertNoSecret(t, out)
+	if strings.Contains(out, "marshaling failure text") {
+		t.Errorf("output %q carries the Error text, want the MarshalJSON object", out)
+	}
+	errRec, ok := rec["err"].(map[string]any)
+	if !ok {
+		t.Fatalf("err = %v, want the object MarshalJSON writes", rec["err"])
+	}
+	if got, want := errRec["code"], float64(7); got != want {
+		t.Errorf("err.code = %v, want %v", got, want)
+	}
+	if got, want := errRec["token"], "ghp_[REDACTED]"; got != want {
+		t.Errorf("err.token = %v, want %v", got, want)
+	}
+	if got, want := errRec["Cookie"], "[REDACTED]"; got != want {
+		t.Errorf("err.Cookie = %v, want %v", got, want)
+	}
+}
+
 // namedBytes is a type whose underlying type is a byte slice, which the text handler writes as
 // the quoted bytes.
 type namedBytes []byte
@@ -528,6 +561,7 @@ func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
 		slog.Any("map", map[string]any{"b": []int{1, 2}, "a": nil}),
 		slog.Any("err", errors.New("plain failure")),
 		slog.Any("nilerr", (*nilErr)(nil)),
+		slog.Any("marshalerr", marshalingError{body: `{"code": 7, "msg": "x <&> y"}`}),
 		slog.Any("str", stringer{}),
 		slog.Any("bytes", []byte("raw bytes")),
 		slog.Any("named", namedBytes("named bytes")),
