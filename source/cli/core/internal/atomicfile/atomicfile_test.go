@@ -238,3 +238,20 @@ func TestWriteFileFailureLeavesNoTemp(t *testing.T) {
 
 	assertEntries(t, dir, "config.toml")
 }
+
+// TestWriteFileRelativePath runs in the process's working directory, which t.Chdir changes, and
+// sets the system temporary directory, which os.CreateTemp falls back to when given no directory,
+// to one that does not exist. A bare file name therefore succeeds only when the temporary file is
+// created beside it, in ".". It is not parallel because both settings are process-wide.
+func TestWriteFileRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("TMPDIR", filepath.Join(dir, "missing"))
+
+	if err := atomicfile.WriteFile("config.toml", []byte("key = 1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	assertFile(t, filepath.Join(dir, "config.toml"), "key = 1\n", 0o600)
+	assertEntries(t, dir, "config.toml")
+}
