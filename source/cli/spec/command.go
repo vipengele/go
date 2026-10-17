@@ -40,6 +40,11 @@ type Command struct {
 // otherwise runs around it. Any value, the empty string included, exempts it.
 const SkipUpdateCheck = "vipengele.skip-update-check"
 
+// SkipConfig is the annotation key that runs a command without configuration loaded. Any value,
+// the empty string included, exempts it. An annotation applies to the command that carries it
+// alone, not to its subcommands.
+const SkipConfig = "vipengele.skip-config"
+
 // CommandError reports a problem with one command of a tree.
 type CommandError struct {
 	// Path is the space-separated names from the root to the command, as in "tool remote add".
