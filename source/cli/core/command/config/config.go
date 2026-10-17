@@ -1,6 +1,6 @@
-// Package config provides the "config" command group, which locates, checks and shows a tool's
-// configuration file, and the context accessors through which a loaded configuration reaches a
-// run function.
+// Package config provides the "config" command group, which locates, checks, shows and edits a
+// tool's configuration file, and the context accessors through which a loaded configuration
+// reaches a run function.
 //
 // [New] returns the group for a configuration of struct type T, as [cfg.Load] binds it. The group
 // has no run function, so "config" alone prints its help. Its subcommands are:
@@ -12,11 +12,14 @@
 //   - "show" prints every key with its value and its origin: "default", the file and line, or the
 //     environment variable that set it. It reads the configuration the context carries, stored by
 //     [With], so the code that runs before it loads it.
+//   - "edit" opens a copy of the file in an editor and moves it over the file only once the copy
+//     is valid, checked as "validate" checks the file; the file it writes has mode 0600. It needs
+//     a terminal on the standard input and carries [spec.SkipConfig], so it repairs a broken file.
 //
 // "path" and "show" write JSON when [spec.Output.Format] is [spec.FormatJSON], as it is under
 // the standard --json or --output json of a cli.App; neither declares a flag of its own.
 //
-// The package never imports a CLI framework, and no subcommand creates a directory.
+// The package never imports a CLI framework, and no subcommand but "edit" creates a directory.
 package config
 
 import (
@@ -46,7 +49,11 @@ type Options[T any] struct {
 	// LookupEnv looks up the environment variables of the environment layer, as os.LookupEnv
 	// does. Nil reads the LookupEnv of the invocation's Env.
 	LookupEnv func(key string) (string, bool)
-	// Editor is the editor a subcommand that edits the file opens it in.
+	// Editor is the editor "config edit" opens the copy of the file in. Nil runs the program
+	// $VISUAL names, else the one $EDITOR names, as the invocation's Env looks them up, split on
+	// whitespace and given the copy's path as its last argument, with the invocation's standard
+	// streams, each of which must then be an *os.File; with neither variable set, "config edit"
+	// fails.
 	Editor Editor
 }
 
@@ -71,8 +78,8 @@ func (o Options[T]) loadFile() (cfg.Result[T], error) {
 func New[T any](opts Options[T]) *spec.Command {
 	group := &spec.Command{
 		Name:        "config",
-		Summary:     "Locate, check and show the configuration file",
-		Description: "Locate, check and show the configuration file at " + opts.Path + ".",
+		Summary:     "Locate, check, show and edit the configuration file",
+		Description: "Locate, check, show and edit the configuration file at " + opts.Path + ".",
 	}
 	for _, build := range commands[T]() {
 		group.Commands = append(group.Commands, build(opts))
@@ -86,6 +93,7 @@ func commands[T any]() []func(Options[T]) *spec.Command {
 		newPath[T],
 		newValidate[T],
 		newShow[T],
+		newEdit[T],
 	}
 }
 

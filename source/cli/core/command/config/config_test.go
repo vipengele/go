@@ -91,7 +91,7 @@ func run(t *testing.T, ctx context.Context, opts config.Options[testConfig], nam
 	return result{stdout: out.String(), stderr: errOut.String(), err: err}
 }
 
-func TestGroupHoldsPathValidateAndShow(t *testing.T) {
+func TestGroupHoldsItsSubcommands(t *testing.T) {
 	group := config.New(options(t, ""))
 	if group.Name != "config" {
 		t.Errorf("Name = %q, want config", group.Name)
@@ -103,7 +103,7 @@ func TestGroupHoldsPathValidateAndShow(t *testing.T) {
 	for _, c := range group.Commands {
 		names = append(names, c.Name)
 	}
-	if got, want := strings.Join(names, " "), "path validate show"; got != want {
+	if got, want := strings.Join(names, " "), "path validate show edit"; got != want {
 		t.Errorf("subcommands = %q, want %q", got, want)
 	}
 	root := &spec.Command{Name: "tool", Commands: []*spec.Command{group}}
@@ -112,7 +112,7 @@ func TestGroupHoldsPathValidateAndShow(t *testing.T) {
 	}
 }
 
-func TestSkipConfigOnPathAndValidateOnly(t *testing.T) {
+func TestSkipConfigOnEveryCommandButShow(t *testing.T) {
 	group := config.New(options(t, ""))
 	tests := []struct {
 		name string
@@ -121,6 +121,7 @@ func TestSkipConfigOnPathAndValidateOnly(t *testing.T) {
 		{"path", true},
 		{"validate", true},
 		{"show", false},
+		{"edit", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,7 +144,7 @@ func TestGroupAlonePrintsHelp(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d; stderr %q", code, cli.ExitOK, errOut.String())
 	}
 	help := out.String() + errOut.String()
-	for _, name := range []string{"path", "validate", "show"} {
+	for _, name := range []string{"path", "validate", "show", "edit"} {
 		if !strings.Contains(help, name) {
 			t.Errorf("help %q does not list %q", help, name)
 		}
