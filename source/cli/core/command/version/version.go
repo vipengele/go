@@ -1,4 +1,4 @@
-package versioncmd
+package version
 
 import (
 	"context"

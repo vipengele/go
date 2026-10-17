@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"go.vipengele.org/cli/core/buildinfo"
+	"go.vipengele.org/cli/core/command/version"
 	"go.vipengele.org/cli/core/internal/cobra"
 	"go.vipengele.org/cli/core/internal/errrender"
-	"go.vipengele.org/cli/core/versioncmd"
 	"go.vipengele.org/cli/spec"
 )
 
@@ -20,7 +20,7 @@ import (
 //		os.Exit(app.Execute())
 //	}
 //
-// The App owns the "version" command, which prints its build information as the versioncmd
+// The App owns the "version" command, which prints its build information as the version
 // package describes: every root it runs holds it after the added commands, so every tool
 // answers "version --json". A tool does not add a command named "version"; one it adds makes
 // the tree invalid.
@@ -209,9 +209,9 @@ func (a *App) root(flags standardFlags) *spec.Command {
 // version returns the "version" command for one execution. It declares a local --json unless
 // flags holds the standard --json, which it then reads through the invocation's Output.
 func (a *App) version(flags standardFlags) *spec.Command {
-	var opts []versioncmd.Option
+	var opts []version.Option
 	if flags.json != nil {
-		opts = append(opts, versioncmd.WithOutputJSON())
+		opts = append(opts, version.WithOutputJSON())
 	}
-	return versioncmd.New(*a.settings.buildInfo, opts...)
+	return version.New(*a.settings.buildInfo, opts...)
 }

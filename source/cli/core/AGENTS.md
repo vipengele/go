@@ -20,8 +20,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   true `--json`, `--output json` with an explicit `--json=false`, and an unknown value are usage
   errors (exit 2). A command with a local `--json` reads it OR'd with `Output.Format()`. The App
   owns `version`
-  (ADR-0009): every root holds `versioncmd.New(...)` after the added commands, with a local `--json`
-  unless `WithJSON` is given, then `versioncmd.WithOutputJSON()`, so `version --json` writes JSON
+  (ADR-0009): every root holds `version.New(...)` after the added commands, with a local `--json`
+  unless `WithJSON` is given, then `version.WithOutputJSON()`, so `version --json` writes JSON
   under every option set, and `version --output json` too under `WithOutput`; a tool's own `version` is a
   duplicate name. `cli/core` never imports `update`: the tool's `main` wires the update check as a
   hook, and `spec.SkipUpdateCheck` is the opt-out annotation.
@@ -74,11 +74,11 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `*UsageError`.
 - `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). `Info.IsDev`
   delegates to `cli/spec/version`. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
-  JSON object without `schema`; `versioncmd` writes it with `spec.WriteJSON(inv.Env.Stdout, 1, info)`,
+  JSON object without `schema`; `command/version` writes it with `spec.WriteJSON(inv.Env.Stdout, 1, info)`,
   which adds `schema` first and indents. The keys are pinned by
   `buildinfo/testdata/version-json.golden` (`speccheck.AssertJSONKeys`, `SPECCHECK_UPDATE=1`
   rewrites it). Adding a key keeps `schema`; renaming, removing or retyping a key increments it.
-- `versioncmd` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated
+- `command/version` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated
   `spec.SkipUpdateCheck`. By default it has a local (not inherited) `--json` flag, OR'd with
   `inv.Output.Format() == spec.FormatJSON`;
   `WithOutputJSON()` declares none and reads `inv.Output.JSON()`, for a root with an inherited

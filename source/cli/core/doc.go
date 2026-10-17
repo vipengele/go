@@ -16,7 +16,7 @@
 // subcommands; it has no run function, so given no argument it writes its help. [Execute] runs
 // a root command the tool builds itself instead.
 //
-// The App owns the "version" command of the versioncmd package: every root it runs holds it,
+// The App owns the "version" command of the command/version package: every root it runs holds it,
 // printing the build information of the running binary, so every tool answers "version --json"
 // with the JSON contract the buildinfo package specifies. A tool does not add "version"; a
 // command of that name it adds makes the tree invalid.

@@ -1,4 +1,4 @@
-// Package versioncmd provides the "version" command, which prints the [buildinfo.Info] of the
+// Package version provides the "version" command, which prints the [buildinfo.Info] of the
 // running binary.
 //
 // [New] returns a [spec.Command] for the Commands of a root. A cli.App adds it to every root it
@@ -22,4 +22,4 @@
 // and "version --output json" both write JSON. With [WithOutputJSON] the command declares no
 // flag and reads [spec.Output.JSON] instead, so an inherited --json declared on the root, given
 // before or after "version", selects JSON. Either way "version --json" writes JSON.
-package versioncmd
+package version
