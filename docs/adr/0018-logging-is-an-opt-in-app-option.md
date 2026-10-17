@@ -23,8 +23,30 @@ public package `go.vipengele.org/cli/core/logging`.
 - **Usage errors.** They are the internal usage error type of `internal/cobra`, not
   `spec.UsageError`: that type is for a run function that needs a prompt, and its text reads
   "requires interactive input".
-- **Setup.** `logging.Setup` builds the logger, calls `slog.SetDefault` and returns it. The hook
-  also stores the logger in the context (ADR-0016), where `cli.LoggerFrom(ctx)` reads it.
+- **Setup.** `logging.Setup(opts)` returns a `Result` and an error: it builds the logger, calls
+  `slog.SetDefault` and returns the logger with the redacting writer beneath it. The hook stores
+  both in the context (ADR-0016), where `cli.LoggerFrom(ctx)` and `cli.LogWriterFrom(ctx)` read
+  them.
+- **Two redaction layers, one redactor.** Logging always installs a redacting `slog.Handler` and a
+  redacting `io.Writer` beneath it, built from one shared redactor. No option or constructor skips
+  either: the writer is the backstop for text that reaches the destination without passing the
+  handler.
+- **Baseline.** Always on: the header names Authorization, Proxy-Authorization, Cookie and
+  Set-Cookie, and the values `Bearer <token>` and `Basic <token>`. `WithLogging()` alone is valid.
+- **Additions.** A tool adds with `cli.WithRedaction(logging.Redaction{Prefixes, Headers})` and
+  cannot remove from the baseline. `WithRedaction` without `WithLogging` is an invalid command tree.
+- **Matching.** A prefix followed by a run of `[A-Za-z0-9_+/=.~-]` becomes the prefix followed by
+  `[REDACTED]`; a bare prefix is left alone. A header matches by attribute key, in any letter case
+  and at any group depth, or as `Name: value` in text. In JSON mode the value ends at the closing
+  unescaped quote, so a line stays valid JSON.
+- **Writer scope.** Only the log writer is redacted, plus that same writer exposed by
+  `cli.LogWriterFrom(ctx)` for raw or subprocess output. `Env.Stderr`, error rendering, `inv.Info`
+  and the other message helpers, and the cobra error stream are untouched: wrapping `Env.Stderr`
+  would hide the `*os.File` the editor launcher needs (ADR-0017) and change the golden-pinned error
+  output and ADR-0013's streams.
+- **Buffering.** The writer is line-buffered with a 64 KiB cap and a 256-byte trailing window kept
+  on overflow. A final line without a newline is held until `Flush` or `Close`, or until `Execute`
+  returns, when the App flushes it.
 - **One default per process.** The default is process-wide, so executions that overlap in one
   process, of one App or of two, share the logger installed last, and a record written through the
   default may go to the stderr of another execution. Code that needs the logger of its own
@@ -49,3 +71,9 @@ public package `go.vipengele.org/cli/core/logging`.
 - **Letting `-q --log-level debug` through, by last flag wins or by a precedence.** Command line
   order is not visible after parsing and a precedence would have to be learnt, so setting a level
   twice is refused.
+- **`WithLogging(opts...)` carrying the redaction.** Redaction is a separate `WithRedaction`, so
+  `WithLogging()` stays argument-free and valid alone.
+- **A tool-only pattern set with no baseline.** A tool that forgot to list `Authorization` or
+  `Bearer` would log tokens.
+- **Wrapping `Env.Stderr`.** It would break the editor launcher, which needs the raw `*os.File`
+  (ADR-0017), and change the golden-pinned error output and the streams of ADR-0013.

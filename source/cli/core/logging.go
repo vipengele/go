@@ -21,6 +21,10 @@ import (
 // the format of the records, text or json, the spellings of [WithOutput], and is text when the
 // command line does not set it.
 //
+// The logger redacts secrets: a baseline of header names and Bearer and Basic values always, and
+// what [WithRedaction] adds. The records and the text written to the writer [LogWriterFrom]
+// returns pass through the same redactor; env.Stderr itself is not redacted.
+//
 // Before every run function, after the configuration hook of [WithConfig] and ahead of every
 // [WithPreRun] hook, a pre-run hook installs the logger with [logging.Setup], writing to the
 // env.Stderr of the execution, and stores it in the context it hands on, where [LoggerFrom] reads
