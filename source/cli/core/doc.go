@@ -44,6 +44,16 @@
 // every post-run hook receive, so a hook that loads state, such as configuration, hands it on
 // as a value of that context.
 //
+// [WithConfig] gives the App a configuration of a struct type, as go.vipengele.org/config binds
+// it: the "config" group of the command/config package, with the subcommands "path", "show",
+// "validate" and "edit", and a hook that loads config.yaml of the tool's configuration directory,
+// under the environment variables of the identity's EnvPrefix, into the context before every
+// other hook. A run function reads it with [ConfigFrom]. A command annotated [spec.SkipConfig]
+// runs without it, as "path", "validate", "edit" and "version" do, so a broken file can still be
+// diagnosed and repaired. A configuration that does not load stops the execution as a pre-run
+// hook's error does, with exit code 1. Without [WithConfig] the App has no "config" command and
+// reads no file.
+//
 // [App.ExecuteArgs] and [ExecuteArgs] run the same commands against a [spec.Env] and arguments
 // the caller gives, and touch nothing else of the process, so a test runs the tool's commands
 // against buffers, a fixed environment and a temporary working directory.
@@ -98,7 +108,8 @@
 // by rules 2 to 5, so a reported usage error exits 2 silently. The "invalid command tree" message,
 // one row per problem [spec.Command.Validate] finds, is never suppressed.
 //
-// A [PreRunHook] error is mapped as a run function's error is. A [PostRunHook] error after a run
+// A [PreRunHook] error, that of the configuration hook included, is mapped as a run function's
+// error is. A [PostRunHook] error after a run
 // that succeeded is opaque: it is written and exits 1, whatever it wraps. When the run function
 // fails, its error decides, whatever a post-run hook returns.
 package cli

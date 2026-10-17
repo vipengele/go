@@ -12,6 +12,15 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   add `PreRunHook` / `PostRunHook`s (`hooks.go`), which receive the `Invocation` and a
   `spec.CommandInfo` (path and `Annotations`); a `PreRunHook` returns the context later pre-run
   hooks, the run function and post-run hooks receive (nil keeps the one it got; ADR-0016);
+  `WithConfig[T](defaults)` (`config.go`) is opt-in: it mounts the `command/config` group after the
+  added commands and before `version`, and adds the hook that loads defaults < `config.yaml` in
+  `Dirs.Config()` of the identity < env (`inv.Env.LookupEnv`, `Identity.EnvPrefix`) and stores the
+  `Result[T]` in the context; `ConfigFrom[T](ctx)` reads it (false without `WithConfig` or on a
+  `spec.SkipConfig` command). The hook runs ahead of every `WithPreRun` hook whatever the option
+  order, a load failure is a hook error (exit 1), and a missing file is valid. A directory that
+  cannot be resolved makes the hook and every group run function return that error. `version`
+  carries `SkipConfig` (set in `App.version`); annotations are per command, never inherited. No
+  `--config` flag, no per-key flags, no seeded file;
   `WithBuildInfo` fixes what `version` prints (tests),
   otherwise `buildinfo.Read()`. A run function reads the standard flags and colour (per stream,
   `Output.Color(stream)`) from `inv.Output` (`spec.Output`, resolved in `output.go`), never from a
@@ -86,6 +95,20 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `WithOutputJSON()` declares none and reads `inv.Output.JSON()`, for a root with an inherited
   `--json` (a descendant flag of the same name makes the tree invalid).
 
+- `command/config` — `New(Options[T])` returns the `config` group (ADR-0017); a leaf package that
+  never imports `cli` or a CLI framework. `ctx.go` holds `With` / `From`, the context accessors
+  keyed per `T`. `path` prints the path (JSON `{path, exists}`), `validate` loads defaults < file
+  only and prints a success line on stderr, `show` prints key / value / origin of the full stack
+  from the context (`ErrNotLoaded` without one), `edit` edits a copy in a `.edit-*` directory
+  beside the file and replaces the file at 0600 only when the copy validates (file layer only), with
+  a `re-edit? [Y/n]` prompt; editor `$VISUAL` then `$EDITOR`, via `Options.Editor` in tests, else
+  the default launcher, which needs `*os.File` stdio. `path`, `validate` and `edit` carry
+  `SkipConfig`; `show` does not. JSON follows `inv.Output.Format()` (no flag of its own), so `show
+  --json` needs `WithJSON` or `WithOutput`. Errors are plain (exit 1), including the non-terminal
+  refusal of `edit`: the usage-error type is in `internal/cobra`.
+- `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over
+  `final` and syncs the directory, removing the temp on failure; `WriteFile(path, data, mode)`.
+
 ## Gotchas
 
 - Link-time values: `buildinfo.version`, `commit` and `date` are set with `-X` and must stay
@@ -98,9 +121,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 - Commands are `cli/spec` data. Flags are read through typed handles (`asJSON.Get(inv)`) built inside
   the command's constructor: `gochecknoglobals` is on, so there are no package-level handles, and a
   package-level variable needs a justified `//nolint`.
-- Sibling edges: `go.mod` requires `go.vipengele.org/cli/spec` and `go.vipengele.org/commons`
-  (indirect, because spec imports it), each with a version-less directory `replace` (`../spec`,
-  `../../commons`) while they are developed together (ADR-0006). The main module ignores a
+- Sibling edges: `go.mod` requires `go.vipengele.org/cli/spec`, `go.vipengele.org/config` and
+  `go.vipengele.org/commons` (indirect, because spec imports it), each with a version-less
+  directory `replace` (`../spec`, `../../config`, `../../commons`) while they are developed together (ADR-0006). The main module ignores a
   dependency's `replace`, which is why commons is listed here.
 - Error output is pinned by golden files under `testdata/render/*.golden` (`render_golden_test.go`).
   Regenerate with `go test -update`; the `-update` flag is registered in `TestMain`
