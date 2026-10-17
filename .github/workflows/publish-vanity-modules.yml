@@ -8,8 +8,16 @@
 #
 # A push to main that changes a go.mod, the generator, the list's schema, the
 # publisher or this workflow publishes the list from that commit. A
-# `workflow_dispatch` on main republishes it from main's head. No other branch
-# is ever published.
+# `workflow_dispatch` on main republishes it from main's head.
+#
+# What keeps the R2 credentials to main is the deployment-branch policy of the
+# GitHub Environment `vanity-modules`: it allows deployments from the `main`
+# branch only, and administrators cannot bypass it. The policy is configured on
+# the environment, not in this repository. GitHub runs this file from the ref
+# that triggers it, so nothing written here restrains a branch that edits it or
+# adds a workflow naming the same environment; only the policy does. The ref
+# step below only stops a dispatch from another branch publishing that
+# branch's list.
 #
 # The upload is one PutObject of the whole list: an unchanged list overwrites
 # the object with identical content, and a failed upload fails the run and
@@ -52,7 +60,10 @@ jobs:
       run:
         working-directory: tools/vanity-worker
     steps:
-      # A dispatch can name any branch; only main's list is ever published.
+      # A guard against a mistaken dispatch from another branch publishing that
+      # branch's list. It is not what restricts the credentials: the
+      # environment's deployment-branch policy does, and a branch can edit this
+      # step away.
       - name: The ref is main
         working-directory: .
         env:

@@ -19,12 +19,18 @@ the Worker does not read the published object.
   `PutObject` of the whole list. A failed upload leaves the previous object in place.
 - **When.** The `publish-vanity-modules` workflow runs on a push to `main` that changes a `go.mod`,
   the generator, the schema module, the publisher or the workflow, and on `workflow_dispatch`, which
-  republishes from `main`'s head. It refuses any ref but `main`.
+  republishes from `main`'s head. A step in the workflow fails a run on any ref but `main`, as a
+  guard against a mistaken dispatch; the control that keeps the credentials to `main` is the
+  environment's deployment-branch policy, below.
 - **Under what credential.** The job runs in its own GitHub Environment, `vanity-modules`, which
   holds the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` and the variables
   `CLOUDFLARE_ACCOUNT_ID` and `R2_BUCKET`. The key is an R2 API token scoped to that one bucket, so
-  a run that reaches it can write that bucket and nothing else. Without all four values the job
-  logs a notice and succeeds without uploading.
+  a run that reaches it can write that bucket and nothing else. The environment allows deployments
+  from the `main` branch only, with administrator bypass off, as `cloudflare-production` allows only
+  the Worker tag pattern. That policy is configured on the environment, outside the repository's
+  files, and it is the control for the credential: GitHub runs a workflow file from the ref that
+  triggers it, so a branch could remove the in-workflow ref check or add another workflow naming the
+  environment. Without all four values the job logs a notice and succeeds without uploading.
 - **Checked on every pull request.** `ci-tools.yml` runs `publish-modules --dry-run` on a change
   touching `tools/**`, which generates and validates the list and sends nothing.
 
@@ -55,7 +61,10 @@ reserved for a change to that code. Adding, moving or removing a project is not 
 
 - **The environments hold separate credentials.** `cloudflare-production` holds the token that
   deploys code and runs only from a Worker tag. `vanity-modules` holds a token that writes one
-  bucket and runs from `main`. Neither environment's secret is readable from the other's jobs.
+  bucket and runs from `main`. A secret is available only to jobs that name the environment holding
+  it, and each environment's deployment policy decides which refs may: the Worker tag pattern for
+  `cloudflare-production`, `main` for `vanity-modules`. The workflow's own ref check is a guard
+  against mistakes, not the control.
 - **The object is the list at the last successful publication.** An unchanged list overwrites the
   object with identical content. Runs are serialised and never cancelled in flight, so the last
   run started is the list left published.
