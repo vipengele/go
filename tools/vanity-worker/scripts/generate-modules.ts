@@ -44,18 +44,39 @@ export const modules: readonly string[] = ${JSON.stringify(modules)};
 `;
 }
 
-function main(): void {
+/** Where main reads the go.mod files from and writes the generated module list to. */
+export interface GeneratePaths {
+  /** The source/ directory the go.mod files are found under. */
+  sourceRoot: string;
+  /** The TypeScript module the Worker imports. */
+  out: string;
+  /** The JSON module list. */
+  jsonOut: string;
+}
+
+/** The repository's source/ directory and the Worker's src/ outputs, resolved from this script's location. */
+function defaultPaths(): GeneratePaths {
   const here = dirname(fileURLToPath(import.meta.url));
-  const sourceRoot = resolve(here, "../../../source");
-  const out = resolve(here, "../src/modules.generated.ts");
-  const jsonOut = resolve(here, "../src/modules.generated.json");
+  return {
+    sourceRoot: resolve(here, "../../../source"),
+    out: resolve(here, "../src/modules.generated.ts"),
+    jsonOut: resolve(here, "../src/modules.generated.json"),
+  };
+}
+
+/**
+ * Writes both generated files for the go.mod files under paths.sourceRoot.
+ * A failure is printed to stderr and calls exit with status 1, before either
+ * file is written when the module list is invalid.
+ */
+export function main(paths: GeneratePaths = defaultPaths(), exit: (code: number) => void = process.exit): void {
   try {
-    const modules = moduleDirs(findGoModDirs(sourceRoot));
-    writeFileSync(out, renderModules(modules));
-    writeFileSync(jsonOut, renderModuleList(modules));
+    const modules = moduleDirs(findGoModDirs(paths.sourceRoot));
+    writeFileSync(paths.out, renderModules(modules));
+    writeFileSync(paths.jsonOut, renderModuleList(modules));
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
+    exit(1);
   }
 }
 

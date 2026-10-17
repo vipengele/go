@@ -139,20 +139,38 @@ export async function run(options: RunOptions): Promise<void> {
   options.log(request.body.trimEnd());
 }
 
-async function main(): Promise<void> {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const sourceRoot = resolve(here, "../../../source");
+export interface MainOptions {
+  argv: readonly string[];
+  env: Readonly<Record<string, string | undefined>>;
+  /** The source/ directory the go.mod files are found under. */
+  sourceRoot: string;
+  createStore: (config: R2Config) => ObjectStore;
+  /** Ends the process with the given status. */
+  exit: (code: number) => void;
+}
+
+/** The repository's source/ directory, resolved from this script's location. */
+function defaultSourceRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../../../source");
+}
+
+/**
+ * Runs the publisher as the command line does: its output goes to stdout, and
+ * any failure is printed to stderr and exits with status 1.
+ */
+export async function main(options: Partial<MainOptions> = {}): Promise<void> {
+  const sourceRoot = options.sourceRoot ?? defaultSourceRoot();
   try {
     await run({
-      argv: process.argv.slice(2),
-      env: process.env,
+      argv: options.argv ?? process.argv.slice(2),
+      env: options.env ?? process.env,
       goModDirs: () => findGoModDirs(sourceRoot),
-      createStore: r2Store,
+      createStore: options.createStore ?? r2Store,
       log: (line) => console.log(line),
     });
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
+    (options.exit ?? process.exit)(1);
   }
 }
 
