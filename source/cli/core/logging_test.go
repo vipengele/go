@@ -1,13 +1,17 @@
 package cli_test
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	cli "go.vipengele.org/cli/core"
+	"go.vipengele.org/cli/core/logging"
 	"go.vipengele.org/cli/spec"
 )
 
@@ -344,5 +348,256 @@ func TestWithLoggingRunsBeforeEveryPreRunHook(t *testing.T) {
 	}
 	if !slices.Equal(order, []string{"pre-run", "run"}) {
 		t.Errorf("order %v, want [pre-run run]", order)
+	}
+}
+
+// toolTokenRun is the run after the prefix "tkn_" of a token of a tool's own, which only
+// [cli.WithRedaction] redacts.
+const toolTokenRun = "fakefakefake"
+
+// secretApp returns an App taking WithLogging, -v and -q and opts, with a "run" command that logs
+// a "tkn_" token and a baseline bearer token, and writes tail, a line without its newline, to the
+// writer LogWriterFrom returns.
+func secretApp(tail string, opts ...cli.Option) *cli.App {
+	app := cli.New(identity(), append([]cli.Option{cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging()}, opts...)...)
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		slog.InfoContext(ctx, "token tkn_"+toolTokenRun+" auth Bearer basesecret99")
+		if tail != "" {
+			w, _ := cli.LogWriterFrom(ctx)
+			_, _ = w.Write([]byte(tail))
+		}
+		return nil
+	}})
+	return app
+}
+
+func TestWithRedactionRedactsToolPrefixes(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			restoreDefaultLogger(t)
+			app := secretApp("", cli.WithRedaction(logging.Redaction{Prefixes: []string{"tkn_"}}))
+			got := runApp(t, app, "run", "--log-format", format)
+			if got.code != cli.ExitOK {
+				t.Fatalf("result %+v, want 0", got)
+			}
+			for _, secret := range []string{toolTokenRun, "basesecret99"} {
+				if strings.Contains(got.stderr, secret) {
+					t.Errorf("stderr holds %q:\n%s", secret, got.stderr)
+				}
+			}
+			if !strings.Contains(got.stderr, "token") {
+				t.Errorf("stderr lacks the record:\n%s", got.stderr)
+			}
+		})
+	}
+}
+
+// TestWithRedactionAccumulates pins that the prefixes of every WithRedaction are redacted, each
+// read from a copy taken when the option is given.
+func TestWithRedactionAccumulates(t *testing.T) {
+	restoreDefaultLogger(t)
+	prefixes := []string{"tkn_"}
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging(),
+		cli.WithRedaction(logging.Redaction{Prefixes: prefixes}),
+		cli.WithRedaction(logging.Redaction{Prefixes: []string{"other_"}}))
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		slog.InfoContext(ctx, "token tkn_"+toolTokenRun+" auth Bearer basesecret99", "second", "other_secondtoken")
+		return nil
+	}})
+	prefixes[0] = "zzz_"
+	got := runApp(t, app, "run")
+	for _, secret := range []string{toolTokenRun, "basesecret99", "secondtoken"} {
+		if strings.Contains(got.stderr, secret) {
+			t.Errorf("stderr holds %q:\n%s", secret, got.stderr)
+		}
+	}
+	for _, want := range []string{"tkn_[REDACTED]", "second=other_[REDACTED]"} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
+		}
+	}
+}
+
+func TestBaselineRedactedWithoutWithRedaction(t *testing.T) {
+	restoreDefaultLogger(t)
+	got := runApp(t, secretApp(""), "run")
+	if strings.Contains(got.stderr, "basesecret99") {
+		t.Errorf("stderr holds the baseline secret:\n%s", got.stderr)
+	}
+	if !strings.Contains(got.stderr, toolTokenRun) {
+		t.Errorf("stderr lacks the unregistered token, want it kept:\n%s", got.stderr)
+	}
+}
+
+func TestWithRedactionRequiresWithLogging(t *testing.T) {
+	var ran bool
+	app := loggingApp(&ran, cli.WithVerbose(), cli.WithQuiet(), cli.WithRedaction(logging.Redaction{}))
+	got := runApp(t, app, "run")
+	want := "tool: invalid command tree\n  → WithRedaction requires WithLogging\n"
+	if got.code != cli.ExitError || got.stdout != "" || got.stderr != want {
+		t.Errorf("result %+v, want code 1 and stderr %q", got, want)
+	}
+	if ran {
+		t.Error("run function called, want none")
+	}
+}
+
+func TestLogWriterFrom(t *testing.T) {
+	if w, ok := cli.LogWriterFrom(t.Context()); ok || w != nil {
+		t.Errorf("LogWriterFrom = %v, %t on a bare context; want nil and false", w, ok)
+	}
+	restoreDefaultLogger(t)
+	var (
+		with, without     *logging.RedactingWriter
+		okWith, okWithout bool
+	)
+	app := loggingApp(new(bool), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging())
+	app.Add(&spec.Command{Name: "probe", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		with, okWith = cli.LogWriterFrom(ctx)
+		return nil
+	}})
+	plain := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet())
+	plain.Add(&spec.Command{Name: "probe", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		without, okWithout = cli.LogWriterFrom(ctx)
+		return nil
+	}})
+	if res := runApp(t, app, "probe"); res.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", res)
+	}
+	if res := runApp(t, plain, "probe"); res.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", res)
+	}
+	if !okWith || with == nil {
+		t.Errorf("LogWriterFrom = %v, %t under WithLogging; want a writer and true", with, okWith)
+	}
+	if okWithout || without != nil {
+		t.Errorf("LogWriterFrom = %v, %t without WithLogging; want nil and false", without, okWithout)
+	}
+}
+
+func TestExecuteFlushesTheLogWriter(t *testing.T) {
+	restoreDefaultLogger(t)
+	app := secretApp("partial Bearer basesecret99",
+		cli.WithRedaction(logging.Redaction{Prefixes: []string{"tkn_"}}))
+	got := runApp(t, app, "run")
+	if got.code != cli.ExitOK {
+		t.Fatalf("result %+v, want 0", got)
+	}
+	if !strings.Contains(got.stderr, "partial Bearer ") {
+		t.Errorf("stderr lacks the unterminated line:\n%s", got.stderr)
+	}
+	if strings.Contains(got.stderr, "basesecret99") {
+		t.Errorf("stderr holds the secret of the unterminated line:\n%s", got.stderr)
+	}
+}
+
+// TestExecuteFlushesTheLogWriterWhenTheRunPanics pins that the held bytes of an unterminated line
+// reach stderr, redacted, while a run's panic unwinds to the caller of ExecuteArgs, on the
+// caller's goroutine without Interrupts and on the run's own goroutine with them.
+func TestExecuteFlushesTheLogWriterWhenTheRunPanics(t *testing.T) {
+	type panicValue struct{ msg string }
+	want := &panicValue{msg: "run panicked"}
+	tests := []struct {
+		name       string
+		interrupts chan struct{}
+	}{
+		{name: "without interrupts"},
+		{name: "with interrupts", interrupts: make(chan struct{})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreDefaultLogger(t)
+			app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging(),
+				cli.WithRedaction(logging.Redaction{Prefixes: []string{"tkn_"}}))
+			app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+				w, _ := cli.LogWriterFrom(ctx)
+				_, _ = w.Write([]byte("partial tkn_" + toolTokenRun))
+				panic(want)
+			}})
+			var stderr bytes.Buffer
+			env := &spec.Env{Stderr: &stderr, WorkDir: t.TempDir(), Interrupts: tt.interrupts}
+			got := func() (v any) {
+				defer func() { v = recover() }()
+				app.ExecuteArgs(env, []string{"run"})
+				return nil
+			}()
+			if got != want {
+				t.Fatalf("recovered %v, want %v", got, want)
+			}
+			if !strings.Contains(stderr.String(), "partial ") {
+				t.Errorf("stderr lacks the unterminated line:\n%s", stderr.String())
+			}
+			if strings.Contains(stderr.String(), toolTokenRun) {
+				t.Errorf("stderr holds the secret of the unterminated line:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+// lockedBuffer is a [bytes.Buffer] safe for a run that writes to it while the test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestAbandonedRunIsFlushedWhenItEnds pins that a run abandoned on a second interrupt keeps its
+// held bytes until it ends: a flush when ExecuteArgs returns would write the header name the run
+// has only begun, and the rest of the name with its secret would then match nothing.
+func TestAbandonedRunIsFlushedWhenItEnds(t *testing.T) {
+	restoreDefaultLogger(t)
+	started, resume := make(chan struct{}), make(chan struct{})
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithQuiet(), cli.WithLogging())
+	app.Add(&spec.Command{Name: "run", Run: func(ctx context.Context, _ *spec.Invocation) error {
+		w, _ := cli.LogWriterFrom(ctx)
+		_, _ = w.Write([]byte("Author"))
+		close(started)
+		<-resume
+		_, _ = w.Write([]byte("ization: secret\nend "))
+		_, _ = w.Write([]byte("Bearer tok123"))
+		return nil
+	}})
+
+	var stderr lockedBuffer
+	ch := make(chan struct{}, 2)
+	codes := make(chan int, 1)
+	go func() {
+		codes <- app.ExecuteArgs(&spec.Env{Stderr: &stderr, WorkDir: t.TempDir(), Interrupts: ch}, []string{"run"})
+	}()
+	<-started
+	ch <- struct{}{}
+	ch <- struct{}{}
+	select {
+	case code := <-codes:
+		if code != cli.ExitInterrupted {
+			t.Fatalf("code %d, want %d", code, cli.ExitInterrupted)
+		}
+	case <-time.After(10 * time.Second):
+		close(resume)
+		t.Fatal("ExecuteArgs did not return after the second interrupt")
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("stderr %q when ExecuteArgs returns, want the held bytes still held", got)
+	}
+	close(resume)
+
+	const want = "Authorization: [REDACTED]\nend Bearer [REDACTED]"
+	deadline := time.Now().Add(10 * time.Second)
+	for stderr.String() != want && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := stderr.String(); got != want {
+		t.Errorf("stderr %q after the abandoned run ends, want %q", got, want)
 	}
 }

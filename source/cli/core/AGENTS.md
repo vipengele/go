@@ -27,7 +27,13 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `text`), and adds a pre-run hook, after the config hook and ahead of every `WithPreRun` hook,
   that installs the logger with `logging.Setup` on `inv.Env.Stderr` as the process-wide
   `slog.Default` (overlapping executions share the last one installed) and stores it in the
-  context for `LoggerFrom(ctx)`. Level: info, debug under `-v`, error under `-q`, or `--log-level`;
+  context for `LoggerFrom(ctx)`, with its redacting writer for `LogWriterFrom(ctx)` (raw or
+  subprocess output; the App flushes it on the run's own goroutine when the run ends). Redaction is always on:
+  the baseline (headers Authorization, Proxy-Authorization, Cookie, Set-Cookie; `Bearer `/`Basic `
+  values, the scheme in any letter case; a tool's prefix matches as given) applies to `WithLogging()` alone, `WithRedaction(logging.Redaction{Prefixes, Headers})`
+  adds a tool's and cannot remove from it, and needs `WithLogging` (else `invalid command tree`).
+  `Env.Stderr`, error rendering and `inv.Info` and friends are not redacted. Level: info, debug
+  under `-v`, error under `-q`, or `--log-level`;
   `--log-level` beside `-v`/`-q` or an unknown level or format is a usage error (exit 2);
   `WithBuildInfo` fixes what `version` prints (tests),
   otherwise `buildinfo.Read()`. A run function reads the standard flags and colour (per stream,
@@ -116,8 +122,20 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `SkipConfig`; `show` does not. JSON follows `inv.Output.Format()` (no flag of its own), so `show
   --json` needs `WithJSON` or `WithOutput`. Errors are plain (exit 1), including the non-terminal
   refusal of `edit`: the usage-error type is in `internal/cobra`.
-- `logging` — `Setup(Options)` builds the `slog` logger (text or JSON handler, level, writer) and
-  installs it as `slog.Default`; `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
+- `logging` — `Setup(Options) (Result, error)` builds the `slog` logger (text or JSON handler,
+  level, writer) and installs it as `slog.Default`; `Result` holds the `Logger` and the
+  `*RedactingWriter` beneath it. One redactor, from `Options.Redaction` (`Redaction{Prefixes,
+  Headers}`, added to the baseline), serves a handler wrapper (message and attributes, any group
+  depth) and `RedactingWriter` (line-buffered, 64 KiB cap with a 256-byte trailing window, a final
+  line without newline held until `Flush`/`Close`; each line is read by its shape, not the log format: a line that is valid JSON
+  (first non-space byte `{` or `[`) ends a header value at the closing unescaped quote and replaces
+  a non-string value of a header key, at any depth, with `"[REDACTED]"`, any other
+  line runs it to end of line and also matches `"Name": value`; a header name matches whole, so
+  `X-Cookie` is not `Cookie`, and under JSON a base64 string in an encoded `slog.Any` value, a byte
+  slice at any depth, is checked as its bytes, as is a byte array the encoder writes as decimal
+  bytes (not one a `MarshalJSON`/`MarshalText` of its type or element type writes), which becomes
+  the redacted bytes as a JSON string, and under text is a byte slice or array nested in a
+  `slog.Any` value, which `%+v` writes as decimal bytes and which becomes the redacted bytes quoted). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
   A leaf package that never imports `cli`; `cli.WithLogging` drives it from the flags.
 - `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over
   `final` and syncs the directory, removing the temp on failure; `WriteFile(path, data, mode)`.

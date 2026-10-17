@@ -1,5 +1,10 @@
 // Package logging builds the process-wide [slog.Logger] of a command-line program from a level
-// name and an output [spec.Format].
+// name and an output [spec.Format], and redacts secrets from everything it writes.
+//
+// Redaction has two layers, both built from one [Redaction] and both always present. A
+// [slog.Handler] wrapper redacts the message and attributes of every record before the handler
+// formats it, and a [RedactingWriter] beneath the handler redacts the lines it writes, along with
+// any other text a caller writes to the same destination through it.
 package logging
 
 import (
@@ -20,6 +25,21 @@ type Options struct {
 	Format spec.Format
 	// Writer receives the records. A nil Writer means [os.Stderr].
 	Writer io.Writer
+	// Redaction names the secrets redacted in addition to the baseline of every [Redaction]. The
+	// zero value redacts the baseline alone.
+	Redaction Redaction
+}
+
+// Result is what [Setup] builds.
+type Result struct {
+	// Logger is the logger Setup installs as the [slog] default.
+	Logger *slog.Logger
+	// Writer is the redacting writer between Logger's handler and Options.Writer, reading each
+	// line by its shape, whatever Options.Format, as [RedactingWriter] describes. Text written to
+	// it is redacted like the records of Logger; it holds the
+	// bytes after the last newline until a later write completes the line or until
+	// [RedactingWriter.Flush].
+	Writer *RedactingWriter
 }
 
 // ParseLevel returns the level named by s: debug, info, warn or error, in any letter case.
@@ -37,25 +57,30 @@ func ParseLevel(s string) (slog.Level, error) {
 	return 0, fmt.Errorf("unknown log level %q: want debug, info, warn or error", s)
 }
 
-// Setup builds a logger from opts, installs it as the [slog] default and returns it. It returns
-// an error, and leaves the default untouched, when opts.Format is not [spec.FormatText] or
-// [spec.FormatJSON].
-func Setup(opts Options) (*slog.Logger, error) {
-	w := opts.Writer
-	if w == nil {
-		w = os.Stderr
+// Setup builds a logger from opts, installs it as the [slog] default and returns it with the
+// redacting writer it writes through. One redactor, built from opts.Redaction, serves both
+// layers: the handler redacts each record's message and attributes, and the writer redacts each
+// line on its way to opts.Writer, read by its shape whatever opts.Format. Setup returns an error, and leaves the default untouched, when
+// opts.Format is not [spec.FormatText] or [spec.FormatJSON].
+func Setup(opts Options) (Result, error) {
+	if opts.Format != spec.FormatText && opts.Format != spec.FormatJSON {
+		return Result{}, fmt.Errorf("unsupported log format %q", opts.Format.String())
 	}
+
+	dst := opts.Writer
+	if dst == nil {
+		dst = os.Stderr
+	}
+	r := newRedactor(opts.Redaction)
+	w := newRedactingWriter(dst, r)
 	handlerOpts := &slog.HandlerOptions{Level: opts.Level}
 	var h slog.Handler
-	switch opts.Format {
-	case spec.FormatText:
-		h = slog.NewTextHandler(w, handlerOpts)
-	case spec.FormatJSON:
+	if opts.Format == spec.FormatJSON {
 		h = slog.NewJSONHandler(w, handlerOpts)
-	default:
-		return nil, fmt.Errorf("unsupported log format %q", opts.Format.String())
+	} else {
+		h = slog.NewTextHandler(w, handlerOpts)
 	}
-	logger := slog.New(h)
+	logger := slog.New(newRedactingHandler(h, r, opts.Format))
 	slog.SetDefault(logger)
-	return logger, nil
+	return Result{Logger: logger, Writer: w}, nil
 }

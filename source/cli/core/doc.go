@@ -59,8 +59,10 @@
 // level is info, debug under -v and error under -q, or the one --log-level names; --log-level
 // beside -v or -q is a usage error. The hook runs after the configuration hook and ahead of every
 // other pre-run hook, writes to the standard error of the execution, and hands the logger on in
-// the context, where [LoggerFrom] reads it. The App also needs [WithVerbose] and [WithQuiet].
-// Without [WithLogging] the App declares neither flag and installs no logger.
+// the context, where [LoggerFrom] reads it. The logger redacts secrets from its records and from
+// the writer [LogWriterFrom] returns; [WithRedaction] adds a tool's own. The App also needs
+// [WithVerbose] and [WithQuiet]. Without [WithLogging] the App declares neither flag and installs
+// no logger.
 //
 // [App.ExecuteArgs] and [ExecuteArgs] run the same commands against a [spec.Env] and arguments
 // the caller gives, and touch nothing else of the process, so a test runs the tool's commands
