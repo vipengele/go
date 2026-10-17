@@ -57,7 +57,9 @@ const (
 // string up to the bracket that closes it or the delimiter after a scalar, following the strings
 // and nesting inside it. A JSON header key is recognised in a piece only when its value has
 // started there: a [RedactingWriter.Flush] that ends between the key and its value writes both
-// unredacted. A piece is therefore not a line
+// unredacted. A header name at the start of a piece is recognised whatever byte ends the piece
+// before it, so a longer name split just before a header name it ends in, such as X-Cookie split
+// before Cookie, has its value redacted. A piece is therefore not a line
 // on its own, and not a JSON document, but the destination's lines are the redacted lines: the
 // pieces of one line concatenate to that line redacted whole.
 //
@@ -189,8 +191,9 @@ func (w *RedactingWriter) pieceEnd(cut int) (int, continuation) {
 	cont := continueNone
 	for {
 		end := cut
-		for _, m := range header.FindAllIndex(w.buf, -1) {
-			start, stop, kind := m[0], m[1], headerCont
+		for _, m := range header.FindAllSubmatchIndex(w.buf, -1) {
+			// The secret starts at the header name; group 1 holds the byte before it.
+			start, stop, kind := m[3], m[1], headerCont
 			// The value pattern stops short of an escape whose escaped byte is not held yet.
 			if w.shape == shapeJSON && stop == len(w.buf)-1 && w.buf[stop] == '\\' {
 				stop, kind = len(w.buf), continueJSONEscape

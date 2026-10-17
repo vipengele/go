@@ -38,7 +38,12 @@ public package `go.vipengele.org/cli/core/logging`.
   cannot remove from the baseline. `WithRedaction` without `WithLogging` is an invalid command tree.
 - **Matching.** A prefix followed by a run of `[A-Za-z0-9_+/=.~-]` becomes the prefix followed by
   `[REDACTED]`; a bare prefix is left alone. A header matches by attribute key, in any letter case
-  and at any group depth, or as `Name: value` in text. Each line is read by its own shape, whatever the
+  and at any group depth, or as `Name: value` in text, the name whole: after the start of the line,
+  a quote or a byte that is neither a word character nor `-`, or inside a JSON string the escape
+  `\n`, `\r` or `\t`, so `X-Authorization: v` is not the header Authorization. Under the JSON
+  format, a string in an encoded `slog.Any` value that is the base64 form of bytes, as
+  `encoding/json` writes a byte slice at any depth, is replaced by those bytes, redacted, when they
+  hold a secret. Each line is read by its own shape, whatever the
   log format: a whole line that is valid JSON (it starts with `{` or `[`) is read as JSON, where a
   header value ends at the closing unescaped quote, and the value of a header key that is an array,
   an object, a number, a boolean or null becomes the string `"[REDACTED]"`, so the line stays valid

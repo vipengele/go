@@ -2,6 +2,7 @@ package logging_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -424,5 +425,52 @@ func TestSetupRedactsHeaderBehindNestedPointers(t *testing.T) {
 				t.Errorf("header Accept = %v, want it kept as an array", h["Accept"])
 			}
 		})
+	}
+}
+
+// dumpBytes is a named byte-slice type, which the JSON handler writes in base64 as it does a []byte.
+type dumpBytes []byte
+
+// TestSetupJSONRedactsByteSlices pins that under the JSON format a secret in the bytes of a byte
+// slice, a []byte or a named byte-slice type, at the top of an attribute or inside an object, is
+// redacted and written as text, neither in clear nor in the base64 form the JSON handler gives
+// bytes, and the record stays one JSON object.
+func TestSetupJSONRedactsByteSlices(t *testing.T) {
+	restoreDefault(t)
+	var buf bytes.Buffer
+	res, err := logging.Setup(logging.Options{Format: spec.FormatJSON, Writer: &buf})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	dump := "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok\r\n\r\n"
+	res.Logger.Info("m",
+		slog.Any("dump", []byte(dump)),
+		slog.Any("named", dumpBytes("Authorization: Bearer tok")),
+		slog.Any("req", struct{ Body []byte }{Body: []byte("Cookie: sid=tok")}),
+	)
+	out := buf.String()
+	for _, s := range []string{
+		"tok", base64.StdEncoding.EncodeToString([]byte(dump)),
+		base64.StdEncoding.EncodeToString([]byte("Authorization: Bearer tok")),
+		base64.StdEncoding.EncodeToString([]byte("Cookie: sid=tok")),
+	} {
+		if strings.Contains(out, s) {
+			t.Errorf("output %q leaks %q", out, s)
+		}
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("output %q is not one JSON record: %v", out, err)
+	}
+	// Read as JSON, the header value runs to the closing quote of the string.
+	if got, want := rec["dump"], "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: [REDACTED]"; got != want {
+		t.Errorf("dump = %q, want %q", got, want)
+	}
+	if got, want := rec["named"], "Authorization: [REDACTED]"; got != want {
+		t.Errorf("named = %q, want %q", got, want)
+	}
+	req, _ := rec["req"].(map[string]any)
+	if got, want := req["Body"], "Cookie: [REDACTED]"; got != want {
+		t.Errorf("req.Body = %q, want %q", got, want)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +30,10 @@ import (
 // or null, becomes the string "[REDACTED]" whole, so the line stays valid JSON. The key is
 // recognised when it is written as the plain string "Name", with no escape in it. Any other line
 // is read as plain text: the value after "Name:", and after the quoted key form `"Name":` of a
-// JSON fragment, runs to the end of the line.
+// JSON fragment, runs to the end of the line. In either reading a name matches whole: after the
+// start of the line, a quote or another byte that is neither a word character nor "-", or, inside
+// a JSON string, the escape \n, \r or \t, so "X-Authorization: v" and {"X-Cookie":"v"} are left
+// alone.
 type Redaction struct {
 	// Prefixes are token prefixes, such as "ghp_", matched in the letter case they are written in.
 	// The prefix followed by a run of the characters [A-Za-z0-9_+/=.~-] becomes the prefix followed
@@ -114,16 +118,29 @@ type redactor struct {
 	// prefix matches a prefix, in group 1, followed by its token: a baseline prefix in any letter
 	// case, so group 1 keeps the scheme as it is written, and a prefix of the [Redaction] as given.
 	prefix *regexp.Regexp
-	// textHeader and jsonHeader match a header name and its separator, in group 1, followed by
-	// the value the shape delimits.
+	// textHeader and jsonHeader match what [nameStart] admits before a header name, in group 1,
+	// the name and its separator, in group 2, and the value the shape delimits after them.
 	textHeader *regexp.Regexp
 	jsonHeader *regexp.Regexp
 	// jsonKey matches a header name written as a JSON object key, the quoted name and the colon
 	// and white space after it, in group 1. The opening quote follows the start of the text or a
 	// byte other than a backslash and then an even run of backslashes, so it is not an escaped
-	// quote inside a string.
+	// quote inside a string. The quote before the name is one of the starts [nameStart] admits, so
+	// the key is the whole name, as for textHeader and jsonHeader.
 	jsonKey *regexp.Regexp
+	// base64String matches a JSON string whose content, in group 1, is a run of the standard
+	// base64 alphabet and its padding, the form a [json.Encoder] gives a byte slice. The opening
+	// quote follows what jsonKey's does, so it opens a string, and the content holds no backslash,
+	// so the closing quote ends that string.
+	base64String *regexp.Regexp
 }
+
+// nameStart matches what precedes a header name in textHeader and jsonHeader, so a name matches
+// only whole: the start of the text, a byte that cannot be part of a header name, neither a word
+// character nor "-", or the JSON escape "\n", "\r" or "\t" of a line break or a tab inside a
+// string, its letter in lower case as JSON writes it. A longer name that ends in a header name, such as X-Authorization or my_cookie, is not
+// that header.
+const nameStart = `(?:^|[^\w-]|\\(?-i:[nrt]))`
 
 // newRedactor returns a redactor for the baseline and the additions of red.
 func newRedactor(red Redaction) *redactor {
@@ -140,11 +157,12 @@ func newRedactor(red Redaction) *redactor {
 	prefixAlt := alternation(prefixes, prefixPattern)
 	nameAlt := alternation(names, regexp.QuoteMeta)
 	return &redactor{
-		headers:    headers,
-		prefix:     regexp.MustCompile(`(` + prefixAlt + `)` + suffixChars + `+`),
-		textHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)"?\s*:\s*)[^\r\n]*`),
-		jsonHeader: regexp.MustCompile(`(?i)(\b(?:` + nameAlt + `)(?:"\s*:\s*"|\s*:\s*))(?:[^"\\]|\\.)*`),
-		jsonKey:    regexp.MustCompile(`(?i)(?:^|[^\\])(?:\\\\)*("(?:` + nameAlt + `)"\s*:\s*)`),
+		headers:      headers,
+		prefix:       regexp.MustCompile(`(` + prefixAlt + `)` + suffixChars + `+`),
+		textHeader:   regexp.MustCompile(`(?i)(` + nameStart + `)((?:` + nameAlt + `)"?\s*:\s*)[^\r\n]*`),
+		jsonHeader:   regexp.MustCompile(`(?i)(` + nameStart + `)((?:` + nameAlt + `)(?:"\s*:\s*"|\s*:\s*))(?:[^"\\]|\\.)*`),
+		jsonKey:      regexp.MustCompile(`(?i)(?:^|[^\\])(?:\\\\)*("(?:` + nameAlt + `)"\s*:\s*)`),
+		base64String: regexp.MustCompile(`(?:^|[^\\])(?:\\\\)*"([A-Za-z0-9+/]+=*)"`),
 	}
 }
 
@@ -194,7 +212,7 @@ func (r *redactor) lineAs(s string, shape lineShape) string {
 		header = r.jsonHeader
 		s = r.jsonValues(s)
 	}
-	s = header.ReplaceAllString(s, "${1}"+redacted)
+	s = header.ReplaceAllString(s, "${1}${2}"+redacted)
 	return r.prefix.ReplaceAllString(s, "${1}"+redacted)
 }
 
@@ -342,7 +360,11 @@ func (r *redactor) attrs(as []slog.Attr, format spec.Format) []slog.Attr {
 // and the value as a [json.Encoder] encodes it otherwise, a [encoding.TextMarshaler] as its text
 // in a JSON string; the encoded value is read as JSON, so a header key at any depth has its value
 // redacted whatever its type, and it is handed on as a [json.RawMessage], so an object stays an
-// object. For [spec.FormatText] the form is the text of a [encoding.TextAppender] or
+// object. A string in the encoded value that is the base64 form of bytes holding a secret is
+// replaced by those bytes as a JSON string, redacted, by [redactor.decodeBytes]: a [json.Encoder]
+// writes a byte slice in base64, at any depth, unless its type is a [json.Marshaler] or a
+// [encoding.TextMarshaler], and whatever the value's own marshaling writes is read the same way.
+// For [spec.FormatText] the form is the text of a [encoding.TextAppender] or
 // [encoding.TextMarshaler], and the %+v form otherwise, which is the Error or String of an error
 // or a [fmt.Stringer]; it is handed on as a string, which the text handler writes as it would
 // have written v. A byte slice, which the text handler writes quoted, is checked as its bytes and
@@ -374,11 +396,33 @@ func (r *redactor) jsonAny(v slog.Value) slog.Value {
 	if err != nil {
 		return r.failed(v, err)
 	}
-	clean := r.lineAs(s, shapeJSON)
+	clean := r.lineAs(r.decodeBytes(s), shapeJSON)
 	if clean != s && !json.Valid([]byte(clean)) {
 		return slog.StringValue(clean)
 	}
 	return slog.AnyValue(json.RawMessage(clean))
+}
+
+// decodeBytes returns the JSON text s with every string that is the base64 form of bytes holding a
+// secret replaced by those bytes as a JSON string, redacted by [redactor.text], and every other
+// string as it is. The bytes decoded before an error in the base64 are checked as well, so a
+// string with its padding cut still has its secret found.
+func (r *redactor) decodeBytes(s string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range r.base64String.FindAllStringSubmatchIndex(s, -1) {
+		raw, _ := base64.StdEncoding.DecodeString(s[m[2]:m[3]])
+		clean := r.text(string(raw))
+		if clean == string(raw) {
+			continue
+		}
+		quoted, _ := encodeJSON(clean)
+		b.WriteString(s[last : m[2]-1])
+		b.WriteString(quoted)
+		last = m[3] + 1
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // textAny is [redactor.anyValue] for [spec.FormatText].
@@ -447,7 +491,7 @@ func encodeJSON(v any) (string, error) {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		return "", err // [lydite:exclude_from_mutation][the only caller discards the string when err is non-nil]
+		return "", err // [lydite:exclude_from_mutation][jsonAny discards the string when err is non-nil, and decodeBytes encodes a string, which never fails]
 	}
 	return strings.TrimSuffix(buf.String(), "\n"), nil
 }

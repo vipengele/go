@@ -3,6 +3,7 @@ package logging
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -35,6 +36,19 @@ func TestRedactorLineText(t *testing.T) {
 		{"tool header", "x-api-key: 12345", "x-api-key: [REDACTED]"},
 		{"header value ends at line end", "Cookie: a=b\nnext line", "Cookie: [REDACTED]\nnext line"},
 		{"nothing to redact", "plain text", "plain text"},
+		{"name after a space", "sent Cookie: a=b", "sent Cookie: [REDACTED]"},
+		{"name after a tab", "\tCookie: a=b", "\tCookie: [REDACTED]"},
+		{"name after a quote", `"Authorization: x"`, `"Authorization: [REDACTED]`},
+		{"name after a brace", "{Cookie: a=b}", "{Cookie: [REDACTED]"},
+		{"name after a comma", "a,Cookie: a=b", "a,Cookie: [REDACTED]"},
+		{"name after an equals sign", "h=Authorization: x", "h=Authorization: [REDACTED]"},
+		{"name after an escaped newline", `a\nCookie: x`, `a\nCookie: [REDACTED]`},
+		{"longer name ending in a name", "X-Authorization: v", "X-Authorization: v"},
+		{"longer cookie name", "X-Cookie: v", "X-Cookie: v"},
+		{"name after an underscore", "my_cookie: v", "my_cookie: v"},
+		{"name after a letter", "xAuthorization: v", "xAuthorization: v"},
+		{"name after a digit", "2Cookie: v", "2Cookie: v"},
+		{"name after an upper-case escape letter", `a\NCookie: v`, `a\NCookie: v`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -72,6 +86,15 @@ func TestRedactorLineJSON(t *testing.T) {
 			`{"msg":"use ghp_abc","n":1}`,
 			`{"msg":"use ghp_[REDACTED]","n":1}`,
 		},
+		{"longer key ending in a name", `{"X-Cookie":"v","n":1}`, `{"X-Cookie":"v","n":1}`},
+		{"longer authorization key", `{"X-Authorization":"v"}`, `{"X-Authorization":"v"}`},
+		{"longer name in a string", `{"msg":"X-Authorization: v"}`, `{"msg":"X-Authorization: v"}`},
+		{"name after a letter in a string", `{"msg":"aCookie: v"}`, `{"msg":"aCookie: v"}`},
+		{"name after a space in a string", `{"msg":"sent Cookie: v","n":1}`, `{"msg":"sent Cookie: [REDACTED]","n":1}`},
+		{"name after an escaped newline", `{"msg":"a\nCookie: v","n":1}`, `{"msg":"a\nCookie: [REDACTED]","n":1}`},
+		{"name after an escaped return", `{"msg":"a\rCookie: v"}`, `{"msg":"a\rCookie: [REDACTED]"}`},
+		{"name after an escaped tab", `{"msg":"a\tCookie: v"}`, `{"msg":"a\tCookie: [REDACTED]"}`},
+		{"name after another escape", `{"msg":"a\bCookie: v"}`, `{"msg":"a\bCookie: v"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -491,6 +514,8 @@ func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
 		slog.Any("nilerr", (*nilErr)(nil)),
 		slog.Any("str", stringer{}),
 		slog.Any("bytes", []byte("raw bytes")),
+		slog.Any("named", namedBytes("named bytes")),
+		slog.Any("body", struct{ Body []byte }{Body: []byte("clean body")}),
 		slog.Any("raw", json.RawMessage(`{"k": [1, 2]}`)),
 		slog.Any("nil", nil),
 		slog.Any("text", textToken{id: 1}),
@@ -509,6 +534,40 @@ func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
 			slog.New(newRedactingHandler(tt.next(&redactedOut), r, tt.format)).Info("m", attrs...)
 			if got, want := redactedOut.String(), plainOut.String(); got != want {
 				t.Errorf("redacting handler wrote\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+}
+
+// TestRedactorDecodeBytes pins that a JSON string that is the base64 form of bytes holding a
+// secret becomes those bytes, redacted, as a JSON string, wherever it sits, while every other
+// string, including base64 of clean bytes and base64 that follows an escaped quote inside a
+// string, is left as it is.
+func TestRedactorDecodeBytes(t *testing.T) {
+	r := newRedactor(Redaction{})
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	secret := b64("Authorization: Bearer tok")
+	tests := []struct {
+		name, in, want string
+	}{
+		{"whole value", `"` + secret + `"`, `"Authorization: [REDACTED]"`},
+		{"among clean strings", `["` + b64("safe") + `","` + secret + `","` + b64("x") + `"]`,
+			`["` + b64("safe") + `","Authorization: [REDACTED]","` + b64("x") + `"]`},
+		{"in an object", `{"Body":"` + secret + `","n":1}`, `{"Body":"Authorization: [REDACTED]","n":1}`},
+		{"padding cut", `"` + strings.TrimSuffix(secret, "=") + `"`, `"Authorization: [REDACTED]"`},
+		{"quote in the bytes", `"` + b64("say \"hi\" <&> Bearer tok") + `"`, `"say \"hi\" <&> Bearer [REDACTED]"`},
+		{"clean bytes", `"` + b64("raw bytes") + `"`, `"` + b64("raw bytes") + `"`},
+		{"after an escaped quote", `{"m":"x \"` + secret + `"}`, `{"m":"x \"` + secret + `"}`},
+		{"after an escaped backslash", `{"a":"\\","b":"` + secret + `"}`, `{"a":"\\","b":"Authorization: [REDACTED]"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.decodeBytes(tt.in)
+			if got != tt.want {
+				t.Errorf("decodeBytes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if !json.Valid([]byte(got)) {
+				t.Errorf("decodeBytes(%q) = %q, not valid JSON", tt.in, got)
 			}
 		})
 	}

@@ -46,6 +46,7 @@ func TestRedactingWriterSplitAtEveryOffset(t *testing.T) {
 			`{"X-Api-Key":"v\\\"w","n":1}` + "\n"},
 		{"mixed shapes", `Set-Cookie: sid="abc123"; Path=/` + "\n" + `{"Cookie":"sid=abc"}` + "\n" +
 			`  {"x-api-key" : "k1", "n":1}` + "\n" + `{"Cookie":"cut` + "\n" + `plain "X-Api-Key":"k2"` + "\n"},
+		{"whole names", "X-Cookie: v\nsent Cookie: w\n" + `{"X-Authorization":"v","msg":"a\nCookie: w","n":1}` + "\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,6 +123,27 @@ func TestRedactingWriterFlushInsideMixedCaseSchemeToken(t *testing.T) {
 	writeAll(t, w, "en more\n")
 	if got, want := out.String(), "x bEaReR [REDACTED] more\n"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestRedactingWriterFlushInsideLongerName pins that a header name at the start of a piece is
+// recognised whatever ends the piece before it, while a piece that starts with the "-" of a longer
+// name holds no header name.
+func TestRedactingWriterFlushInsideLongerName(t *testing.T) {
+	for _, tt := range []struct{ head, rest, want string }{
+		{"X-", "Cookie: v\n", "X-Cookie: [REDACTED]\n"},
+		{"X", "-Cookie: v\n", "X-Cookie: v\n"},
+	} {
+		var out bytes.Buffer
+		w := newRedactingWriter(&out, testRedactor())
+		writeAll(t, w, tt.head)
+		if err := w.Flush(); err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+		writeAll(t, w, tt.rest)
+		if got := out.String(); got != tt.want {
+			t.Errorf("%q then %q: got %q, want %q", tt.head, tt.rest, got, tt.want)
+		}
 	}
 }
 

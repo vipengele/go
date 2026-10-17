@@ -130,7 +130,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   line without newline held until `Flush`/`Close`; each line is read by its shape, not the log format: a line that is valid JSON
   (first non-space byte `{` or `[`) ends a header value at the closing unescaped quote and replaces
   a non-string value of a header key, at any depth, with `"[REDACTED]"`, any other
-  line runs it to end of line and also matches `"Name": value`). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
+  line runs it to end of line and also matches `"Name": value`; a header name matches whole, so
+  `X-Cookie` is not `Cookie`, and under JSON a base64 string in an encoded `slog.Any` value, a byte
+  slice at any depth, is checked as its bytes). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
   A leaf package that never imports `cli`; `cli.WithLogging` drives it from the flags.
 - `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over
   `final` and syncs the directory, removing the temp on failure; `WriteFile(path, data, mode)`.
