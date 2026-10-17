@@ -43,7 +43,9 @@ public package `go.vipengele.org/cli/core/logging`.
   `\n`, `\r` or `\t`, so `X-Authorization: v` is not the header Authorization. Under the JSON
   format, a string in an encoded `slog.Any` value that is the base64 form of bytes, as
   `encoding/json` writes a byte slice at any depth, is replaced by those bytes, redacted, when they
-  hold a secret. Each line is read by its own shape, whatever the
+  hold a secret. Under the text format, a byte slice or byte array inside a `slog.Any` value, which
+  `%+v` writes as its decimal byte values, is checked as its bytes, and when they hold a secret its
+  decimal form is replaced by those bytes, redacted, as a quoted string. Each line is read by its own shape, whatever the
   log format: a whole line that is valid JSON (it starts with `{` or `[`) is read as JSON, where a
   header value ends at the closing unescaped quote, and the value of a header key that is an array,
   an object, a number, a boolean or null becomes the string `"[REDACTED]"`, so the line stays valid

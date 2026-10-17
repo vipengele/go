@@ -516,6 +516,12 @@ func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
 		slog.Any("bytes", []byte("raw bytes")),
 		slog.Any("named", namedBytes("named bytes")),
 		slog.Any("body", struct{ Body []byte }{Body: []byte("clean body")}),
+		slog.Any("nested", &struct {
+			M map[string]namedBytes
+			A [4]byte
+			X any
+			s []struct{ B []byte }
+		}{M: map[string]namedBytes{"k": namedBytes("v")}, A: [4]byte{1, 2, 3, 4}, X: []byte("x"), s: []struct{ B []byte }{{B: []byte("b")}}}),
 		slog.Any("raw", json.RawMessage(`{"k": [1, 2]}`)),
 		slog.Any("nil", nil),
 		slog.Any("text", textToken{id: 1}),

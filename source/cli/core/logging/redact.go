@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"go.vipengele.org/cli/spec"
@@ -368,7 +369,10 @@ func (r *redactor) attrs(as []slog.Attr, format spec.Format) []slog.Attr {
 // [encoding.TextMarshaler], and the %+v form otherwise, which is the Error or String of an error
 // or a [fmt.Stringer]; it is handed on as a string, which the text handler writes as it would
 // have written v. A byte slice, which the text handler writes quoted, is checked as its bytes and
-// replaced only when they hold a secret.
+// replaced only when they hold a secret. A byte slice or byte array inside the value, which %+v
+// writes as its decimal byte values, is checked as its bytes too, and when they hold a secret its
+// decimal form is replaced by those bytes, redacted, as a quoted string, by
+// [redactor.secretBytes]; a value with no such secret is written exactly as %+v writes it.
 //
 // A value whose rendering panics is handed on unchanged, and the handler writes its own panic
 // text. A value whose rendering fails has the "!ERROR:" text the handler writes for the failure
@@ -447,13 +451,72 @@ func (r *redactor) textAny(v slog.Value) slog.Value {
 			}
 			return v
 		}
-		return slog.StringValue(r.text(fmt.Sprintf("%+v", a)))
+		s := fmt.Sprintf("%+v", a)
+		for _, sub := range r.secretBytes(a) {
+			s = strings.ReplaceAll(s, sub.form, sub.clean)
+		}
+		return slog.StringValue(r.text(s))
 	}
 	s, err := render(text)
 	if err != nil {
 		return r.failed(v, err)
 	}
 	return slog.StringValue(r.text(s))
+}
+
+// bytesSub replaces, in the %+v form of a value, the decimal form of a byte slice or byte array
+// whose bytes hold a secret, such as "[67 111 111]", by clean, those bytes redacted and quoted.
+type bytesSub struct{ form, clean string }
+
+// secretBytes returns a [bytesSub] for each byte slice and byte array inside a, the value %+v
+// prints, whose bytes hold a secret. %+v writes such bytes as their decimal values, which no
+// pattern matches. The walk reads what %+v reads: exported and unexported fields, the elements of
+// slices and arrays, the keys and values of maps, and what an interface holds, and it follows a
+// pointer only at the top, as %+v prints "&{...}" there and an address below. It therefore ends
+// whenever %+v does: a value that holds itself through a pointer is cut at that pointer by both,
+// and one that holds itself through a map, a slice or an interface %+v cannot print either.
+func (r *redactor) secretBytes(a any) []bytesSub {
+	v := reflect.ValueOf(a)
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	var subs []bytesSub
+	r.walkBytes(v, &subs)
+	return subs
+}
+
+// walkBytes appends to subs a [bytesSub] for each byte slice and byte array in v whose bytes hold
+// a secret, as [redactor.secretBytes] walks it. Values are read without Interface, so unexported
+// fields are read too.
+func (r *redactor) walkBytes(v reflect.Value, subs *[]bytesSub) {
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			b := make([]byte, v.Len())
+			for i := range b {
+				b[i] = byte(v.Index(i).Uint())
+			}
+			if clean := r.text(string(b)); clean != string(b) {
+				*subs = append(*subs, bytesSub{form: fmt.Sprintf("%d", b), clean: strconv.Quote(clean)})
+			}
+			return
+		}
+		for i := range v.Len() {
+			r.walkBytes(v.Index(i), subs)
+		}
+	case reflect.Map:
+		for it := v.MapRange(); it.Next(); {
+			r.walkBytes(it.Key(), subs)
+			r.walkBytes(it.Value(), subs)
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			r.walkBytes(v.Field(i), subs)
+		}
+	case reflect.Interface:
+		r.walkBytes(v.Elem(), subs)
+	default:
+	}
 }
 
 // failed returns v, whose rendering failed with err, replaced by the "!ERROR:" text a handler

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -472,5 +473,82 @@ func TestSetupJSONRedactsByteSlices(t *testing.T) {
 	req, _ := rec["req"].(map[string]any)
 	if got, want := req["Body"], "Cookie: [REDACTED]"; got != want {
 		t.Errorf("req.Body = %q, want %q", got, want)
+	}
+}
+
+// bodyHolder holds a byte slice, which %+v writes as its decimal byte values.
+type bodyHolder struct{ Body []byte }
+
+// bodyNode links to itself through a pointer, which %+v prints as an address below the top.
+type bodyNode struct {
+	Next *bodyNode
+	Body []byte
+}
+
+// TestSetupTextRedactsNestedByteSlices pins that under the text format a secret in the bytes of a
+// byte slice or byte array inside a slog.Any value, which %+v writes as decimal byte values, is
+// written redacted as a quoted string, neither in clear nor as its decimal form, while clean bytes
+// beside it keep their decimal form.
+func TestSetupTextRedactsNestedByteSlices(t *testing.T) {
+	secret := []byte("Bearer tok")
+	cyclic := &bodyNode{Body: secret}
+	cyclic.Next = cyclic
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"struct field", bodyHolder{Body: secret}, `v="{Body:\"Bearer [REDACTED]\"}"`},
+		{"map value", map[string][]byte{"a": secret, "b": []byte("ok")}, `v="map[a:\"Bearer [REDACTED]\" b:[111 107]]"`},
+		{"slice of structs", []bodyHolder{{Body: []byte("x")}, {Body: secret}}, `v="[{Body:[120]} {Body:\"Bearer [REDACTED]\"}]"`},
+		{"pointer", &bodyHolder{Body: secret}, `v="&{Body:\"Bearer [REDACTED]\"}"`},
+		{"named type", struct{ D dumpBytes }{D: dumpBytes(secret)}, `v="{D:\"Bearer [REDACTED]\"}"`},
+		{"interface field", struct{ X any }{X: secret}, `v="{X:\"Bearer [REDACTED]\"}"`},
+		{"unexported field", struct{ body []byte }{body: secret}, `v="{body:\"Bearer [REDACTED]\"}"`},
+		{"array", struct{ A [10]byte }{A: [10]byte(secret)}, `v="{A:\"Bearer [REDACTED]\"}"`},
+		{"map key", map[[10]byte]int{[10]byte(secret): 1}, `v="map[\"Bearer [REDACTED]\":1]"`},
+		{"cyclic pointer", cyclic, `Body:\"Bearer [REDACTED]\"}"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreDefault(t)
+			var buf bytes.Buffer
+			res, err := logging.Setup(logging.Options{Format: spec.FormatText, Writer: &buf})
+			if err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			res.Logger.Info("m", slog.Any("v", tt.value))
+			out := buf.String()
+			for _, s := range []string{"tok", strings.Trim(fmt.Sprintf("%d", secret), "[]")} {
+				if strings.Contains(out, s) {
+					t.Errorf("output %q leaks %q", out, s)
+				}
+			}
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output %q lacks %q", out, tt.want)
+			}
+		})
+	}
+}
+
+// TestSetupTextRedactsNestedHeaderBytes pins that a header in the bytes of a nested byte slice
+// has its value redacted under the text format, through both layers.
+func TestSetupTextRedactsNestedHeaderBytes(t *testing.T) {
+	restoreDefault(t)
+	var buf bytes.Buffer
+	res, err := logging.Setup(logging.Options{Format: spec.FormatText, Writer: &buf})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	body := []byte("Cookie: sid=tok")
+	res.Logger.Info("m", slog.Any("req", bodyHolder{Body: body}))
+	out := buf.String()
+	for _, s := range []string{"sid=tok", strings.Trim(fmt.Sprintf("%d", body), "[]")} {
+		if strings.Contains(out, s) {
+			t.Errorf("output %q leaks %q", out, s)
+		}
+	}
+	if want := `req="{Body:\"Cookie: [REDACTED]`; !strings.Contains(out, want) {
+		t.Errorf("output %q lacks %q", out, want)
 	}
 }
