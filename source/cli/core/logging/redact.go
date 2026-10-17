@@ -278,14 +278,29 @@ type jsonSkip struct {
 	inString, escaped bool
 }
 
-// next advances the skip over c and reports whether the value ends at c, and if so whether c is
-// its last byte or the first byte after it. A newline ends the value, as it ends the line.
-func (k *jsonSkip) next(c byte) (done, last bool) {
+// skipStep is where a byte stands relative to the value a [jsonSkip] skips.
+type skipStep int
+
+const (
+	// skipInside is a byte of the value that is not its last.
+	skipInside skipStep = iota
+	// skipLast is the last byte of the value, the bracket that closes it.
+	skipLast
+	// skipAfter is the first byte after the value, the delimiter that ends a scalar or a newline.
+	skipAfter
+)
+
+// next advances the skip over c and returns where c stands relative to the value. A newline ends
+// the value, as it ends the line.
+func (k *jsonSkip) next(c byte) skipStep {
 	if c == '\n' {
-		return true, false
+		return skipAfter
 	}
 	if k.scalar {
-		return strings.IndexByte(",}] \t\r", c) >= 0, false
+		if strings.IndexByte(",}] \t\r", c) >= 0 {
+			return skipAfter
+		}
+		return skipInside
 	}
 	switch {
 	case k.inString && k.escaped:
@@ -300,9 +315,11 @@ func (k *jsonSkip) next(c byte) (done, last bool) {
 		k.depth++
 	case c == '}' || c == ']':
 		k.depth--
-		return k.depth == 0, true
+		if k.depth == 0 {
+			return skipLast
+		}
 	}
-	return false, false // [lydite:exclude_from_mutation][last is read only when done is true, and done is false here]
+	return skipInside
 }
 
 // skipJSONValue returns where the value that starts at s[i], not a string, ends: after its
@@ -311,11 +328,12 @@ func (k *jsonSkip) next(c byte) (done, last bool) {
 func skipJSONValue(s string, i int) (int, *jsonSkip) {
 	k := &jsonSkip{scalar: s[i] != '{' && s[i] != '['}
 	for j := i; j < len(s); j++ {
-		if done, last := k.next(s[j]); done {
-			if last {
-				return j + 1, nil
-			}
+		switch k.next(s[j]) {
+		case skipLast:
+			return j + 1, nil
+		case skipAfter:
 			return j, nil
+		case skipInside:
 		}
 	}
 	return len(s), k
@@ -492,9 +510,13 @@ func (r *redactor) walkBytes(v reflect.Value, subs *[]bytesSub) {
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
+			// Each element is copied by SetUint, which stores the value of a uint8 element whole.
+			// Bytes and Copy do not read every such slice or array: Bytes refuses an array that is
+			// not addressable, and Copy one read through an unexported field.
 			b := make([]byte, v.Len())
+			dst := reflect.ValueOf(b)
 			for i := range b {
-				b[i] = byte(v.Index(i).Uint())
+				dst.Index(i).SetUint(v.Index(i).Uint())
 			}
 			if clean := r.text(string(b)); clean != string(b) {
 				*subs = append(*subs, bytesSub{form: fmt.Sprintf("%d", b), clean: strconv.Quote(clean)})
@@ -554,7 +576,7 @@ func encodeJSON(v any) (string, error) {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		return "", err // [lydite:exclude_from_mutation][jsonAny discards the string when err is non-nil, and decodeBytes encodes a string, which never fails]
+		return "", err
 	}
 	return strings.TrimSuffix(buf.String(), "\n"), nil
 }

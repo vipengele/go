@@ -425,6 +425,26 @@ type failingText struct{}
 
 func (failingText) MarshalText() ([]byte, error) { return nil, errors.New("bad ghp_fail") }
 
+// appendToken writes a token through AppendText that its %+v form does not show.
+type appendToken struct{}
+
+func (appendToken) AppendText(b []byte) ([]byte, error) { return append(b, "ghp_append"...), nil }
+
+// failingAppend fails AppendText with a token in the error.
+type failingAppend struct{}
+
+func (failingAppend) AppendText([]byte) ([]byte, error) { return nil, errors.New("bad ghp_afail") }
+
+// cleanFailingText fails MarshalText with an error that holds no secret.
+type cleanFailingText struct{}
+
+func (cleanFailingText) MarshalText() ([]byte, error) { return nil, errors.New("clean failure") }
+
+// panickingText panics in MarshalText.
+type panickingText struct{}
+
+func (panickingText) MarshalText() ([]byte, error) { panic("marshal blew up") }
+
 // nilErr panics in Error on a nil receiver.
 type nilErr struct{ msg string }
 
@@ -468,16 +488,18 @@ func TestHandlerTextRedactsTheWrittenForm(t *testing.T) {
 		slog.Any("named", namedBytes("Bearer abc")),
 		slog.Any("plain", plain{Token: "ghp_plain"}),
 		slog.Any("fail", failingText{}),
+		slog.Any("appended", appendToken{}),
+		slog.Any("appendfail", failingAppend{}),
 	)
 	out := buf.String()
-	for _, s := range []string{"ghp_text", "abc", "ghp_plain", "ghp_fail"} {
+	for _, s := range []string{"ghp_text", "abc", "ghp_plain", "ghp_fail", "ghp_append", "ghp_afail"} {
 		if strings.Contains(out, s) {
 			t.Errorf("output %q leaks %q", out, s)
 		}
 	}
 	for _, want := range []string{
 		"text=ghp_[REDACTED]", `bytes="Bearer [REDACTED]"`, `named="Bearer [REDACTED]"`,
-		"plain={Token:ghp_[REDACTED]}",
+		"plain={Token:ghp_[REDACTED]}", "appended=ghp_[REDACTED]", `appendfail="!ERROR:bad ghp_[REDACTED]"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q lacks %q", out, want)
@@ -500,12 +522,6 @@ func TestHandlerJSONHandsOnAnInvalidRedactionAsAString(t *testing.T) {
 // TestHandlerKeepsCleanValuesAsWritten pins that a value with no secret is written by the
 // redacting handler exactly as the handler beneath it writes it alone.
 func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
-	noTime := &slog.HandlerOptions{ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-		if a.Key == slog.TimeKey && len(groups) == 0 {
-			return slog.Attr{}
-		}
-		return a
-	}}
 	attrs := []any{
 		slog.Any("struct", plain{Token: "x <&> y"}),
 		slog.Any("ptr", &plain{Token: "p"}),
@@ -525,7 +541,30 @@ func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
 		slog.Any("raw", json.RawMessage(`{"k": [1, 2]}`)),
 		slog.Any("nil", nil),
 		slog.Any("text", textToken{id: 1}),
+		slog.Any("cleanfail", cleanFailingText{}),
+		slog.Any("panics", panickingText{}),
 	}
+	assertWrittenAsAlone(t, Redaction{Prefixes: []string{"zzz_"}}, attrs...)
+}
+
+// TestHandlerHandsOnAPanickingValue pins that a value whose rendering panics is handed on
+// unchanged, so the handler beneath writes its own panic text, even when a prefix of the
+// redactor matches the text of the failure.
+func TestHandlerHandsOnAPanickingValue(t *testing.T) {
+	assertWrittenAsAlone(t, Redaction{Prefixes: []string{"render"}},
+		slog.Any("panics", panickingText{}))
+}
+
+// assertWrittenAsAlone fails t unless a record of attrs is written by a redacting handler with the
+// redactor of red exactly as the handler beneath it writes it alone, under each format.
+func assertWrittenAsAlone(t *testing.T, red Redaction, attrs ...any) {
+	t.Helper()
+	noTime := &slog.HandlerOptions{ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey && len(groups) == 0 {
+			return slog.Attr{}
+		}
+		return a
+	}}
 	for _, tt := range []struct {
 		format spec.Format
 		next   func(*bytes.Buffer) slog.Handler
@@ -536,8 +575,7 @@ func TestHandlerKeepsCleanValuesAsWritten(t *testing.T) {
 		t.Run(tt.format.String(), func(t *testing.T) {
 			var plainOut, redactedOut bytes.Buffer
 			slog.New(tt.next(&plainOut)).Info("m", attrs...)
-			r := newRedactor(Redaction{Prefixes: []string{"zzz_"}})
-			slog.New(newRedactingHandler(tt.next(&redactedOut), r, tt.format)).Info("m", attrs...)
+			slog.New(newRedactingHandler(tt.next(&redactedOut), newRedactor(red), tt.format)).Info("m", attrs...)
 			if got, want := redactedOut.String(), plainOut.String(); got != want {
 				t.Errorf("redacting handler wrote\n%s\nwant\n%s", got, want)
 			}

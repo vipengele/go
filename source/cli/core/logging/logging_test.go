@@ -163,17 +163,20 @@ func TestSetupNilWriterUsesStderr(t *testing.T) {
 	}
 }
 
-// baselineSecrets are secrets of the baseline every [logging.Redaction] redacts, each with the
-// header name or prefix that stays in the output.
-var baselineSecrets = []struct { //nolint:gochecknoglobals // read-only test table
-	key, value, kept string
-}{
-	{"Authorization", "s3cret-authorization", ""},
-	{"Proxy-Authorization", "s3cret-proxy", ""},
-	{"Cookie", "s3cret-cookie", ""},
-	{"Set-Cookie", "s3cret-set-cookie", ""},
-	{"token", "Bearer s3cret-bearer", "Bearer "},
-	{"basic", "Basic s3cret-basic", "Basic "},
+// baselineSecret is a secret of the baseline every [logging.Redaction] redacts, with the header
+// name or prefix that stays in the output.
+type baselineSecret struct{ key, value, kept string }
+
+// baselineSecrets returns a secret of each kind the baseline redacts.
+func baselineSecrets() []baselineSecret {
+	return []baselineSecret{
+		{"Authorization", "s3cret-authorization", ""},
+		{"Proxy-Authorization", "s3cret-proxy", ""},
+		{"Cookie", "s3cret-cookie", ""},
+		{"Set-Cookie", "s3cret-set-cookie", ""},
+		{"token", "Bearer s3cret-bearer", "Bearer "},
+		{"basic", "Basic s3cret-basic", "Basic "},
+	}
 }
 
 func formats() []spec.Format { return []spec.Format{spec.FormatText, spec.FormatJSON} }
@@ -206,7 +209,7 @@ func secretPart(value, kept string) string { return strings.TrimPrefix(value, ke
 
 func TestSetupRedactsBaselineThroughHandler(t *testing.T) {
 	for _, format := range formats() {
-		for _, sec := range baselineSecrets {
+		for _, sec := range baselineSecrets() {
 			t.Run(format.String()+"/"+sec.key, func(t *testing.T) {
 				restoreDefault(t)
 				var buf bytes.Buffer
@@ -229,7 +232,7 @@ func TestSetupRedactsBaselineThroughHandler(t *testing.T) {
 
 func TestSetupRedactsBaselineThroughWriter(t *testing.T) {
 	for _, format := range formats() {
-		for _, sec := range baselineSecrets {
+		for _, sec := range baselineSecrets() {
 			t.Run(format.String()+"/"+sec.key, func(t *testing.T) {
 				restoreDefault(t)
 				var buf bytes.Buffer
@@ -291,16 +294,15 @@ func TestSetupRedactsToolAdditions(t *testing.T) {
 	}
 }
 
-// failingWriter fails every write.
-type failingWriter struct{}
+// failingWriter fails every write with err.
+type failingWriter struct{ err error }
 
-var errWrite = errors.New("write failed") //nolint:gochecknoglobals // sentinel
-
-func (failingWriter) Write([]byte) (int, error) { return 0, errWrite }
+func (f failingWriter) Write([]byte) (int, error) { return 0, f.err }
 
 func TestSetupWriterReportsDestinationError(t *testing.T) {
 	restoreDefault(t)
-	res, err := logging.Setup(logging.Options{Writer: failingWriter{}})
+	errWrite := errors.New("write failed")
+	res, err := logging.Setup(logging.Options{Writer: failingWriter{err: errWrite}})
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -506,6 +508,8 @@ func TestSetupTextRedactsNestedByteSlices(t *testing.T) {
 		{"interface field", struct{ X any }{X: secret}, `v="{X:\"Bearer [REDACTED]\"}"`},
 		{"unexported field", struct{ body []byte }{body: secret}, `v="{body:\"Bearer [REDACTED]\"}"`},
 		{"array", struct{ A [10]byte }{A: [10]byte(secret)}, `v="{A:\"Bearer [REDACTED]\"}"`},
+		{"unexported array", struct{ a [10]byte }{a: [10]byte(secret)}, `v="{a:\"Bearer [REDACTED]\"}"`},
+		{"array in an interface", struct{ X any }{X: [10]byte(secret)}, `v="{X:\"Bearer [REDACTED]\"}"`},
 		{"map key", map[[10]byte]int{[10]byte(secret): 1}, `v="map[\"Bearer [REDACTED]\":1]"`},
 		{"cyclic pointer", cyclic, `Body:\"Bearer [REDACTED]\"}"`},
 	}

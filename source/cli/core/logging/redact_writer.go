@@ -254,12 +254,14 @@ func (w *RedactingWriter) skipContinuation(p []byte) []byte {
 			}
 			w.cont = continueJSON
 		case continueJSONValue:
-			if done, last := w.skip.next(c); done {
+			switch w.skip.next(c) {
+			case skipLast:
 				w.cont = continueNone
-				if last {
-					return p[i+1:]
-				}
+				return p[i+1:]
+			case skipAfter:
+				w.cont = continueNone
 				return p[i:]
+			case skipInside:
 			}
 		case continueJSON:
 			switch c {

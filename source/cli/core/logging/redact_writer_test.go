@@ -801,3 +801,27 @@ func TestRedactingWriterFlushInsideJSONHeaderValue(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestRedactingWriterNewlineEndsAFlushedJSONValue pins that a newline ends what of a flushed JSON
+// header value is still dropped, whether the flush ended inside a value that is not a string or
+// right after a backslash inside a string, so the lines after it are written.
+func TestRedactingWriterNewlineEndsAFlushedJSONValue(t *testing.T) {
+	tests := []struct{ name, head, want string }{
+		{"array", `{"Cookie":[1,`, `{"Cookie":"[REDACTED]"`},
+		{"escape", `{"Cookie":"ab\`, `{"Cookie":"[REDACTED]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			w := newRedactingWriter(&out, testRedactor())
+			writeAll(t, w, tt.head)
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+			writeAll(t, w, "\nafter\n", "next\n")
+			if got, want := out.String(), tt.want+"\nafter\nnext\n"; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
