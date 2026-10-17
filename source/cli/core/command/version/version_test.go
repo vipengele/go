@@ -1,4 +1,4 @@
-package versioncmd_test
+package version_test
 
 import (
 	"bytes"
@@ -9,14 +9,14 @@ import (
 
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/core/buildinfo"
-	"go.vipengele.org/cli/core/versioncmd"
+	"go.vipengele.org/cli/core/command/version"
 	"go.vipengele.org/cli/spec"
 )
 
 func root(info buildinfo.Info) *spec.Command {
 	return &spec.Command{
 		Name:     "tool",
-		Commands: []*spec.Command{versioncmd.New(info)},
+		Commands: []*spec.Command{version.New(info)},
 	}
 }
 
@@ -113,7 +113,7 @@ func TestRejectsArguments(t *testing.T) {
 }
 
 func TestJSONIsLocalFlagByDefault(t *testing.T) {
-	cmd := versioncmd.New(buildinfo.Info{})
+	cmd := version.New(buildinfo.Info{})
 	if len(cmd.Flags) != 1 {
 		t.Fatalf("flags = %d, want 1", len(cmd.Flags))
 	}
@@ -135,7 +135,7 @@ func TestJSONIsLocalFlagByDefault(t *testing.T) {
 
 func TestWithOutputJSONReadsTheOutput(t *testing.T) {
 	info := buildinfo.Info{Version: "v1.0.0"}
-	cmd := versioncmd.New(info, versioncmd.WithOutputJSON())
+	cmd := version.New(info, version.WithOutputJSON())
 	if len(cmd.Flags) != 0 {
 		t.Fatalf("flags = %d, want none", len(cmd.Flags))
 	}
@@ -173,8 +173,8 @@ func TestLocalJSONUnderAnInheritedJSONIsInvalid(t *testing.T) {
 		cmd  *spec.Command
 		ok   bool
 	}{
-		{"local flag", versioncmd.New(buildinfo.Info{}), false},
-		{"output JSON", versioncmd.New(buildinfo.Info{}, versioncmd.WithOutputJSON()), true},
+		{"local flag", version.New(buildinfo.Info{}), false},
+		{"output JSON", version.New(buildinfo.Info{}, version.WithOutputJSON()), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,7 +189,7 @@ func TestLocalJSONUnderAnInheritedJSONIsInvalid(t *testing.T) {
 func TestRunWritesToEnvStdout(t *testing.T) {
 	var out bytes.Buffer
 	inv := spec.NewInvocation(&spec.Env{Stdout: &out}, nil, nil)
-	if err := versioncmd.New(buildinfo.Info{Version: "v1.0.0"}).Run(context.Background(), inv); err != nil {
+	if err := version.New(buildinfo.Info{Version: "v1.0.0"}).Run(context.Background(), inv); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got, want := out.String(), "v1.0.0\n"; got != want {
@@ -216,7 +216,7 @@ func TestLocalJSONReadsTheOutputFormatToo(t *testing.T) {
 			var out bytes.Buffer
 			inv := spec.NewInvocation(&spec.Env{Stdout: &out}, nil, tt.values)
 			inv.Output = spec.NewOutput(spec.OutputOptions{Format: tt.format})
-			if err := versioncmd.New(info).Run(context.Background(), inv); err != nil {
+			if err := version.New(info).Run(context.Background(), inv); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 			if got := out.String(); got != tt.want {

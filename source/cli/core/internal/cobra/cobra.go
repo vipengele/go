@@ -54,9 +54,11 @@ type Config struct {
 	// [*UsageError] and calls no run function. Nil leaves the zero Output.
 	Output func(inv *spec.Invocation) (spec.Output, error)
 	// PreRun are called in order before the run function, after Output, with the invocation the
-	// run function is about to receive and the command that runs. The first error stops the
-	// run: Run returns it as it is and calls neither the run function nor any PostRun.
-	PreRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error
+	// run function is about to receive and the command that runs. Each returns the context the
+	// next PreRun, the run function and every PostRun receive; a nil context keeps the one it
+	// was given. The first error stops the run: Run returns it as it is, ignores the context
+	// returned with it and calls neither the run function nor any PostRun.
+	PreRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error)
 	// PostRun are called in reverse order after the run function returns, every one of them,
 	// with the error the run function returned. When the run function returned an error, Run
 	// returns that error and ignores theirs. Otherwise Run returns the first error a PostRun
@@ -196,14 +198,19 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 	return cmd, nil
 }
 
-// runHooked calls run with ctx and inv between the PreRun and the PostRun of cfg, which receive
-// info, and returns the error [Config] describes.
+// runHooked calls run with inv between the PreRun and the PostRun of cfg, which receive info,
+// and returns the error [Config] describes. The first PreRun receives ctx, and each later call
+// the context the last PreRun returned that was not nil.
 func runHooked(ctx context.Context, cfg Config, inv *spec.Invocation, info spec.CommandInfo,
 	run func(context.Context, *spec.Invocation) error,
 ) error {
 	for _, pre := range cfg.PreRun {
-		if err := pre(ctx, inv, info); err != nil {
+		next, err := pre(ctx, inv, info)
+		if err != nil {
 			return err
+		}
+		if next != nil {
+			ctx = next
 		}
 	}
 	runErr := run(ctx, inv)

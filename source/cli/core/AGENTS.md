@@ -10,7 +10,18 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `identity.Name`. Options: `WithVerbose`, `WithQuiet`, `WithNoColor`, `WithJSON`, `WithOutput` opt
   into the standard flags, declared as inherited flags on the root (`flags.go`); `WithPreRun` / `WithPostRun`
   add `PreRunHook` / `PostRunHook`s (`hooks.go`), which receive the `Invocation` and a
-  `spec.CommandInfo` (path and `Annotations`); `WithBuildInfo` fixes what `version` prints (tests),
+  `spec.CommandInfo` (path and `Annotations`); a `PreRunHook` returns the context later pre-run
+  hooks, the run function and post-run hooks receive (nil keeps the one it got; ADR-0016);
+  `WithConfig[T](defaults)` (`config.go`) is opt-in: it mounts the `command/config` group after the
+  added commands and before `version`, and adds the hook that loads defaults < `config.yaml` in
+  `Dirs.Config()` of the identity < env (`inv.Env.LookupEnv`, `Identity.EnvPrefix`) and stores the
+  `Result[T]` in the context; `ConfigFrom[T](ctx)` reads it (false without `WithConfig` or on a
+  `spec.SkipConfig` command). The hook runs ahead of every `WithPreRun` hook whatever the option
+  order, a load failure is a hook error (exit 1), and a missing file is valid. A directory that
+  cannot be resolved makes the hook and every group run function return that error. `version`
+  carries `SkipConfig` (set in `App.version`); annotations are per command, never inherited. No
+  `--config` flag, no per-key flags, no seeded file;
+  `WithBuildInfo` fixes what `version` prints (tests),
   otherwise `buildinfo.Read()`. A run function reads the standard flags and colour (per stream,
   `Output.Color(stream)`) from `inv.Output` (`spec.Output`, resolved in `output.go`), never from a
   handle. `Output.Format()` is resolved by `outputResolver.format`: `WithJSON`'s `--json` or
@@ -20,8 +31,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   true `--json`, `--output json` with an explicit `--json=false`, and an unknown value are usage
   errors (exit 2). A command with a local `--json` reads it OR'd with `Output.Format()`. The App
   owns `version`
-  (ADR-0009): every root holds `versioncmd.New(...)` after the added commands, with a local `--json`
-  unless `WithJSON` is given, then `versioncmd.WithOutputJSON()`, so `version --json` writes JSON
+  (ADR-0009): every root holds `version.New(...)` after the added commands, with a local `--json`
+  unless `WithJSON` is given, then `version.WithOutputJSON()`, so `version --json` writes JSON
   under every option set, and `version --output json` too under `WithOutput`; a tool's own `version` is a
   duplicate name. `cli/core` never imports `update`: the tool's `main` wires the update check as a
   hook, and `spec.SkipUpdateCheck` is the opt-out annotation.
@@ -76,15 +87,29 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `*UsageError`.
 - `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). `Info.IsDev`
   delegates to `cli/spec/version`. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
-  JSON object without `schema`; `versioncmd` writes it with `spec.WriteJSON(inv.Env.Stdout, 1, info)`,
+  JSON object without `schema`; `command/version` writes it with `spec.WriteJSON(inv.Env.Stdout, 1, info)`,
   which adds `schema` first and indents. The keys are pinned by
   `buildinfo/testdata/version-json.golden` (`speccheck.AssertJSONKeys`, `SPECCHECK_UPDATE=1`
   rewrites it). Adding a key keeps `schema`; renaming, removing or retyping a key increments it.
-- `versioncmd` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated
+- `command/version` — `New(info, opts...)` returns the `*spec.Command` for `version`, annotated
   `spec.SkipUpdateCheck`. By default it has a local (not inherited) `--json` flag, OR'd with
   `inv.Output.Format() == spec.FormatJSON`;
   `WithOutputJSON()` declares none and reads `inv.Output.JSON()`, for a root with an inherited
   `--json` (a descendant flag of the same name makes the tree invalid).
+
+- `command/config` — `New(Options[T])` returns the `config` group (ADR-0017); a leaf package that
+  never imports `cli` or a CLI framework. `ctx.go` holds `With` / `From`, the context accessors
+  keyed per `T`. `path` prints the path (JSON `{path, exists}`), `validate` loads defaults < file
+  only and prints a success line on stderr, `show` prints key / value / origin of the full stack
+  from the context (`ErrNotLoaded` without one), `edit` edits a copy in a `.edit-*` directory
+  beside the file and replaces the file at 0600 only when the copy validates (file layer only), with
+  a `re-edit? [Y/n]` prompt; editor `$VISUAL` then `$EDITOR`, via `Options.Editor` in tests, else
+  the default launcher, which needs `*os.File` stdio. `path`, `validate` and `edit` carry
+  `SkipConfig`; `show` does not. JSON follows `inv.Output.Format()` (no flag of its own), so `show
+  --json` needs `WithJSON` or `WithOutput`. Errors are plain (exit 1), including the non-terminal
+  refusal of `edit`: the usage-error type is in `internal/cobra`.
+- `internal/atomicfile` — `Replace(tmp, final, mode)` chmods the temp, syncs it, renames it over
+  `final` and syncs the directory, removing the temp on failure; `WriteFile(path, data, mode)`.
 
 ## Gotchas
 
@@ -98,9 +123,9 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 - Commands are `cli/spec` data. Flags are read through typed handles (`asJSON.Get(inv)`) built inside
   the command's constructor: `gochecknoglobals` is on, so there are no package-level handles, and a
   package-level variable needs a justified `//nolint`.
-- Sibling edges: `go.mod` requires `go.vipengele.org/cli/spec` and `go.vipengele.org/commons`
-  (indirect, because spec imports it), each with a version-less directory `replace` (`../spec`,
-  `../../commons`) while they are developed together (ADR-0006). The main module ignores a
+- Sibling edges: `go.mod` requires `go.vipengele.org/cli/spec`, `go.vipengele.org/config` and
+  `go.vipengele.org/commons` (indirect, because spec imports it), each with a version-less
+  directory `replace` (`../spec`, `../../config`, `../../commons`) while they are developed together (ADR-0006). The main module ignores a
   dependency's `replace`, which is why commons is listed here.
 - Error output is pinned by golden files under `testdata/render/*.golden` (`render_golden_test.go`).
   Regenerate with `go test -update`; the `-update` flag is registered in `TestMain`

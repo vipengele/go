@@ -38,11 +38,11 @@ func Example() {
 
 	// A hook standing in for the update check a tool's main wires: it skips a command
 	// annotated with spec.SkipUpdateCheck, "version" included.
-	check := func(_ context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error {
+	check := func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
 		if _, skip := cmd.Annotation(spec.SkipUpdateCheck); !skip {
 			_, _ = fmt.Fprintln(inv.Env.Stderr, "checking for updates before", cmd)
 		}
-		return nil
+		return ctx, nil
 	}
 
 	app := cli.New(spec.Identity{

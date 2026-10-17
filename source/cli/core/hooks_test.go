@@ -53,9 +53,9 @@ func hookApp(c *calls, runErr error, opts ...cli.Option) *cli.App {
 
 // preHook returns a pre-run hook that records its call in c, as "pre<name>", and returns err.
 func preHook(c *calls, name string, err error) cli.Option {
-	return cli.WithPreRun(func(context.Context, *spec.Invocation, spec.CommandInfo) error {
+	return cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
 		c.add("pre%s", name)
-		return err
+		return ctx, err
 	})
 }
 
@@ -183,10 +183,10 @@ func TestAppHooksReceiveTheInvocationAndTheCommand(t *testing.T) {
 		*s = seen{quiet: inv.Output.Quiet(), path: cmd.String(), annotations: cmd.Annotations(), args: inv.Args}
 	}
 	app := cli.New(identity(), cli.WithQuiet(),
-		cli.WithPreRun(func(_ context.Context, inv *spec.Invocation, cmd spec.CommandInfo) error {
+		cli.WithPreRun(func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
 			record(&pre, inv, cmd)
 			cmd.Annotations()["k"] = "changed"
-			return nil
+			return ctx, nil
 		}),
 		cli.WithPostRun(func(_ context.Context, inv *spec.Invocation, cmd spec.CommandInfo, _ error) error {
 			record(&post, inv, cmd)
@@ -231,12 +231,12 @@ func TestAppHooksReceiveTheInvocationAndTheCommand(t *testing.T) {
 // updateCheck returns a pre-run hook standing in for an update check: it records in c the
 // commands it checks, and skips a command annotated with [spec.SkipUpdateCheck].
 func updateCheck(c *calls) cli.Option {
-	return cli.WithPreRun(func(_ context.Context, _ *spec.Invocation, cmd spec.CommandInfo) error {
+	return cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
 		if _, skip := cmd.Annotation(spec.SkipUpdateCheck); skip {
-			return nil
+			return ctx, nil
 		}
 		c.add("check %s", cmd)
-		return nil
+		return ctx, nil
 	})
 }
 
@@ -298,9 +298,9 @@ func TestAppHooksRunTwice(t *testing.T) {
 
 func TestAppHooksConcurrent(t *testing.T) {
 	app := cli.New(identity(),
-		cli.WithPreRun(func(_ context.Context, inv *spec.Invocation, _ spec.CommandInfo) error {
+		cli.WithPreRun(func(ctx context.Context, inv *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
 			_, _ = fmt.Fprintf(inv.Env.Stdout, "pre %s;", inv.Args[0])
-			return nil
+			return ctx, nil
 		}),
 		cli.WithPostRun(func(_ context.Context, inv *spec.Invocation, cmd spec.CommandInfo, _ error) error {
 			_, _ = fmt.Fprintf(inv.Env.Stdout, "post %s %s", cmd, inv.Args[0])
@@ -329,4 +329,87 @@ func TestAppHooksConcurrent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// loadedKey is the context key under which a pre-run hook hands a value to what follows it.
+type loadedKey struct{}
+
+// loaded returns the string ctx carries under loadedKey, empty when it carries none.
+func loaded(ctx context.Context) string {
+	s, _ := ctx.Value(loadedKey{}).(string)
+	return s
+}
+
+// loadHook returns a pre-run hook that records the value it receives in c, as
+// "pre<name>[<value>]", and returns err with a context whose value gains name, or with a nil
+// context when keep is true.
+func loadHook(c *calls, name string, keep bool, err error) cli.Option {
+	return cli.WithPreRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+		c.add("pre%s[%s]", name, loaded(ctx))
+		if keep {
+			return nil, err
+		}
+		return context.WithValue(ctx, loadedKey{}, loaded(ctx)+name), err
+	})
+}
+
+func TestAppPreRunContextReachesWhatFollows(t *testing.T) {
+	tests := []struct {
+		name    string
+		hooks   func(c *calls) []cli.Option
+		want    result
+		wantLog string
+	}{
+		{
+			name: "each context reaches the next pre-run hook, the run and every post-run hook",
+			hooks: func(c *calls) []cli.Option {
+				return []cli.Option{loadHook(c, "A", false, nil), loadHook(c, "B", false, nil)}
+			},
+			want:    result{code: cli.ExitOK},
+			wantLog: "preA[] preB[A] run[AB] post[AB]",
+		},
+		{
+			name: "a nil context keeps the one the hook received",
+			hooks: func(c *calls) []cli.Option {
+				return []cli.Option{loadHook(c, "A", false, nil), loadHook(c, "B", true, nil),
+					loadHook(c, "C", false, nil)}
+			},
+			want:    result{code: cli.ExitOK},
+			wantLog: "preA[] preB[A] preC[A] run[AC] post[AC]",
+		},
+		{
+			name: "an error stops the run and every post-run hook",
+			hooks: func(c *calls) []cli.Option {
+				return []cli.Option{loadHook(c, "A", false, nil), loadHook(c, "B", false, errors.New("no")),
+					loadHook(c, "C", false, nil)}
+			},
+			want:    result{code: cli.ExitError, stderr: "tool: no\n"},
+			wantLog: "preA[] preB[A]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var c calls
+			opts := append(tt.hooks(&c),
+				cli.WithPostRun(func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo, _ error) error {
+					c.add("post[%s]", loaded(ctx))
+					return nil
+				}))
+			app := cli.New(identity(), opts...)
+			app.Add(&spec.Command{
+				Name:    "load",
+				Summary: "Read what the hooks loaded",
+				Run: func(ctx context.Context, _ *spec.Invocation) error {
+					c.add("run[%s]", loaded(ctx))
+					return nil
+				},
+			})
+			if got := runApp(t, app, "load"); got != tt.want {
+				t.Errorf("ExecuteArgs\n got: %+v\nwant: %+v", got, tt.want)
+			}
+			if got := c.String(); got != tt.wantLog {
+				t.Errorf("calls %q, want %q", got, tt.wantLog)
+			}
+		})
+	}
 }
