@@ -12,7 +12,7 @@ export const MODULE_LIST_TTL_MS = 60_000;
 
 /** The module list object could not be read, is absent, or fails the schema. */
 export class ModuleListUnavailableError extends Error {
-  override name = "ModuleListUnavailableError";
+  override name = ModuleListUnavailableError.name;
 }
 
 /**
@@ -75,7 +75,6 @@ export class ModuleListCache {
     if (this.cached !== undefined && this.now() < this.cached.expiresAt) {
       return Promise.resolve(this.cached.modules);
     }
-    this.cached = undefined;
     if (this.inFlight === undefined) {
       this.inFlight = readModuleList(bucket)
         .then((modules) => {
