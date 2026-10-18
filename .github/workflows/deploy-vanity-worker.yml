@@ -1,14 +1,15 @@
 # deploy-vanity-worker — deploys tools/vanity-worker to Cloudflare.
 #
 # The Worker answers `go get` for go.vipengele.org/<path> (ADR-0004). Its module
-# list is generated at build time from every source/**/go.mod at the tagged
-# commit, so a project added, moved or removed is served only once a new Worker
-# tag is deployed.
+# list is read at request time from the R2 object that publish-vanity-modules
+# writes, so a project added, moved or removed is served once that workflow has
+# published; a Worker tag deploys Worker code only.
 #
 # A deploy runs only from a tag `tools/vanity-worker/vX.Y.Z` that points at a
 # commit on main; no branch is ever deployed. Pushing the tag deploys it. A
 # redeploy or a rollback is a `workflow_dispatch` naming an existing tag of that
-# form, which deploys the Worker exactly as that tag built it.
+# form, which deploys the Worker exactly as that tag built it; the rollback tag
+# tools/vanity-worker/v0.1.2 serves the module list compiled into it.
 #
 # Three jobs, and the seams between them are safety properties. `tag` decides
 # whether the ref is a deployable Worker version and holds no credential.

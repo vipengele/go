@@ -81,23 +81,20 @@ go test -race -shuffle=on ./...
 
 Every command must pass. Then merge the pull request.
 
-## 6 — Deploy the Worker with the project's path
+## 6 — Check the Worker answers for the project's path
 
-`go.vipengele.org` is a Cloudflare Worker whose module list is generated from `source/**/go.mod`. A
-project resolves only after the Worker deploy that includes its `go.mod`, so the deploy comes before
-the tag. The deploy is a tag of its own: push the next `tools/vanity-worker/vX.Y.Z` at a commit on
-`main` that contains the project's `go.mod`, which runs `deploy-vanity-worker.yml`. Then check what
-the Worker answers:
+`go.vipengele.org` is a Cloudflare Worker that reads its module list from an R2 object, which
+`publish-vanity-modules.yml` writes from `source/**/go.mod` when a `go.mod` merges to `main`. No
+Worker tag is needed. Check what the Worker answers:
 
 ```bash
-git tag tools/vanity-worker/v<version> origin/main
-git push origin tools/vanity-worker/v<version>
 curl -s 'https://go.vipengele.org/<project>?go-get=1'
 ```
 
 The answer must carry a `go-import` meta tag naming the project
-(`go.vipengele.org/<project> git https://github.com/vipengele/go source/<project>`). Until it does,
-push no tag.
+(`go.vipengele.org/<project> git https://github.com/vipengele/go source/<project>`). The Worker
+caches the list for about a minute. Until the answer carries the tag, push no tag: confirm the
+`publish-vanity-modules` run for the merge commit succeeded, and re-run it if it did not.
 
 ## 7 — Tag the merged commit
 
