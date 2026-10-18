@@ -8,8 +8,9 @@
 # A deploy runs only from a tag `tools/vanity-worker/vX.Y.Z` that points at a
 # commit on main; no branch is ever deployed. Pushing the tag deploys it. A
 # redeploy or a rollback is a `workflow_dispatch` naming an existing tag of that
-# form, which deploys the Worker exactly as that tag built it; the rollback tag
-# tools/vanity-worker/v0.1.2 serves the module list compiled into it.
+# form, which deploys the Worker exactly as that tag built it. ROLLBACK_TAG is
+# the tag to roll back to: its Worker serves the module list compiled into it
+# and reads nothing from R2.
 #
 # Three jobs, and the seams between them are safety properties. `tag` decides
 # whether the ref is a deployable Worker version and holds no credential.
@@ -37,6 +38,9 @@ on:
         required: true
 
 permissions: {}
+
+env:
+  ROLLBACK_TAG: tools/vanity-worker/v0.1.2
 
 jobs:
   tag:
@@ -165,19 +169,19 @@ jobs:
           npx wrangler deploy --tag "$VERSION" --message "${TAG} (${sha})"
 
       # A public, unauthenticated GET of each path must answer with its exact
-      # go-import line. commons, cli/spec and cli/core are absent from the
-      # compiled-in list of tools/vanity-worker/v0.1.2 and daemon is present, so
-      # together they show the deployed Worker serves the list it reads from R2.
+      # go-import line. The compiled-in list of ROLLBACK_TAG holds daemon and
+      # none of commons, cli/spec and cli/core, so only a Worker that serves the
+      # list it reads from R2 answers all four. A deploy of ROLLBACK_TAG skips
+      # the check, because that Worker does not read R2 and cannot pass it.
       # The custom domain can take a moment to serve a new deploy, so the whole
       # set is retried for about a minute before a miss fails the job; the
       # failure lists every path still wrong and names the rollback.
       - name: The deployed Worker answers go get
-        if: steps.credentials.outputs.present == 'true'
+        if: steps.credentials.outputs.present == 'true' && needs.tag.outputs.tag != env.ROLLBACK_TAG
         run: |
           set -euo pipefail
           base="https://go.vipengele.org"
           paths=(commons cli/spec cli/core daemon)
-          rollback="tools/vanity-worker/v0.1.2"
           attempts=6
           delay=10
           failing=()
@@ -204,7 +208,7 @@ jobs:
           for path in "${failing[@]}"; do
             echo "::error::go.vipengele.org/${path} does not resolve to source/${path} after ${attempts} attempts"
           done
-          echo "::error::The deployed Worker does not serve ${failing[*]}. Roll back by running this workflow (workflow_dispatch) with tag ${rollback}, which serves its compiled-in module list."
+          echo "::error::The deployed Worker does not serve ${failing[*]}. Roll back by running this workflow (workflow_dispatch) with tag ${ROLLBACK_TAG}, which serves its compiled-in module list."
           exit 1
 
   announce:

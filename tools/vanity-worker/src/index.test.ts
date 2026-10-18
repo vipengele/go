@@ -142,6 +142,21 @@ describe("worker without a usable module list", () => {
     expect((await getFrom(bucket, "/cli/core?go-get=1")).status).toBe(503);
   });
 
+  it("logs the error with its name when it answers 503", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const bucket = fakeBucket(async () => {
+        throw new Error("R2 is down");
+      });
+      expect((await getFrom(bucket, "/cli/core?go-get=1")).status).toBe(503);
+      expect(errors).toHaveBeenCalledWith(
+        "ModuleListUnavailableError: object modules.json is unreadable: R2 is down",
+      );
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("answers 503 when the object is not JSON", async () => {
     expect((await getFrom(bucketWith("not json"), "/cli/core?go-get=1")).status).toBe(503);
   });

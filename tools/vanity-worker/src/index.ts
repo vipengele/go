@@ -77,7 +77,7 @@ export function createHandler(
       try {
         modules = await cache.get(env.MODULE_LIST);
       } catch (err) {
-        console.error(err instanceof Error ? err.message : err);
+        console.error(String(err));
         return new Response("Module list unavailable\n", { status: 503 });
       }
 
