@@ -206,6 +206,17 @@ func executeArgs(env *spec.Env, root *spec.Command, args []string, cfg cobra.Con
 func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args []string,
 	cfg cobra.Config, registry exitMatchers, renderers ...errrender.Renderer,
 ) int {
+	return executeArgsEnded(ctx, env, root, args, cfg, nil, registry, renderers...)
+}
+
+// executeArgsEnded is [executeArgsCtx] that calls ended, when it is not nil, on the goroutine
+// that runs the command, once the run is over: after cobra.Run returns or while its panic
+// unwinds, and before the outcome is reported. A run abandoned on a second interrupt calls it
+// when that run ends, after executeArgsEnded has returned, so ended never runs while the run can
+// still write. It is not called when the tree is invalid, as no run starts.
+func executeArgsEnded(ctx context.Context, env *spec.Env, root *spec.Command, args []string,
+	cfg cobra.Config, ended func(), registry exitMatchers, renderers ...errrender.Renderer,
+) int {
 	env = env.Resolved()
 	if env.Terminal == nil {
 		env.Terminal = terminal.Detect(env.Stdin, env.Stdout, env.Stderr)
@@ -217,7 +228,7 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if env.Interrupts == nil {
-		return report(runCtx, env, root, cobra.Run(runCtx, env, root, args, cfg), registry, renderers)
+		return report(runCtx, env, root, runThenEnd(runCtx, env, root, args, cfg, ended), registry, renderers)
 	}
 
 	second, stop := watchInterrupts(env.Interrupts, cancel)
@@ -228,7 +239,7 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 				done <- outcome{panicked: true, value: v}
 			}
 		}()
-		done <- outcome{err: cobra.Run(runCtx, env, root, args, cfg)}
+		done <- outcome{err: runThenEnd(runCtx, env, root, args, cfg, ended)}
 	}()
 	select {
 	case out := <-done:
@@ -240,6 +251,17 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 	case <-second:
 		return ExitInterrupted
 	}
+}
+
+// runThenEnd returns what cobra.Run returns, calling ended, when it is not nil, once cobra.Run
+// has returned or panicked.
+func runThenEnd(ctx context.Context, env *spec.Env, root *spec.Command, args []string,
+	cfg cobra.Config, ended func(),
+) error {
+	if ended != nil {
+		defer ended()
+	}
+	return cobra.Run(ctx, env, root, args, cfg)
 }
 
 // outcome is how a run on its own goroutine ended: it returned err, or it panicked with value.

@@ -23,8 +23,52 @@ public package `go.vipengele.org/cli/core/logging`.
 - **Usage errors.** They are the internal usage error type of `internal/cobra`, not
   `spec.UsageError`: that type is for a run function that needs a prompt, and its text reads
   "requires interactive input".
-- **Setup.** `logging.Setup` builds the logger, calls `slog.SetDefault` and returns it. The hook
-  also stores the logger in the context (ADR-0016), where `cli.LoggerFrom(ctx)` reads it.
+- **Setup.** `logging.Setup(opts)` returns a `Result` and an error: it builds the logger, calls
+  `slog.SetDefault` and returns the logger with the redacting writer beneath it. The hook stores
+  both in the context (ADR-0016), where `cli.LoggerFrom(ctx)` and `cli.LogWriterFrom(ctx)` read
+  them.
+- **Two redaction layers, one redactor.** Logging always installs a redacting `slog.Handler` and a
+  redacting `io.Writer` beneath it, built from one shared redactor. No option or constructor skips
+  either: the writer is the backstop for text that reaches the destination without passing the
+  handler.
+- **Baseline.** Always on: the header names Authorization, Proxy-Authorization, Cookie and
+  Set-Cookie, and the values `Bearer <token>` and `Basic <token>`, the scheme in any letter case (a
+  tool's prefix matches as given). `WithLogging()` alone is valid.
+- **Additions.** A tool adds with `cli.WithRedaction(logging.Redaction{Prefixes, Headers})` and
+  cannot remove from the baseline. `WithRedaction` without `WithLogging` is an invalid command tree.
+- **Matching.** A prefix followed by a run of `[A-Za-z0-9_+/=.~-]` becomes the prefix followed by
+  `[REDACTED]`; a bare prefix is left alone. A header matches by attribute key, in any letter case
+  and at any group depth, or as `Name: value` in text, the name whole: after the start of the line,
+  a quote or a byte that is neither a word character nor `-`, or inside a JSON string the escape
+  `\n`, `\r` or `\t`, so `X-Authorization: v` is not the header Authorization. Under the JSON
+  format, a string in an encoded `slog.Any` value that is the base64 form of bytes, as
+  `encoding/json` writes a byte slice at any depth, is replaced by those bytes, redacted, when they
+  hold a secret, and a byte array, which `encoding/json` writes as a JSON array of its decimal
+  byte values unless a `MarshalJSON` or `MarshalText` of its type or element type writes it, is
+  checked as its bytes, and when they hold a secret that array is replaced by those bytes,
+  redacted, as a JSON string. Under the text format, a byte slice or byte array inside a `slog.Any` value, which
+  `%+v` writes as its decimal byte values, is checked as its bytes, and when they hold a secret its
+  decimal form is replaced by those bytes, redacted, as a quoted string. Each line is read by its own shape, whatever the
+  log format: a whole line that is valid JSON (it starts with `{` or `[`) is read as JSON, where a
+  header value ends at the closing unescaped quote, and the value of a header key that is an array,
+  an object, a number, a boolean or null becomes the string `"[REDACTED]"`, so the line stays valid
+  JSON; any other line is
+  read as text, where the value runs to end of line and the quoted form `"Name": value` also
+  matches. A line written in pieces, past the 64 KiB cap or by a flush, takes its shape from the
+  bytes held when its first piece is written: JSON when they are a whole JSON line or start with
+  `{` and are the start of a JSON document, every token well formed; text otherwise, so a line
+  that only starts with `{`, such as a Go `%+v` dump, never has a header value end at a quote.
+- **Shape, not format, selects the pattern.** The writer also carries raw and subprocess output,
+  which is not in the format the logger was given.
+- **Writer scope.** Only the log writer is redacted, plus that same writer exposed by
+  `cli.LogWriterFrom(ctx)` for raw or subprocess output. `Env.Stderr`, error rendering, `inv.Info`
+  and the other message helpers, and the cobra error stream are untouched: wrapping `Env.Stderr`
+  would hide the `*os.File` the editor launcher needs (ADR-0017) and change the golden-pinned error
+  output and ADR-0013's streams.
+- **Buffering.** The writer is line-buffered with a 64 KiB cap and a 256-byte trailing window kept
+  on overflow. A final line without a newline is held until `Flush` or `Close`, or until the run ends, when the
+  App flushes it on the run's own goroutine. A run abandoned on a second interrupt flushes when
+  that run ends, never earlier, so the flush cannot race a write.
 - **One default per process.** The default is process-wide, so executions that overlap in one
   process, of one App or of two, share the logger installed last, and a record written through the
   default may go to the stderr of another execution. Code that needs the logger of its own
@@ -49,3 +93,9 @@ public package `go.vipengele.org/cli/core/logging`.
 - **Letting `-q --log-level debug` through, by last flag wins or by a precedence.** Command line
   order is not visible after parsing and a precedence would have to be learnt, so setting a level
   twice is refused.
+- **`WithLogging(opts...)` carrying the redaction.** Redaction is a separate `WithRedaction`, so
+  `WithLogging()` stays argument-free and valid alone.
+- **A tool-only pattern set with no baseline.** A tool that forgot to list `Authorization` or
+  `Bearer` would log tokens.
+- **Wrapping `Env.Stderr`.** It would break the editor launcher, which needs the raw `*os.File`
+  (ADR-0017), and change the golden-pinned error output and the streams of ADR-0013.
