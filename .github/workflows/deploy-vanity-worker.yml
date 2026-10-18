@@ -163,6 +163,49 @@ jobs:
           sha="$(git rev-parse --short HEAD)"
           npx wrangler deploy --tag "$VERSION" --message "${TAG} (${sha})"
 
+      # A public, unauthenticated GET of each path must answer with its exact
+      # go-import line. commons, cli/spec and cli/core are absent from the
+      # compiled-in list of tools/vanity-worker/v0.1.2 and daemon is present, so
+      # together they show the deployed Worker serves the list it reads from R2.
+      # The custom domain can take a moment to serve a new deploy, so the whole
+      # set is retried for about a minute before a miss fails the job; the
+      # failure lists every path still wrong and names the rollback.
+      - name: The deployed Worker answers go get
+        if: steps.credentials.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          base="https://go.vipengele.org"
+          paths=(commons cli/spec cli/core daemon)
+          rollback="tools/vanity-worker/v0.1.2"
+          attempts=6
+          delay=10
+          failing=()
+          for attempt in $(seq 1 "$attempts"); do
+            failing=()
+            for path in "${paths[@]}"; do
+              want="content=\"go.vipengele.org/${path} git https://github.com/vipengele/go source/${path}\""
+              if ! body="$(curl --fail --silent --show-error --max-time 10 "${base}/${path}?go-get=1")"; then
+                failing+=("$path")
+              elif ! grep -qF -- "$want" <<<"$body"; then
+                echo "${path}: the response carries no ${want}"
+                failing+=("$path")
+              fi
+            done
+            if [ "${#failing[@]}" -eq 0 ]; then
+              echo "every path resolves: ${paths[*]}"
+              exit 0
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              echo "attempt ${attempt}/${attempts}: not yet resolving: ${failing[*]}; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          for path in "${failing[@]}"; do
+            echo "::error::go.vipengele.org/${path} does not resolve to source/${path} after ${attempts} attempts"
+          done
+          echo "::error::The deployed Worker does not serve ${failing[*]}. Roll back by running this workflow (workflow_dispatch) with tag ${rollback}, which serves its compiled-in module list."
+          exit 1
+
   announce:
     name: announce
     needs: [tag, deploy]
