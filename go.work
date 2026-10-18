@@ -6,3 +6,4 @@ use ./source/daemon
 use ./source/commons
 use ./source/cli/spec
 use ./source/config
+use ./source/cli/state

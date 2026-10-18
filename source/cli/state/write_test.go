@@ -1,4 +1,4 @@
-package atomicfile_test
+package state_test
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.vipengele.org/cli/core/internal/atomicfile"
+	"go.vipengele.org/cli/state"
 )
 
 // writeAt writes data to path and sets its mode explicitly, so the result does not depend on the
@@ -99,7 +99,7 @@ func TestReplaceMovesTempOverFinalAtMode(t *testing.T) {
 
 			writeAt(t, tmp, "new", 0o644)
 
-			if err := atomicfile.Replace(tmp, final, 0o600); err != nil {
+			if err := state.Replace(tmp, final, 0o600); err != nil {
 				t.Fatalf("Replace: %v", err)
 			}
 
@@ -128,7 +128,7 @@ func TestReplaceUsesTheInodeTempNamesAtCallTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := atomicfile.Replace(tmp, final, 0o600); err != nil {
+	if err := state.Replace(tmp, final, 0o600); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestReplaceFailureRemovesTemp(t *testing.T) {
 
 			tt.setup(t, tmp, final)
 
-			if err := atomicfile.Replace(tmp, final, 0o600); err == nil {
+			if err := state.Replace(tmp, final, 0o600); err == nil {
 				t.Fatal("Replace: want an error, got nil")
 			}
 
@@ -213,7 +213,7 @@ func TestWriteFile(t *testing.T) {
 				writeAt(t, path, "old", 0o644)
 			}
 
-			if err := atomicfile.WriteFile(path, []byte("key = 1\n"), 0o600); err != nil {
+			if err := state.WriteFile(path, []byte("key = 1\n"), 0o600); err != nil {
 				t.Fatalf("WriteFile: %v", err)
 			}
 
@@ -235,7 +235,7 @@ func TestWriteFileFailureLeavesNoTemp(t *testing.T) {
 
 	writeAt(t, filepath.Join(path, "inside"), "x", 0o644)
 
-	if err := atomicfile.WriteFile(path, []byte("new"), 0o600); err == nil {
+	if err := state.WriteFile(path, []byte("new"), 0o600); err == nil {
 		t.Fatal("WriteFile: want an error, got nil")
 	}
 
@@ -251,7 +251,7 @@ func TestWriteFileRelativePath(t *testing.T) {
 	t.Chdir(dir)
 	t.Setenv("TMPDIR", filepath.Join(dir, "missing"))
 
-	if err := atomicfile.WriteFile("config.toml", []byte("key = 1\n"), 0o600); err != nil {
+	if err := state.WriteFile("config.toml", []byte("key = 1\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -265,12 +265,12 @@ func TestWriteFileInAMissingDirectoryFails(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "missing", "config.toml")
 
-	err := atomicfile.WriteFile(path, []byte("new"), 0o600)
+	err := state.WriteFile(path, []byte("new"), 0o600)
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("WriteFile = %v, want an error matching fs.ErrNotExist", err)
 	}
 
-	if want := "atomicfile: create temp for " + path + ": "; !strings.HasPrefix(err.Error(), want) {
+	if want := "state: create temp for " + path + ": "; !strings.HasPrefix(err.Error(), want) {
 		t.Errorf("error %q does not start with %q", err, want)
 	}
 
@@ -282,7 +282,7 @@ func TestSyncDirMissingDirectory(t *testing.T) {
 
 	missing := filepath.Join(t.TempDir(), "missing")
 
-	err := atomicfile.SyncDir(missing)
+	err := state.SyncDir(missing)
 	if err == nil {
 		t.Fatal("SyncDir: want an error for a missing directory, got nil")
 	}
@@ -295,7 +295,128 @@ func TestSyncDirMissingDirectory(t *testing.T) {
 func TestSyncDirExistingDirectory(t *testing.T) {
 	t.Parallel()
 
-	if err := atomicfile.SyncDir(t.TempDir()); err != nil {
+	if err := state.SyncDir(t.TempDir()); err != nil {
 		t.Fatalf("SyncDir: %v", err)
+	}
+}
+
+// TestWriteFileAbortedAfterAnyStepLeavesOldOrNewContent aborts WriteFile at each step of its write
+// path in turn. Every step but Create performs its real operation first and then reports an error,
+// so the abort lands after the step's effect; Write writes only half the data. Create fails before
+// creating anything, because a caller given no file has no name to remove. A kill at the same
+// points skips the error path and leaves the temporary file behind; this test covers the error
+// path, which must remove it.
+func TestWriteFileAbortedAfterAnyStepLeavesOldOrNewContent(t *testing.T) {
+	t.Parallel()
+
+	errAbort := errors.New("aborted")
+
+	const (
+		oldContent = "old = 1\n"
+		newContent = "new = 2\n"
+	)
+
+	tests := []struct {
+		name  string
+		abort func(s *state.Steps)
+		want  string
+	}{
+		{
+			name: "create",
+			abort: func(s *state.Steps) {
+				s.Create = func(string, string) (*os.File, error) { return nil, errAbort }
+			},
+			want: oldContent,
+		},
+		{
+			name: "write",
+			abort: func(s *state.Steps) {
+				s.Write = func(f *os.File, data []byte) (int, error) {
+					n, err := f.Write(data[:len(data)/2])
+
+					return n, errors.Join(err, errAbort)
+				}
+			},
+			want: oldContent,
+		},
+		{
+			name: "close after write",
+			abort: func(s *state.Steps) {
+				s.CloseWritten = func(f *os.File) error { return errors.Join(f.Close(), errAbort) }
+			},
+			want: oldContent,
+		},
+		{
+			name: "open",
+			abort: func(s *state.Steps) {
+				s.Open = func(name string) (*os.File, error) {
+					f, err := os.Open(filepath.Clean(name))
+					if err == nil {
+						err = f.Close()
+					}
+
+					return nil, errors.Join(err, errAbort)
+				}
+			},
+			want: oldContent,
+		},
+		{
+			name: "chmod",
+			abort: func(s *state.Steps) {
+				s.Chmod = func(f *os.File, mode os.FileMode) error { return errors.Join(f.Chmod(mode), errAbort) }
+			},
+			want: oldContent,
+		},
+		{
+			name: "sync",
+			abort: func(s *state.Steps) {
+				s.Sync = func(f *os.File) error { return errors.Join(f.Sync(), errAbort) }
+			},
+			want: oldContent,
+		},
+		{
+			name: "close after sync",
+			abort: func(s *state.Steps) {
+				s.CloseSynced = func(f *os.File) error { return errors.Join(f.Close(), errAbort) }
+			},
+			want: oldContent,
+		},
+		{
+			name: "rename",
+			abort: func(s *state.Steps) {
+				s.Rename = func(oldpath, newpath string) error {
+					return errors.Join(os.Rename(oldpath, newpath), errAbort)
+				}
+			},
+			want: newContent,
+		},
+		{
+			name: "sync directory",
+			abort: func(s *state.Steps) {
+				s.SyncDir = func(dir string) error { return errors.Join(state.SyncDir(dir), errAbort) }
+			},
+			want: newContent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			writeAt(t, path, oldContent, 0o600)
+
+			s := state.NewSteps()
+			tt.abort(&s)
+
+			err := state.WriteFileWith(s, path, []byte(newContent), 0o600)
+			if !errors.Is(err, errAbort) {
+				t.Fatalf("WriteFile = %v, want an error matching %v", err, errAbort)
+			}
+
+			assertFile(t, path, tt.want, 0o600)
+			assertEntries(t, dir, "config.toml")
+		})
 	}
 }

@@ -631,7 +631,7 @@ func TestEditReportsAFailedReplace(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("Run succeeded, want the replace error")
 	}
-	if want := "config edit: atomicfile: rename "; !strings.HasPrefix(r.err.Error(), want) {
+	if want := "config edit: state: rename "; !strings.HasPrefix(r.err.Error(), want) {
 		t.Errorf("error %q does not start with %q", r.err, want)
 	}
 	if strings.Contains(r.stderr, "updated") {

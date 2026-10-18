@@ -15,8 +15,8 @@ import (
 
 	cfg "go.vipengele.org/config"
 
-	"go.vipengele.org/cli/core/internal/atomicfile"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/state"
 )
 
 // ErrNoTerminal reports that "config edit" was run with a standard input that is not a terminal,
@@ -116,7 +116,7 @@ func edit[T any](ctx context.Context, inv *spec.Invocation, opts Options[T], edi
 		}
 		_, loadErr := cfg.Load(opts.Defaults, cfg.File(temp))
 		if loadErr == nil {
-			if err := atomicfile.Replace(temp, opts.Path, editMode); err != nil {
+			if err := state.Replace(temp, opts.Path, editMode); err != nil {
 				return fmt.Errorf("config edit: %w", err)
 			}
 			inv.Success("%s updated", opts.Path)
@@ -140,7 +140,7 @@ func prepareCopy[T any](opts Options[T], temp string) ([]byte, error) {
 	data, err := os.ReadFile(opts.Path)
 	switch {
 	case err == nil:
-		return data, atomicfile.WriteFile(temp, data, editMode)
+		return data, state.WriteFile(temp, data, editMode)
 	case errors.Is(err, fs.ErrNotExist):
 		if _, err := cfg.Seed(temp, opts.Defaults); err != nil {
 			return nil, err
