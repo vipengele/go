@@ -2,3 +2,4 @@ node_modules/
 dist/
 .wrangler/
 src/modules.generated.ts
+src/modules.generated.json

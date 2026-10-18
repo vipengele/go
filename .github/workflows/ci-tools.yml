@@ -6,13 +6,16 @@
 #
 # tools/vanity-worker is a TypeScript Cloudflare Worker. Every npm script that
 # reads the module list regenerates it from source/**/go.mod first, so the
-# checkout is the whole repository rather than the tool's directory alone.
+# checkout is the whole repository rather than the tool's directory alone, and
+# a change to any source/**/go.mod runs the checks: a project path outside the
+# list's schema fails them before it merges.
 name: ci-tools
 
 on:
   pull_request:
     paths:
       - 'tools/**'
+      - 'source/**/go.mod'
       - '.github/workflows/ci-tools.yml'
 
 permissions:
@@ -44,3 +47,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # The module list publish-vanity-modules would upload, generated and
+      # validated without credentials or network.
+      - run: npm run publish-modules -- --dry-run

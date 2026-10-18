@@ -31,6 +31,13 @@ path, `github.com/vipengele/go/source/<path>`, which is where the code lives and
 consumer writes. The Worker in the **Tools directory** serves it (ADR-0004).
 _Avoid_: import path (also names a package's path inside the module), repository path, short path
 
+**Module list**:
+The JSON array of project paths relative to `source/`, one for every `source/**/go.mod` on `main`,
+published to R2 as the object `modules.json` by the `publish-vanity-modules` workflow
+(ADR-0016). It is data, separate from the Worker's code: a project added, moved or removed changes
+it without a Worker tag.
+_Avoid_: project index, manifest, registry
+
 **Release**:
 One project at one version, identified by its tag. The tag is the publication: the module proxy
 serves the version from it, and the `release` workflow only validates, tests and announces it.
