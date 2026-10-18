@@ -6,3 +6,8 @@ workers_dev = false
 routes = [
   { pattern = "go.vipengele.org", custom_domain = true },
 ]
+
+# The bucket publish-vanity-modules writes the module list object to.
+[[r2_buckets]]
+binding = "MODULE_LIST"
+bucket_name = "vanity-modules"
