@@ -1,0 +1,42 @@
+{
+  "cli-core": {
+    "above": 0,
+    "worst": 21,
+    "producer": "go 1.27.2"
+  },
+  "cli-spec": {
+    "above": 0,
+    "worst": 19,
+    "producer": "go 1.27.2"
+  },
+  "cli-state": {
+    "above": 0,
+    "worst": 7.048702776513427,
+    "producer": "go 1.27.2"
+  },
+  "commons": {
+    "above": 0,
+    "worst": 13,
+    "producer": "go 1.27.2"
+  },
+  "config": {
+    "above": 0,
+    "worst": 21,
+    "producer": "go 1.27.2"
+  },
+  "daemon": {
+    "above": 0,
+    "worst": 9,
+    "producer": "go 1.27.2"
+  },
+  "update": {
+    "above": 0,
+    "worst": 16,
+    "producer": "go 1.27.2"
+  },
+  "vanity-worker": {
+    "above": 0,
+    "worst": 9,
+    "producer": "vitest 5.0.3, @vitest/coverage-v8 5.0.3"
+  }
+}
