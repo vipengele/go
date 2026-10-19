@@ -233,8 +233,9 @@ jobs:
       # Asking the proxy for the version makes it fetch the tag now, so the
       # first consumer does not wait for it, and proves the module path and the
       # tag agree. The proxy resolves go.vipengele.org/<project> through the
-      # vanity Worker, which answers only for the projects it was deployed with
-      # (ADR-0004). The proxy can lag the push by a moment, hence the retries.
+      # vanity Worker, which answers for a project once its go.mod is merged and
+      # publish-vanity-modules has published the list (ADR-0004, ADR-0016). The
+      # proxy can lag the push by a moment, hence the retries.
       - name: The module proxy serves the version
         env:
           MODULE: ${{ needs.tag.outputs.module }}
@@ -247,7 +248,7 @@ jobs:
             echo "attempt ${attempt} failed; retrying in 10s"
             sleep 10
           done
-          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy. go.vipengele.org must answer for ${MODULE} before its tag is pushed: push a tools/vanity-worker/vX.Y.Z tag at a commit on main that contains this project's go.mod (it runs deploy-vanity-worker.yml), then re-run this workflow (ADR-0004)"
+          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy. go.vipengele.org must answer for ${MODULE} before its tag is pushed. It answers once this project's go.mod is merged and publish-vanity-modules has published the list, so a failure means the list has not been published or the Worker is down: check that run, then re-run this workflow (ADR-0004, ADR-0016)"
           exit 1
 
       # A release is idempotent: re-running the workflow after a partial run

@@ -4,11 +4,12 @@
 # changed-projects selects nothing for a change there and the gt CI stages skip
 # it. This workflow is what checks it instead.
 #
-# tools/vanity-worker is a TypeScript Cloudflare Worker. Every npm script that
-# reads the module list regenerates it from source/**/go.mod first, so the
-# checkout is the whole repository rather than the tool's directory alone, and
-# a change to any source/**/go.mod runs the checks: a project path outside the
-# list's schema fails them before it merges.
+# tools/vanity-worker is a TypeScript Cloudflare Worker. The module list
+# generator reads source/**/go.mod and publish-vanity-modules runs it; the test,
+# typecheck and build scripts do not, but the checkout is the whole repository
+# rather than the tool's directory alone, and a change to any source/**/go.mod
+# runs the checks: a project path outside the list's schema fails them before
+# it merges.
 name: ci-tools
 
 on:

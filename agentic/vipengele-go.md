@@ -25,9 +25,11 @@ under `source/`; the repository's own tooling that is not a Go project lives und
   subdirectories; everything not meant for consumers lives under `internal/`.
 - Consumers need Go 1.25 or later: `go.vipengele.org` answers with the four-field `go-import` tag,
   whose subdirectory field earlier releases ignore.
-- `tools/vanity-worker` — the Cloudflare Worker that serves `go.vipengele.org`. Its module list is
-  generated from `source/**/go.mod`, so a new project resolves only after the deploy that includes
-  it. Repo tooling, not part of the framework: no `go.mod`, no tag, deployed from CI.
+- `tools/vanity-worker` — the Cloudflare Worker that serves `go.vipengele.org`. It reads its module list
+  from the R2 object `modules.json`, which `publish-vanity-modules.yml` writes from `source/**/go.mod`
+  when a `go.mod` merges to `main`, so a new project resolves once that workflow has run, with no
+  Worker deploy (ADR-0016). A `tools/vanity-worker/vX.Y.Z` tag deploys Worker code only. Repo
+  tooling, not part of the framework: no `go.mod`, deployed from CI.
 - `go.work` — lists every project for local development. CI never reads it (ADR-0006).
 - A dependency on a sibling project is a `require` of `go.vipengele.org/<path>`. While the two are
   developed together it also carries a `replace` with the sibling's own directory, relative to the
@@ -74,7 +76,8 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
   that touches no project (docs, agentic instructions) selects none and the stages skip.
 - A new project needs a component in `.lydite/components.yml`, a `gomod` entry in `.gt-repo.yaml`
   followed by `gt repo sync`, and a `use` line in `go.work`, each at its full nested directory
-  (`./source/cli/core`), and a Worker deploy before its first tag.
+  (`./source/cli/core`). It resolves through `go.vipengele.org` once its `go.mod` has merged and
+  `publish-vanity-modules.yml` has run; check it before its first tag.
 
 ## Release
 

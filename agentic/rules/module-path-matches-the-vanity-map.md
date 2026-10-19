@@ -13,9 +13,10 @@ included, even though the module path is not; any other module line makes every 
 module fail, and only after the tag is pushed. `verify-sibling-deps` fails a module path that is not
 `go.vipengele.org/<path>`.
 
-The Worker's module list is generated from `source/**/go.mod`, so a new project resolves only after
-the Worker deploy that includes its `go.mod`. Deploy before pushing the project's first tag; until
-then its release cannot be announced.
+The Worker reads its module list from an R2 object that `publish-vanity-modules.yml` writes from
+`source/**/go.mod` when a `go.mod` merges to `main`, so a new project resolves once that workflow
+has run, with no Worker deploy. Check that `https://go.vipengele.org/<path>?go-get=1` answers
+before pushing the project's first tag; until it does, its release cannot be announced.
 
 ## Applies to
 

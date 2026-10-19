@@ -1,14 +1,16 @@
 # deploy-vanity-worker — deploys tools/vanity-worker to Cloudflare.
 #
 # The Worker answers `go get` for go.vipengele.org/<path> (ADR-0004). Its module
-# list is generated at build time from every source/**/go.mod at the tagged
-# commit, so a project added, moved or removed is served only once a new Worker
-# tag is deployed.
+# list is read at request time from the R2 object that publish-vanity-modules
+# writes, so a project added, moved or removed is served once that workflow has
+# published; a Worker tag deploys Worker code only.
 #
 # A deploy runs only from a tag `tools/vanity-worker/vX.Y.Z` that points at a
 # commit on main; no branch is ever deployed. Pushing the tag deploys it. A
 # redeploy or a rollback is a `workflow_dispatch` naming an existing tag of that
-# form, which deploys the Worker exactly as that tag built it.
+# form, which deploys the Worker exactly as that tag built it. ROLLBACK_TAG is
+# the tag to roll back to: its Worker serves the module list compiled into it
+# and reads nothing from R2.
 #
 # Three jobs, and the seams between them are safety properties. `tag` decides
 # whether the ref is a deployable Worker version and holds no credential.
@@ -36,6 +38,9 @@ on:
         required: true
 
 permissions: {}
+
+env:
+  ROLLBACK_TAG: tools/vanity-worker/v0.1.2
 
 jobs:
   tag:
@@ -162,6 +167,49 @@ jobs:
           set -euo pipefail
           sha="$(git rev-parse --short HEAD)"
           npx wrangler deploy --tag "$VERSION" --message "${TAG} (${sha})"
+
+      # A public, unauthenticated GET of each path must answer with its exact
+      # go-import line. The compiled-in list of ROLLBACK_TAG holds daemon and
+      # none of commons, cli/spec and cli/core, so only a Worker that serves the
+      # list it reads from R2 answers all four. A deploy of ROLLBACK_TAG skips
+      # the check, because that Worker does not read R2 and cannot pass it.
+      # The custom domain can take a moment to serve a new deploy, so the whole
+      # set is retried for about a minute before a miss fails the job; the
+      # failure lists every path still wrong and names the rollback.
+      - name: The deployed Worker answers go get
+        if: steps.credentials.outputs.present == 'true' && needs.tag.outputs.tag != env.ROLLBACK_TAG
+        run: |
+          set -euo pipefail
+          base="https://go.vipengele.org"
+          paths=(commons cli/spec cli/core daemon)
+          attempts=6
+          delay=10
+          failing=()
+          for attempt in $(seq 1 "$attempts"); do
+            failing=()
+            for path in "${paths[@]}"; do
+              want="content=\"go.vipengele.org/${path} git https://github.com/vipengele/go source/${path}\""
+              if ! body="$(curl --fail --silent --show-error --max-time 10 "${base}/${path}?go-get=1")"; then
+                failing+=("$path")
+              elif ! grep -qF -- "$want" <<<"$body"; then
+                echo "${path}: the response carries no ${want}"
+                failing+=("$path")
+              fi
+            done
+            if [ "${#failing[@]}" -eq 0 ]; then
+              echo "every path resolves: ${paths[*]}"
+              exit 0
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              echo "attempt ${attempt}/${attempts}: not yet resolving: ${failing[*]}; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          for path in "${failing[@]}"; do
+            echo "::error::go.vipengele.org/${path} does not resolve to source/${path} after ${attempts} attempts"
+          done
+          echo "::error::The deployed Worker does not serve ${failing[*]}. Roll back by running this workflow (workflow_dispatch) with tag ${ROLLBACK_TAG}, which serves its compiled-in module list."
+          exit 1
 
   announce:
     name: announce

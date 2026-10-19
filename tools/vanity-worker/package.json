@@ -6,11 +6,7 @@
     "build": "wrangler deploy --dry-run --outdir dist",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "generate": "node --experimental-strip-types scripts/generate-modules.ts",
-    "publish-modules": "node --experimental-strip-types scripts/publish-modules.ts",
-    "pretest": "npm run generate",
-    "pretypecheck": "npm run generate",
-    "prebuild": "npm run generate"
+    "publish-modules": "node --experimental-strip-types scripts/publish-modules.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "3.1152.0",
