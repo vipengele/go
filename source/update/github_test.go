@@ -1390,3 +1390,44 @@ func TestGitHubSource_UnbuildableRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubSource_AssetURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		source    GitHubSource
+		tag, file string
+		want      string
+	}{
+		{
+			name:   "default web URL",
+			source: GitHubSource{Owner: testOwner, Repo: testRepo},
+			tag:    "v1.2.3",
+			file:   "tool_linux_amd64.tar.gz",
+			want:   "https://github.com/octo/tool/releases/download/v1.2.3/tool_linux_amd64.tar.gz",
+		},
+		{
+			name:   "web URL with a trailing slash",
+			source: GitHubSource{Owner: testOwner, Repo: testRepo, WebURL: "https://web.test/"},
+			tag:    "v1.2.3",
+			file:   "checksums.txt",
+			want:   "https://web.test/octo/tool/releases/download/v1.2.3/checksums.txt",
+		},
+		{
+			name:   "every part escaped as a path segment",
+			source: GitHubSource{Owner: "o/x", Repo: "r?y", WebURL: "https://web.test"},
+			tag:    "v1.2.3+meta/x",
+			file:   "my tool#?.tar.gz",
+			want:   "https://web.test/o%2Fx/r%3Fy/releases/download/v1.2.3+meta%2Fx/my%20tool%23%3F.tar.gz",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.source.AssetURL(tc.tag, tc.file); got != tc.want {
+				t.Errorf("AssetURL(%q, %q) = %q, want %q", tc.tag, tc.file, got, tc.want)
+			}
+		})
+	}
+}
