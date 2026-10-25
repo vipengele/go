@@ -1,9 +1,15 @@
-go 1.27.2
+go 1.27.3
 
 use ./source/cli/core
+
 use ./source/update
+
 use ./source/daemon
+
 use ./source/commons
+
 use ./source/cli/spec
+
 use ./source/config
+
 use ./source/cli/state
