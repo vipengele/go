@@ -1,6 +1,6 @@
 module go.vipengele.org/update
 
-go 1.27.3
+go 1.27.2
 
 require (
 	go.vipengele.org/cli/spec v0.0.0
