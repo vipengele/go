@@ -17,9 +17,10 @@ type fakeTB struct {
 	returns bool
 	failed  bool
 	message string
+	helpers int
 }
 
-func (f *fakeTB) Helper() {}
+func (f *fakeTB) Helper() { f.helpers++ }
 
 func (f *fakeTB) Fatalf(format string, args ...any) {
 	f.failed = true
@@ -129,6 +130,22 @@ func TestRequireRecordReturnsZeroWhenFatalfReturns(t *testing.T) {
 	}
 	if got.Message != "" || got.Attrs != nil {
 		t.Errorf("record = %+v, want the zero Record", got)
+	}
+}
+
+func TestRequireRecordMarksItselfAsAHelper(t *testing.T) {
+	f := &fakeTB{}
+	run(f, func(tb testing.TB) { captured().RequireRecord(tb, slog.LevelInfo, "started", nil) })
+	if f.helpers == 0 {
+		t.Error("RequireRecord did not call Helper, so a failure is reported at its own line")
+	}
+}
+
+func TestRequireNoneMarksItselfAsAHelper(t *testing.T) {
+	f := &fakeTB{}
+	run(f, func(tb testing.TB) { captured().RequireNone(tb, slog.LevelError) })
+	if f.helpers == 0 {
+		t.Error("RequireNone did not call Helper, so a failure is reported at its own line")
 	}
 }
 
