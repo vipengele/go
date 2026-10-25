@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/asset"
 )
 
 // selectConfig is a validConfig for linux/amd64, whose default archive and checksums names are
@@ -228,5 +229,31 @@ func TestSelect_FailsWhenTheConfigDoesNotResolve(t *testing.T) {
 	noHome.UserHomeDir = func() (string, error) { return "", homeErr }
 	if _, err := noHome.Select(Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), testChecksums()}}); !errors.Is(err, homeErr) {
 		t.Errorf("Select() without a home directory error = %v, want %v", err, homeErr)
+	}
+}
+
+func TestSelectAssets_TemplateThatDoesNotRender(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "archive template", cfg: Config{AssetTemplate: "{unknown}", ChecksumsAsset: "checksums.txt", BinaryName: "atk"}},
+		{name: "checksums template", cfg: Config{AssetTemplate: "atk.tar.gz", ChecksumsAsset: "{unknown}", BinaryName: "atk"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := tc.cfg.selectAssets(Release{Tag: "v1.2.3", Assets: []Asset{}})
+			if !errors.Is(err, asset.ErrUnknownPlaceholder) {
+				t.Errorf("selectAssets() error = %v, want %v", err, asset.ErrUnknownPlaceholder)
+			}
+			if got != (Selection{}) {
+				t.Errorf("selectAssets() = %+v, want the zero Selection", got)
+			}
+		})
 	}
 }

@@ -40,7 +40,12 @@ func (c Config) Select(rel Release) (Selection, error) {
 	if err != nil {
 		return Selection{}, err
 	}
+	return r.selectAssets(rel)
+}
 
+// selectAssets is [Config.Select] for a Config that is already resolved. It fails on a template
+// that does not render, which a resolved Config never holds.
+func (r Config) selectAssets(rel Release) (Selection, error) {
 	fields := asset.Fields{Name: r.BinaryName, Tag: rel.Tag, OS: r.GOOS, Arch: r.GOARCH, Ext: r.AssetExt}
 	archiveName, err := asset.Render(r.AssetTemplate, fields)
 	if err != nil {
