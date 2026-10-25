@@ -14,7 +14,8 @@ be reachable by `update`, which may not require `cli/core` (ADR-0005), as well a
 ## Decisions
 
 - **Home.** `source/filelock`, a top-level project with its own `go.mod`, lydite component, `gomod`
-  entry and `go.work` line. `daemon` and `update` both require it.
+  entry and `go.work` line. `daemon` and `update` are its consumers and require it when they take
+  the lock.
 - **OS calls.** The lock is taken with `golang.org/x/sys`: `unix.Flock` on Unix systems and
   `windows.LockFileEx` and `windows.UnlockFileEx` on Windows, in build-tagged per-OS files.
   `golang.org/x/sys` is a direct requirement of this project only. The project's `.golangci.yml`

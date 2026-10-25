@@ -95,11 +95,6 @@ func (l *fileLocker) Lock(ctx context.Context) (func(), error) {
 		return nil, l.wrap("open", err)
 	}
 
-	timer := time.NewTimer(pollInterval)
-	timer.Stop()
-
-	defer timer.Stop()
-
 	for {
 		if err := ctx.Err(); err != nil {
 			_ = f.Close()
@@ -118,11 +113,9 @@ func (l *fileLocker) Lock(ctx context.Context) (func(), error) {
 			return l.release(f), nil
 		}
 
-		timer.Reset(pollInterval)
-
 		select {
 		case <-ctx.Done():
-		case <-timer.C:
+		case <-time.After(pollInterval):
 		}
 	}
 }
