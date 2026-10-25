@@ -13,3 +13,4 @@ use ./source/cli/spec
 use ./source/config
 
 use ./source/cli/state
+use ./source/filelock

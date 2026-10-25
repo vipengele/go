@@ -45,6 +45,10 @@ components:
     dir: source/cli/state
     runner: go-test
     args: ["-race", "./..."]
+  - name: filelock
+    dir: source/filelock
+    runner: go-test
+    args: ["-race", "./..."]
   - name: vanity-worker
     dir: tools/vanity-worker
     runner: vitest

@@ -33,6 +33,8 @@ dependabot:
     directory: /source/config
   - ecosystem: gomod
     directory: /source/cli/state
+  - ecosystem: gomod
+    directory: /source/filelock
 pipeline:
   ci:
     stages:
