@@ -128,14 +128,14 @@ func TestValidate_Errors(t *testing.T) {
 			if err := Validate(tc.tmpl); !errors.Is(err, tc.want) {
 				t.Errorf("Validate(%q) = %v, want %v", tc.tmpl, err, tc.want)
 			}
-			if _, err := Render(tc.tmpl, Fields{}); !errors.Is(err, tc.want) {
-				t.Errorf("Render(%q) error = %v, want %v", tc.tmpl, err, tc.want)
+			if got, err := Render(tc.tmpl, Fields{}); !errors.Is(err, tc.want) || got != "" {
+				t.Errorf("Render(%q) = %q, %v, want \"\", %v", tc.tmpl, got, err, tc.want)
 			}
-			if _, err := GoReleaserArchive(tc.tmpl, "atk"); !errors.Is(err, tc.want) {
-				t.Errorf("GoReleaserArchive(%q) error = %v, want %v", tc.tmpl, err, tc.want)
+			if got, err := GoReleaserArchive(tc.tmpl, "atk"); !errors.Is(err, tc.want) || got != "" {
+				t.Errorf("GoReleaserArchive(%q) = %q, %v, want \"\", %v", tc.tmpl, got, err, tc.want)
 			}
-			if _, err := GoReleaserChecksum(tc.tmpl, "atk"); !errors.Is(err, tc.want) {
-				t.Errorf("GoReleaserChecksum(%q) error = %v, want %v", tc.tmpl, err, tc.want)
+			if got, err := GoReleaserChecksum(tc.tmpl, "atk"); !errors.Is(err, tc.want) || got != "" {
+				t.Errorf("GoReleaserChecksum(%q) = %q, %v, want \"\", %v", tc.tmpl, got, err, tc.want)
 			}
 		})
 	}
@@ -291,8 +291,8 @@ func TestGoReleaserArchive_Errors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if _, err := GoReleaserArchive(tc.tmpl, "atk"); !errors.Is(err, tc.want) {
-				t.Errorf("GoReleaserArchive(%q) error = %v, want %v", tc.tmpl, err, tc.want)
+			if got, err := GoReleaserArchive(tc.tmpl, "atk"); !errors.Is(err, tc.want) || got != "" {
+				t.Errorf("GoReleaserArchive(%q) = %q, %v, want \"\", %v", tc.tmpl, got, err, tc.want)
 			}
 		})
 	}
@@ -351,8 +351,35 @@ func TestGoReleaserChecksum_RejectsExt(t *testing.T) {
 	t.Parallel()
 
 	for _, tmpl := range []string{"checksums.{ext}", "{ext}.txt", "{name}_{ext}_checksums.txt"} {
-		if _, err := GoReleaserChecksum(tmpl, "atk"); !errors.Is(err, ErrMisplacedExt) {
-			t.Errorf("GoReleaserChecksum(%q) error = %v, want %v", tmpl, err, ErrMisplacedExt)
+		if got, err := GoReleaserChecksum(tmpl, "atk"); !errors.Is(err, ErrMisplacedExt) || got != "" {
+			t.Errorf("GoReleaserChecksum(%q) = %q, %v, want \"\", %v", tmpl, got, err, ErrMisplacedExt)
 		}
+	}
+}
+
+func TestValidate_ReportsTheOffsetOfTheBadPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		tmpl string
+		want string
+	}{
+		{name: "unknown at the start", tmpl: "{x}_{os}", want: "at offset 0"},
+		{name: "unknown after literal text", tmpl: "ab{x}", want: "at offset 2"},
+		{name: "unknown after a placeholder", tmpl: "{name}ab{x}", want: "at offset 8"},
+		{name: "unclosed after literal text", tmpl: "ab{os", want: "at offset 2"},
+		{name: "unclosed after a placeholder", tmpl: "{name}_{os", want: "at offset 7"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := Validate(tc.tmpl)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Validate(%q) = %v, want it to contain %q", tc.tmpl, err, tc.want)
+			}
+		})
 	}
 }

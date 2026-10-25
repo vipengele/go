@@ -127,25 +127,23 @@ func parse(tmpl string) ([]segment, error) {
 	var segs []segment
 	rest := tmpl
 	for rest != "" {
-		open := strings.IndexByte(rest, '{')
-		if open < 0 {
-			segs = append(segs, segment{text: rest})
+		literal, afterOpen, found := strings.Cut(rest, "{")
+		if literal != "" {
+			segs = append(segs, segment{text: literal})
+		}
+		if !found {
 			break
 		}
-		if open > 0 {
-			segs = append(segs, segment{text: rest[:open]})
-		}
-		offset := len(tmpl) - len(rest) + open
-		closing := strings.IndexByte(rest[open:], '}')
-		if closing < 0 {
+		offset := len(tmpl) - len(rest) + len(literal)
+		name, after, closed := strings.Cut(afterOpen, "}")
+		if !closed {
 			return nil, fmt.Errorf("asset: template %q: %w at offset %d", tmpl, ErrUnclosedPlaceholder, offset)
 		}
-		name := rest[open+1 : open+closing]
 		if !known(name) {
 			return nil, fmt.Errorf("asset: template %q: %w {%s} at offset %d", tmpl, ErrUnknownPlaceholder, name, offset)
 		}
 		segs = append(segs, segment{text: name, placeholder: true})
-		rest = rest[open+closing+1:]
+		rest = after
 	}
 	return segs, nil
 }
@@ -191,19 +189,19 @@ func value(name string, f Fields) string {
 }
 
 // goreleaserField returns the GoReleaser action that the known placeholder name stands for, and
-// false for {ext}, which has none.
-func goreleaserField(name string) (string, bool) {
+// the empty string for {name} and {ext}, which have none.
+func goreleaserField(name string) string {
 	switch name {
 	case "version":
-		return "{{ .Version }}", true
+		return "{{ .Version }}"
 	case "tag":
-		return "{{ .Tag }}", true
+		return "{{ .Tag }}"
 	case "os":
-		return "{{ .Os }}", true
+		return "{{ .Os }}"
 	case "arch":
-		return "{{ .Arch }}", true
+		return "{{ .Arch }}"
 	default:
-		return "", false
+		return ""
 	}
 }
 
@@ -246,8 +244,8 @@ func goreleaser(tmpl string, segs []segment, name string) (string, error) {
 		case s.text == "name":
 			writeLiteral(&b, name)
 		default:
-			action, ok := goreleaserField(s.text)
-			if !ok {
+			action := goreleaserField(s.text)
+			if action == "" {
 				return "", fmt.Errorf("asset: template %q: %w: GoReleaser appends the extension only at the end, after a %q", tmpl, ErrMisplacedExt, ".")
 			}
 			b.WriteString(action)
