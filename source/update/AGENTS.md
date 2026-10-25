@@ -26,9 +26,24 @@ golangci-lint run
 - `github.go` — `GitHubSource`: reads the `releases/latest` redirect without following it, falls back
   to the REST API, and with `IncludePrereleases` reads the first page of the release list instead.
   Tags must be plain release versions; `WebURL`, `APIURL` and `Timeout` are overridable for tests.
-- `errors.go` — `StatusError`, `TimeoutError` (a `net.Error`), `TagError` and `ErrPrerelease`, the
-  typed errors a source returns; `classifyError` maps deadline and timeout failures to `TimeoutError`
-  and passes cancellation through unchanged.
+- `select.go` — `Config.Select` names the archive and checksums assets of a `Release`: the
+  `AssetTemplate` and `ChecksumsAsset` rendered with `AssetExt`. A non-nil `Assets` is matched by
+  exact name; nil `Assets` (the redirect path, ADR-0019) is located through the `Source`'s optional
+  `AssetLocator`, which `GitHubSource.AssetURL` implements.
+- `asset/` — the template language (`{name}`, `{version}`, `{tag}`, `{os}`, `{arch}`, `{ext}`) with
+  `Validate`, `ValidateChecksums` and `Render`, and `GoReleaserArchive` / `GoReleaserChecksum`, which
+  translate a template into a GoReleaser `name_template`. GoReleaser's archive `format` must equal
+  `Config.AssetExt`, or the published name and the one `Select` looks for differ.
+- `errors.go` — `StatusError`, `TimeoutError` (a `net.Error`), `TagError`, `AssetNotFoundError`,
+  `ErrPrerelease` and `ErrAssetsNotListed`, the typed errors a source or `Select` returns;
+  `classifyError` maps deadline and timeout failures to `TimeoutError` and passes cancellation
+  through unchanged.
+
+## Download contract
+
+- An asset from `Select` on an unlisted release has `Size` 0, which means unknown, not empty.
+- The download step maps a 404 on a URL `Select` located to a `*AssetNotFoundError`, not a
+  `*StatusError`: a missing asset on the redirect path surfaces there (ADR-0019).
 
 ## Conventions
 

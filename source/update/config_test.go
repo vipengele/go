@@ -13,6 +13,7 @@ import (
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/asset"
 )
 
 // stubSource is a Source that reports no release.
@@ -56,6 +57,7 @@ type plainFields struct {
 	BinaryName     string
 	TempPrefix     string
 	AssetTemplate  string
+	AssetExt       string
 	ChecksumsAsset string
 	StateDir       string
 	Source         Source
@@ -70,6 +72,7 @@ func plainFieldsOf(c Config) plainFields {
 		BinaryName:     c.BinaryName,
 		TempPrefix:     c.TempPrefix,
 		AssetTemplate:  c.AssetTemplate,
+		AssetExt:       c.AssetExt,
 		ChecksumsAsset: c.ChecksumsAsset,
 		StateDir:       c.StateDir,
 		Source:         c.Source,
@@ -133,11 +136,14 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if r.TempPrefix != "atk-update-" {
 		t.Errorf("TempPrefix = %q, want %q", r.TempPrefix, "atk-update-")
 	}
-	if r.AssetTemplate != "{name}_{os}_{arch}.tar.gz" {
-		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, "{name}_{os}_{arch}.tar.gz")
+	if r.AssetTemplate != asset.DefaultTemplate {
+		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, asset.DefaultTemplate)
 	}
-	if r.ChecksumsAsset != "checksums.txt" {
-		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, "checksums.txt")
+	if r.AssetExt != asset.DefaultExt {
+		t.Errorf("AssetExt = %q, want %q", r.AssetExt, asset.DefaultExt)
+	}
+	if r.ChecksumsAsset != asset.DefaultChecksumsTemplate {
+		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, asset.DefaultChecksumsTemplate)
 	}
 	if want := filepath.Join(home, "state"); r.StateDir != want {
 		t.Errorf("StateDir = %q, want %q", r.StateDir, want)
@@ -200,7 +206,8 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	c := validConfig("")
 	c.BinaryName = "toolkit"
 	c.TempPrefix = "tk-tmp-"
-	c.AssetTemplate = "{name}-{os}-{arch}.zip"
+	c.AssetTemplate = "{name}-{os}-{arch}.{ext}"
+	c.AssetExt = "zip"
 	c.ChecksumsAsset = "SHA256SUMS"
 	c.HTTPClient = client
 	c.Now = func() time.Time { return fixed }
@@ -221,8 +228,11 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	if r.TempPrefix != "tk-tmp-" {
 		t.Errorf("TempPrefix = %q, want %q", r.TempPrefix, "tk-tmp-")
 	}
-	if r.AssetTemplate != "{name}-{os}-{arch}.zip" {
-		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, "{name}-{os}-{arch}.zip")
+	if r.AssetTemplate != "{name}-{os}-{arch}.{ext}" {
+		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, "{name}-{os}-{arch}.{ext}")
+	}
+	if r.AssetExt != "zip" {
+		t.Errorf("AssetExt = %q, want %q", r.AssetExt, "zip")
 	}
 	if r.ChecksumsAsset != "SHA256SUMS" {
 		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, "SHA256SUMS")
@@ -597,5 +607,71 @@ func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 		if !errors.Is(err, want) {
 			t.Errorf("Validate() = %v, want one wrapping %v", err, want)
 		}
+	}
+}
+
+func TestValidateChecksAssetFields(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  func(*Config)
+		want []error
+	}{
+		{"unknown placeholder in AssetTemplate", func(c *Config) { c.AssetTemplate = "{name}_{platform}.tar.gz" },
+			[]error{validate.ErrInvalid, asset.ErrUnknownPlaceholder}},
+		{"unclosed placeholder in AssetTemplate", func(c *Config) { c.AssetTemplate = "{name" },
+			[]error{validate.ErrInvalid, asset.ErrUnclosedPlaceholder}},
+		{"unknown placeholder in ChecksumsAsset", func(c *Config) { c.ChecksumsAsset = "{nope}.txt" },
+			[]error{validate.ErrInvalid, asset.ErrUnknownPlaceholder}},
+		{"{ext} in ChecksumsAsset", func(c *Config) { c.ChecksumsAsset = "{name}.{ext}" },
+			[]error{validate.ErrInvalid, asset.ErrMisplacedExt}},
+		{"AssetExt with a slash", func(c *Config) { c.AssetExt = "tar/gz" }, []error{validate.ErrInvalid}},
+		{"AssetExt with a backslash", func(c *Config) { c.AssetExt = `tar\gz` }, []error{validate.ErrInvalid}},
+		{"AssetExt with an opening brace", func(c *Config) { c.AssetExt = "{ext" }, []error{validate.ErrInvalid}},
+		{"AssetExt with a closing brace", func(c *Config) { c.AssetExt = "ext}" }, []error{validate.ErrInvalid}},
+		{"AssetExt with a leading dot", func(c *Config) { c.AssetExt = ".zip" }, []error{validate.ErrInvalid}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			tc.set(&c)
+			err := c.Validate()
+			for _, want := range tc.want {
+				if !errors.Is(err, want) {
+					t.Errorf("Validate() = %v, want one wrapping %v", err, want)
+				}
+			}
+			if _, rerr := c.resolve(); rerr == nil {
+				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsEmptyAndValidAssetFields(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  func(*Config)
+	}{
+		{"every field empty", func(*Config) {}},
+		{"custom templates and extension", func(c *Config) {
+			c.AssetTemplate = "{name}-{version}-{os}-{arch}.{ext}"
+			c.ChecksumsAsset = "{name}_{tag}_checksums.txt"
+			c.AssetExt = "zip"
+		}},
+		{"raw binary template", func(c *Config) { c.AssetTemplate = "{name}-{os}-{arch}" }},
+		{"multi-part extension", func(c *Config) { c.AssetExt = "tar.xz" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			tc.set(&c)
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want nil", err)
+			}
+		})
 	}
 }

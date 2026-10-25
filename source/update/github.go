@@ -118,6 +118,14 @@ func (s *GitHubSource) Latest(ctx context.Context) (Release, error) {
 	return s.latestStable(ctx)
 }
 
+// AssetURL returns the address GitHub serves the asset name of the release tagged tag from,
+// WebURL/<Owner>/<Repo>/releases/download/<tag>/<name>, with tag and name each escaped as a path
+// segment. It makes no request, so it does not check that the asset exists.
+func (s *GitHubSource) AssetURL(tag, name string) string {
+	return strings.TrimSuffix(s.webURL(), "/") + "/" + s.repoPath() + "/releases/download/" +
+		url.PathEscape(tag) + "/" + url.PathEscape(name)
+}
+
 // latestStable returns the latest stable release: by the web redirect when it names one, and by
 // the REST API otherwise.
 func (s *GitHubSource) latestStable(ctx context.Context) (Release, error) {

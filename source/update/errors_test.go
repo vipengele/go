@@ -261,3 +261,27 @@ func TestClassifyError(t *testing.T) {
 		})
 	}
 }
+
+func TestAssetNotFoundError(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("select: %w", &AssetNotFoundError{Tag: "v1.2.3", Name: "atk_linux_amd64.tar.gz"})
+	var nf *AssetNotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatal("errors.As did not find *AssetNotFoundError")
+	}
+	if nf.Tag != "v1.2.3" || nf.Name != "atk_linux_amd64.tar.gz" {
+		t.Errorf("got Tag %q Name %q", nf.Tag, nf.Name)
+	}
+	if want := `update: release v1.2.3 has no asset "atk_linux_amd64.tar.gz"`; nf.Error() != want {
+		t.Errorf("Error() = %q, want %q", nf.Error(), want)
+	}
+}
+
+func TestErrAssetsNotListed_Is(t *testing.T) {
+	t.Parallel()
+
+	if !errors.Is(fmt.Errorf("select: %w", ErrAssetsNotListed), ErrAssetsNotListed) {
+		t.Error("errors.Is does not match ErrAssetsNotListed through a wrap")
+	}
+}

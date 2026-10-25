@@ -5,24 +5,19 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/paths"
+	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/asset"
 )
 
 // optOutSuffix is the suffix of the environment variable that turns update checks off. The
 // variable's full name is Identity.EnvVar(optOutSuffix): "ATK_NO_UPDATE_CHECK" for EnvPrefix
 // "ATK".
 const optOutSuffix = "NO_UPDATE_CHECK"
-
-// defaultAssetTemplate is the [Config.AssetTemplate] a Config without one uses. The library
-// treats it as an opaque string; {name}, {os} and {arch} stand for the binary name and the
-// target platform.
-const defaultAssetTemplate = "{name}_{os}_{arch}.tar.gz"
-
-// defaultChecksumsAsset is the [Config.ChecksumsAsset] a Config without one uses.
-const defaultChecksumsAsset = "checksums.txt"
 
 // tempPrefixSuffix follows the binary name in the default [Config.TempPrefix].
 const tempPrefixSuffix = "-update-"
@@ -40,11 +35,17 @@ type Config struct {
 	// TempPrefix prefixes the names of the temporary files an update writes. Empty means
 	// BinaryName followed by "-update-".
 	TempPrefix string
-	// AssetTemplate names the release asset that holds the binary for a platform. Empty means
-	// "{name}_{os}_{arch}.tar.gz".
+	// AssetTemplate names the release asset that holds the binary for a platform, written in the
+	// template language of package asset: {name}, {version}, {tag}, {os}, {arch} and {ext}. Empty
+	// means [asset.DefaultTemplate].
 	AssetTemplate string
-	// ChecksumsAsset is the name of the release asset that lists every asset's checksum. Empty
-	// means "checksums.txt".
+	// AssetExt is the archive extension {ext} stands for, without a leading ".". Empty means
+	// [asset.DefaultExt]. It carries no per-OS rules: a tool whose assets differ by platform
+	// writes the difference into AssetTemplate, and a raw-binary tool leaves {ext} out of it.
+	AssetExt string
+	// ChecksumsAsset is the name of the release asset that lists every asset's checksum, written
+	// in the template language of package asset: it takes every placeholder but {ext}. Empty means
+	// [asset.DefaultChecksumsTemplate].
 	ChecksumsAsset string
 	// StateDir is the directory the library keeps its state in. Empty means the state directory
 	// [paths.Resolve] resolves for the Identity, through the GOOS, Getenv and UserHomeDir seams: on
@@ -80,9 +81,45 @@ type Config struct {
 
 // Validate returns nil when the Config can be used. Otherwise it returns one error listing every
 // problem at once: each [validate.FieldError] of [spec.Identity.Validate], which wraps
-// [validate.ErrEmpty] or [validate.ErrInvalid]. Every other field is optional.
+// [validate.ErrEmpty] or [validate.ErrInvalid]. Every other field is optional, and a non-empty
+// AssetTemplate, ChecksumsAsset or AssetExt must be valid: AssetTemplate by [asset.Validate],
+// ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
+// "}" and not starting with ".". Those three are [validate.FieldError]s wrapping
+// [validate.ErrInvalid], and the first two also wrap the error of package asset.
 func (c Config) Validate() error {
-	return c.Identity.Validate()
+	return validate.Join(
+		c.Identity.Validate(),
+		checkTemplate("AssetTemplate", c.AssetTemplate, asset.Validate),
+		checkTemplate("ChecksumsAsset", c.ChecksumsAsset, asset.ValidateChecksums),
+		checkAssetExt(c.AssetExt),
+	)
+}
+
+// checkTemplate applies check to a non-empty template; an empty one means the default.
+func checkTemplate(field, tmpl string, check func(string) error) error {
+	if tmpl == "" {
+		return nil
+	}
+	if err := check(tmpl); err != nil {
+		return &validate.FieldError{Field: field, Value: tmpl, Err: fmt.Errorf("%w: %w", validate.ErrInvalid, err)}
+	}
+	return nil
+}
+
+// checkAssetExt rejects an extension that would change the asset name's structure: a path
+// separator, a brace that could open a placeholder, or a leading "." the template already writes.
+func checkAssetExt(ext string) error {
+	if ext == "" {
+		return nil
+	}
+	if strings.ContainsAny(ext, `/\{}`) || strings.HasPrefix(ext, ".") {
+		return &validate.FieldError{
+			Field: "AssetExt",
+			Value: ext,
+			Err:   fmt.Errorf("%w: must not contain '/', '\\', '{' or '}' or start with '.'", validate.ErrInvalid),
+		}
+	}
+	return nil
 }
 
 // resolve validates c and returns a copy with every zero field set to its production default.
@@ -103,10 +140,13 @@ func (c Config) resolve() (Config, error) {
 		r.TempPrefix = r.BinaryName + tempPrefixSuffix
 	}
 	if r.AssetTemplate == "" {
-		r.AssetTemplate = defaultAssetTemplate
+		r.AssetTemplate = asset.DefaultTemplate
+	}
+	if r.AssetExt == "" {
+		r.AssetExt = asset.DefaultExt
 	}
 	if r.ChecksumsAsset == "" {
-		r.ChecksumsAsset = defaultChecksumsAsset
+		r.ChecksumsAsset = asset.DefaultChecksumsTemplate
 	}
 	if r.HTTPClient == nil {
 		r.HTTPClient = &http.Client{}

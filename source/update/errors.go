@@ -15,6 +15,10 @@ const maxErrorBody = 1 << 10
 // include pre-releases.
 var ErrPrerelease = errors.New("update: latest release is a pre-release")
 
+// ErrAssetsNotListed reports a release whose assets the source did not list, from a [Source] that
+// cannot say where an asset of a given name is downloaded from: it is not an [AssetLocator].
+var ErrAssetsNotListed = errors.New("update: release assets are not listed")
+
 // StatusError reports a response with a non-success HTTP status.
 type StatusError struct {
 	// URL is the address that was requested.
@@ -95,6 +99,20 @@ func (e *TagError) Error() string {
 
 // Unwrap returns the reason the tag was rejected.
 func (e *TagError) Unwrap() error { return e.Err }
+
+// AssetNotFoundError reports a release that does not list the asset a [Config] names for the
+// platform.
+type AssetNotFoundError struct {
+	// Tag is the release's tag.
+	Tag string
+	// Name is the asset name that was expected.
+	Name string
+}
+
+// Error implements error.
+func (e *AssetNotFoundError) Error() string {
+	return fmt.Sprintf("update: release %s has no asset %q", e.Tag, e.Name)
+}
 
 // classifyError turns an error from a request to url into the error a caller sees. A cancellation
 // is returned as it is, because it is the caller's own doing and not a timeout. An expired context
