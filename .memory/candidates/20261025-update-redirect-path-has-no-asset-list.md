@@ -1,14 +1,17 @@
 ---
-about: "update's default GitHub source returns nil Assets on the redirect path, so asset selection cannot rely on Release.Assets; AssetTemplate/ChecksumsAsset already exist as opaque strings"
+about: "update's default GitHub source returns nil Assets on the redirect path, so Config.Select locates assets through the optional AssetLocator instead of listing them, and a missing asset surfaces at download"
 saw:
   - source/update/github.go
   - source/update/source.go
+  - source/update/select.go
   - source/update/config.go
   - docs/adr/0016-the-default-update-source-reads-the-github-latest-redirect-then-the-api.md
+  - docs/adr/0019-a-missing-asset-on-the-redirect-path-surfaces-at-download.md
   - source/update/AGENTS.md
 ---
 
-- Redirect path returns tag + page URL with nil Assets ("the assets are not listed"): github.go:64 doc, ADR-0016 rule "Release.Assets == nil means the assets are not listed". API path and IncludePrereleases path always return non-nil Assets (github.go:194-212).
-- Config already has AssetTemplate (config.go:43-45, default "{name}_{os}_{arch}.tar.gz", opaque string, config.go:19-22) and ChecksumsAsset (config.go:46-48, "checksums.txt"). Placeholders are {name} {os} {arch}; no version, no extension; nothing consumes them yet (grep AssetTemplate only hits config.go/config_test.go).
-- update is untagged and has no docs/release-notes/update/, so not in strict mode; only commons has notes (v0.1.0). No other project requires go.vipengele.org/update (grep of go.mod files). No goreleaser/release-binary tooling in the repo (release.yml tags/announces modules only).
-- Conventions: every outside-world reach is a Config field resolved in resolve (AGENTS.md:35-37); no mutable package globals (gochecknoglobals; AGENTS.md:38); depguard bans cli/core and cobra outside updatecmd (AGENTS.md:39-40).
+- The redirect path returns tag + page URL with nil Assets ("the assets are not listed"), `GitHubSource.latestStable` in github.go and ADR-0016's rule "Release.Assets == nil means the assets are not listed". The API path and the IncludePrereleases path always return a non-nil Assets, empty when the release has none.
+- `Config.Select` (select.go) renders `AssetTemplate` and `ChecksumsAsset` and matches a non-nil Assets by exact name; an empty non-nil slice is a miss, not "unlisted". A nil Assets goes through the resolved Source's optional `AssetLocator` (`GitHubSource.AssetURL`), giving assets of Size 0 ("unknown"); a Source without `AssetURL` gives `ErrAssetsNotListed`. Why no REST listing or HEAD probe: ADR-0019.
+- Because nothing checks the asset on that path, the download step must map a 404 on a located URL to `*AssetNotFoundError` (errors.go); Select cannot. The contract is in source/update/AGENTS.md "Download contract".
+- update is untagged and has no docs/release-notes/update/, so it is not in strict mode; no other project requires go.vipengele.org/update. No goreleaser tooling lives in the repo (release.yml tags and announces modules only), so `asset.GoReleaserArchive` serves consuming tools.
+- Conventions: every outside-world reach is a Config field resolved in `resolve` (AGENTS.md); no mutable package globals (gochecknoglobals; AGENTS.md), so the asset placeholder tables are switch functions; depguard bans cli/core and cobra outside updatecmd (AGENTS.md).
