@@ -1,0 +1,16 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - depguard
+    - gochecknoglobals
+  settings:
+    depguard:
+      rules:
+        syscall-only:
+          files:
+            - "**"
+          list-mode: strict
+          allow:
+            - $gostd
+            - golang.org/x/sys

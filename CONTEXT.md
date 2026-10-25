@@ -71,7 +71,7 @@ _Avoid_: scripts, utilities
 
 ## Library vocabulary
 
-These name what the `cli/core`, `cli/spec`, `cli/state`, `update` and `daemon` projects build (ADR-0003, ADR-0018). They describe the tools
+These name what the `cli/core`, `cli/spec`, `cli/state`, `filelock`, `update` and `daemon` projects build (ADR-0003, ADR-0018, ADR-0019). They describe the tools
 a consumer writes with the library, not this repo; **Release** above is a version of a project here,
 and a tool's own releases are reached through a **Release source**.
 
@@ -275,3 +275,15 @@ service control manager), started, stopped and restarted by it. Installing, remo
 a Service are the `daemoncmd` commands.
 _Avoid_: daemon for the registration (the daemon is the program, the Service is its registration),
 unit, agent, microservice
+
+**Lock**:
+Exclusive ownership of a **Lock file** that the operating system gives to one process at a time and
+takes back when that process exits, however it exits. A daemon holds one so only one instance runs,
+and `update` holds one so only one check or replacement of the **Managed binary** runs at a time
+(ADR-0019).
+_Avoid_: mutex (guards memory inside one process), semaphore, pidfile
+
+**Lock file**:
+The file a **Lock** is taken on. Its existence means nothing: the file may be left behind by a
+process that has exited and the next process takes the Lock on it as usual (ADR-0019).
+_Avoid_: pidfile, lockfile
