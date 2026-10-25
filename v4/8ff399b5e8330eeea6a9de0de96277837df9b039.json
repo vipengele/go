@@ -1,0 +1,47 @@
+{
+  "cli-core": {
+    "covered": 1161,
+    "total": 1170,
+    "producer": "go 1.27.3"
+  },
+  "cli-spec": {
+    "covered": 717,
+    "total": 732,
+    "producer": "go 1.27.3"
+  },
+  "cli-state": {
+    "covered": 87,
+    "total": 89,
+    "producer": "go 1.27.3"
+  },
+  "commons": {
+    "covered": 80,
+    "total": 80,
+    "producer": "go 1.27.3"
+  },
+  "config": {
+    "covered": 607,
+    "total": 616,
+    "producer": "go 1.27.3"
+  },
+  "daemon": {
+    "covered": 102,
+    "total": 102,
+    "producer": "go 1.27.3"
+  },
+  "filelock": {
+    "covered": 49,
+    "total": 52,
+    "producer": "go 1.27.3"
+  },
+  "update": {
+    "covered": 322,
+    "total": 322,
+    "producer": "go 1.27.3"
+  },
+  "vanity-worker": {
+    "covered": 125,
+    "total": 126,
+    "producer": "vitest 5.0.3, @vitest/coverage-v8 5.0.3"
+  }
+}
