@@ -1,10 +1,3 @@
-// Package logging builds the process-wide [slog.Logger] of a command-line program from a level
-// name and an output [spec.Format], and redacts secrets from everything it writes.
-//
-// Redaction has two layers, both built from one [Redaction] and both always present. A
-// [slog.Handler] wrapper redacts the message and attributes of every record before the handler
-// formats it, and a [RedactingWriter] beneath the handler redacts the lines it writes, along with
-// any other text a caller writes to the same destination through it.
 package logging
 
 import (

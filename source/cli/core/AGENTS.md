@@ -137,6 +137,12 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   the redacted bytes as a JSON string, and under text is a byte slice or array nested in a
   `slog.Any` value, which `%+v` writes as decimal bytes and which becomes the redacted bytes quoted). `ParseLevel(s)` reads `debug|info|warn|error` in any letter case.
   A leaf package that never imports `cli`; `cli.WithLogging` drives it from the flags.
+- `logging/logtest` (`go.vipengele.org/cli/core/logging/logtest`) — a non-redacting capture handler
+  and assertions for tests. `logtest.New()` returns a `*Recorder` (an `slog.Handler`) whose
+  `Records()` return flattened `Record{Level, Message, Attrs}` (group keys dot-joined, e.g.
+  `http.status`); `RequireRecord(t, level, message, attrs)` and `RequireNone(t, level)` assert on
+  them. It is never the installed logger: redaction is asserted through `Setup`'s writer
+  (`Options.Writer`), not through the recorder.
 - `edit` replaces the file with `Replace` from `go.vipengele.org/cli/state`, which chmods, syncs and
   renames the validated copy and syncs the directory.
 
