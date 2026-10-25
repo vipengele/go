@@ -1,13 +1,3 @@
-// Package filelock takes an exclusive lock on a file, which the operating system releases when the
-// holder closes the file or exits.
-//
-// New returns a Locker for one path. Every Lock opens its own descriptor on that path, so two
-// Lockers in the same process exclude each other as two processes do. The lock file is created at
-// 0600 when it is missing and is never removed: removing it on unlock would let a waiter that
-// already opened the old file lock an inode no longer reachable by path. The directory must exist;
-// the package creates none.
-//
-// NewNoop returns a Locker that grants every Lock at once, for callers that need no exclusion.
 package filelock
 
 import (
