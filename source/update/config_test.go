@@ -148,6 +148,15 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if want := filepath.Join(home, "state"); r.StateDir != want {
 		t.Errorf("StateDir = %q, want %q", r.StateDir, want)
 	}
+	if want := os.TempDir(); r.TempDir != want {
+		t.Errorf("TempDir = %q, want %q", r.TempDir, want)
+	}
+	if want := int64(256 << 20); r.MaxDownloadBytes != want {
+		t.Errorf("MaxDownloadBytes = %d, want %d", r.MaxDownloadBytes, want)
+	}
+	if want := 5 * time.Minute; r.DownloadTimeout != want {
+		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, want)
+	}
 }
 
 func TestResolveDefaultStateDirReadsTheProcessEnvironment(t *testing.T) {
@@ -206,6 +215,9 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	c := validConfig("")
 	c.BinaryName = "toolkit"
 	c.TempPrefix = "tk-tmp-"
+	c.TempDir = filepath.Join(t.TempDir(), "scratch")
+	c.MaxDownloadBytes = 1024
+	c.DownloadTimeout = 7 * time.Second
 	c.AssetTemplate = "{name}-{os}-{arch}.{ext}"
 	c.AssetExt = "zip"
 	c.ChecksumsAsset = "SHA256SUMS"
@@ -227,6 +239,15 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	}
 	if r.TempPrefix != "tk-tmp-" {
 		t.Errorf("TempPrefix = %q, want %q", r.TempPrefix, "tk-tmp-")
+	}
+	if r.TempDir != c.TempDir {
+		t.Errorf("TempDir = %q, want %q", r.TempDir, c.TempDir)
+	}
+	if r.MaxDownloadBytes != 1024 {
+		t.Errorf("MaxDownloadBytes = %d, want %d", r.MaxDownloadBytes, 1024)
+	}
+	if r.DownloadTimeout != 7*time.Second {
+		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, 7*time.Second)
 	}
 	if r.AssetTemplate != "{name}-{os}-{arch}.{ext}" {
 		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, "{name}-{os}-{arch}.{ext}")
@@ -644,6 +665,60 @@ func TestValidateChecksAssetFields(t *testing.T) {
 			}
 			if _, rerr := c.resolve(); rerr == nil {
 				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
+func TestValidateRejectsNegativeDownloadLimits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		set   func(*Config)
+		field string
+	}{
+		{"negative MaxDownloadBytes", func(c *Config) { c.MaxDownloadBytes = -1 }, "MaxDownloadBytes"},
+		{"negative DownloadTimeout", func(c *Config) { c.DownloadTimeout = -time.Second }, "DownloadTimeout"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			tc.set(&c)
+			err := c.Validate()
+			if !errors.Is(err, validate.ErrInvalid) {
+				t.Errorf("Validate() = %v, want one wrapping %v", err, validate.ErrInvalid)
+			}
+			var fe *validate.FieldError
+			if !errors.As(err, &fe) || fe.Field != tc.field {
+				t.Errorf("Validate() = %v, want a FieldError for %q", err, tc.field)
+			}
+			if _, rerr := c.resolve(); rerr == nil {
+				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsZeroAndPositiveDownloadLimits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  func(*Config)
+	}{
+		{"zero limits", func(*Config) {}},
+		{"positive limits", func(c *Config) {
+			c.MaxDownloadBytes = 1
+			c.DownloadTimeout = time.Nanosecond
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			tc.set(&c)
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want nil", err)
 			}
 		})
 	}

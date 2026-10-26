@@ -278,6 +278,61 @@ func TestAssetNotFoundError(t *testing.T) {
 	}
 }
 
+func TestChecksumAndSizeErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		err    error
+		as     func(error) bool
+		wantIn []string
+	}{
+		{
+			name: "mismatch",
+			err:  &ChecksumMismatchError{Name: "atk.tar.gz", Want: "aa11", Got: "bb22"},
+			as:   func(err error) bool { var e *ChecksumMismatchError; return errors.As(err, &e) },
+			wantIn: []string{
+				"update: ", "atk.tar.gz", "aa11", "bb22",
+			},
+		},
+		{
+			name:   "not found",
+			err:    &ChecksumNotFoundError{Name: "atk.tar.gz"},
+			as:     func(err error) bool { var e *ChecksumNotFoundError; return errors.As(err, &e) },
+			wantIn: []string{"update: ", "atk.tar.gz"},
+		},
+		{
+			name:   "conflict",
+			err:    &ChecksumConflictError{Name: "atk.tar.gz"},
+			as:     func(err error) bool { var e *ChecksumConflictError; return errors.As(err, &e) },
+			wantIn: []string{"update: ", "atk.tar.gz"},
+		},
+		{
+			name:   "size limit",
+			err:    &SizeLimitError{URL: "https://example.test/x", Limit: 4096},
+			as:     func(err error) bool { var e *SizeLimitError; return errors.As(err, &e) },
+			wantIn: []string{"update: ", "https://example.test/x", "4096"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := fmt.Errorf("download: %w", tc.err)
+			if !tc.as(wrapped) {
+				t.Fatalf("errors.As did not find the error in %v", wrapped)
+			}
+
+			for _, want := range tc.wantIn {
+				if !strings.Contains(tc.err.Error(), want) {
+					t.Errorf("Error() = %q, missing %q", tc.err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
 func TestErrAssetsNotListed_Is(t *testing.T) {
 	t.Parallel()
 
