@@ -92,7 +92,8 @@ that the project exists, that the commit is on `main`, that
 `docs/release-notes/<path>/<version>.md` exists, and that the tagged project's `go.mod` carries no
 `replace` and requires every sibling at a tagged version — no other project's `go.mod` is read, so
 a sibling under development elsewhere never blocks the release; `test` runs, with `GOWORK=off`,
-`go mod tidy` failing on any change to `go.mod` or `go.sum`, `go build`, `go vet` and the module's
-suite; `announce` asks the module proxy to fetch the version, which resolves through
-`go.vipengele.org`, and creates the GitHub Release. Re-running finishes a partial release, including
-one whose `announce` failed while the Worker did not answer.
+`go mod tidy` failing on any change to `go.mod` or `go.sum`, `go build`, `GOOS=windows go vet` when
+the project holds a `*_windows.go` file, `go vet` and the module's suite; `announce` asks the module
+proxy to fetch the version, which resolves through `go.vipengele.org`, and creates the GitHub
+Release. Re-running finishes a partial release, including one whose `announce` failed while the
+Worker did not answer.
