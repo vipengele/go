@@ -166,6 +166,87 @@ func (e *SizeLimitError) Error() string {
 	return fmt.Sprintf("update: GET %s: exceeds the limit of %d bytes", e.URL, e.Limit)
 }
 
+// ErrEmptyAsset reports a raw asset of zero bytes: a binary published as is cannot be empty.
+var ErrEmptyAsset = errors.New("update: raw asset is empty")
+
+// ErrNotGzip reports a tar.gz archive whose bytes do not start with the gzip magic number.
+var ErrNotGzip = errors.New("update: archive is not gzip-compressed")
+
+// ErrTruncatedGzip reports a tar.gz archive whose gzip stream ends before its trailer.
+var ErrTruncatedGzip = errors.New("update: gzip stream is truncated")
+
+// ExtractLimitError reports an extraction that exceeded its byte cap, [Config.MaxExtractBytes].
+type ExtractLimitError struct {
+	// Name is the entry being written when the cap was reached; for a raw asset, the binary's
+	// file name.
+	Name string
+	// Limit is the most bytes the extraction may write.
+	Limit int64
+}
+
+// Error implements error.
+func (e *ExtractLimitError) Error() string {
+	return fmt.Sprintf("update: extracting %q: exceeds the limit of %d bytes", e.Name, e.Limit)
+}
+
+// UnsafeEntryError reports an archive entry that extraction refuses to read: a name that could
+// reach outside the archive, such as an absolute path, a ".." component, a backslash, a drive
+// letter or a NUL byte, or an entry that is not a regular file or a directory, such as a symbolic
+// link, a hard link or a device.
+type UnsafeEntryError struct {
+	// Name is the entry's name as the archive records it.
+	Name string
+	// Reason says why the entry is refused.
+	Reason string
+	// Err is the underlying cause, when the archive reader reported one; nil otherwise.
+	Err error
+}
+
+// Error implements error.
+func (e *UnsafeEntryError) Error() string {
+	return fmt.Sprintf("update: unsafe archive entry %q: %s", e.Name, e.Reason)
+}
+
+// Unwrap returns the underlying cause, so errors.Is reaches an error such as
+// [archive/zip.ErrInsecurePath].
+func (e *UnsafeEntryError) Unwrap() error { return e.Err }
+
+// BinaryNotFoundError reports an archive that holds no regular file named like the binary.
+type BinaryNotFoundError struct {
+	// Name is the binary's file name that was looked for.
+	Name string
+}
+
+// Error implements error.
+func (e *BinaryNotFoundError) Error() string {
+	return fmt.Sprintf("update: archive has no file named %q", e.Name)
+}
+
+// MultipleBinariesError reports an archive that holds more than one regular file named like the
+// binary, so which one to stage is ambiguous.
+type MultipleBinariesError struct {
+	// Name is the binary's file name that was looked for.
+	Name string
+	// Entries are the names of the matching entries, in archive order.
+	Entries []string
+}
+
+// Error implements error.
+func (e *MultipleBinariesError) Error() string {
+	return fmt.Sprintf("update: archive has %d files named %q: %q", len(e.Entries), e.Name, e.Entries)
+}
+
+// UnsupportedFormatError reports an archive format that [Config.Extract] has no extractor for.
+type UnsupportedFormatError struct {
+	// Ext is the AssetExt that names the format.
+	Ext string
+}
+
+// Error implements error.
+func (e *UnsupportedFormatError) Error() string {
+	return fmt.Sprintf("update: no extractor for archive format %q", e.Ext)
+}
+
 // classifyError turns an error from a request to url into the error a caller sees. A cancellation
 // is returned as it is, because it is the caller's own doing and not a timeout. An expired context
 // deadline or a [net.Error] reporting Timeout becomes a [*TimeoutError]. Any other error,
