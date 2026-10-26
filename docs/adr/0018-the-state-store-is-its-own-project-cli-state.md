@@ -2,7 +2,8 @@
 
 Status: accepted. It refines the "state store with a file lock" row of the project table in
 `0003-the-library-is-three-projects-cli-update-and-daemon.md`: the store is a project of its own,
-and the lock is tracked in issue #39.
+and the lock is `go.vipengele.org/filelock`, a project of its own
+(`0019-the-file-lock-is-its-own-project-filelock.md`).
 
 A tool keeps small files of its own beside its configuration: the last update check, a pending
 update, a runner's record. A reader must see the old content or the new, never a partial write, and
@@ -51,7 +52,8 @@ default and a failure. `go.vipengele.org/cli/state` provides that, with the modu
   (ADR-0004, ADR-0012); a project takes the YAML library by requiring `cli/state`.
 - **One atomic writer for the framework.** `config edit` uses `Replace` and `WriteFile` rather than a
   copy of the sequence in `cli/core`.
-- **No lock yet.** Two processes writing the same file each leave a whole file, and the last rename
-  wins. Serialising them is issue #39.
+- **No lock here.** Two processes writing the same file each leave a whole file, and the last rename
+  wins. The cross-process lock is `go.vipengele.org/filelock` (ADR-0019); the consumer that needs
+  its writes serialised decides who takes it.
 - **A new project to release.** `cli/state` is tagged `source/cli/state/vX.Y.Z` and needs a Worker
   deploy before its first tag (ADR-0001, ADR-0004).
