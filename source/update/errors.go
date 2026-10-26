@@ -178,10 +178,11 @@ var ErrTruncatedGzip = errors.New("update: gzip stream is truncated")
 
 // ExtractLimitError reports an extraction that exceeded its byte cap, [Config.MaxExtractBytes].
 type ExtractLimitError struct {
-	// Name is the entry being written when the cap was reached; for a raw asset, the binary's
-	// file name.
+	// Name is the entry the cap was reached in. For a tar.gz archive it is the entry whose header
+	// was read last, empty when the cap is reached before the first header; for a zip archive, the
+	// selected entry; for a raw asset, the binary's file name.
 	Name string
-	// Limit is the most bytes the extraction may write.
+	// Limit is the most bytes the extraction may read or write.
 	Limit int64
 }
 
