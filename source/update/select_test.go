@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -144,6 +145,40 @@ func TestSelect_UnlistedThroughGitHubSource(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
+	}
+}
+
+func TestSelect_ReleaseFromGitHubSource(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range kitModes() {
+		t.Run(m.name, func(t *testing.T) {
+			t.Parallel()
+
+			k := newKitRelease(t, t.TempDir(), m.opts...)
+			rel, err := k.cfg.Source.Latest(context.Background())
+			if err != nil {
+				t.Fatalf("Latest() error = %v", err)
+			}
+
+			got, err := k.cfg.Select(rel)
+			if err != nil {
+				t.Fatalf("Select() error = %v", err)
+			}
+			want := Selection{
+				Tag:       k.rel.Tag,
+				Located:   !m.listed,
+				Archive:   Asset{Name: k.rel.ArchiveName, URL: k.srv.AssetURL(k.rel.ArchiveName)},
+				Checksums: Asset{Name: k.rel.ChecksumsName, URL: k.srv.AssetURL(k.rel.ChecksumsName)},
+			}
+			if m.listed {
+				want.Archive.Size = int64(len(k.rel.Archive))
+				want.Checksums.Size = int64(len(k.srv.ChecksumsFile()))
+			}
+			if got != want {
+				t.Errorf("Select() = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 

@@ -43,6 +43,12 @@ golangci-lint run
   the archive request, and the bounded, hashed copy to the temp file.
 - `archive.go` — `Archive`, the verified temp file `Download` returns, and its lifecycle.
 - `checksums.go` — `parseChecksum`, which finds the archive's digest in a checksums file.
+- `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
+  `Release` in the redirect and REST-API modes, in-memory tar.gz and zip archive (`BuildArchive`) and
+  checksums (`Checksums`) builders, and the fault options `BadChecksum`, `MissingAsset`, `Slow` and
+  `APIOnly`. It imports neither package `update` (the update tests are `package update`, so that
+  would be an import cycle) nor `go.vipengele.org/cli/core`; a test builds its own `GitHubSource`
+  from the server's `WebURL`, `APIURL` and `Client`.
 
 ## Download contract
 
