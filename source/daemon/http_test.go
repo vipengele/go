@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,61 @@ func TestHTTPStopReturnsTheContextErrorWhenTheDrainIsCutShort(t *testing.T) {
 	<-r.Done()
 }
 
+// isClosed reports whether ch is closed.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// yields bounds how many times a test yields to let another goroutine reach a point the test
+// cannot observe, before it concludes that the goroutine is not going to get there.
+const yields = 10_000
+
+func TestHTTPDoneClosesOnlyOnceTheDrainHasEnded(t *testing.T) {
+	b := newBlockingServer()
+	l := listen(t)
+	r := NewHTTPServerListener(b.srv, l)
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	resp := get(t, l.Addr().String())
+	<-b.entered
+	connCtx := <-b.connCtx
+
+	baseLiveAtDone := make(chan bool, 1)
+	go func() {
+		<-r.Done()
+		baseLiveAtDone <- !isDone(connCtx)
+	}()
+	stopped := make(chan error, 1)
+	go func() { stopped <- r.Stop(context.Background()) }()
+
+	// Shutdown closes the listener before it runs its hooks, so Serve has returned or is about to.
+	<-b.shutdown
+	for range yields {
+		if isClosed(r.Done()) {
+			t.Error("Done closed while a request is in flight")
+			break
+		}
+		runtime.Gosched()
+	}
+
+	close(b.release)
+	if got := <-resp; got.err != nil || got.body != "ok" {
+		t.Errorf("response = %q, %v, want \"ok\"", got.body, got.err)
+	}
+	if err := <-stopped; err != nil {
+		t.Errorf("Stop = %v, want nil", err)
+	}
+	if <-baseLiveAtDone {
+		t.Error("Done closed before the drain ended and the base context was cancelled")
+	}
+}
+
 func TestHTTPBindFailureIsAStartFailure(t *testing.T) {
 	taken := listen(t)
 	srv := &http.Server{Addr: taken.Addr().String(), Handler: http.NotFoundHandler()}
@@ -244,7 +300,10 @@ func TestHTTPServerBindsItsAddress(t *testing.T) {
 	if err := r.Stop(context.Background()); err != nil {
 		t.Errorf("Stop = %v, want nil", err)
 	}
-	<-r.Done()
+	if !isClosed(r.Done()) {
+		t.Error("Stop returned nil before Done closed")
+		<-r.Done()
+	}
 	if err := r.Err(); err != nil {
 		t.Errorf("Err = %v, want nil after Stop", err)
 	}
@@ -265,7 +324,10 @@ func TestHTTPServerListenerServesTheCallersListener(t *testing.T) {
 	if err := r.Stop(context.Background()); err != nil {
 		t.Errorf("Stop = %v, want nil", err)
 	}
-	<-r.Done()
+	if !isClosed(r.Done()) {
+		t.Error("Stop returned nil before Done closed")
+		<-r.Done()
+	}
 	if err := r.Err(); err != nil {
 		t.Errorf("Err = %v, want nil after Stop", err)
 	}

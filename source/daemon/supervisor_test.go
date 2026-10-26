@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -305,6 +306,9 @@ type scriptedRunner struct {
 	stopExitPanic any
 	keepRunning   bool
 
+	// onStart, when set, runs inside Start once it has reported its context, before it returns.
+	onStart func()
+
 	// onStop, when set, runs inside Stop before it returns.
 	onStop func()
 }
@@ -324,6 +328,9 @@ func (r *scriptedRunner) Name() string { return r.name }
 func (r *scriptedRunner) Start(ctx context.Context) error {
 	r.rec.started(r.name)
 	r.started <- ctx
+	if r.onStart != nil {
+		r.onStart()
+	}
 	switch {
 	case r.startPanics:
 		panic(r.startPanicValue)
@@ -726,6 +733,102 @@ func TestRunParentCancelDuringStartStopsTheStartedRunnersAndReturnsNil(t *testin
 	checkOrder(t, "start", h.rec.startOrder(), []string{"a", "b"})
 	checkOrder(t, "stop", h.rec.stopOrder(), []string{"b", "a"})
 	h.finish()
+}
+
+// phaseContext is a start context whose phase a test ends from inside a Start: Err reports the
+// phase over once ended is set, but Done never closes, so only the check Run makes before calling
+// the next Start sees the end.
+type phaseContext struct {
+	context.Context
+	ended *atomic.Bool
+}
+
+func (c phaseContext) Done() <-chan struct{} { return nil }
+
+func (c phaseContext) Err() error {
+	if c.ended.Load() {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func TestRunStartPhaseEndingBetweenTwoStartsStopsTheStartedRunners(t *testing.T) {
+	tests := []struct {
+		name string
+		// cancelRun cancels the run context as the start phase ends; otherwise the phase times out.
+		cancelRun bool
+	}{
+		{name: "start timeout"},
+		{name: "parent cancel", cancelRun: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			rec := &recorder{}
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			for _, r := range []*scriptedRunner{a, b, c} {
+				r.rec = rec
+			}
+			s, err := New([]Runner{a, b, c})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			defer cancelRun()
+			var ended atomic.Bool
+			s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+				return phaseContext{Context: context.WithoutCancel(parent), ended: &ended}, func() {}
+			}
+			s.newStopContext = func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			}
+			waited := make(chan struct{}, 1)
+			s.waiting = func() {
+				select {
+				case waited <- struct{}{}:
+				default:
+				}
+			}
+			b.onStart = func() {
+				if tt.cancelRun {
+					cancelRun()
+				}
+				ended.Store(true)
+			}
+
+			result := make(chan error, 1)
+			go func() { result <- s.Run(runCtx) }()
+			select {
+			case err = <-result:
+			case <-waited:
+				t.Error("Run waited for shutdown after the start phase ended")
+				cancelRun()
+				err = <-result
+			}
+			select {
+			case <-waited:
+				t.Error("Run waited for shutdown after the start phase ended")
+			default:
+			}
+
+			if tt.cancelRun {
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			} else {
+				checkJoined(t, err, []wantErr{{is: ErrStartTimeout}})
+				for _, name := range []string{"a", "b", "c"} {
+					if strings.Contains(err.Error(), fmt.Sprintf("%q", name)) {
+						t.Errorf("Run = %v, want it to name no runner", err)
+					}
+				}
+			}
+			checkOrder(t, "start", rec.startOrder(), []string{"a", "b"})
+			checkOrder(t, "stop", rec.stopOrder(), []string{"b", "a"})
+			cancelRun()
+			settle(t, baseline)
+		})
+	}
 }
 
 func TestRunReportsAStopProblemAndStillStopsTheRest(t *testing.T) {
