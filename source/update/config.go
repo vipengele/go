@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,13 @@ const optOutSuffix = "NO_UPDATE_CHECK"
 // tempPrefixSuffix follows the binary name in the default [Config.TempPrefix].
 const tempPrefixSuffix = "-update-"
 
+const (
+	// defaultMaxDownloadBytes is the [Config.MaxDownloadBytes] a zero value resolves to.
+	defaultMaxDownloadBytes int64 = 256 << 20
+	// defaultDownloadTimeout is the [Config.DownloadTimeout] a zero value resolves to.
+	defaultDownloadTimeout = 5 * time.Minute
+)
+
 // Config is everything the update library needs to know about a tool, and every seam through
 // which it reaches the outside world. Any field left at its zero value takes its production
 // default, documented on the field. The embedded [spec.Identity] is required in full.
@@ -35,6 +43,15 @@ type Config struct {
 	// TempPrefix prefixes the names of the temporary files an update writes. Empty means
 	// BinaryName followed by "-update-".
 	TempPrefix string
+	// TempDir is the directory the temporary files of an update are created in. Empty means
+	// [os.TempDir].
+	TempDir string
+	// MaxDownloadBytes is the most bytes a single download may read. Zero means 256 MiB; a negative
+	// value is invalid.
+	MaxDownloadBytes int64
+	// DownloadTimeout bounds the whole of a single download. Zero means 5 minutes; a negative value
+	// is invalid.
+	DownloadTimeout time.Duration
 	// AssetTemplate names the release asset that holds the binary for a platform, written in the
 	// template language of package asset: {name}, {version}, {tag}, {os}, {arch} and {ext}. Empty
 	// means [asset.DefaultTemplate].
@@ -84,15 +101,26 @@ type Config struct {
 // [validate.ErrEmpty] or [validate.ErrInvalid]. Every other field is optional, and a non-empty
 // AssetTemplate, ChecksumsAsset or AssetExt must be valid: AssetTemplate by [asset.Validate],
 // ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
-// "}" and not starting with ".". Those three are [validate.FieldError]s wrapping
-// [validate.ErrInvalid], and the first two also wrap the error of package asset.
+// "}" and not starting with ".". MaxDownloadBytes and DownloadTimeout must not be negative. Each of
+// those is a [validate.FieldError] wrapping [validate.ErrInvalid], and the AssetTemplate and
+// ChecksumsAsset ones also wrap the error of package asset.
 func (c Config) Validate() error {
 	return validate.Join(
 		c.Identity.Validate(),
 		checkTemplate("AssetTemplate", c.AssetTemplate, asset.Validate),
 		checkTemplate("ChecksumsAsset", c.ChecksumsAsset, asset.ValidateChecksums),
 		checkAssetExt(c.AssetExt),
+		checkNotNegative("MaxDownloadBytes", c.MaxDownloadBytes),
+		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
 	)
+}
+
+// checkNotNegative rejects a negative limit; zero means the default.
+func checkNotNegative(field string, v int64) error {
+	if v < 0 {
+		return &validate.FieldError{Field: field, Value: strconv.FormatInt(v, 10), Err: fmt.Errorf("%w: must not be negative", validate.ErrInvalid)}
+	}
+	return nil
 }
 
 // checkTemplate applies check to a non-empty template; an empty one means the default.
@@ -138,6 +166,15 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.TempPrefix == "" {
 		r.TempPrefix = r.BinaryName + tempPrefixSuffix
+	}
+	if r.TempDir == "" {
+		r.TempDir = os.TempDir()
+	}
+	if r.MaxDownloadBytes == 0 {
+		r.MaxDownloadBytes = defaultMaxDownloadBytes
+	}
+	if r.DownloadTimeout == 0 {
+		r.DownloadTimeout = defaultDownloadTimeout
 	}
 	if r.AssetTemplate == "" {
 		r.AssetTemplate = asset.DefaultTemplate
