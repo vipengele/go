@@ -47,6 +47,12 @@ golangci-lint run
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
   runs the hooks in order and joins their errors. A failure is non-fatal. `update` does not import
   `cli/spec/completioninstall` outside tests (ADR-0021).
+- `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
+  `Release` in the redirect and REST-API modes, in-memory tar.gz and zip archive (`BuildArchive`) and
+  checksums (`Checksums`) builders, and the fault options `BadChecksum`, `MissingAsset`, `Slow` and
+  `APIOnly`. It imports neither package `update` (the update tests are `package update`, so that
+  would be an import cycle) nor `go.vipengele.org/cli/core`; a test builds its own `GitHubSource`
+  from the server's `WebURL`, `APIURL` and `Client`.
 
 ## Download contract
 
