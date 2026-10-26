@@ -7,7 +7,8 @@ routes = [
   { pattern = "go.vipengele.org", custom_domain = true },
 ]
 
-# The bucket publish-vanity-modules writes the module list object to.
+# The bucket publish-vanity-modules writes the module list object to: the value
+# of the R2_BUCKET variable of the vanity-modules environment.
 [[r2_buckets]]
 binding = "MODULE_LIST"
-bucket_name = "vanity-modules"
+bucket_name = "vipengele-go"
