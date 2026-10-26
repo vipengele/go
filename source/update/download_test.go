@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/updatetest"
 )
 
 const (
@@ -250,10 +252,6 @@ func TestDownloadSucceeds(t *testing.T) {
 			checksums: serveBody(dlChecksums() + strings.Repeat("\n", maxChecksumsBytes-len(dlChecksums()))),
 		},
 		{
-			name: "located",
-			sel:  func(s *Selection) { s.Located = true },
-		},
-		{
 			name: "default temporary file prefix",
 			cfg:  func(c *Config) { c.TempPrefix = "" },
 		},
@@ -354,7 +352,6 @@ func TestDownloadFails(t *testing.T) {
 	t.Parallel()
 
 	n := int64(len(dlContent))
-	wrong := strings.Repeat("x", len(dlContent))
 
 	tests := []struct {
 		name      string
@@ -428,21 +425,6 @@ func TestDownloadFails(t *testing.T) {
 			check:              wantStatus(dlArchivePath, http.StatusCreated, dlContent),
 		},
 		{
-			name:               "checksums located 404",
-			checksums:          respond(http.StatusNotFound, "Not Found"),
-			sel:                func(s *Selection) { s.Located = true },
-			wantChecksumsCalls: 1,
-			check:              wantAssetNotFound(dlChecksumsName),
-		},
-		{
-			name:               "archive located 404",
-			archive:            respond(http.StatusNotFound, "Not Found"),
-			sel:                func(s *Selection) { s.Located = true },
-			wantChecksumsCalls: 1,
-			wantArchiveCalls:   1,
-			check:              wantAssetNotFound(dlArchiveName),
-		},
-		{
 			name:               "checksums unlocated 404",
 			checksums:          respond(http.StatusNotFound, "Not Found"),
 			wantChecksumsCalls: 1,
@@ -462,22 +444,6 @@ func TestDownloadFails(t *testing.T) {
 			wantChecksumsCalls: 1,
 			wantArchiveCalls:   1,
 			check:              wantStatus(dlArchivePath, http.StatusInternalServerError, "boom"),
-		},
-		{
-			name:               "checksum mismatch",
-			archive:            serveBody(wrong),
-			wantChecksumsCalls: 1,
-			wantArchiveCalls:   1,
-			check: func(t *testing.T, _ *fakeAssets, err error) {
-				var mismatch *ChecksumMismatchError
-				if !errors.As(err, &mismatch) {
-					t.Fatalf("err = %v, want a *ChecksumMismatchError", err)
-				}
-				want := ChecksumMismatchError{Name: dlArchiveName, Want: sha256Hex(dlContent), Got: sha256Hex(wrong)}
-				if *mismatch != want {
-					t.Errorf("ChecksumMismatchError = %+v, want %+v", *mismatch, want)
-				}
-			},
 		},
 		{
 			name:               "missing checksum entry",
@@ -655,20 +621,6 @@ func wantStatus(path string, status int, body string) func(*testing.T, *fakeAsse
 	}
 }
 
-// wantAssetNotFound checks for a *AssetNotFoundError for name in the release dlTag.
-func wantAssetNotFound(name string) func(*testing.T, *fakeAssets, error) {
-	return func(t *testing.T, _ *fakeAssets, err error) {
-		t.Helper()
-		var nf *AssetNotFoundError
-		if !errors.As(err, &nf) {
-			t.Fatalf("err = %v, want a *AssetNotFoundError", err)
-		}
-		if want := (AssetNotFoundError{Tag: dlTag, Name: name}); *nf != want {
-			t.Errorf("AssetNotFoundError = %+v, want %+v", *nf, want)
-		}
-	}
-}
-
 // wantSizeLimit checks for a *SizeLimitError for path with the limit given.
 func wantSizeLimit(path string, limit int64) func(*testing.T, *fakeAssets, error) {
 	return func(t *testing.T, f *fakeAssets, err error) {
@@ -755,9 +707,7 @@ func TestDownloadTimeout(t *testing.T) {
 		callerDeadline bool
 		wantPath       string
 	}{
-		{name: "checksums headers", checksums: blockUntilDone, timeout: 50 * time.Millisecond, wantPath: dlChecksumsPath},
 		{name: "checksums body", checksums: blockAfter("abc"), timeout: 50 * time.Millisecond, wantPath: dlChecksumsPath},
-		{name: "archive headers", archive: blockUntilDone, timeout: archiveBudget, wantPath: dlArchivePath},
 		{name: "archive body", archive: blockAfter(dlContent[:5]), timeout: archiveBudget, wantPath: dlArchivePath},
 		{name: "shorter caller deadline", callerDeadline: true, wantPath: dlArchivePath},
 	}
@@ -843,74 +793,37 @@ func TestDownloadTimeoutIsPerRequest(t *testing.T) {
 	}
 }
 
-func TestDownloadCancellation(t *testing.T) {
+func TestDownloadCancellationDuringTheArchiveBody(t *testing.T) {
 	t.Parallel()
 
-	arriveThen := func(next http.HandlerFunc) func(chan<- struct{}) http.HandlerFunc {
-		return func(arrived chan<- struct{}) http.HandlerFunc {
-			return func(w http.ResponseWriter, r *http.Request) {
-				close(arrived)
-				next(w, r)
-			}
-		}
+	arrived := make(chan struct{})
+	f := newFakeRelease(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, dlContent[:5])
+		w.(http.Flusher).Flush()
+		close(arrived)
+		<-r.Context().Done()
+	})
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-arrived
+		cancel()
+	}()
+
+	a, err := f.config(t, dir).Download(ctx, f.selection())
+	if a != nil {
+		t.Errorf("Download() Archive = %v, want nil", a)
 	}
-
-	tests := []struct {
-		name      string
-		checksums func(chan<- struct{}) http.HandlerFunc
-		archive   func(chan<- struct{}) http.HandlerFunc
-	}{
-		{name: "checksums", checksums: arriveThen(blockUntilDone)},
-		{name: "archive headers", archive: arriveThen(blockUntilDone)},
-		{
-			name: "archive body",
-			archive: func(arrived chan<- struct{}) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					_, _ = io.WriteString(w, dlContent[:5])
-					w.(http.Flusher).Flush()
-					close(arrived)
-					<-r.Context().Done()
-				}
-			},
-		},
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Download() error = %v, want context.Canceled", err)
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			arrived := make(chan struct{})
-			var checksums, archive http.HandlerFunc
-			if tc.checksums != nil {
-				checksums = tc.checksums(arrived)
-			}
-			if tc.archive != nil {
-				archive = tc.archive(arrived)
-			}
-			f := newFakeRelease(t, checksums, archive)
-			dir := t.TempDir()
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go func() {
-				<-arrived
-				cancel()
-			}()
-
-			a, err := f.config(t, dir).Download(ctx, f.selection())
-			if a != nil {
-				t.Errorf("Download() Archive = %v, want nil", a)
-			}
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("Download() error = %v, want context.Canceled", err)
-			}
-			var timeoutErr *TimeoutError
-			if errors.As(err, &timeoutErr) {
-				t.Errorf("Download() error = %v, want no *TimeoutError", err)
-			}
-			assertDirEmpty(t, dir)
-		})
+	var timeoutErr *TimeoutError
+	if errors.As(err, &timeoutErr) {
+		t.Errorf("Download() error = %v, want no *TimeoutError", err)
 	}
+	assertDirEmpty(t, dir)
 }
 
 func TestDownloadProgress(t *testing.T) {
@@ -1018,11 +931,10 @@ func TestDownloadProgressStopsAtFailure(t *testing.T) {
 func TestDownloadLastProgressOptionWins(t *testing.T) {
 	t.Parallel()
 
-	f := newFakeRelease(t, nil, nil)
+	k := newKitRelease(t, t.TempDir())
 
 	var first, second []progressCall
-	a, err := f.config(t, t.TempDir()).Download(context.Background(), f.selection(),
-		recordProgress(&first), recordProgress(&second))
+	_, a, err := k.update(context.Background(), recordProgress(&first), recordProgress(&second))
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
@@ -1058,5 +970,324 @@ func TestDownloadEmptyArchiveWithContentLengthZero(t *testing.T) {
 	assertDirEmpty(t, dir)
 	if want := []progressCall{{0, 0}}; len(calls) != 1 || calls[0] != want[0] {
 		t.Errorf("progress calls = %v, want %v", calls, want)
+	}
+}
+
+// kitMode is one way the updatetest server publishes its release to a GitHubSource.
+type kitMode struct {
+	name string
+	// opts selects the mode on the server.
+	opts []updatetest.Option
+	// listed reports that the source reads the release's asset list from the REST API; otherwise
+	// it takes the release from the redirect, and Select locates the assets.
+	listed bool
+}
+
+// kitModes returns both serving modes: the release by the redirect, and by the REST API.
+func kitModes() []kitMode {
+	return []kitMode{
+		{name: "redirect"},
+		{name: "API", opts: []updatetest.Option{updatetest.APIOnly()}, listed: true},
+	}
+}
+
+// kitRelease is a release dlTag of testOwner/testRepo for the platform the test runs on, the
+// updatetest server publishing it, and a Config that finds it through a GitHubSource and downloads
+// it.
+type kitRelease struct {
+	rel updatetest.Release
+	srv *updatetest.Server
+	cfg Config
+}
+
+// newKitRelease starts an updatetest server with opts and returns it with a valid Config whose
+// temporary files go to dir and whose requests, the source's included, go to the server. The
+// release's binary is the Config's Name, so Select names the archive the server publishes.
+func newKitRelease(t *testing.T, dir string, opts ...updatetest.Option) kitRelease {
+	t.Helper()
+
+	cfg := validConfig(t.TempDir())
+	rel := updatetest.NewRelease(t, testOwner, testRepo, dlTag, cfg.Name)
+	srv := updatetest.NewServer(t, rel, opts...)
+	cfg.TempDir = dir
+	cfg.HTTPClient = srv.Client()
+	cfg.Source = kitSource(srv)
+
+	return kitRelease{rel: rel, srv: srv, cfg: cfg}
+}
+
+// update finds the latest release, selects its assets and downloads them, and returns the
+// Selection, the Archive and the error of the first step that fails.
+func (k kitRelease) update(ctx context.Context, opts ...DownloadOption) (Selection, *Archive, error) {
+	rel, err := k.cfg.Source.Latest(ctx)
+	if err != nil {
+		return Selection{}, nil, err
+	}
+	sel, err := k.cfg.Select(rel)
+	if err != nil {
+		return Selection{}, nil, err
+	}
+	a, err := k.cfg.Download(ctx, sel, opts...)
+	return sel, a, err
+}
+
+// assertRequests fails when the server's checksums file or archive has not received the number
+// of requests given.
+func (k kitRelease) assertRequests(t *testing.T, checksums, archive int) {
+	t.Helper()
+
+	if got := k.srv.Requests(updatetest.TargetChecksums); got != checksums {
+		t.Errorf("checksums requests = %d, want %d", got, checksums)
+	}
+	if got := k.srv.Requests(updatetest.TargetArchive); got != archive {
+		t.Errorf("archive requests = %d, want %d", got, archive)
+	}
+}
+
+func TestDownloadTheReleaseTheSourceFinds(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range kitModes() {
+		t.Run(m.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			k := newKitRelease(t, dir, m.opts...)
+
+			var calls []progressCall
+			sel, a, err := k.update(context.Background(), recordProgress(&calls))
+			if err != nil {
+				t.Fatalf("update error = %v", err)
+			}
+			if sel.Located == m.listed {
+				t.Errorf("Selection.Located = %v, want %v", sel.Located, !m.listed)
+			}
+			if got := filepath.Dir(a.Name()); got != dir {
+				t.Errorf("Name dir = %q, want %q", got, dir)
+			}
+			got, err := io.ReadAll(a)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+			if string(got) != string(k.rel.Archive) {
+				t.Errorf("content = %d bytes, want the %d bytes of the release archive", len(got), len(k.rel.Archive))
+			}
+			n := int64(len(k.rel.Archive))
+			if len(calls) == 0 || calls[len(calls)-1] != (progressCall{n, n}) {
+				t.Errorf("progress calls %v, want a final call {%d %d}", calls, n, n)
+			}
+			if err := a.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			assertDirEmpty(t, dir)
+			k.assertRequests(t, 1, 1)
+		})
+	}
+}
+
+func TestDownloadMissingAsset(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range kitModes() {
+		for _, missing := range []string{"archive", "checksums"} {
+			t.Run(m.name+" "+missing, func(t *testing.T) {
+				t.Parallel()
+
+				dir := t.TempDir()
+				name := updatetest.DefaultChecksumsName
+				if missing == "archive" {
+					name = updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, updatetest.ExtTarGz)
+				}
+				k := newKitRelease(t, dir, append([]updatetest.Option{updatetest.MissingAsset(name)}, m.opts...)...)
+
+				_, a, err := k.update(context.Background())
+				if a != nil {
+					_ = a.Close()
+					t.Fatalf("update Archive = %v, want nil", a)
+				}
+				var nf *AssetNotFoundError
+				if !errors.As(err, &nf) {
+					t.Fatalf("update error = %v, want a *AssetNotFoundError", err)
+				}
+				if want := (AssetNotFoundError{Tag: dlTag, Name: name}); *nf != want {
+					t.Errorf("AssetNotFoundError = %+v, want %+v", *nf, want)
+				}
+				assertDirEmpty(t, dir)
+
+				// A listed release is rejected by Select before any download; a located one fails at
+				// the asset's 404, and a missing checksums file before the archive is requested.
+				switch {
+				case m.listed:
+					k.assertRequests(t, 0, 0)
+				case missing == "archive":
+					k.assertRequests(t, 1, 1)
+				default:
+					k.assertRequests(t, 1, 0)
+				}
+			})
+		}
+	}
+}
+
+func TestDownloadBadChecksum(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range kitModes() {
+		t.Run(m.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			k := newKitRelease(t, dir, append([]updatetest.Option{updatetest.BadChecksum()}, m.opts...)...)
+
+			var calls []progressCall
+			_, a, err := k.update(context.Background(), recordProgress(&calls))
+			if a != nil {
+				_ = a.Close()
+				t.Fatalf("update Archive = %v, want nil", a)
+			}
+			var mismatch *ChecksumMismatchError
+			if !errors.As(err, &mismatch) {
+				t.Fatalf("update error = %v, want a *ChecksumMismatchError", err)
+			}
+			listed := strings.Fields(string(k.srv.ChecksumsFile()))[0]
+			want := ChecksumMismatchError{Name: k.rel.ArchiveName, Want: listed, Got: updatetest.Digest(k.rel.Archive)}
+			if *mismatch != want {
+				t.Errorf("ChecksumMismatchError = %+v, want %+v", *mismatch, want)
+			}
+			if want.Want == want.Got {
+				t.Errorf("checksums file lists %s, the archive's own digest", listed)
+			}
+			assertDirEmpty(t, dir)
+			// The last streaming call already reports every byte against the Content-Length, so a
+			// final call after the failure would repeat it.
+			for i := 1; i < len(calls); i++ {
+				if calls[i].done <= calls[i-1].done {
+					t.Errorf("progress calls %v: a call repeats the count, as the final call would", calls)
+				}
+			}
+			k.assertRequests(t, 1, 1)
+		})
+	}
+}
+
+func TestDownloadTimeoutWaitingForHeaders(t *testing.T) {
+	t.Parallel()
+
+	// The archive stall is reached only after the checksums request completes, and each request
+	// has a deadline of its own, so archiveBudget must outlast a fast checksums request under any
+	// load. A stalled request ends as soon as the deadline passes, so the budget costs wall time
+	// only, which the parallel cases share.
+	const archiveBudget = 2 * time.Second
+
+	tests := []struct {
+		name    string
+		target  updatetest.Target
+		timeout time.Duration
+		// callerDeadline has the caller's context expire once the stalled request is waiting, with
+		// DownloadTimeout left at its default.
+		callerDeadline bool
+		wantArchive    int
+	}{
+		{name: "checksums", target: updatetest.TargetChecksums, timeout: 50 * time.Millisecond},
+		{name: "archive", target: updatetest.TargetArchive, timeout: archiveBudget, wantArchive: 1},
+		{name: "shorter caller deadline on the checksums", target: updatetest.TargetChecksums, callerDeadline: true},
+		{name: "shorter caller deadline on the archive", target: updatetest.TargetArchive, callerDeadline: true, wantArchive: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			k := newKitRelease(t, dir, updatetest.Slow(tc.target, make(chan struct{})))
+			k.cfg.DownloadTimeout = tc.timeout
+
+			ctx := context.Background()
+			if tc.callerDeadline {
+				expiring := newExpiringContext()
+				t.Cleanup(expiring.expire)
+				ctx = expiring
+				go func() {
+					select {
+					case <-k.srv.Blocked(tc.target):
+						expiring.expire()
+					case <-expiring.Done():
+					}
+				}()
+			}
+
+			var calls []progressCall
+			sel, a, err := k.update(ctx, recordProgress(&calls))
+			if a != nil {
+				_ = a.Close()
+				t.Fatalf("update Archive = %v, want nil", a)
+			}
+			var timeoutErr *TimeoutError
+			if !errors.As(err, &timeoutErr) {
+				t.Fatalf("update error = %v, want a *TimeoutError", err)
+			}
+			wantURL := sel.Checksums.URL
+			if tc.target == updatetest.TargetArchive {
+				wantURL = sel.Archive.URL
+			}
+			if timeoutErr.URL != wantURL {
+				t.Errorf("TimeoutError.URL = %q, want %q", timeoutErr.URL, wantURL)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, want true")
+			}
+			if len(calls) != 0 {
+				t.Errorf("progress calls %v, want none before the headers", calls)
+			}
+			assertDirEmpty(t, dir)
+			k.assertRequests(t, 1, tc.wantArchive)
+		})
+	}
+}
+
+func TestDownloadCancellationWaitingForHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		target      updatetest.Target
+		wantArchive int
+	}{
+		{name: "checksums", target: updatetest.TargetChecksums},
+		{name: "archive", target: updatetest.TargetArchive, wantArchive: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			k := newKitRelease(t, dir, updatetest.Slow(tc.target, make(chan struct{})))
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				select {
+				case <-k.srv.Blocked(tc.target):
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+
+			_, a, err := k.update(ctx)
+			if a != nil {
+				_ = a.Close()
+				t.Fatalf("update Archive = %v, want nil", a)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("update error = %v, want context.Canceled", err)
+			}
+			var timeoutErr *TimeoutError
+			if errors.As(err, &timeoutErr) {
+				t.Errorf("update error = %v, want no *TimeoutError", err)
+			}
+			assertDirEmpty(t, dir)
+			k.assertRequests(t, 1, tc.wantArchive)
+		})
 	}
 }
