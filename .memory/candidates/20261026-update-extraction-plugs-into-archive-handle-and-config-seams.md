@@ -1,34 +1,24 @@
 ---
-about: "extraction (story #50) must read the verified *Archive via ReaderAt/Size, reuse Config budget style, and ADR/CONTEXT leave format, zip and output location undecided"
+about: "Config.Extract reads the verified *Archive through ReaderAt/Size and owns closing it; format comes from AssetTemplate/AssetExt, the budget is Config.MaxExtractBytes, and the staged file lives in the caller's dir"
 saw:
+  - source/update/extract.go
   - source/update/archive.go
-  - source/update/download.go
   - source/update/config.go
-  - source/update/AGENTS.md
-  - source/update/.golangci.yml
   - docs/adr/0020-a-download-returns-a-verified-archive-the-caller-never-sees-unverified.md
-  - docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md
-  - CONTEXT.md
+  - docs/adr/0021-extraction-derives-the-format-from-config-and-stages-the-binary-in-the-callers-directory.md
 ---
 
-Established while planning issue #50 (hardened extraction); `agtk memory search` found no note on it.
-
-- Download hands off a verified `*Archive` (open 0600 temp file in `Config.TempDir`, rewound), exposing only
-  Read/ReadAt/Seek/Size/Name/Close (archive.go; ADR-0020). ADR-0020 "Consequences" says extraction and
-  replacement "read an `*Archive` ... through ReaderAt and Size, and own closing it". Not bytes, not a callback.
-- Budget mechanism in download.go: `Config.MaxDownloadBytes` (default 256 MiB, config.go:27-28, negative invalid),
-  announced size is only a hint, enforced while reading by `io.LimitReader(body, readBound(limit))` (limit+1,
-  saturating at MaxInt64) then `written > limit` -> `*SizeLimitError{URL, Limit}` (errors.go:157). The checksums
-  file has a fixed 1 MiB cap. Extraction has no Config budget field yet; `SizeLimitError` carries a URL, so reuse
-  needs a decision.
-- Format: `Config.AssetExt` (default `tar.gz`, asset.DefaultExt) renders `{ext}` into the asset name; config.go:59-61
-  says a raw-binary tool leaves `{ext}` out of AssetTemplate. Select (select.go) does not tag the format, so
-  extraction must be driven by config or sniffing; nothing records which.
-- Seams: AGENTS.md Conventions: every outside-world access is a Config field resolved in `resolve`; new seam =
-  new field with documented zero default. No Config seam for filesystem exists beyond TempDir/Executable.
-- Lint: .golangci.yml enables gochecknoglobals (sentinel errors allowed) and depguard (no cli/core, cobra only in
-  updatecmd). go.mod deps: cli/spec, commons, golang.org/x/mod only.
-- No ADR/CONTEXT/note mentions zip, Windows archives, symlinks, hardlinks or decompression bombs; ADR-0003:22 only
-  lists "archive extraction" and "atomic replacement of the managed binary" as update's job. CONTEXT.md has no
-  Asset/Archive/Budget/Binary term; it has "Managed binary" (installed executable, replaced atomically with a
-  verified staged binary) and "Release source". Nothing on lydite/gt extract is recorded in the repo.
+- `Config.Extract(ctx, *Archive, dir)` (extract.go) reads the archive through `io.NewSectionReader(a, 0, a.Size())`
+  (zip: `zip.NewReader(a, a.Size())`) and closes it on success and on every failure after a non-nil archive
+  (ADR-0020 "own closing it"). `Archive.Close` closes then removes (archive.go), and a close error after a
+  successful extraction discards the staged binary and fails.
+- The format is never sniffed: `deriveFormat` (config.go) maps the resolved `AssetTemplate` and `AssetExt`. A template
+  without `{ext}` is raw; an empty `AssetExt` resolves to `tar.gz`, so it cannot mean raw. `Validate` rejects any
+  other extension than `tar.gz`, `tgz` and `zip` when the template uses `{ext}`.
+- The budget is `Config.MaxExtractBytes` (default 512 MiB, zero = default, negative invalid), enforced with the
+  `readBound` limit+1 pattern; `*ExtractLimitError` is distinct from `*SizeLimitError`, which carries a URL.
+- The staged file is `os.CreateTemp(dir, TempPrefix+"*")` in a directory the caller supplies, so a later rename
+  onto the managed binary stays on one filesystem; `Config.TempDir` is for the download only. It is chmod 0700 and
+  synced. `Staged.Keep` and `Staged.Discard` are separate because Windows cannot remove an open file.
+- `resolve` rejects unknown extensions before `Extract` picks an extractor, so `*UnsupportedFormatError` is not
+  reachable from a valid `Config`.
