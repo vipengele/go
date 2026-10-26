@@ -64,6 +64,12 @@ type Config struct {
 	// returns that error and ignores theirs. Otherwise Run returns the first error a PostRun
 	// returns, as a [*HookError], so the error is never taken for a [*UsageError].
 	PostRun []func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo, runErr error) error
+	// Completion adds cobra's completion command to the root, which writes the completion
+	// script of bash, zsh, fish or powershell to env.Stdout. It is cobra's command, not a
+	// [spec.Command]: neither Output nor any hook runs around it, so nothing a hook depends on
+	// can stop a script from being written. A root with a command named completion of its own
+	// keeps that command instead.
+	Completion bool
 }
 
 // HookError reports an error a [Config] PostRun returned after the run function succeeded. It
@@ -88,16 +94,21 @@ func (e *HookError) Error() string {
 // --help, not for a command without Run, and not for a command line the tree rejects.
 //
 // The tree answers --help, on every command, by writing the command's help to env.Stdout and
-// returning nil. It has no help or completion subcommand, and refuses a tree in which a command
-// declares a flag named help. A command with subcommands and no Run writes its help to
-// env.Stdout and returns nil when it is given no positional argument, and returns a
-// [*UsageError] naming the first one when it is.
+// returning nil. It has no help subcommand, and a completion subcommand only when cfg.Completion
+// is set; it refuses a tree in which a command declares a flag named help. A command with
+// subcommands and no Run writes its help to env.Stdout and returns nil when it is given no
+// positional argument, and returns a [*UsageError] naming the first one when it is.
+//
+// Cobra's hidden __complete command, which a completion script runs, is there whatever cfg
+// says: it writes the candidates of the [spec.Completion] of the flag or the positional
+// arguments being completed, and runs neither Output nor any hook, so nothing a hook writes
+// reaches the completing shell.
 func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string, cfg Config) error {
-	cmd, err := build(env, cfg, root, nil, nil)
+	cmd, err := build(env, cfg, root, nil, nil, completing(args))
 	if err != nil {
 		return err
 	}
-	cmd.CompletionOptions.DisableDefaultCmd = true
+	cmd.CompletionOptions.DisableDefaultCmd = !cfg.Completion
 	cmd.SetHelpCommand(&spf.Command{Hidden: true})
 	cmd.SetFlagErrorFunc(func(c *spf.Command, err error) error {
 		return &UsageError{Path: relPath(c), Err: err}
@@ -112,10 +123,18 @@ func Run(ctx context.Context, env *spec.Env, root *spec.Command, args []string, 
 	return cmd.ExecuteContext(ctx)
 }
 
+// completing reports whether args request shell completion through cobra's hidden __complete
+// command.
+func completing(args []string) bool {
+	return len(args) > 0 && (args[0] == spf.ShellCompRequestCmd || args[0] == spf.ShellCompNoDescRequestCmd)
+}
+
 // build returns the cobra command for c and, recursively, its subcommands. inherited are the
 // inherited flags of c's ancestors, which c reads along with its own, and parents the names from
-// the root to c's parent.
-func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, parents []string) (*spf.Command, error) {
+// the root to c's parent. With complete, the flags of c register their completion with cobra.
+func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, parents []string,
+	complete bool,
+) (*spf.Command, error) {
 	path := append(slices.Clone(parents), c.Name)
 	cmd := &spf.Command{
 		Use:           c.Name,
@@ -140,7 +159,15 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 		if err := define(fs, f); err != nil {
 			return nil, fmt.Errorf("command %q: %w", c.Name, err)
 		}
+		if fn := completionFunc(f.Completion(), nil); complete && fn != nil {
+			if err := cmd.RegisterFlagCompletionFunc(f.Name(), fn); err != nil {
+				return nil, fmt.Errorf("command %q: %w", c.Name, err)
+			}
+		}
 		visible = append(visible, f)
+	}
+	if c.Run != nil {
+		cmd.ValidArgsFunction = completionFunc(c.ArgCompletion, c.Args.Max)
 	}
 
 	// Cobra's own --help flag takes the shorthand -h unconditionally, and pflag panics when a
@@ -151,7 +178,7 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 	}
 
 	for _, sub := range c.Commands {
-		child, err := build(env, cfg, sub, children, path)
+		child, err := build(env, cfg, sub, children, path, complete)
 		if err != nil {
 			return nil, err
 		}
@@ -224,6 +251,57 @@ func runHooked(ctx context.Context, cfg Config, inv *spec.Invocation, info spec.
 		return runErr
 	}
 	return &HookError{Err: hookErr}
+}
+
+// completionFunc returns the cobra completion function of c, and nil for a [spec.NoCompletion].
+// limit, when not nil, is the most positional arguments the completed command accepts: once the
+// command line holds that many, nothing more is proposed.
+//
+// Cobra keeps every flag's completion function in a process-wide map it never clears, keyed by
+// the flag, and [Run] builds new flags on every execution, so build registers flag completion
+// only when the command line requests completion; registering on every execution would grow
+// the map for as long as the process runs.
+func completionFunc(c spec.Completion, limit func() (int, bool)) spf.CompletionFunc {
+	kind := c.Kind()
+	if kind == spec.NoCompletion {
+		return nil
+	}
+	choices, exts, fn := c.Choices(), c.Extensions(), c.Func()
+	return func(cmd *spf.Command, args []string, toComplete string) ([]spf.Completion, spf.ShellCompDirective) {
+		if limit != nil {
+			if n, bounded := limit(); bounded && len(args) >= n {
+				return nil, spf.ShellCompDirectiveNoFileComp
+			}
+		}
+		switch kind {
+		case spec.ChoicesCompletion:
+			var out []spf.Completion
+			for _, v := range choices {
+				if strings.HasPrefix(v, toComplete) {
+					out = append(out, v)
+				}
+			}
+			return out, spf.ShellCompDirectiveNoFileComp
+		case spec.FilesCompletion:
+			if len(exts) == 0 {
+				return nil, spf.ShellCompDirectiveDefault
+			}
+			return exts, spf.ShellCompDirectiveFilterFileExt
+		case spec.DirsCompletion:
+			return nil, spf.ShellCompDirectiveFilterDirs
+		case spec.FuncCompletion:
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			values, err := fn(ctx, spec.CompletionInput{ToComplete: toComplete, Args: slices.Clone(args)})
+			if err != nil {
+				return nil, spf.ShellCompDirectiveNoFileComp
+			}
+			return values, spf.ShellCompDirectiveNoFileComp
+		}
+		return nil, spf.ShellCompDirectiveDefault
+	}
 }
 
 // unknownCommand rejects any positional argument of a command that has subcommands: cobra
