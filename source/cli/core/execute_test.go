@@ -213,7 +213,7 @@ func TestExecuteArgsExitCodes(t *testing.T) {
 			want: result{code: cli.ExitUsage, stderr: "tool: unknown command \"help\" for \"tool\"\n"},
 		},
 		{
-			name: "completion is not a subcommand",
+			name: "completion is not a subcommand of a package-level root",
 			args: []string{"completion"},
 			want: result{code: cli.ExitUsage,
 				stderr: "tool: unknown command \"completion\" for \"tool\"\n"},
@@ -1608,5 +1608,33 @@ func TestExecuteArgsCodedAndReported(t *testing.T) {
 				t.Errorf("got: %+v\nwant: %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// The package-level entry points take no option, so no tree they run has a "completion" command,
+// while an App holding the same commands has one under WithCompletion.
+func TestExecuteArgsNeverHasCompletion(t *testing.T) {
+	unknown := result{code: cli.ExitUsage, stderr: "tool: unknown command \"completion\" for \"tool\"\n"}
+	for _, args := range [][]string{{"completion"}, {"completion", "bash"}} {
+		if got := run(t, args...); got != unknown {
+			t.Errorf("ExecuteArgs(%q)\n got: %+v\nwant: %+v", args, got, unknown)
+		}
+		if got := runApp(t, newApp(cli.WithCompletion()), args...); got.code != cli.ExitOK || got.stdout == "" {
+			t.Errorf("App.ExecuteArgs(%q) with WithCompletion = %+v, want 0 and output", args, got)
+		}
+	}
+	if got := run(t, "--help"); strings.Contains(got.stdout, "completion") {
+		t.Errorf("ExecuteArgs(--help) lists completion:\n%s", got.stdout)
+	}
+	if got := runApp(t, newApp(cli.WithCompletion()), "--help"); !strings.Contains(got.stdout, "completion") {
+		t.Errorf("App.ExecuteArgs(--help) with WithCompletion lacks completion:\n%s", got.stdout)
+	}
+}
+
+func TestExecuteNeverHasCompletion(t *testing.T) {
+	got := runChild(t, "run", t.TempDir(), "CLI_CORE_EXECUTE_ARGS=completion bash")
+	want := result{code: cli.ExitUsage, stderr: "tool: unknown command \"completion\" for \"tool\"\n"}
+	if got != want {
+		t.Errorf("Execute(completion bash)\n got: %+v\nwant: %+v", got, want)
 	}
 }

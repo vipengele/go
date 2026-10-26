@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -646,5 +647,250 @@ func TestRunConfigPreRunContextReachesWhatFollows(t *testing.T) {
 				t.Errorf("calls %q, want %q", got, tt.wantLog)
 			}
 		})
+	}
+}
+
+// complete runs cobra's __complete request for words against root and returns the candidates
+// and the directive it writes, which the completion protocol puts on the last line.
+func complete(t *testing.T, root *spec.Command, cfg cobra.Config, words ...string) (candidates []string, directive string) {
+	t.Helper()
+	if err := root.Validate(); err != nil {
+		t.Fatalf("invalid tree: %v", err)
+	}
+	var out bytes.Buffer
+	env := (&spec.Env{Stdout: &out, Stderr: &bytes.Buffer{}}).Resolved()
+	args := append([]string{"__complete"}, words...)
+	if err := cobra.Run(context.Background(), env, root, args, cfg); err != nil {
+		t.Fatalf("Run(%q) = %v", args, err)
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	return lines[:len(lines)-1], lines[len(lines)-1]
+}
+
+// Directives of the completion protocol, as cobra writes them.
+const (
+	directiveDefault    = ":0"
+	directiveNoFileComp = ":4"
+	directiveFileExt    = ":8"
+	directiveDirs       = ":16"
+)
+
+// completionCases are the completions of every kind, each with the word completed, the
+// candidates and the directive it writes, for a flag value or a positional argument alike.
+func completionCases(seen *spec.CompletionInput) []struct {
+	name          string
+	completion    spec.Completion
+	toComplete    string
+	wantValues    []string
+	wantDirective string
+} {
+	fn := func(_ context.Context, in spec.CompletionInput) ([]string, error) {
+		*seen = in
+		return []string{"alpha", "beta"}, nil
+	}
+	failing := func(context.Context, spec.CompletionInput) ([]string, error) {
+		return []string{"never"}, errors.New("lookup failed")
+	}
+	return []struct {
+		name          string
+		completion    spec.Completion
+		toComplete    string
+		wantValues    []string
+		wantDirective string
+	}{
+		{"choices", spec.CompleteChoices("json", "text", "jsonl"), "", []string{"json", "text", "jsonl"}, directiveNoFileComp},
+		{"choices by prefix", spec.CompleteChoices("json", "text", "jsonl"), "js", []string{"json", "jsonl"}, directiveNoFileComp},
+		{"choices none matching", spec.CompleteChoices("json"), "x", nil, directiveNoFileComp},
+		{"files", spec.CompleteFiles(), "", nil, directiveDefault},
+		{"files by extension", spec.CompleteFiles(".yaml", "yml"), "", []string{"yaml", "yml"}, directiveFileExt},
+		{"dirs", spec.CompleteDirs(), "", nil, directiveDirs},
+		{"func", spec.CompleteFunc(fn), "a", []string{"alpha", "beta"}, directiveNoFileComp},
+		{"func error", spec.CompleteFunc(failing), "", nil, directiveNoFileComp},
+	}
+}
+
+func TestRunCompletesFlagValues(t *testing.T) {
+	var seen spec.CompletionInput
+	for _, tt := range completionCases(&seen) {
+		t.Run(tt.name, func(t *testing.T) {
+			value := spec.StringFlag("value", "the value", spec.Complete(tt.completion))
+			global := spec.StringFlag("global", "a global", spec.Complete(tt.completion), spec.Inherited())
+			root := &spec.Command{
+				Name:  "tool",
+				Flags: []spec.Flag{global},
+				Commands: []*spec.Command{{
+					Name:  "set",
+					Args:  spec.AnyArgs(),
+					Flags: []spec.Flag{value},
+					Run:   func(context.Context, *spec.Invocation) error { return nil },
+				}},
+			}
+			for _, words := range [][]string{
+				{"set", "first", "--value", tt.toComplete},
+				{"set", "first", "--value=" + tt.toComplete},
+				{"set", "first", "--global", tt.toComplete},
+			} {
+				seen = spec.CompletionInput{}
+				got, directive := complete(t, root, cobra.Config{}, words...)
+				want := tt.wantValues
+				if !slices.Equal(got, want) || directive != tt.wantDirective {
+					t.Errorf("complete %q = %q %s, want %q %s", words, got, directive, want, tt.wantDirective)
+				}
+				if tt.name == "func" {
+					wantSeen := spec.CompletionInput{ToComplete: tt.toComplete, Args: []string{"first"}}
+					if seen.ToComplete != wantSeen.ToComplete || !slices.Equal(seen.Args, wantSeen.Args) {
+						t.Errorf("complete %q gave the func %+v, want %+v", words, seen, wantSeen)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRunCompletesFlagValuesWithoutDescriptions(t *testing.T) {
+	root := &spec.Command{
+		Name:  "tool",
+		Flags: []spec.Flag{spec.StringFlag("mode", "the mode", spec.Complete(spec.CompleteChoices("fast", "slow")))},
+		Run:   func(context.Context, *spec.Invocation) error { return nil },
+	}
+	var out bytes.Buffer
+	env := (&spec.Env{Stdout: &out, Stderr: &bytes.Buffer{}}).Resolved()
+	if err := cobra.Run(context.Background(), env, root, []string{"__completeNoDesc", "--mode", ""}, cobra.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "fast\nslow\n"+directiveNoFileComp+"\n"; got != want {
+		t.Errorf("__completeNoDesc --mode = %q, want %q", got, want)
+	}
+}
+
+func TestRunCompletesPositionalArguments(t *testing.T) {
+	var seen spec.CompletionInput
+	for _, tt := range completionCases(&seen) {
+		t.Run(tt.name, func(t *testing.T) {
+			root := &spec.Command{
+				Name: "tool",
+				Commands: []*spec.Command{{
+					Name:          "open",
+					Args:          spec.RangeArgs(0, 2),
+					ArgCompletion: tt.completion,
+					Flags:         []spec.Flag{spec.BoolFlag("force", "")},
+					Run:           func(context.Context, *spec.Invocation) error { return nil },
+				}},
+			}
+			seen = spec.CompletionInput{}
+			got, directive := complete(t, root, cobra.Config{}, "open", "--force", "first", tt.toComplete)
+			if !slices.Equal(got, tt.wantValues) || directive != tt.wantDirective {
+				t.Errorf("complete = %q %s, want %q %s", got, directive, tt.wantValues, tt.wantDirective)
+			}
+			if tt.name == "func" {
+				if seen.ToComplete != tt.toComplete || !slices.Equal(seen.Args, []string{"first"}) {
+					t.Errorf("the func got %+v, want ToComplete %q and Args [first]", seen, tt.toComplete)
+				}
+			}
+
+			got, directive = complete(t, root, cobra.Config{}, "open", "first", "second", tt.toComplete)
+			if len(got) != 0 || directive != directiveNoFileComp {
+				t.Errorf("complete past the last argument = %q %s, want nothing %s", got, directive, directiveNoFileComp)
+			}
+		})
+	}
+}
+
+func TestRunCompletesTheRootsArguments(t *testing.T) {
+	root := &spec.Command{
+		Name:          "tool",
+		Args:          spec.AnyArgs(),
+		ArgCompletion: spec.CompleteChoices("one", "two"),
+		Run:           func(context.Context, *spec.Invocation) error { return nil },
+	}
+	got, directive := complete(t, root, cobra.Config{}, "t")
+	if !slices.Equal(got, []string{"two"}) || directive != directiveNoFileComp {
+		t.Errorf("complete = %q %s, want [two] %s", got, directive, directiveNoFileComp)
+	}
+}
+
+func TestRunCompletionFuncReceivesTheRunContext(t *testing.T) {
+	var got any
+	root := &spec.Command{
+		Name: "tool",
+		Args: spec.AnyArgs(),
+		ArgCompletion: spec.CompleteFunc(func(ctx context.Context, _ spec.CompletionInput) ([]string, error) {
+			got = ctx.Value(ctxKey{})
+			return nil, nil
+		}),
+		Run: func(context.Context, *spec.Invocation) error { return nil },
+	}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "marker")
+	env := (&spec.Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).Resolved()
+	if err := cobra.Run(ctx, env, root, []string{"__complete", ""}, cobra.Config{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got != "marker" {
+		t.Errorf("completion func saw context value %v, want %q", got, "marker")
+	}
+}
+
+func TestRunCompletionRunsNoHook(t *testing.T) {
+	var log []string
+	cfg := hooks(&log, []error{nil}, []error{nil})
+	cfg.Output = func(*spec.Invocation) (spec.Output, error) {
+		log = append(log, "output")
+		return spec.Output{}, nil
+	}
+	cfg.Completion = true
+	root := hookRoot(&log, nil)
+	root.Commands[0].Commands[0].ArgCompletion = spec.CompleteChoices("one")
+	got, directive := complete(t, root, cfg, "remote", "add", "")
+	if !slices.Equal(got, []string{"one"}) || directive != directiveNoFileComp {
+		t.Errorf("complete = %q %s, want [one] %s", got, directive, directiveNoFileComp)
+	}
+	if len(log) != 0 {
+		t.Errorf("completion called %q, want nothing", log)
+	}
+}
+
+func completionRoot() *spec.Command {
+	return &spec.Command{
+		Name: "tool",
+		Commands: []*spec.Command{{
+			Name: "go",
+			Run:  func(context.Context, *spec.Invocation) error { return nil },
+		}},
+	}
+}
+
+func TestRunWithoutCompletionHasNoCompletionCommand(t *testing.T) {
+	for _, args := range [][]string{{"completion"}, {"completion", "bash"}} {
+		_, _, err := run(t, completionRoot(), args...)
+		var usage *cobra.UsageError
+		if !errors.As(err, &usage) || !strings.Contains(err.Error(), `unknown command "completion"`) {
+			t.Errorf("Run(%q) = %v, want a *UsageError for the unknown command completion", args, err)
+		}
+	}
+}
+
+func TestRunWithCompletionWritesTheScript(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
+		t.Run(shell, func(t *testing.T) {
+			var out bytes.Buffer
+			env := (&spec.Env{Stdout: &out, Stderr: &bytes.Buffer{}}).Resolved()
+			err := cobra.Run(context.Background(), env, completionRoot(), []string{"completion", shell},
+				cobra.Config{Completion: true})
+			if err != nil {
+				t.Fatalf("Run(completion %s) = %v", shell, err)
+			}
+			if !strings.Contains(out.String(), "__complete") {
+				t.Errorf("completion %s wrote %q, want a script that calls __complete", shell, out.String())
+			}
+		})
+	}
+}
+
+func TestRunCompletionListsTheCompletionCommandOnlyWhenSet(t *testing.T) {
+	for _, set := range []bool{false, true} {
+		got, _ := complete(t, completionRoot(), cobra.Config{Completion: set}, "c")
+		if want := set; slices.Contains(got, "completion\tGenerate the autocompletion script for the specified shell") != want {
+			t.Errorf("Completion %v: complete c = %q, want completion listed %v", set, got, want)
+		}
 	}
 }

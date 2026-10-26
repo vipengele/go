@@ -29,10 +29,10 @@ func identity() spec.Identity {
 	}
 }
 
-// newApp builds an App holding the subcommands of newRoot, as a tool's main would. The root's
-// inherited --verbose stays on newRoot, so the App's commands do not accept it.
-func newApp() *cli.App {
-	app := cli.New(identity())
+// newApp builds an App configured by opts holding the subcommands of newRoot, as a tool's main
+// would. The root's inherited --verbose stays on newRoot, so the App's commands do not accept it.
+func newApp(opts ...cli.Option) *cli.App {
+	app := cli.New(identity(), opts...)
 	for _, cmd := range newRoot().Commands {
 		app.Add(cmd)
 	}
@@ -92,6 +92,7 @@ func TestAppExecuteArgs(t *testing.T) {
 func TestAppExecuteArgsHelp(t *testing.T) {
 	tests := []struct {
 		name    string
+		opts    []cli.Option
 		args    []string
 		want    []string
 		notWant []string
@@ -101,6 +102,20 @@ func TestAppExecuteArgsHelp(t *testing.T) {
 			args:    []string{"--help"},
 			want:    []string{"tool [command]", "greet", "Greet someone", "remote", "Manage remotes"},
 			notWant: []string{"secret", "completion", "help [command]"},
+		},
+		{
+			name:    "root --help with completion",
+			opts:    []cli.Option{cli.WithCompletion()},
+			args:    []string{"--help"},
+			want:    []string{"tool [command]", "greet", "remote", "completion"},
+			notWant: []string{"secret", "help [command]"},
+		},
+		{
+			name:    "completion --help",
+			opts:    []cli.Option{cli.WithCompletion()},
+			args:    []string{"completion", "--help"},
+			want:    []string{"tool completion [command]", "bash", "zsh", "fish", "powershell"},
+			notWant: []string{"greet"},
 		},
 		{
 			name: "no arguments",
@@ -115,7 +130,7 @@ func TestAppExecuteArgsHelp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := runApp(t, newApp(), tt.args...)
+			got := runApp(t, newApp(tt.opts...), tt.args...)
 			if got.code != cli.ExitOK || got.stderr != "" {
 				t.Fatalf("ExecuteArgs(%q) = %d, stderr %q; want 0 and no stderr", tt.args, got.code, got.stderr)
 			}
@@ -661,5 +676,85 @@ func TestWithExitCodeAcceptsARegistrableCode(t *testing.T) {
 				t.Errorf("exit code %d, want %d", got.code, code)
 			}
 		})
+	}
+}
+
+func TestAppCompletionNeedsTheOption(t *testing.T) {
+	for _, args := range [][]string{{"completion"}, {"completion", "bash"}} {
+		got := runApp(t, newApp(), args...)
+		want := result{code: cli.ExitUsage, stderr: "tool: unknown command \"completion\" for \"tool\"\n"}
+		if got != want {
+			t.Errorf("ExecuteArgs(%q) without WithCompletion\n got: %+v\nwant: %+v", args, got, want)
+		}
+	}
+}
+
+func TestWithCompletionWritesEveryShellsScript(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
+		t.Run(shell, func(t *testing.T) {
+			got := runApp(t, newApp(cli.WithCompletion()), "completion", shell)
+			if got.code != cli.ExitOK || got.stderr != "" {
+				t.Fatalf("completion %s = %d, stderr %q; want 0 and no stderr", shell, got.code, got.stderr)
+			}
+			if !strings.Contains(got.stdout, "__complete") {
+				t.Errorf("completion %s wrote %q, want a script that calls __complete", shell, got.stdout)
+			}
+		})
+	}
+}
+
+func TestWithCompletionRunsNoHook(t *testing.T) {
+	var s seen
+	called := false
+	hook := func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+		called = true
+		return ctx, errors.New("hook ran")
+	}
+	app := configApp(&s, cli.WithCompletion(), cli.WithPreRun(hook))
+	got := newConfigEnv(t, "port: [1]\n").run(t, app, "completion", "bash")
+	if got.code != cli.ExitOK || got.stderr != "" || got.stdout == "" {
+		t.Errorf("completion bash with a broken config.yaml = %+v, want 0, a script and no stderr", got)
+	}
+	if called {
+		t.Error("completion bash ran the pre-run hook")
+	}
+}
+
+func TestWithCompletionKeepsAToolsOwnCompletionCommand(t *testing.T) {
+	app := cli.New(identity(), cli.WithCompletion())
+	app.Add(&spec.Command{
+		Name:    "completion",
+		Summary: "The tool's own completion",
+		Run: func(_ context.Context, inv *spec.Invocation) error {
+			_, _ = fmt.Fprintln(inv.Env.Stdout, "own")
+			return nil
+		},
+	})
+	if got, want := runApp(t, app, "completion"), (result{code: cli.ExitOK, stdout: "own\n"}); got != want {
+		t.Errorf("completion\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+func TestAppCompletesWithoutTheOptionAndRunsNoHook(t *testing.T) {
+	var s seen
+	called := false
+	hook := func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+		called = true
+		return ctx, errors.New("hook ran")
+	}
+	app := configApp(&s, cli.WithPreRun(hook))
+	app.Add(&spec.Command{
+		Name:          "pick",
+		Summary:       "Pick a colour",
+		Args:          spec.ExactArgs(1),
+		ArgCompletion: spec.CompleteChoices("red", "green"),
+		Run:           func(context.Context, *spec.Invocation) error { return nil },
+	})
+	got := newConfigEnv(t, "port: [1]\n").run(t, app, "__complete", "pick", "")
+	if got.code != cli.ExitOK || got.stdout != "red\ngreen\n:4\n" {
+		t.Errorf("__complete pick \"\" with a broken config.yaml = %+v, want 0 and red, green, :4 on stdout", got)
+	}
+	if strings.Contains(got.stderr, "load config") || called || s.called {
+		t.Errorf("__complete ran a hook or a run function: stderr %q, hook %t, run %t", got.stderr, called, s.called)
 	}
 }

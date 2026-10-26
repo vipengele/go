@@ -330,6 +330,68 @@ func TestCommandValidateRejects(t *testing.T) {
 			wantPath:  "tool remote add",
 			wantInErr: `shorthand -f of flag --force collides with the flag inherited from command "tool remote"`,
 		},
+		{
+			name: "ArgCompletion on a command with NoArgs",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[0].Commands[1].ArgCompletion = spec.CompleteChoices("a")
+				return c
+			},
+			wantPath:  "tool remote list",
+			wantInErr: "ArgCompletion on a command that accepts no arguments",
+		},
+		{
+			name: "ArgCompletion on a command with ExactArgs(0)",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[1].Args = spec.ExactArgs(0)
+				c.Commands[1].ArgCompletion = spec.CompleteDirs()
+				return c
+			},
+			wantPath:  "tool status",
+			wantInErr: "ArgCompletion on a command that accepts no arguments",
+		},
+		{
+			name: "ArgCompletion on a command group with no Run",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[0].Args = spec.AnyArgs()
+				c.Commands[0].ArgCompletion = spec.CompleteChoices("a")
+				return c
+			},
+			wantPath:  "tool remote",
+			wantInErr: "ArgCompletion on a command with no Run",
+		},
+		{
+			name: "ArgCompletion with a nil function",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[1].ArgCompletion = spec.CompleteFunc(nil)
+				return c
+			},
+			wantPath:  "tool status",
+			wantInErr: "completion function is nil",
+		},
+		{
+			name: "completion on a bool flag",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[1].Flags = []spec.Flag{spec.BoolFlag("all", "", spec.Complete(spec.CompleteChoices("x")))}
+				return c
+			},
+			wantPath:  "tool status",
+			wantInErr: "a bool flag takes no completion",
+		},
+		{
+			name: "flag completion with a nil function",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[1].Flags = []spec.Flag{spec.StringFlag("name", "", spec.Complete(spec.CompleteFunc(nil)))}
+				return c
+			},
+			wantPath:  "tool status",
+			wantInErr: "completion function is nil",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -402,6 +464,21 @@ func TestCommandValidateDoesNotModifyTheTree(t *testing.T) {
 	_ = c.Validate()
 	if c.Commands[1].Name != before.Name || c.Commands[1].Run != nil || len(c.Commands) != 2 {
 		t.Fatal("Validate modified the tree")
+	}
+}
+
+func TestCommandValidateAcceptsCompletions(t *testing.T) {
+	complete := func(context.Context, spec.CompletionInput) ([]string, error) { return nil, nil }
+	tree := validTree()
+	tree.Commands[0].Flags = append(tree.Commands[0].Flags,
+		spec.StringFlag("config", "", spec.Complete(spec.CompleteFiles("yaml"))),
+		spec.IntFlag("port", "", spec.Complete(spec.CompleteFunc(complete))))
+	tree.Commands[0].Commands[0].ArgCompletion = spec.CompleteChoices("origin", "upstream")
+	tree.Commands[1].ArgCompletion = spec.CompleteFunc(complete)
+	tree.Commands = append(tree.Commands,
+		&spec.Command{Name: "cd", Args: spec.RangeArgs(0, 1), ArgCompletion: spec.CompleteDirs(), Run: run})
+	if err := tree.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
 	}
 }
 

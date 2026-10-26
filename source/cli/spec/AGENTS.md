@@ -5,7 +5,8 @@
 `docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md`,
 `docs/adr/0009-platform-paths-live-in-cli-spec-paths.md`,
 `docs/adr/0010-version-comparison-lives-in-cli-spec-version.md` and
-`docs/adr/0015-table-helper-lives-in-cli-spec-table.md` at the repo root.
+`docs/adr/0015-table-helper-lives-in-cli-spec-table.md` and
+`docs/adr/0020-completion-is-an-opt-in-app-option-over-a-neutral-spec-model.md` at the repo root.
 
 ## Commands (run from `source/cli/spec`)
 
@@ -47,6 +48,14 @@ golangci-lint run
   names the set flags with the variadic `NewInvocation(env, args, values, ExplicitFlags(names...))`
   (`invocation.go`); without the option nothing reads as set. `IsSet` is false for a value of
   another type under the name, as `Get` then returns the default.
+- `Completion` (`completion.go`) — how a shell completes a flag value (`spec.Complete(c)` as a
+  `FlagOption`, read back by `Flag.Completion()`) or a command's positional arguments
+  (`Command.ArgCompletion`). Built by `CompleteChoices`, `CompleteFiles(exts...)`, `CompleteDirs()` or
+  `CompleteFunc(fn)`; the zero value is `NoCompletion`, and an adapter switches on `Kind()` and reads
+  `Choices()`, `Extensions()` or `Func()`. `Validate` rejects a completion on a bool flag, a
+  `CompleteFunc` with a nil function, and an `ArgCompletion` on a command that accepts no arguments
+  or has no `Run`. A `CompletionFunc` runs in the shell's own completion process, outside any command
+  run: no `Invocation`, configuration, logger or hook, so it closes over what it reads (ADR-0020).
 - `WriteJSON(w, schema, v)` (`json.go`) — the JSON envelope: one indented object, `schema` first,
   then the keys of `v`, which must marshal to an object with no `schema` key (ADR-0014). `Output.Format()` is the
   resolved `Format` (`FormatText` or `FormatJSON`). `speccheck.AssertJSONKeys(t, v, golden)`
