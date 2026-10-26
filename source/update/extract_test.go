@@ -188,18 +188,6 @@ func TestExtractFails(t *testing.T) {
 			check:   wantExtractLimit("atk.exe", 4),
 		},
 		{
-			name:    "tar.gz has no extractor",
-			content: "archive",
-			config:  func(c Config) Config { c.AssetTemplate = ""; return c },
-			check:   wantUnsupportedFormat("tar.gz"),
-		},
-		{
-			name:    "tgz has no extractor",
-			content: "archive",
-			config:  func(c Config) Config { c.AssetTemplate = "{name}.{ext}"; c.AssetExt = "tgz"; return c },
-			check:   wantUnsupportedFormat("tgz"),
-		},
-		{
 			name:    "zip has no extractor",
 			content: "archive",
 			config:  func(c Config) Config { c.AssetTemplate = "{name}.{ext}"; c.AssetExt = "zip"; return c },

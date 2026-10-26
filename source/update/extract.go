@@ -155,6 +155,8 @@ func extractorFor(f assetFormat) extractFunc {
 	switch f {
 	case formatRaw:
 		return extractRaw
+	case formatTarGz:
+		return extractTarGz
 	default:
 		return nil
 	}
