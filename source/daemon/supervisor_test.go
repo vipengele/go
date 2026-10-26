@@ -1110,3 +1110,48 @@ func TestRunCallsStopOnceOnARunnerThatExitedWithAPanic(t *testing.T) {
 		})
 	}
 }
+
+func TestRunJoinsWorkThatEndsOnlyWhenStoppedAndReturnsAfterIt(t *testing.T) {
+	// hangGuard bounds each wait so that a Run that never returns fails the test instead of
+	// hanging it; it orders nothing.
+	const hangGuard = 10 * time.Second
+
+	cancelled, release := make(chan struct{}), make(chan struct{})
+	finished := false
+	work := Func("work", func(ctx context.Context) error {
+		<-ctx.Done()
+		close(cancelled)
+		<-release
+		finished = true
+		return ctx.Err()
+	})
+	run := startFuncRun(t, context.Background(), nil, work)
+	<-run.waiting
+	run.cancel()
+
+	select {
+	case <-cancelled:
+	case err := <-run.result:
+		t.Fatalf("Run = %v before the work saw its cancellation", err)
+	case <-time.After(hangGuard):
+		t.Fatalf("the work was not cancelled within %v of shutdown", hangGuard)
+	}
+	select {
+	case err := <-run.result:
+		t.Fatalf("Run = %v while the work is still running", err)
+	default:
+	}
+	close(release)
+
+	select {
+	case err := <-run.result:
+		if err != nil {
+			t.Errorf("Run = %v, want nil", err)
+		}
+	case <-time.After(hangGuard):
+		t.Fatalf("Run did not return within %v of the work finishing", hangGuard)
+	}
+	if !finished {
+		t.Errorf("Run returned before the work finished")
+	}
+}
