@@ -3,70 +3,81 @@ package daemon_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"time"
 
 	"go.vipengele.org/daemon"
 )
 
-// worker is a Runner whose work runs in a goroutine until Stop asks it to end. It reports on
-// started once it is running.
-type worker struct {
-	name    string
-	started chan<- struct{}
-	quit    chan struct{}
-	done    chan struct{}
-}
+// serve runs a daemon of three Runners: a background worker at the default Order, an HTTP server
+// at DefaultHTTPOrder, and a client that starts once the server is ready, calls it, then asks for
+// a restart. A requested restart is a clean exit, so serve returns nil for it.
+func serve(ctx context.Context) error {
+	var lc net.ListenConfig
+	l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	url := "http://" + l.Addr().String() + "/"
 
-func newWorker(name string, started chan<- struct{}) *worker {
-	return &worker{name: name, started: started, quit: make(chan struct{}), done: make(chan struct{})}
-}
+	worker := daemon.Func("worker", func(ctx context.Context) error {
+		<-ctx.Done()
+		fmt.Println("worker stopped")
+		return ctx.Err()
+	})
 
-func (w *worker) Name() string { return w.name }
+	srv := &http.Server{
+		ReadHeaderTimeout: 5 * time.Second,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Println("handler:", r.Method, r.URL.Path)
+			_, _ = io.WriteString(w, "hello")
+		}),
+	}
+	server := daemon.NewHTTPServerListener(srv, l)
 
-func (w *worker) Start(context.Context) error {
-	go func() {
-		defer close(w.done)
-		<-w.quit
-	}()
-	fmt.Println("started", w.name)
-	w.started <- struct{}{}
-	return nil
-}
+	client := daemon.Func("client", func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := io.ReadAll(resp.Body)
+		if closeErr := resp.Body.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Println("client got:", string(body))
+		return daemon.ErrRestartRequired
+	}, daemon.WithOrder(daemon.DefaultHTTPOrder+1))
 
-func (w *worker) Done() <-chan struct{} { return w.done }
+	sup, err := daemon.New([]daemon.Runner{client, server, worker})
+	if err != nil {
+		return err
+	}
 
-func (w *worker) Err() error { return nil }
-
-func (w *worker) Stop(context.Context) error {
-	fmt.Println("stopping", w.name)
-	close(w.quit)
-	return nil
+	err = sup.Run(ctx)
+	if daemon.RestartRequested(err) {
+		fmt.Println("restart requested")
+		return nil
+	}
+	return err
 }
 
 func ExampleSupervisor() {
-	started := make(chan struct{}, 2)
-	sup, err := daemon.New([]daemon.Runner{
-		newWorker("database", started),
-		newWorker("server", started),
-	})
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	// A daemon cancels this context from its signal handler; here it is cancelled once both
-	// Runners are running.
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-started
-		<-started
-		cancel()
-	}()
-
-	fmt.Println("run:", sup.Run(ctx))
+	// A daemon passes a context its signal handler cancels; this one stops when the client asks
+	// for a restart.
+	fmt.Println("serve:", serve(context.Background()))
 	// Output:
-	// started database
-	// started server
-	// stopping server
-	// stopping database
-	// run: <nil>
+	// handler: GET /
+	// client got: hello
+	// worker stopped
+	// restart requested
+	// serve: <nil>
 }
