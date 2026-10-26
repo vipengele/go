@@ -188,12 +188,6 @@ func TestExtractFails(t *testing.T) {
 			check:   wantExtractLimit("atk.exe", 4),
 		},
 		{
-			name:    "zip has no extractor",
-			content: "archive",
-			config:  func(c Config) Config { c.AssetTemplate = "{name}.{ext}"; c.AssetExt = "zip"; return c },
-			check:   wantUnsupportedFormat("zip"),
-		},
-		{
 			name:    "invalid config",
 			content: "bin",
 			config:  func(c Config) Config { c.Name = ""; return c },
@@ -263,18 +257,18 @@ func wantExtractLimit(name string, limit int64) func(*testing.T, error) {
 	}
 }
 
-func wantUnsupportedFormat(ext string) func(*testing.T, error) {
-	return func(t *testing.T, err error) {
-		t.Helper()
+func TestExtractorFor(t *testing.T) {
+	t.Parallel()
 
-		var formatErr *UnsupportedFormatError
-		if !errors.As(err, &formatErr) {
-			t.Fatalf("err = %v, want *UnsupportedFormatError", err)
+	for _, f := range []assetFormat{formatRaw, formatTarGz, formatZip} {
+		if extractorFor(f) == nil {
+			t.Errorf("extractorFor(%d) = nil, want an extractor", f)
 		}
+	}
 
-		if formatErr.Ext != ext {
-			t.Errorf("Ext = %q, want %q", formatErr.Ext, ext)
-		}
+	// Config.Extract reports a nil extractor as an *UnsupportedFormatError.
+	if extractorFor(assetFormat(0)) != nil {
+		t.Error("extractorFor(0) = an extractor, want nil for a format that names none")
 	}
 }
 

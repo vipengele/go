@@ -166,13 +166,14 @@ func (e *SizeLimitError) Error() string {
 	return fmt.Sprintf("update: GET %s: exceeds the limit of %d bytes", e.URL, e.Limit)
 }
 
-// ErrEmptyAsset reports a raw asset of zero bytes: a binary published as is cannot be empty.
-var ErrEmptyAsset = errors.New("update: raw asset is empty")
+// ErrEmptyAsset reports a binary of zero bytes: a raw asset, or the entry an archive holds.
+var ErrEmptyAsset = errors.New("update: binary is empty")
 
 // ErrNotGzip reports a tar.gz archive whose bytes do not start with the gzip magic number.
 var ErrNotGzip = errors.New("update: archive is not gzip-compressed")
 
-// ErrTruncatedGzip reports a tar.gz archive whose gzip stream ends before its trailer.
+// ErrTruncatedGzip reports a tar.gz archive cut short: a gzip stream that ends before its trailer,
+// or a tar stream that ends early inside an intact gzip stream.
 var ErrTruncatedGzip = errors.New("update: gzip stream is truncated")
 
 // ExtractLimitError reports an extraction that exceeded its byte cap, [Config.MaxExtractBytes].

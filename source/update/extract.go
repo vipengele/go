@@ -73,9 +73,9 @@ func (s *Staged) Discard() error {
 // The Config is resolved first, so an invalid one fails before anything is read. a must not be
 // nil and dir must not be empty; dir must exist, and nothing creates it. The format comes from the
 // Config's AssetTemplate and AssetExt, never from the archive's bytes: a raw asset is the binary
-// itself and must not be empty ([ErrEmptyAsset]). A format with no extractor is an
-// [*UnsupportedFormatError]. Inside an archive the binary is the file named BinaryName, followed
-// by ".exe" when GOOS is "windows".
+// itself. A format with no extractor is an [*UnsupportedFormatError]. Inside an archive the binary
+// is the file named BinaryName, followed by ".exe" when GOOS is "windows". In every format the
+// binary must not be empty ([ErrEmptyAsset]).
 //
 // The staged binary is a file named TempPrefix followed by a random suffix, with mode 0700 whatever
 // mode the archive records, synced to disk before Extract returns. At most MaxExtractBytes are
@@ -157,6 +157,8 @@ func extractorFor(f assetFormat) extractFunc {
 		return extractRaw
 	case formatTarGz:
 		return extractTarGz
+	case formatZip:
+		return extractZip
 	default:
 		return nil
 	}
