@@ -166,16 +166,16 @@ func (r Config) fetchArchive(ctx context.Context, sel Selection, want []byte, pr
 		err = &ChecksumMismatchError{Name: sel.Archive.Name, Want: hex.EncodeToString(want), Got: hex.EncodeToString(got)}
 	}
 
+	if err == nil {
+		err = a.finish()
+	}
+
 	if err != nil {
 		if a != nil {
 			return nil, a.discard(err)
 		}
 
 		return nil, err
-	}
-
-	if a, err = a.finish(); err != nil {
-		return nil, err // [lydite:exclude_from_mutation][finish fails only on a file the download has just written through, which no test can make unreadable]
 	}
 
 	if progress != nil {

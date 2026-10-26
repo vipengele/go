@@ -59,12 +59,8 @@ func parseChecksum(r io.Reader, name string) ([]byte, error) {
 func parseChecksumLine(line string) (digest []byte, name string, ok bool) {
 	const hexLen = 2 * sha256.Size
 
-	if len(line) <= hexLen {
-		return nil, "", false
-	}
-
-	digest, err := hex.DecodeString(line[:hexLen])
-	if err != nil {
+	digest, err := hex.DecodeString(line[:min(len(line), hexLen)])
+	if err != nil || len(digest) != sha256.Size {
 		return nil, "", false
 	}
 

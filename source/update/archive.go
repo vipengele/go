@@ -33,17 +33,17 @@ func createArchive(dir, prefix string) (*Archive, error) {
 }
 
 // finish records the size of the file and rewinds it to offset 0, ready to be returned. On a
-// failure the file is discarded and the error carries any failure to remove it.
-func (a *Archive) finish() (*Archive, error) {
+// failure the file is left in place: the caller discards it along with every other failure.
+func (a *Archive) finish() error {
 	info, err := a.f.Stat()
 	if err == nil {
 		_, err = a.f.Seek(0, io.SeekStart)
 	}
 	if err != nil {
-		return nil, a.discard(fmt.Errorf("update: rewinding temporary file: %w", err))
+		return fmt.Errorf("update: rewinding temporary file: %w", err)
 	}
 	a.size = info.Size()
-	return a, nil
+	return nil
 }
 
 // discard closes and removes the file and returns err joined with any error doing so. It is the

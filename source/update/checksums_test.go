@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -132,5 +133,50 @@ func TestParseChecksumReadError(t *testing.T) {
 	_, err := parseChecksum(iotest.ErrReader(boom), "foo.tar.gz")
 	if !errors.Is(err, boom) {
 		t.Errorf("parseChecksum() error = %v, want %v", err, boom)
+	}
+}
+
+func TestParseChecksumLine(t *testing.T) {
+	t.Parallel()
+
+	const digestC = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	tests := []struct {
+		name       string
+		line       string
+		wantDigest string
+		wantName   string
+		wantOK     bool
+	}{
+		{name: "empty", line: ""},
+		{name: "too short", line: digestC[:63]},
+		{name: "digest only", line: digestC},
+		{name: "digest and separator only", line: digestC + "  "},
+		{name: "non-hex digest", line: digestC[:63] + "z  foo.tar.gz"},
+		{name: "no separator", line: digestC + "foo.tar.gz"},
+		{name: "one more digit and no separator", line: digestC + "0"},
+		{name: "dot slash only", line: digestC + "  ./"},
+		{name: "plain", line: digestC + "  foo.tar.gz", wantDigest: digestC, wantName: "foo.tar.gz", wantOK: true},
+		{name: "binary marker", line: digestC + " *foo.tar.gz", wantDigest: digestC, wantName: "foo.tar.gz", wantOK: true},
+		{name: "dot slash", line: digestC + "  ./foo.tar.gz", wantDigest: digestC, wantName: "foo.tar.gz", wantOK: true},
+		{name: "one-character name", line: digestC + " x", wantDigest: digestC, wantName: "x", wantOK: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			digest, name, ok := parseChecksumLine(tt.line)
+
+			var wantDigest []byte
+			if tt.wantDigest != "" {
+				wantDigest, _ = hex.DecodeString(tt.wantDigest)
+			}
+
+			if !bytes.Equal(digest, wantDigest) || (digest == nil) != (wantDigest == nil) || name != tt.wantName || ok != tt.wantOK {
+				t.Errorf("parseChecksumLine(%q) = %x, %q, %v; want %x, %q, %v",
+					tt.line, digest, name, ok, wantDigest, tt.wantName, tt.wantOK)
+			}
+		})
 	}
 }

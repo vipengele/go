@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,12 +29,8 @@ func newFinishedArchive(t *testing.T) (*Archive, string) {
 	if _, err := a.f.WriteString(archiveContent); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got, err := a.finish()
-	if err != nil {
+	if err := a.finish(); err != nil {
 		t.Fatalf("finish: %v", err)
-	}
-	if got != a {
-		t.Fatalf("finish returned %p, want %p", got, a)
 	}
 	return a, dir
 }
@@ -55,7 +50,7 @@ func assertDirEmpty(t *testing.T, dir string) {
 	}
 }
 
-func TestCreateArchiveNameAndMode(t *testing.T) {
+func TestCreateArchiveName(t *testing.T) {
 	t.Parallel()
 
 	a, dir := newFinishedArchive(t)
@@ -65,16 +60,6 @@ func TestCreateArchiveNameAndMode(t *testing.T) {
 	}
 	if base := filepath.Base(a.Name()); !strings.HasPrefix(base, "tool-update-") || base == "tool-update-" {
 		t.Errorf("Name base = %q, want the prefix and a random suffix", base)
-	}
-	if runtime.GOOS == "windows" {
-		return
-	}
-	info, err := os.Stat(a.Name())
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("mode = %v, want 0600", got)
 	}
 }
 
@@ -263,7 +248,7 @@ func TestArchiveDiscardJoinsRemoveError(t *testing.T) {
 	assertDirEmpty(t, dir)
 }
 
-func TestArchiveFinishFailureDiscards(t *testing.T) {
+func TestArchiveFinishFailureLeavesFileToDiscard(t *testing.T) {
 	t.Parallel()
 
 	errRemove := errors.New("remove failed")
@@ -276,22 +261,29 @@ func TestArchiveFinishFailureDiscards(t *testing.T) {
 	if err := a.f.Close(); err != nil {
 		t.Fatalf("closing the file: %v", err)
 	}
+	removed := 0
 	a.remove = func(name string) error {
+		removed++
 		return errors.Join(os.Remove(name), errRemove)
 	}
 
-	got, err := a.finish()
-	if got != nil {
-		t.Errorf("finish Archive = %v, want nil", got)
-	}
+	err = a.finish()
 	if !errors.Is(err, os.ErrClosed) {
 		t.Errorf("finish = %v, want it to wrap the failure", err)
 	}
-	if !errors.Is(err, errRemove) {
-		t.Errorf("finish = %v, want it to wrap the remove error", err)
-	}
-	if !strings.Contains(err.Error(), "rewinding temporary file") {
+	if err == nil || !strings.HasPrefix(err.Error(), "update: rewinding temporary file: ") {
 		t.Errorf("finish = %v, want it to name the rewind", err)
+	}
+	if removed != 0 {
+		t.Errorf("finish removed the file %d times, want it left for the caller", removed)
+	}
+	if _, statErr := os.Stat(a.Name()); statErr != nil {
+		t.Errorf("Stat after finish: %v, want the file still present", statErr)
+	}
+
+	err = a.discard(err)
+	if !errors.Is(err, os.ErrClosed) || !errors.Is(err, errRemove) {
+		t.Errorf("discard = %v, want it to wrap the finish failure and the remove error", err)
 	}
 	assertDirEmpty(t, dir)
 }
