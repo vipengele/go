@@ -684,10 +684,59 @@ func TestBudgetReader(t *testing.T) {
 				t.Errorf("read %d bytes, want at most the limit %d", len(got), tc.limit)
 			}
 
-			if _, err := b.Read(make([]byte, 1)); err == nil {
-				t.Error("Read after the limit = nil, want the limit error again")
+			if n, err := b.Read(make([]byte, 1)); n != 0 || err == nil {
+				t.Errorf("Read after the limit = %d, %v, want 0 and the limit error again", n, err)
 			}
 		})
+	}
+}
+
+func TestBudgetReaderBoundaryInEveryChunkSize(t *testing.T) {
+	t.Parallel()
+
+	const limit = 4
+
+	for _, size := range []int{limit, limit + 1} {
+		for _, chunk := range []int{1, 2, 3, limit, limit + 1, 2 * limit} {
+			t.Run(fmt.Sprintf("%d bytes in reads of %d", size, chunk), func(t *testing.T) {
+				t.Parallel()
+
+				b := &budgetReader{r: strings.NewReader(strings.Repeat("x", size)), limit: limit, name: "entry"}
+
+				var (
+					got int
+					err error
+				)
+
+				buf := make([]byte, chunk)
+				for err == nil {
+					var n int
+					n, err = b.Read(buf)
+					got += n
+				}
+
+				if got != limit {
+					t.Errorf("read %d bytes, want %d", got, limit)
+				}
+
+				if size == limit {
+					if !errors.Is(err, io.EOF) {
+						t.Errorf("Read at the end = %v, want io.EOF", err)
+					}
+
+					return
+				}
+
+				wantExtractLimit("entry", limit)(t, err)
+
+				n, err := b.Read(buf)
+				if n != 0 {
+					t.Errorf("Read after the limit = %d bytes, want 0", n)
+				}
+
+				wantExtractLimit("entry", limit)(t, err)
+			})
+		}
 	}
 }
 
@@ -720,7 +769,7 @@ func TestCopyTarGzEntryRejectsAStreamThatIsNotGzip(t *testing.T) {
 
 	var dst bytes.Buffer
 
-	err := copyTarGzEntry(context.Background(), bytes.NewReader(data), int64(len(data)), 0, 1<<20, &dst)
+	err := copyTarGzEntry(context.Background(), bytes.NewReader(data), int64(len(data)), "atk", 1<<20, &dst)
 	if !errors.Is(err, gzip.ErrHeader) {
 		t.Errorf("copyTarGzEntry = %v, want an error matching gzip.ErrHeader", err)
 	}

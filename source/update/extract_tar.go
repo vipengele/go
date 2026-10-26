@@ -14,12 +14,12 @@ import (
 const gzipMagic = "\x1f\x8b"
 
 // extractTarGz is the extractFunc of a tar.gz archive. The binary is the one regular file whose
-// base name is name, at any depth; a directory of that name is not it. No match is a
-// [*BinaryNotFoundError], more than one a [*MultipleBinariesError], and a match of zero bytes is
-// [ErrEmptyAsset].
+// base name is name, at any depth, as [isTarBinary] decides; a directory of that name is not it. No
+// match is a [*BinaryNotFoundError], more than one a [*MultipleBinariesError], and a match of zero
+// bytes is [ErrEmptyAsset].
 //
 // Every entry is checked before anything is written to dst, and any one entry the policy of
-// [tarEntryKind] refuses rejects the whole archive with an [*UnsafeEntryError], wherever it sits
+// [checkTarEntry] refuses rejects the whole archive with an [*UnsafeEntryError], wherever it sits
 // relative to the binary. The archive is therefore read twice: the first pass checks every entry
 // and reads the gzip stream to its trailer, the second copies the binary's body to dst.
 //
@@ -32,12 +32,11 @@ func extractTarGz(ctx context.Context, src io.ReaderAt, size int64, name string,
 		return err
 	}
 
-	index, err := scanTarGz(ctx, src, size, name, limit)
-	if err != nil {
+	if err := scanTarGz(ctx, src, size, name, limit); err != nil {
 		return err
 	}
 
-	return copyTarGzEntry(ctx, src, size, index, limit, dst)
+	return copyTarGzEntry(ctx, src, size, name, limit, dst)
 }
 
 // checkGzipMagic returns [ErrNotGzip] unless the size bytes src reads start with the gzip magic.
@@ -61,73 +60,79 @@ func checkGzipMagic(src io.ReaderAt, size int64) error {
 }
 
 // scanTarGz reads every entry of the archive, checking each against the entry policy, and the
-// gzip stream past the end of the tar to its trailer. It returns the index, in the order
-// [tar.Reader.Next] returns entries, of the one regular file named name.
-func scanTarGz(ctx context.Context, src io.ReaderAt, size int64, name string, limit int64) (int, error) {
+// gzip stream past the end of the tar to its trailer. It returns nil when exactly one entry is the
+// binary named name and it is not empty.
+func scanTarGz(ctx context.Context, src io.ReaderAt, size int64, name string, limit int64) error {
 	s, err := openTarGz(ctx, src, size, limit)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	var (
 		matches []string
-		index   int
 		empty   bool
 	)
 
-	for i := 0; ; i++ {
+	for {
 		hdr, err := s.next(ctx)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 
 		if err != nil {
-			return 0, err
+			return err
 		}
 
-		kind, err := tarEntryKind(hdr)
-		if err != nil {
-			return 0, err
+		if err := checkTarEntry(hdr); err != nil {
+			return err
 		}
 
-		if kind == tarEntryFile && path.Base(hdr.Name) == name {
+		if isTarBinary(hdr, name) {
 			matches = append(matches, hdr.Name)
-			index = i
 			empty = hdr.Size == 0
 		}
 	}
 
 	if err := s.drain(); err != nil {
-		return 0, err
+		return err
 	}
 
 	switch {
 	case len(matches) == 0:
-		return 0, &BinaryNotFoundError{Name: name}
+		return &BinaryNotFoundError{Name: name}
 	case len(matches) > 1:
-		return 0, &MultipleBinariesError{Name: name, Entries: matches}
+		return &MultipleBinariesError{Name: name, Entries: matches}
 	case empty:
-		return 0, fmt.Errorf("%w: archive entry %q", ErrEmptyAsset, matches[0])
+		return fmt.Errorf("%w: archive entry %q", ErrEmptyAsset, matches[0])
 	}
 
-	return index, nil
+	return nil
 }
 
-// copyTarGzEntry copies the body of the entry at index, which [scanTarGz] found, to dst.
-func copyTarGzEntry(ctx context.Context, src io.ReaderAt, size int64, index int, limit int64, dst io.Writer) error {
+// copyTarGzEntry copies the body of the binary named name, the one entry [scanTarGz] found, to
+// dst. The archive is the verified file the first pass read, so the first entry [isTarBinary]
+// accepts is that one.
+func copyTarGzEntry(ctx context.Context, src io.ReaderAt, size int64, name string, limit int64, dst io.Writer) error {
 	s, err := openTarGz(ctx, src, size, limit)
 	if err != nil {
 		return err
 	}
 
-	var hdr *tar.Header
-	for range index + 1 {
-		if hdr, err = s.next(ctx); err != nil {
+	for {
+		hdr, err := s.next(ctx)
+		if err != nil {
 			return err
 		}
-	}
 
-	return tarGzError(copyBounded(dst, s.tr, hdr.Name, limit))
+		if isTarBinary(hdr, name) {
+			return tarGzError(copyBounded(dst, s.tr, hdr.Name, limit))
+		}
+	}
+}
+
+// isTarBinary reports whether hdr is the binary named name: a regular file whose base name is name.
+func isTarBinary(hdr *tar.Header, name string) bool {
+	return hdr.Typeflag == tar.TypeReg && path.Base(hdr.Name) == name
 }
 
 // tarGzStream is one pass over a tar.gz archive: a tar reader over the gzip stream, decompressed
@@ -201,24 +206,14 @@ func tarGzError(err error) error {
 	return err
 }
 
-// tarKind is what the entry policy makes of a tar entry it accepts.
-type tarKind int
-
-const (
-	// tarEntryFile is a regular file: the binary, when its base name is the binary's.
-	tarEntryFile tarKind = iota + 1
-	// tarEntrySkipped is an entry that is accepted and never extracted.
-	tarEntrySkipped
-)
-
-// tarEntryKind applies the entry policy to hdr, returning an [*UnsafeEntryError] for an entry it
+// checkTarEntry applies the entry policy to hdr, returning an [*UnsafeEntryError] for an entry it
 // refuses. Accepted are:
 //
 //   - a regular file, [tar.TypeReg]; the reader reports the legacy [tar.TypeRegA] as TypeReg, or
 //     as TypeDir when the name ends in a slash;
-//   - a directory, [tar.TypeDir], skipped;
-//   - a global PAX header, [tar.TypeXGlobalHeader], skipped. Its name is not a path in the
-//     archive, and writers commonly give it an absolute one, so it is not checked.
+//   - a directory, [tar.TypeDir];
+//   - a global PAX header, [tar.TypeXGlobalHeader]. Its name is not a path in the archive, and
+//     writers commonly give it an absolute one, so it is not checked.
 //
 // Every other type is refused: a hard link, [tar.TypeLink], and a symbolic link,
 // [tar.TypeSymlink], whatever their target, because a link can stand for the binary or reach
@@ -227,33 +222,28 @@ const (
 // ([tar.TypeGNUSparse]); and any type the reader does not know. Per-file PAX headers and GNU long
 // names and link names ([tar.TypeXHeader], [tar.TypeGNULongName], [tar.TypeGNULongLink]) are
 // merged by the reader into the entry they describe and never reach the policy. The name of an
-// accepted entry must pass [unsafeEntryName].
-func tarEntryKind(hdr *tar.Header) (tarKind, error) {
-	var kind tarKind
-
+// accepted regular file or directory must pass [unsafeEntryName].
+func checkTarEntry(hdr *tar.Header) error {
 	switch hdr.Typeflag {
 	case tar.TypeXGlobalHeader:
-		return tarEntrySkipped, nil
-	case tar.TypeReg:
-		kind = tarEntryFile
-	case tar.TypeDir:
-		kind = tarEntrySkipped
+		return nil
+	case tar.TypeReg, tar.TypeDir:
 	case tar.TypeLink:
-		return 0, &UnsafeEntryError{Name: hdr.Name, Reason: "hard link"}
+		return &UnsafeEntryError{Name: hdr.Name, Reason: "hard link"}
 	case tar.TypeSymlink:
-		return 0, &UnsafeEntryError{Name: hdr.Name, Reason: "symbolic link"}
+		return &UnsafeEntryError{Name: hdr.Name, Reason: "symbolic link"}
 	default:
-		return 0, &UnsafeEntryError{
+		return &UnsafeEntryError{
 			Name:   hdr.Name,
 			Reason: fmt.Sprintf("type %q is not a regular file or a directory", hdr.Typeflag),
 		}
 	}
 
 	if reason, unsafe := unsafeEntryName(hdr.Name); unsafe {
-		return 0, &UnsafeEntryError{Name: hdr.Name, Reason: reason}
+		return &UnsafeEntryError{Name: hdr.Name, Reason: reason}
 	}
 
-	return kind, nil
+	return nil
 }
 
 // budgetReader reads at most limit bytes from r in total. Reading past them is an
@@ -272,9 +262,7 @@ func (b *budgetReader) Read(p []byte) (int, error) {
 		return 0, b.exceeded()
 	}
 
-	if rest := readBound(b.limit) - b.read; int64(len(p)) > rest {
-		p = p[:rest]
-	}
+	p = p[:min(int64(len(p)), readBound(b.limit)-b.read)]
 
 	n, err := b.r.Read(p)
 	b.read += int64(n)

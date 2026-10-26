@@ -373,6 +373,25 @@ func TestExtractCancellation(t *testing.T) {
 	}
 }
 
+func TestExtractChecksContextBeforeCreatingTheStagedFile(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	a, archiveDir := newExtractArchive(t, []byte("bin"))
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	// Creating the staged file in a missing directory fails, so only a ctx check that precedes it
+	// returns context.Canceled.
+	_, err := rawConfig(t).Extract(ctx, a, missing)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Extract = %v, want context.Canceled before the staged file is created", err)
+	}
+
+	assertArchiveClosed(t, a, archiveDir)
+}
+
 func TestExtractJoinsArchiveCloseError(t *testing.T) {
 	t.Parallel()
 
@@ -580,6 +599,16 @@ func TestUnsafeEntryName(t *testing.T) {
 		{name: "drive with backslash", entry: `C:\atk`, unsafe: true},
 		{name: "drive relative", entry: "C:atk", unsafe: true},
 		{name: "lower-case drive", entry: "c:/atk", unsafe: true},
+		{name: "one byte", entry: "a"},
+		{name: "drive letter alone", entry: "a:", unsafe: true},
+		{name: "first lower-case drive letter", entry: "a:x", unsafe: true},
+		{name: "last lower-case drive letter", entry: "z:x", unsafe: true},
+		{name: "first upper-case drive letter", entry: "A:x", unsafe: true},
+		{name: "last upper-case drive letter", entry: "Z:x", unsafe: true},
+		{name: "byte below a before a colon", entry: "`:x"},
+		{name: "byte above z before a colon", entry: "{:x"},
+		{name: "byte below A before a colon", entry: "@:x"},
+		{name: "byte above Z before a colon", entry: "[:x"},
 		{name: "NUL byte", entry: "atk\x00.txt", unsafe: true},
 	}
 

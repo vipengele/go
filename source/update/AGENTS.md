@@ -53,7 +53,7 @@ golangci-lint run
   bounded copy (`copyBounded`), the context-aware reader and the entry-name check
   (`unsafeEntryName`).
 - `extract_tar.go` — the tar.gz extractor: the validating pass, the copy pass, the entry policy
-  (`tarEntryKind`) and the cumulative budget reader.
+  (`checkTarEntry`) and the cumulative budget reader.
 - `extract_zip.go` — the zip extractor and its entry policy (`zipEntryCheck`).
 - `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
   `Release` in the redirect and REST-API modes, in-memory tar.gz and zip archive (`BuildArchive`) and

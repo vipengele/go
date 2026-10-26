@@ -60,12 +60,11 @@ func scanZip(ctx context.Context, files []*zip.File, name string, insecure bool)
 			return nil, err
 		}
 
-		regular, err := zipEntryCheck(f, insecure)
-		if err != nil {
+		if err := zipEntryCheck(f, insecure); err != nil {
 			return nil, err
 		}
 
-		if regular && path.Base(f.Name) == name {
+		if f.Mode().IsRegular() && path.Base(f.Name) == name {
 			matches = append(matches, f.Name)
 			match = f
 		}
@@ -85,27 +84,24 @@ func scanZip(ctx context.Context, files []*zip.File, name string, insecure bool)
 	return match, nil
 }
 
-// zipEntryCheck applies the entry policy to f, returning whether it is a regular file, or an
-// [*UnsafeEntryError] for an entry it refuses. Accepted are a regular file and a directory, whose
-// name ends in a slash or whose mode says so. Refused are a symbolic link, whatever its target,
-// because it can stand for the binary or reach outside the archive; any other mode that is not a
-// regular file or a directory, such as a device, a named pipe or a socket; and a name that fails
-// [unsafeEntryName]. When insecure is true, [zip.ErrInsecurePath] is the cause of whichever refusal
-// is returned.
-func zipEntryCheck(f *zip.File, insecure bool) (regular bool, err error) {
+// zipEntryCheck applies the entry policy to f, returning an [*UnsafeEntryError] for an entry it
+// refuses. Accepted are a regular file and a directory, whose name ends in a slash or whose mode
+// says so. Refused are a symbolic link, whatever its target, because it can stand for the binary or
+// reach outside the archive; any other mode that is not a regular file or a directory, such as a
+// device, a named pipe or a socket; and a name that fails [unsafeEntryName]. When insecure is
+// true, [zip.ErrInsecurePath] is the cause of whichever refusal is returned.
+func zipEntryCheck(f *zip.File, insecure bool) error {
 	var cause error
 	if insecure {
 		cause = zip.ErrInsecurePath
 	}
 
 	switch t := f.Mode().Type(); t {
-	case 0:
-		regular = true
-	case fs.ModeDir:
+	case 0, fs.ModeDir:
 	case fs.ModeSymlink:
-		return false, &UnsafeEntryError{Name: f.Name, Reason: "symbolic link", Err: cause}
+		return &UnsafeEntryError{Name: f.Name, Reason: "symbolic link", Err: cause}
 	default:
-		return false, &UnsafeEntryError{
+		return &UnsafeEntryError{
 			Name:   f.Name,
 			Reason: fmt.Sprintf("mode %v is not a regular file or a directory", t),
 			Err:    cause,
@@ -113,10 +109,10 @@ func zipEntryCheck(f *zip.File, insecure bool) (regular bool, err error) {
 	}
 
 	if reason, unsafe := unsafeEntryName(f.Name); unsafe {
-		return false, &UnsafeEntryError{Name: f.Name, Reason: reason, Err: cause}
+		return &UnsafeEntryError{Name: f.Name, Reason: reason, Err: cause}
 	}
 
-	return regular, nil
+	return nil
 }
 
 // copyZipEntry copies the body of f to dst through a [ctxReader], writing at most limit bytes. A
