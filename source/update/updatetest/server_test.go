@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"go.vipengele.org/update/asset"
@@ -219,6 +220,13 @@ func TestServerServesTheAssets(t *testing.T) {
 		t.Errorf("checksums = %d %q, want 200 %q", sums.status, sums.body, want)
 	}
 
+	// Without an explicit type net/http guesses one from the name's extension or the content.
+	for name, resp := range map[string]response{"archive": archive, "checksums": sums} {
+		if ct := resp.header.Get("Content-Type"); ct != "application/octet-stream" {
+			t.Errorf("%s Content-Type = %q, want application/octet-stream", name, ct)
+		}
+	}
+
 	if a, c := s.Requests(updatetest.TargetArchive), s.Requests(updatetest.TargetChecksums); a != 1 || c != 1 {
 		t.Errorf("Requests(TargetArchive, TargetChecksums) = %d, %d, want 1, 1", a, c)
 	}
@@ -332,6 +340,34 @@ func TestNewServerRejectsAnIncompleteRelease(t *testing.T) {
 	if !f.failed {
 		t.Error("NewServer accepted a release with no Tag or ArchiveName")
 	}
+}
+
+func TestNewReleaseAndNewServerAreTestHelpers(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		call func(tb testing.TB)
+	}{
+		{"NewRelease", func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, testBinary) }},
+		{"NewServer", func(tb testing.TB) { updatetest.NewServer(tb, newRelease(t)) }},
+	} {
+		h := &helperTB{TB: t}
+		tc.call(h)
+		if got := h.helpers.Load(); got == 0 {
+			t.Errorf("%s called Helper %d times, want it to mark itself a helper so a failure names its caller", tc.name, got)
+		}
+	}
+}
+
+// helperTB passes every call to the test it embeds and counts the calls to Helper.
+type helperTB struct {
+	testing.TB
+	helpers atomic.Int64
+}
+
+func (h *helperTB) Helper() {
+	h.helpers.Add(1)
+	h.TB.Helper()
 }
 
 // fatalTB records a Fatalf and its message, ending its goroutine as testing.T does, instead of
