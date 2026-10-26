@@ -167,12 +167,8 @@ func (r *httpRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("daemon: runner %q: %w", r.name, ErrNilListener)
 	}
 	if !r.useListener {
-		addr := r.srv.Addr
-		if addr == "" {
-			addr = ":http"
-		}
 		var lc net.ListenConfig
-		l, err := lc.Listen(ctx, "tcp", addr)
+		l, err := lc.Listen(ctx, "tcp", listenAddress(r.srv.Addr))
 		if err != nil {
 			return fmt.Errorf("daemon: runner %q: %w", r.name, err)
 		}
@@ -201,6 +197,14 @@ func (r *httpRunner) Start(ctx context.Context) error {
 		close(r.done)
 	}()
 	return nil
+}
+
+// listenAddress returns the address Start binds for srv.Addr addr: ":http" when addr is empty.
+func listenAddress(addr string) string {
+	if addr == "" {
+		return ":http"
+	}
+	return addr
 }
 
 // Done is closed once Serve has returned and any drain Stop began has ended.

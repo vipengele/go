@@ -831,6 +831,75 @@ func TestRunStartPhaseEndingBetweenTwoStartsStopsTheStartedRunners(t *testing.T)
 	}
 }
 
+func TestRunStartReturningTheEndOfItsContextAfterThePhaseEndedIsNoStartFailure(t *testing.T) {
+	expired := fmt.Errorf("dial: %w", context.DeadlineExceeded)
+	tests := []struct {
+		name string
+		// endPhase ends the start phase from inside b's Start, before it returns.
+		endPhase bool
+		// cancelRun cancels the run context as the start phase ends.
+		cancelRun bool
+		// panics makes b's Start panic with expired instead of returning it.
+		panics bool
+		want   []wantErr
+	}{
+		{name: "start timeout", endPhase: true, want: []wantErr{{is: ErrStartTimeout}}},
+		{name: "parent cancel", endPhase: true, cancelRun: true},
+		{name: "phase still running", want: []wantErr{{is: context.DeadlineExceeded}}},
+		{name: "panic after the phase ended", endPhase: true, panics: true, want: []wantErr{{panicked: "b"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			rec := &recorder{}
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			for _, r := range []*scriptedRunner{a, b, c} {
+				r.rec = rec
+			}
+			b.startErr = expired
+			b.startPanics, b.startPanicValue = tt.panics, expired
+			s, err := New([]Runner{a, b, c})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			defer cancelRun()
+			var ended atomic.Bool
+			s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+				return phaseContext{Context: context.WithoutCancel(parent), ended: &ended}, func() {}
+			}
+			s.newStopContext = func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			}
+			b.onStart = func() {
+				if tt.cancelRun {
+					cancelRun()
+				}
+				ended.Store(tt.endPhase)
+			}
+
+			err = s.Run(runCtx)
+			if tt.want == nil {
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			} else {
+				checkJoined(t, err, tt.want)
+				if !strings.Contains(err.Error(), `"b"`) {
+					t.Errorf("Run = %v, want it to name %q", err, "b")
+				}
+			}
+			if tt.endPhase && !tt.panics && errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Run = %v, want the end of the start context not reported as a start failure", err)
+			}
+			checkOrder(t, "start", rec.startOrder(), []string{"a", "b"})
+			checkOrder(t, "stop", rec.stopOrder(), []string{"b", "a"})
+			cancelRun()
+			settle(t, baseline)
+		})
+	}
+}
+
 func TestRunReportsAStopProblemAndStillStopsTheRest(t *testing.T) {
 	stopBoom := errors.New("stop boom")
 	tests := []struct {
@@ -1256,5 +1325,164 @@ func TestRunJoinsWorkThatEndsOnlyWhenStoppedAndReturnsAfterIt(t *testing.T) {
 	}
 	if !finished {
 		t.Errorf("Run returned before the work finished")
+	}
+}
+
+// heldStart is a Runner whose Start reports on entered and then, ignoring its context, waits for
+// the test to send on start what it comes to. Stop reports on stopped and returns stopErr. Done
+// closes when the test calls exit.
+type heldStart struct {
+	name    string
+	entered chan struct{}
+	start   chan func() error
+	stopped chan struct{}
+	stopErr error
+	done    chan struct{}
+	err     error
+}
+
+func newHeldStart(name string) *heldStart {
+	return &heldStart{
+		name:    name,
+		entered: make(chan struct{}),
+		start:   make(chan func() error),
+		stopped: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (r *heldStart) Name() string { return r.name }
+
+func (r *heldStart) Start(context.Context) error {
+	close(r.entered)
+	return (<-r.start)()
+}
+
+func (r *heldStart) Done() <-chan struct{} { return r.done }
+
+func (r *heldStart) Err() error { return r.err }
+
+func (r *heldStart) Stop(context.Context) error {
+	close(r.stopped)
+	return r.stopErr
+}
+
+// exit ends the Runner with err.
+func (r *heldStart) exit(err error) {
+	r.err = err
+	close(r.done)
+}
+
+// graceEndingInFinish is a stop context whose grace period ends once Run has seen Stop return:
+// the first Done, which Run selects on while Stop runs, never closes, and every later Done is
+// closed, as is Err from then on.
+type graceEndingInFinish struct {
+	context.Context
+	calls atomic.Int32
+	ended chan struct{}
+}
+
+func newGraceEndingInFinish() *graceEndingInFinish {
+	c := &graceEndingInFinish{Context: context.Background(), ended: make(chan struct{})}
+	close(c.ended)
+	return c
+}
+
+func (c *graceEndingInFinish) Done() <-chan struct{} {
+	if c.calls.Add(1) == 1 {
+		return nil
+	}
+	return c.ended
+}
+
+func (c *graceEndingInFinish) Err() error {
+	if c.calls.Load() > 1 {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func TestRunWaitsForAStartThatReturnsAfterStop(t *testing.T) {
+	boom, stopBoom := errors.New("boom"), errors.New("stop boom")
+	tests := []struct {
+		name string
+		// start is what the late Start comes to; nil leaves it pending past the grace period.
+		start func() error
+		// exitErr, when exit is set, is the Err the Runner exits with once its late Start returned.
+		exit    bool
+		exitErr error
+		stopErr error
+		want    []wantErr
+	}{
+		{name: "late error is reported", start: func() error { return boom }, want: []wantErr{{is: boom}}},
+		{name: "late panic is reported", start: func() error { panic("oops") }, want: []wantErr{{panicked: "late"}}},
+		{
+			name:  "late end of its context is dropped",
+			start: func() error { return fmt.Errorf("start: %w", context.Canceled) },
+		},
+		{name: "late nil then a clean exit", start: func() error { return nil }, exit: true},
+		{
+			name:    "late nil then an exit error",
+			start:   func() error { return nil },
+			exit:    true,
+			exitErr: boom,
+			want:    []wantErr{{is: boom}},
+		},
+		{name: "start pending past the grace period", want: []wantErr{{is: ErrStopTimeout}}},
+		{
+			name:    "start pending past the grace period after a stop error",
+			stopErr: stopBoom,
+			want:    []wantErr{{is: stopBoom}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			r := newHeldStart("late")
+			r.stopErr = tt.stopErr
+			if tt.exit {
+				r.exit(tt.exitErr)
+			}
+			s, err := New([]Runner{r})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if tt.start == nil {
+				s.newStopContext = func() (context.Context, context.CancelFunc) {
+					return newGraceEndingInFinish(), func() {}
+				}
+			} else {
+				s.newStopContext = func() (context.Context, context.CancelFunc) {
+					return context.WithCancel(context.Background())
+				}
+			}
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			defer cancelRun()
+			result := make(chan error, 1)
+			go func() { result <- s.Run(runCtx) }()
+
+			<-r.entered
+			cancelRun()
+			<-r.stopped
+			if tt.start != nil {
+				r.start <- tt.start
+			}
+			err = <-result
+			if tt.start == nil {
+				r.start <- func() error { return nil }
+			}
+
+			if tt.want == nil {
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			} else {
+				checkJoined(t, err, tt.want)
+				if !strings.Contains(err.Error(), `"late"`) {
+					t.Errorf("Run = %v, want it to name %q", err, "late")
+				}
+			}
+			settle(t, baseline)
+		})
 	}
 }

@@ -81,6 +81,8 @@ func TestRestartRequired(t *testing.T) {
 		{"nil", nil, false},
 		{"unrelated", errors.New("other"), false},
 		{"wrapped unrelated", fmt.Errorf("run: %w", ErrRunnerExited), false},
+		{"joined with no members", emptyJoin{}, false},
+		{"wrapped join with no members", fmt.Errorf("run: %w", emptyJoin{}), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -90,6 +92,12 @@ func TestRestartRequired(t *testing.T) {
 		})
 	}
 }
+
+// emptyJoin is a joined error with no members.
+type emptyJoin struct{}
+
+func (emptyJoin) Error() string   { return "empty" }
+func (emptyJoin) Unwrap() []error { return nil }
 
 type valueError struct{}
 

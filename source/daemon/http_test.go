@@ -458,3 +458,67 @@ func TestHTTPStopsFirstByDefault(t *testing.T) {
 	defer mu.Unlock()
 	checkOrder(t, "stop", stops, []string{"http", "worker"})
 }
+
+func TestHTTPErrIsNilUntilDoneCloses(t *testing.T) {
+	r := NewHTTPServerListener(&http.Server{Handler: http.NotFoundHandler()}, listen(t))
+	if err := r.Err(); err != nil {
+		t.Errorf("Err before Start = %v, want nil", err)
+	}
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if isClosed(r.Done()) {
+		t.Fatal("Done closed before Stop")
+	}
+	if err := r.Err(); err != nil {
+		t.Errorf("Err while serving = %v, want nil", err)
+	}
+	if err := r.Stop(context.Background()); err != nil {
+		t.Errorf("Stop = %v, want nil", err)
+	}
+}
+
+func TestHTTPSecondStopWaitsForTheFirstDrain(t *testing.T) {
+	b := newBlockingServer()
+	l := listen(t)
+	r := NewHTTPServerListener(b.srv, l)
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	resp := get(t, l.Addr().String())
+	<-b.entered
+
+	first := make(chan error, 1)
+	go func() { first <- r.Stop(context.Background()) }()
+	<-b.shutdown
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.Stop(expired); !errors.Is(err, context.Canceled) {
+		t.Errorf("second Stop with a done context during the drain = %v, want context.Canceled", err)
+	}
+	second := make(chan error, 1)
+	go func() { second <- r.Stop(context.Background()) }()
+
+	close(b.release)
+	if got := <-resp; got.err != nil || got.body != "ok" {
+		t.Errorf("response = %q, %v, want \"ok\"", got.body, got.err)
+	}
+	if err := <-second; err != nil {
+		t.Errorf("second Stop = %v, want nil", err)
+	}
+	if !isClosed(r.Done()) {
+		t.Error("second Stop returned nil before Done closed")
+	}
+	if err := <-first; err != nil {
+		t.Errorf("first Stop = %v, want nil", err)
+	}
+}
+
+func TestHTTPListenAddressDefaultsAnEmptyAddressToTheHTTPPort(t *testing.T) {
+	for addr, want := range map[string]string{"": ":http", "127.0.0.1:0": "127.0.0.1:0", ":8080": ":8080"} {
+		if got := listenAddress(addr); got != want {
+			t.Errorf("listenAddress(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}
