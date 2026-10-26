@@ -21,6 +21,17 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   cannot be resolved makes the hook and every group run function return that error. `version`
   carries `SkipConfig` (set in `App.version`); annotations are per command, never inherited. No
   `--config` flag, no per-key flags, no seeded file;
+  `WithCompletion()` (`app.go`) is opt-in: it sets `cobra.Config.Completion`, which gives the
+  root cobra's own `completion` command (`completion <shell>` writes the bash, zsh, fish or
+  powershell script to stdout, exit 0; `completion <shell> --help` says how to load it; root
+  `--help` lists it). Without it `completion` is an unknown command (exit 2), and the
+  package-level `Execute` / `ExecuteArgs` never have it. It is cobra's command, not a
+  `spec.Command`, so no hook runs around it (a broken `config.yaml` cannot stop it) and it needs no
+  `SkipConfig` / `SkipUpdateCheck`; a tool's own `completion` command is kept instead. The option
+  gates only that command: cobra's hidden `__complete`, which a script calls, is live in every App
+  and in the package-level entry points, and runs no hook and no `Output` resolver, so nothing a
+  hook writes reaches the shell. A `spec.CompleteFunc` therefore finds no config or logger in its
+  context and must close over what it needs;
   `WithLogging()` (`logging.go`, ADR-0018) is opt-in and needs `WithVerbose` and `WithQuiet` (else
   every execution is an `invalid command tree`, exit 1): it declares inherited `--log-level`
   (no default, so unset is told from set by `IsSet`) and `--log-format` (`text`|`json`, default
@@ -95,8 +106,8 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `tool: greet: unknown flag: --bogus`.
 - `internal/cobra` — the only code that imports cobra. `Run(ctx, env, root, args, Config)` builds a
   fresh cobra tree per execution from a validated `*spec.Command`, so one tree may run any number of
-  times, concurrently. `Config` carries the per-run `Output` resolver and the `PreRun` / `PostRun`
-  hooks as plain funcs; each invocation names the flags `pflag` reports `Changed` with
+  times, concurrently. `Config` carries the per-run `Output` resolver, the `PreRun` / `PostRun`
+  hooks as plain funcs and the `Completion` switch for cobra's `completion` command; each invocation names the flags `pflag` reports `Changed` with
   `spec.ExplicitFlags`; a post-run error after a successful run is a `*HookError`, never a
   `*UsageError`.
 - `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). `Info.IsDev`

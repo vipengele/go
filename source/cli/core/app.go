@@ -25,8 +25,8 @@ import (
 // The App owns the "version" command, which prints its build information as the version
 // package describes: every root it runs holds it after the added commands, so every tool
 // answers "version --json". A tool does not add a command named "version"; one it adds makes
-// the tree invalid. Under [WithConfig] it owns the "config" group as well, as that option
-// describes.
+// the tree invalid. Under [WithConfig] it owns the "config" group as well, and under
+// [WithCompletion] the "completion" command, as those options describe.
 //
 // Every execution assembles its own root command, named by the identity's Name and holding the
 // added commands as its subcommands, and leaves the added commands as they are, so a built App
@@ -70,6 +70,8 @@ type settings struct {
 	// config binds the configuration [WithConfig] gives to each execution, and is nil without
 	// that option.
 	config configurer
+	// completion gives every root the "completion" command of [WithCompletion].
+	completion bool
 }
 
 // Option configures an [App] when [New] builds it.
@@ -99,6 +101,24 @@ func New(identity spec.Identity, opts ...Option) *App {
 // [buildinfo.Read] reports for the running binary.
 func WithBuildInfo(info buildinfo.Info) Option {
 	return func(s *settings) { s.buildInfo = &info }
+}
+
+// WithCompletion gives the App the "completion" command, which writes the completion script of
+// bash, zsh, fish or powershell, as "completion <shell>" names it, to standard output and exits
+// with [ExitOK]; "completion <shell> --help" describes how to load that script. Without it the App has no
+// "completion" command: "completion" is an unknown command and root --help does not list it.
+//
+// The command runs neither the hook of [WithConfig] nor any [WithPreRun] or [WithPostRun] hook,
+// nor does it need [spec.SkipConfig] or [spec.SkipUpdateCheck], so a configuration file that
+// does not load or a failing update check cannot stop a script from being written. A tool that
+// adds a command named "completion" of its own keeps that command instead.
+//
+// The completions a script asks for are answered by the hidden request every App takes, with or
+// without this option: it writes the candidates of the [spec.Completion] of the flag or the
+// positional arguments being completed, and runs no hook, so a completion function finds no
+// configuration or logger in its context and closes over what it needs.
+func WithCompletion() Option {
+	return func(s *settings) { s.completion = true }
 }
 
 // WithExitCode makes [App.Execute] and [App.ExecuteArgs] exit with code for an error that
@@ -168,8 +188,8 @@ func (a *App) Execute() int {
 // ExecuteArgs runs the App with args against env, and returns the exit code, as the
 // package-level [ExecuteArgs] runs the App's root command: a root named by the identity's Name,
 // with no run function of its own and the added commands, in the order they were added, as its
-// subcommands followed by the "config" group under [WithConfig] and the "version" command, and
-// the standard flags the App's options opt
+// subcommands followed by the "config" group under [WithConfig] and the "version" command, the
+// "completion" command under [WithCompletion], and the standard flags the App's options opt
 // into as its inherited flags. Given no argument, the root writes its help to env.Stdout and
 // returns [ExitOK].
 // The root is checked on every call, so an App with two commands of one name, "version"
@@ -214,7 +234,7 @@ func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	conf := a.configFor(env.Resolved().LookupEnv)
 	pre, post := a.settings.hookFuncs(chainHooks(conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
-	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post}
+	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post, Completion: a.settings.completion}
 	return executeArgsEnded(context.Background(), env, a.root(flags, logFlags, conf.group), args, cfg,
 		logFlags.flush, a.settings.exitMatchers, a.settings.errorRenderers...)
 }

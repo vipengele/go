@@ -140,7 +140,8 @@ func processEnv() (*spec.Env, error) {
 // when the tree is invalid. It then selects the command args name and calls its run function.
 // --help, on any command, writes the command's help to env.Stdout and returns [ExitOK]. A command
 // with subcommands and no Run, given no positional argument, does the same. There is no help or
-// completion subcommand.
+// completion subcommand: "completion" is an unknown command, as it is in an [App] without
+// [WithCompletion]. The hidden request a completion script sends is answered, and runs no hook.
 //
 // Every error is written to env.Stderr as a tree, unless it carries a [spec.ReportedError]: the
 // run function has then shown it already, and nothing is written. The tree's first line is
