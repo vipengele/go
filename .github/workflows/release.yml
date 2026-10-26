@@ -212,6 +212,20 @@ jobs:
             exit 1
           fi
       - run: go build ./...
+      # CI never runs Windows (ADR-0019), so a project's `*_windows.go` files,
+      # in any of its packages, are vetted by a cross-compile, which writes no
+      # artefacts. A project without one skips the vet step.
+      - id: windows
+        name: detect *_windows.go
+        run: |
+          if [[ -n "$(find . -name '*_windows.go' -not -path './vendor/*' -print -quit)" ]]; then
+            echo "files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "files=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: GOOS=windows go vet
+        if: steps.windows.outputs.files == 'true'
+        run: GOOS=windows go vet ./...
       - run: go vet ./...
       - run: go test -race -shuffle=on ./...
 
