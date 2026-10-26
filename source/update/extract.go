@@ -111,12 +111,12 @@ func (c Config) extract(ctx context.Context, a *Archive, dir string) (*Staged, e
 		return nil, errNoStagingDir
 	}
 
-	extract := extractorFor(r.format())
-	if extract == nil {
-		return nil, &UnsupportedFormatError{Ext: r.AssetExt}
+	extract, err := r.extractor()
+	if err == nil {
+		err = ctx.Err()
 	}
 
-	if err := ctx.Err(); err != nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -148,6 +148,17 @@ func (c Config) extract(ctx context.Context, a *Archive, dir string) (*Staged, e
 // past it, it returns an [*ExtractLimitError]. It checks ctx before each entry and reads through a
 // [ctxReader], so a cancelled ctx stops it with an error matching ctx.Err().
 type extractFunc func(ctx context.Context, src io.ReaderAt, size int64, name string, limit int64, dst io.Writer) error
+
+// extractor returns the extractFunc for the format a resolved Config derives, or an
+// [*UnsupportedFormatError] when the format has none.
+func (c Config) extractor() (extractFunc, error) {
+	extract := extractorFor(c.format())
+	if extract == nil {
+		return nil, &UnsupportedFormatError{Ext: c.AssetExt}
+	}
+
+	return extract, nil
+}
 
 // extractorFor returns the extractFunc for format f, or nil for a format with no extractor, which
 // [Config.Extract] reports as an [*UnsupportedFormatError].

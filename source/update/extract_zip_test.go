@@ -456,29 +456,6 @@ func TestScanZipRejectsAnInsecureArchiveWithNoUnsafeEntry(t *testing.T) {
 	}
 }
 
-func TestZipLocalName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		local bool
-	}{
-		{name: "", local: true},
-		{name: "atk", local: true},
-		{name: "./bin/atk", local: true},
-		{name: "a/../atk", local: true},
-		{name: "../atk"},
-		{name: "/atk"},
-		{name: `bin\atk`},
-	}
-
-	for _, tc := range tests {
-		if got := zipLocalName(tc.name); got != tc.local {
-			t.Errorf("zipLocalName(%q) = %v, want %v", tc.name, got, tc.local)
-		}
-	}
-}
-
 func TestExtractZipBudget(t *testing.T) {
 	t.Parallel()
 

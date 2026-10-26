@@ -13,8 +13,10 @@ saw:
   limit. A wrong CRC (`zip.ErrChecksum`) is known only after the whole body is copied, so dst already holds bytes;
   `Config.Extract` discards the staged file.
 - `zip.NewReader` returns `zip.ErrInsecurePath` with a usable reader, but only when GODEBUG `zipinsecurepath=0`, and
-  the error names no entry. `scanZip` therefore applies `unsafeEntryName` to every name regardless of GODEBUG, and
-  when `NewReader` reported the error it also refuses names `filepath.IsLocal` rejects (`zipLocalName`), attaching
-  `zip.ErrInsecurePath` as the cause. A test for that mapping uses `t.Setenv`, so it cannot be parallel.
+  the error names no entry. `scanZip` therefore applies `unsafeEntryName` to every name regardless of GODEBUG and,
+  when `NewReader` reported the error, attaches `zip.ErrInsecurePath` as the cause of the first entry it refuses;
+  an archive `NewReader` flagged in which no entry is refused is still rejected, with an unnamed
+  `*UnsafeEntryError`. A test for that mapping uses `t.Setenv`, so it cannot be parallel; the tar.gz equivalent
+  (`tar.ErrInsecurePath`, GODEBUG `tarinsecurepath=0`) is the same.
 - An encrypted entry (flag 0x1) is rejected only when it is the selected one; an unselected encrypted entry is never
   read.

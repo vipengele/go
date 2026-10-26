@@ -690,3 +690,74 @@ func TestBudgetReader(t *testing.T) {
 		})
 	}
 }
+
+// failingReaderAt is an io.ReaderAt whose every read fails with err.
+type failingReaderAt struct{ err error }
+
+func (f failingReaderAt) ReadAt([]byte, int64) (int, error) { return 0, f.err }
+
+func TestExtractTarGzWrapsAReadError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("disk gone")
+
+	var dst bytes.Buffer
+
+	err := extractTarGz(context.Background(), failingReaderAt{err: cause}, 16, "atk", 1<<20, &dst)
+	if !errors.Is(err, cause) {
+		t.Errorf("extractTarGz = %v, want an error matching the read error", err)
+	}
+
+	if dst.Len() != 0 {
+		t.Errorf("dst holds %d bytes, want none", dst.Len())
+	}
+}
+
+func TestCopyTarGzEntryRejectsAStreamThatIsNotGzip(t *testing.T) {
+	t.Parallel()
+
+	data := []byte("this is not a gzip stream")
+
+	var dst bytes.Buffer
+
+	err := copyTarGzEntry(context.Background(), bytes.NewReader(data), int64(len(data)), 0, 1<<20, &dst)
+	if !errors.Is(err, gzip.ErrHeader) {
+		t.Errorf("copyTarGzEntry = %v, want an error matching gzip.ErrHeader", err)
+	}
+
+	if dst.Len() != 0 {
+		t.Errorf("dst holds %d bytes, want none", dst.Len())
+	}
+}
+
+// TestExtractTarGzMapsErrInsecurePath sets GODEBUG, so it cannot run in parallel.
+func TestExtractTarGzMapsErrInsecurePath(t *testing.T) {
+	t.Setenv("GODEBUG", "tarinsecurepath=0")
+
+	for _, entry := range []string{"../atk", "a/../../atk"} {
+		t.Run(entry, func(t *testing.T) {
+			data := tarGzOf(t, tarFile("bin/atk", "binary"), tarFile(entry, "x"))
+
+			zr, err := gzip.NewReader(bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("gzip.NewReader: %v", err)
+			}
+
+			tr := tar.NewReader(zr)
+			for err == nil {
+				_, err = tr.Next()
+			}
+
+			if !errors.Is(err, tar.ErrInsecurePath) {
+				t.Fatalf("tar.Reader.Next = %v, want ErrInsecurePath", err)
+			}
+
+			_, err = extractTarGzArchive(t, context.Background(), data, nil)
+
+			var unsafeErr *UnsafeEntryError
+			if !errors.As(err, &unsafeErr) || unsafeErr.Name != entry || !errors.Is(err, tar.ErrInsecurePath) {
+				t.Errorf("Extract = %v, want an *UnsafeEntryError for %q matching tar.ErrInsecurePath", err, entry)
+			}
+		})
+	}
+}

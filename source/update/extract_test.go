@@ -735,3 +735,16 @@ func TestExtractErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigExtractorUnsupportedFormat(t *testing.T) {
+	t.Parallel()
+
+	c := Config{AssetTemplate: "{name}.{ext}", AssetExt: "tar.xz"}
+
+	extract, err := c.extractor()
+
+	var unsupported *UnsupportedFormatError
+	if !errors.As(err, &unsupported) || unsupported.Ext != "tar.xz" || extract != nil {
+		t.Errorf("extractor = %v, %v, want nil and an *UnsupportedFormatError for %q", extract, err, "tar.xz")
+	}
+}

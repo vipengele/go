@@ -8,8 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"path"
-	"path/filepath"
-	"strings"
 )
 
 // zipFlagEncrypted is the general-purpose flag bit of a zip entry whose body is encrypted.
@@ -49,8 +47,8 @@ func extractZip(ctx context.Context, src io.ReaderAt, size int64, name string, l
 
 // scanZip checks every entry of files against the entry policy and returns the one regular file
 // named name. insecure is whether [zip.NewReader] reported [zip.ErrInsecurePath]: the entry it
-// refers to is then reported with that error as its cause, and the archive is rejected even when
-// no entry is found to be the one.
+// refers to is then the first entry refused, with that error as its cause, and an archive in which
+// no entry is refused is rejected with an [*UnsafeEntryError] that has no name.
 func scanZip(ctx context.Context, files []*zip.File, name string, insecure bool) (*zip.File, error) {
 	var (
 		matches []string
@@ -92,8 +90,8 @@ func scanZip(ctx context.Context, files []*zip.File, name string, insecure bool)
 // name ends in a slash or whose mode says so. Refused are a symbolic link, whatever its target,
 // because it can stand for the binary or reach outside the archive; any other mode that is not a
 // regular file or a directory, such as a device, a named pipe or a socket; and a name that fails
-// [unsafeEntryName]. When insecure is true, a name [zip.NewReader] counts as not local is refused
-// too, with [zip.ErrInsecurePath] as the cause of whichever refusal is returned.
+// [unsafeEntryName]. When insecure is true, [zip.ErrInsecurePath] is the cause of whichever refusal
+// is returned.
 func zipEntryCheck(f *zip.File, insecure bool) (regular bool, err error) {
 	var cause error
 	if insecure {
@@ -118,17 +116,7 @@ func zipEntryCheck(f *zip.File, insecure bool) (regular bool, err error) {
 		return false, &UnsafeEntryError{Name: f.Name, Reason: reason, Err: cause}
 	}
 
-	if insecure && !zipLocalName(f.Name) {
-		return false, &UnsafeEntryError{Name: f.Name, Reason: "not a local path", Err: cause}
-	}
-
 	return regular, nil
-}
-
-// zipLocalName reports whether [zip.NewReader] counts name as local: empty, or local by
-// [filepath.IsLocal] and free of backslashes.
-func zipLocalName(name string) bool {
-	return name == "" || (filepath.IsLocal(name) && !strings.Contains(name, `\`))
 }
 
 // copyZipEntry copies the body of f to dst through a [ctxReader], writing at most limit bytes. A
