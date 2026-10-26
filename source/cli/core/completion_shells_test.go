@@ -20,6 +20,9 @@ type shellLoad struct {
 	program string
 	// required fails the test, rather than skipping the load, when program is not on PATH.
 	required bool
+	// file is the name the script is written under. PowerShell runs a dot-sourced path only when
+	// it ends in .ps1, and hands any other file to the desktop's opener.
+	file string
 	// marker is a string every generated script for shell contains.
 	marker string
 	// args run program so that it loads the script named by $COMPLETION_SCRIPT and then prints
@@ -38,6 +41,7 @@ func shellLoads() []shellLoad {
 			shell:    "bash",
 			program:  "bash",
 			required: true,
+			file:     "tool.bash",
 			marker:   "complete -o default -F __start_tool tool",
 			args: []string{"--noprofile", "--norc", "-c",
 				`source "$COMPLETION_SCRIPT" && complete -p tool`},
@@ -46,6 +50,7 @@ func shellLoads() []shellLoad {
 		{
 			shell:   "zsh",
 			program: "zsh",
+			file:    "tool.zsh",
 			marker:  "#compdef tool",
 			// compinit defines compdef, which the script calls on load; -D writes no dump file
 			// and -u skips the ownership check of the fpath directories.
@@ -57,6 +62,7 @@ func shellLoads() []shellLoad {
 		{
 			shell:   "fish",
 			program: "fish",
+			file:    "tool.fish",
 			marker:  "complete -c tool",
 			// complete -c with no other option prints the completions registered for the command.
 			args: []string{"-c", `source $COMPLETION_SCRIPT; and complete -c tool`},
@@ -65,6 +71,7 @@ func shellLoads() []shellLoad {
 		{
 			shell:   "powershell",
 			program: "pwsh",
+			file:    "tool.ps1",
 			marker:  "Register-ArgumentCompleter -CommandName 'tool'",
 			// Stop turns any error the script raises into a non-zero exit.
 			args: []string{"-NoProfile", "-NonInteractive", "-Command",
@@ -123,7 +130,7 @@ func TestCompletionScriptLoadsInItsShell(t *testing.T) {
 			}
 
 			home := t.TempDir()
-			script := filepath.Join(t.TempDir(), "tool."+sl.shell)
+			script := filepath.Join(t.TempDir(), sl.file)
 			if err := os.WriteFile(script, []byte(got.stdout), 0o600); err != nil {
 				t.Fatal(err)
 			}
