@@ -111,10 +111,10 @@ func Install(opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("completioninstall: invalid identity: %w", err)
 	}
 	s := newSeams(opts)
-	envVar, err := opts.Identity.EnvVar(NoCompletionEnvSuffix)
-	if err != nil {
-		return Result{}, fmt.Errorf("completioninstall: invalid identity: %w", err)
-	}
+	// EnvVar cannot fail once Validate passes: the prefix is a valid identifier of at most
+	// spec.MaxEnvPrefixLen bytes, NoCompletionEnvSuffix is one, and the joined name stays within
+	// the length an environment variable allows.
+	envVar, _ := opts.Identity.EnvVar(NoCompletionEnvSuffix)
 	if s.env(envVar) == "1" {
 		return Result{Skipped: true, Reason: ReasonDisabled}, nil
 	}
@@ -139,6 +139,7 @@ func Install(opts Options) (Result, error) {
 
 	exe := opts.ExecutablePath
 	if exe == "" {
+		var err error
 		if exe, err = s.executable(); err != nil {
 			return res, fmt.Errorf("completioninstall: locating the executable: %w", err)
 		}

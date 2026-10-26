@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -624,4 +625,191 @@ func TestRunReportsANonZeroExitWithItsStderr(t *testing.T) {
 	if _, err := run(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("run succeeded for a missing executable")
 	}
+}
+
+func TestInstallOptOutVariableWithALongestPrefix(t *testing.T) {
+	opts := hermetic(t, t.TempDir(), nil)
+	opts.Identity.EnvPrefix = strings.Repeat("A", spec.MaxEnvPrefixLen)
+	opts.LookupEnv = func(key string) (string, bool) {
+		if key == opts.Identity.EnvPrefix+"_NO_COMPLETION" {
+			return "1", true
+		}
+		return "", false
+	}
+	opts.Shell = Bash
+	forbidRun(t, &opts)
+
+	res, err := Install(opts)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if want := (Result{Skipped: true, Reason: ReasonDisabled}); res != want {
+		t.Errorf("Install = %+v, want %+v", res, want)
+	}
+}
+
+func TestXDGOrHome(t *testing.T) {
+	tests := []struct {
+		name   string
+		xdg    string
+		home   string
+		def    []string
+		want   string
+		wantOK bool
+	}{
+		{name: "xdg set", xdg: "/xdg", home: "/home/u", def: []string{".config"}, want: "/xdg", wantOK: true},
+		{name: "home and default", home: "/home/u", def: []string{".local", "share"}, want: "/home/u/.local/share", wantOK: true},
+		{name: "neither", def: []string{".config"}, want: "", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := xdgOrHome(tt.xdg, tt.home, tt.def...)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("xdgOrHome(%q, %q, %q) = %q, %v, want %q, %v",
+					tt.xdg, tt.home, tt.def, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestNewSeamsDefaultsToTheRealProcess(t *testing.T) {
+	s := newSeams(Options{})
+	if s.goos != runtime.GOOS {
+		t.Errorf("goos = %q, want %q", s.goos, runtime.GOOS)
+	}
+	same := func(name string, got, want any) {
+		t.Helper()
+		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(want).Pointer() {
+			t.Errorf("%s is not the real implementation", name)
+		}
+	}
+	same("lookupEnv", s.lookupEnv, os.LookupEnv)
+	same("userHomeDir", s.userHomeDir, os.UserHomeDir)
+	same("brewPrefix", s.brewPrefix, brewPrefix)
+	same("run", s.run, run)
+	same("writeFile", s.writeFile, writeFileAtomic)
+	same("executable", s.executable, os.Executable)
+	same("readFile", s.readFile, os.ReadFile)
+	same("dirWritable", s.dirWritable, dirWritable)
+}
+
+func TestNewSeamsKeepsTheGivenSeams(t *testing.T) {
+	s := newSeams(hermetic(t, t.TempDir(), nil))
+	if s.goos != "linux" {
+		t.Errorf("goos = %q, want linux", s.goos)
+	}
+	if _, err := s.brewPrefix(); err == nil || err.Error() != "brew not installed" {
+		t.Errorf("brewPrefix error = %v, want the given seam's", err)
+	}
+}
+
+// fakeBrew makes a `brew` executable running the sh body the only program on PATH.
+func fakeBrew(t *testing.T, body string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("a shell script is not an executable on windows")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	dir := t.TempDir()
+	script := "#!" + sh + "\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "brew"), []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func TestBrewPrefixTrimsTheOutput(t *testing.T) {
+	fakeBrew(t, `[ "$1" = --prefix ] || exit 9; echo '/opt/homebrew'`)
+
+	got, err := brewPrefix()
+	if err != nil || got != "/opt/homebrew" {
+		t.Errorf("brewPrefix = %q, %v, want %q", got, err, "/opt/homebrew")
+	}
+}
+
+func TestBrewPrefixFailureIsAnError(t *testing.T) {
+	fakeBrew(t, `echo '/opt/homebrew'; echo 'brew broke' >&2; exit 1`)
+
+	got, err := brewPrefix()
+	if err == nil || !strings.Contains(err.Error(), "brew broke") {
+		t.Errorf("brewPrefix error = %v, want the exit carrying stderr", err)
+	}
+	if got != "" {
+		t.Errorf("brewPrefix = %q on failure, want \"\"", got)
+	}
+}
+
+func TestWriteFileAtomicFailsWhenTheTempFileCannotBeCreated(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "atk")
+	steps := realSteps()
+	steps.createTemp = func(string, string) (*os.File, error) { return nil, errors.New("no space") }
+	steps.rename = func(string, string) error {
+		t.Error("rename called without a temporary file")
+		return errors.New("unexpected call")
+	}
+
+	if err := steps.write(target, []byte("new"), 0o644); err == nil || !strings.Contains(err.Error(), "no space") {
+		t.Fatalf("write error = %v, want the create failure", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("target exists after a failed write: %v", err)
+	}
+}
+
+func TestWriteFileAtomicRemovesTheTempFileWhenWritingFails(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "atk")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	steps := realSteps()
+	var created string
+	steps.createTemp = func(dir, pattern string) (*os.File, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		created = f.Name()
+		// A closed file fails every write, as a full disk or a revoked handle does.
+		_ = f.Close()
+		return f, nil
+	}
+	steps.rename = func(string, string) error {
+		t.Error("rename called after a failed write")
+		return errors.New("unexpected call")
+	}
+
+	if err := steps.write(target, []byte("new"), 0o644); err == nil {
+		t.Fatal("write succeeded into a closed file")
+	}
+	if _, err := os.Stat(created); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("temporary file %s remains: %v", created, err)
+	}
+	assertNoTempFiles(t, dir)
+	if got := readString(t, target); got != "old" {
+		t.Errorf("target holds %q, want it untouched", got)
+	}
+}
+
+func TestWriteFileAtomicFailsInAReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory's mode bits do not restrict writes on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o555); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if err := writeFileAtomic(filepath.Join(dir, "atk"), []byte("x"), 0o644); err == nil {
+		t.Fatal("writeFileAtomic succeeded in a read-only directory")
+	}
+	assertNoTempFiles(t, dir)
 }
