@@ -21,5 +21,16 @@
 // is removed on every failure and by [Archive.Close]. [WithProgress] reports the archive's progress.
 // HTTPS is not enforced; the digest check is the integrity guarantee.
 //
+// [Config.Extract] turns the verified [*Archive] into a [*Staged] binary: a new file, mode 0700 and
+// synced, in a directory the caller supplies, so that a rename into place stays on one filesystem.
+// The format comes from the Config, never from the archive's bytes: an AssetTemplate without {ext}
+// names a raw binary, and otherwise the AssetExt is "tar.gz" or "tgz" for a gzip-compressed tar, or
+// "zip". Every entry of an archive is checked before anything is written, and one unsafe entry (an
+// absolute or ".." path, a link, a device) rejects the whole archive with an [*UnsafeEntryError].
+// The binary is the regular file named BinaryName, with ".exe" on a Windows GOOS, at any depth. The
+// bytes written are bounded by MaxExtractBytes. Extract closes the archive, removing its temporary
+// file, whether it succeeds or fails. [Staged.Keep] leaves the file on disk and [Staged.Discard]
+// removes it; whichever is called first decides.
+//
 // The package depends on no command-line framework.
 package update
