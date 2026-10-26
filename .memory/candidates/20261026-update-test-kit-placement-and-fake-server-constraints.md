@@ -21,7 +21,8 @@ Explored 2026-10-26 for issue vipengele/go#57 (sub-issue of #8 "Self-update core
   lists update's contents without a test kit and puts cobra only in `updatecmd`.
 - Precedent: `source/cli/core/logging/logtest` is a public subpackage of a project, documented in
   source/cli/core/AGENTS.md:151 and logging/doc.go:33. Subpackage `asset/` also exists in update.
-  update has no internal/ (AGENTS.md "Single public package `update` plus `asset/`").
+  update has no internal/; its public subpackages are `asset/` and `updatetest/` (source/update/AGENTS.md
+  Structure).
 - Fake server must match: redirect path = GET `<WebURL>/<owner>/<repo>/releases/latest` answering 3xx with
   Location ending `/<owner>/<repo>/releases/tag/<tag>` (not followed); API path =
   `<APIURL>/repos/<owner>/<repo>/releases/latest` and `.../releases?per_page=100` (prereleases); assets are
