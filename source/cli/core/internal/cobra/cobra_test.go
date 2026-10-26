@@ -747,6 +747,22 @@ func TestRunCompletesFlagValues(t *testing.T) {
 	}
 }
 
+func TestRunCompletesFlagValuesWithoutDescriptions(t *testing.T) {
+	root := &spec.Command{
+		Name:  "tool",
+		Flags: []spec.Flag{spec.StringFlag("mode", "the mode", spec.Complete(spec.CompleteChoices("fast", "slow")))},
+		Run:   func(context.Context, *spec.Invocation) error { return nil },
+	}
+	var out bytes.Buffer
+	env := (&spec.Env{Stdout: &out, Stderr: &bytes.Buffer{}}).Resolved()
+	if err := cobra.Run(context.Background(), env, root, []string{"__completeNoDesc", "--mode", ""}, cobra.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "fast\nslow\n"+directiveNoFileComp+"\n"; got != want {
+		t.Errorf("__completeNoDesc --mode = %q, want %q", got, want)
+	}
+}
+
 func TestRunCompletesPositionalArguments(t *testing.T) {
 	var seen spec.CompletionInput
 	for _, tt := range completionCases(&seen) {

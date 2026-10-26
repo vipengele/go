@@ -160,9 +160,9 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 			return nil, fmt.Errorf("command %q: %w", c.Name, err)
 		}
 		if fn := completionFunc(f.Completion(), nil); complete && fn != nil {
-			if err := cmd.RegisterFlagCompletionFunc(f.Name(), fn); err != nil {
-				return nil, fmt.Errorf("command %q: %w", c.Name, err)
-			}
+			// Registration fails only for a flag the command lacks or one registered already;
+			// define has just created this one and nothing else registers it.
+			_ = cmd.RegisterFlagCompletionFunc(f.Name(), fn)
 		}
 		visible = append(visible, f)
 	}
@@ -289,18 +289,14 @@ func completionFunc(c spec.Completion, limit func() (int, bool)) spf.CompletionF
 			return exts, spf.ShellCompDirectiveFilterFileExt
 		case spec.DirsCompletion:
 			return nil, spf.ShellCompDirectiveFilterDirs
-		case spec.FuncCompletion:
-			ctx := cmd.Context()
-			if ctx == nil {
-				ctx = context.Background()
-			}
-			values, err := fn(ctx, spec.CompletionInput{ToComplete: toComplete, Args: slices.Clone(args)})
-			if err != nil {
-				return nil, spf.ShellCompDirectiveNoFileComp
-			}
-			return values, spf.ShellCompDirectiveNoFileComp
 		}
-		return nil, spf.ShellCompDirectiveDefault
+		// The one kind left is [spec.FuncCompletion]. The command's context is the one Run was
+		// given, which cobra sets on every command it executes.
+		values, err := fn(cmd.Context(), spec.CompletionInput{ToComplete: toComplete, Args: slices.Clone(args)})
+		if err != nil {
+			return nil, spf.ShellCompDirectiveNoFileComp
+		}
+		return values, spf.ShellCompDirectiveNoFileComp
 	}
 }
 
