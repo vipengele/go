@@ -35,6 +35,8 @@ dependabot:
     directory: /source/cli/state
   - ecosystem: gomod
     directory: /source/filelock
+  - ecosystem: npm
+    directory: /tools/vanity-worker
 pipeline:
   ci:
     stages:
