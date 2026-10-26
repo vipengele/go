@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 )
 
@@ -148,7 +149,7 @@ func (r Config) fetchArchive(ctx context.Context, sel Selection, want []byte, pr
 		h := sha256.New()
 		pw := &progressWriter{total: total, report: progress}
 
-		written, err = io.Copy(io.MultiWriter(a.f, h, pw), io.LimitReader(resp.Body, r.MaxDownloadBytes+1))
+		written, err = io.Copy(io.MultiWriter(a.f, h, pw), io.LimitReader(resp.Body, readBound(r.MaxDownloadBytes)))
 		if err != nil {
 			return fmt.Errorf("update: GET %s: %w", rawURL, err)
 		}
@@ -182,6 +183,17 @@ func (r Config) fetchArchive(ctx context.Context, sel Selection, want []byte, pr
 	}
 
 	return a, nil
+}
+
+// readBound is how many bytes to read under a cap of limit so that a body over the cap is seen: one
+// more than limit, saturating at [math.MaxInt64], where a body cannot exceed the cap and the extra
+// byte would overflow to a negative bound that reads nothing.
+func readBound(limit int64) int64 {
+	if limit == math.MaxInt64 {
+		return limit
+	}
+
+	return limit + 1
 }
 
 // get makes one GET request for asset through the resolved HTTPClient, following redirects and

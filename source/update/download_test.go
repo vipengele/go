@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -229,6 +230,16 @@ func TestDownloadSucceeds(t *testing.T) {
 			name:    "streamed at the cap",
 			archive: serveChunked(dlContent),
 			cfg:     func(c *Config) { c.MaxDownloadBytes = n },
+		},
+		{
+			name:    "content length under a cap of MaxInt64",
+			archive: serveBody(dlContent),
+			cfg:     func(c *Config) { c.MaxDownloadBytes = math.MaxInt64 },
+		},
+		{
+			name:    "streamed under a cap of MaxInt64",
+			archive: serveChunked(dlContent),
+			cfg:     func(c *Config) { c.MaxDownloadBytes = math.MaxInt64 },
 		},
 		{
 			name: "checksums size hint at the cap",
