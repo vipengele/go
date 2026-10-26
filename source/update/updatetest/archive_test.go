@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 	"testing"
 
 	"go.vipengele.org/update/asset"
@@ -186,4 +187,26 @@ func ExampleBuildArchive() {
 	}
 	// Output:
 	// tool -rwxr-xr-x
+}
+
+func TestBuildArchiveRejectsAnEntryTheFormatCannotHold(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		ext   string
+		entry updatetest.Entry
+	}{
+		{updatetest.ExtTarGz, updatetest.Entry{Name: "to\x00ol", Mode: 0o755, Body: []byte("binary")}},
+		{updatetest.ExtZip, updatetest.Entry{Name: "tool/", Mode: 0o755, Body: []byte("binary")}},
+	} {
+		t.Run(tc.ext, func(t *testing.T) {
+			t.Parallel()
+			data, err := updatetest.BuildArchive(tc.ext, append(entries(), tc.entry))
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", tc.entry.Name)) {
+				t.Errorf("BuildArchive error = %v, want one naming the entry %q", err, tc.entry.Name)
+			}
+			if data != nil {
+				t.Errorf("BuildArchive returned %d bytes with its error", len(data))
+			}
+		})
+	}
 }

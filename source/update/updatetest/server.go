@@ -1,15 +1,16 @@
 package updatetest
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"runtime"
 	"slices"
-	"strconv"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Release is the one release a [Server] publishes.
@@ -87,11 +88,15 @@ type Server struct {
 	sums   []byte
 	routes map[string]Target
 
-	mu      sync.Mutex
-	closed  bool
-	done    chan struct{}
-	counts  map[Target]int
-	blocked map[Target]chan struct{}
+	// blocked and blockedOnce hold one entry per Target from NewServer on and are never
+	// written after it, so they are read without mu.
+	blocked     map[Target]chan struct{}
+	blockedOnce map[Target]*sync.Once
+
+	mu     sync.Mutex
+	closed bool
+	done   chan struct{}
+	counts map[Target]int
 }
 
 // NewServer starts a Server publishing rel with the faults and the serving mode opts set, and
@@ -106,17 +111,19 @@ func NewServer(t testing.TB, rel Release, opts ...Option) *Server {
 	}
 
 	s := &Server{
-		t:       t,
-		rel:     rel,
-		done:    make(chan struct{}),
-		counts:  map[Target]int{},
-		blocked: map[Target]chan struct{}{},
+		t:           t,
+		rel:         rel,
+		done:        make(chan struct{}),
+		counts:      map[Target]int{},
+		blocked:     map[Target]chan struct{}{},
+		blockedOnce: map[Target]*sync.Once{},
 	}
 	for _, opt := range opts {
 		opt(&s.opts)
 	}
 	for _, target := range []Target{TargetLatest, TargetLatestAPI, TargetArchive, TargetChecksums} {
 		s.blocked[target] = make(chan struct{})
+		s.blockedOnce[target] = &sync.Once{}
 	}
 
 	listed := rel.Archive
@@ -179,16 +186,10 @@ func (s *Server) Requests(target Target) int {
 }
 
 // Blocked returns a channel closed once a request to target has started waiting on the gate
-// [Slow] gave for it. It is never closed for a target with no Slow option.
+// [Slow] gave for it. It is never closed for a target with no Slow option, and it is nil, never
+// ready, for a value that is not one of the Target constants.
 func (s *Server) Blocked(target Target) <-chan struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ch, ok := s.blocked[target]
-	if !ok {
-		ch = make(chan struct{})
-		s.blocked[target] = ch
-	}
-	return ch
+	return s.blocked[target]
 }
 
 // downloadPath returns the escaped request path of the release's asset called name.
@@ -230,9 +231,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case TargetLatestAPI:
 		s.serveAPI(w)
 	case TargetArchive:
-		s.serveAsset(w, s.rel.ArchiveName, s.rel.Archive)
+		s.serveAsset(w, r, s.rel.ArchiveName, s.rel.Archive)
 	case TargetChecksums:
-		s.serveAsset(w, s.rel.ChecksumsName, s.sums)
+		s.serveAsset(w, r, s.rel.ChecksumsName, s.sums)
 	}
 }
 
@@ -255,14 +256,7 @@ func (s *Server) wait(r *http.Request, target Target) bool {
 		return true
 	}
 
-	s.mu.Lock()
-	ch := s.blocked[target]
-	select {
-	case <-ch:
-	default:
-		close(ch)
-	}
-	s.mu.Unlock()
+	s.blockedOnce[target].Do(func() { close(s.blocked[target]) })
 
 	select {
 	case <-gate:
@@ -312,24 +306,19 @@ func (s *Server) serveAPI(w http.ResponseWriter) {
 		rel.Assets = append(rel.Assets, apiAsset{Name: a.name, BrowserDownloadURL: s.AssetURL(a.name), Size: int64(len(a.body))})
 	}
 
-	body, err := json.Marshal(rel)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// The object is a few hundred bytes, under the response buffer, so net/http sets its
+	// Content-Length. Encode fails only on a write error, which leaves the client nothing to read.
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	_, _ = w.Write(body)
+	_ = json.NewEncoder(w).Encode(rel)
 }
 
 // serveAsset answers the download of the asset called name with body, or 404 Not Found when it is
-// a [MissingAsset].
-func (s *Server) serveAsset(w http.ResponseWriter, name string, body []byte) {
+// a [MissingAsset]. The answer carries the body's Content-Length and no Last-Modified.
+func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request, name string, body []byte) {
 	if s.opts.missing[name] {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	_, _ = w.Write(body)
+	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(body))
 }

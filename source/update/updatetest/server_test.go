@@ -316,6 +316,15 @@ func TestServerReportsNothingForExpectedRoutes(t *testing.T) {
 	}
 }
 
+func TestNewReleaseFailsOnAnUnbuildableArchive(t *testing.T) {
+	t.Parallel()
+	f := &fatalTB{TB: t}
+	runFatal(f, func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, "to\x00ol") })
+	if !f.failed || !strings.Contains(f.message, testTag) {
+		t.Errorf("NewRelease with a NUL in the binary name: failed = %v with %q, want a failure naming %s", f.failed, f.message, testTag)
+	}
+}
+
 func TestNewServerRejectsAnIncompleteRelease(t *testing.T) {
 	t.Parallel()
 	f := &fatalTB{TB: t}
@@ -325,17 +334,19 @@ func TestNewServerRejectsAnIncompleteRelease(t *testing.T) {
 	}
 }
 
-// fatalTB records a Fatalf, ending its goroutine as testing.T does, instead of failing the test
-// it embeds.
+// fatalTB records a Fatalf and its message, ending its goroutine as testing.T does, instead of
+// failing the test it embeds.
 type fatalTB struct {
 	testing.TB
-	failed bool
+	failed  bool
+	message string
 }
 
 func (f *fatalTB) Helper() {}
 
-func (f *fatalTB) Fatalf(string, ...any) {
+func (f *fatalTB) Fatalf(format string, args ...any) {
 	f.failed = true
+	f.message = fmt.Sprintf(format, args...)
 	runtime.Goexit()
 }
 
