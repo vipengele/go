@@ -7,37 +7,54 @@ import (
 	"go.vipengele.org/daemon"
 )
 
-// stopper is a Runner that reports on started once it is running and prints a line when it is
-// stopped.
-type stopper struct {
+// worker is a Runner whose work runs in a goroutine until Stop asks it to end. It reports on
+// started once it is running.
+type worker struct {
 	name    string
 	started chan<- struct{}
+	quit    chan struct{}
+	done    chan struct{}
 }
 
-func (s stopper) Name() string { return s.name }
+func newWorker(name string, started chan<- struct{}) *worker {
+	return &worker{name: name, started: started, quit: make(chan struct{}), done: make(chan struct{})}
+}
 
-func (s stopper) Start(ctx context.Context) error {
-	s.started <- struct{}{}
-	<-ctx.Done()
+func (w *worker) Name() string { return w.name }
+
+func (w *worker) Start(context.Context) error {
+	go func() {
+		defer close(w.done)
+		<-w.quit
+	}()
+	fmt.Println("started", w.name)
+	w.started <- struct{}{}
 	return nil
 }
 
-func (s stopper) Stop(context.Context) error {
-	fmt.Println("stopped", s.name)
+func (w *worker) Done() <-chan struct{} { return w.done }
+
+func (w *worker) Err() error { return nil }
+
+func (w *worker) Stop(context.Context) error {
+	fmt.Println("stopping", w.name)
+	close(w.quit)
 	return nil
 }
 
 func ExampleSupervisor() {
 	started := make(chan struct{}, 2)
 	sup, err := daemon.New([]daemon.Runner{
-		stopper{name: "database", started: started},
-		stopper{name: "server", started: started},
+		newWorker("database", started),
+		newWorker("server", started),
 	})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
+	// A daemon cancels this context from its signal handler; here it is cancelled once both
+	// Runners are running.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-started
@@ -47,7 +64,9 @@ func ExampleSupervisor() {
 
 	fmt.Println("run:", sup.Run(ctx))
 	// Output:
-	// stopped server
-	// stopped database
+	// started database
+	// started server
+	// stopping server
+	// stopping database
 	// run: <nil>
 }

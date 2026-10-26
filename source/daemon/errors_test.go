@@ -13,6 +13,7 @@ func TestSentinelMessages(t *testing.T) {
 		want string
 	}{
 		{"runner exited", ErrRunnerExited, "daemon: runner exited before shutdown"},
+		{"start timeout", ErrStartTimeout, "daemon: runner start timed out"},
 		{"stop timeout", ErrStopTimeout, "daemon: runner stop timed out"},
 		{"already ran", ErrAlreadyRan, "daemon: supervisor already ran"},
 	}
@@ -31,6 +32,7 @@ func TestSentinelsMatchThroughWrapping(t *testing.T) {
 		err  error
 	}{
 		{"runner exited", ErrRunnerExited},
+		{"start timeout", ErrStartTimeout},
 		{"stop timeout", ErrStopTimeout},
 		{"already ran", ErrAlreadyRan},
 	}
