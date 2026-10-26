@@ -25,8 +25,8 @@ var ErrNilServer = errors.New("daemon: nil http server")
 // listener.
 var ErrNilListener = errors.New("daemon: nil listener")
 
-// errHTTPStarted is what Start returns on an HTTP Runner that has already been started or stopped.
-var errHTTPStarted = errors.New("daemon: http runner already started or stopped")
+// errHTTPStarted is what a second Start returns on an HTTP Runner.
+var errHTTPStarted = errors.New("daemon: http runner already started")
 
 // HTTPOption configures a Runner built by NewHTTPServer or NewHTTPServerListener.
 type HTTPOption interface {
@@ -80,8 +80,11 @@ func NewHTTPServer(srv *http.Server, opts ...HTTPOption) Runner {
 // Serve takes l over and closes it when the server stops; a listener Start never served stays the
 // caller's to close. A nil srv makes Start return ErrNilServer, and a nil l ErrNilListener.
 //
-// Start may be called once. A second Start, or a Start after Stop, returns an error and changes
-// nothing. Stop before Start returns nil and leaves the Runner never started: Done never closes.
+// Start may be called once: a second Start returns an error and changes nothing. Stop before Start
+// returns nil and leaves the Runner never started: Done never closes, and a Start that follows
+// neither binds nor serves and returns an error wrapping context.Canceled. The Supervisor stops a
+// Runner whose Start is still pending when the start phase ends, so that Start, losing the race
+// to Stop, reports the cancellation it was given rather than a failure.
 func NewHTTPServerListener(srv *http.Server, l net.Listener, opts ...HTTPOption) Runner {
 	return newHTTPRunner(srv, l, true, opts)
 }
@@ -125,8 +128,10 @@ type httpRunner struct {
 	mu sync.Mutex
 	// listener is what Serve serves, set by Start when it binds.
 	listener net.Listener
-	// claimed is set by the first Start or Stop; only a Start that claims the Runner serves.
+	// claimed is set by the first Start; only a Start that claims the Runner serves.
 	claimed bool
+	// stopped is set by Stop; a first Start after it neither binds nor serves.
+	stopped bool
 	// started is set once Start has launched Serve.
 	started bool
 	// stopping is set by the first Stop of a started Runner, before it shuts the server down.
@@ -143,7 +148,7 @@ func (r *httpRunner) Order() int { return r.order }
 
 // Start binds the listener when the Runner has none, launches Serve in a goroutine and returns
 // nil. It returns an error when the server or listener is nil, when binding fails, or when the
-// Runner was already started or stopped.
+// Runner was already started, and one wrapping context.Canceled when Stop came first.
 func (r *httpRunner) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -151,6 +156,9 @@ func (r *httpRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("daemon: runner %q: %w", r.name, errHTTPStarted)
 	}
 	r.claimed = true
+	if r.stopped {
+		return stoppedBeforeStart(r.name)
+	}
 
 	if r.srv == nil {
 		return fmt.Errorf("daemon: runner %q: %w", r.name, ErrNilServer)
@@ -213,7 +221,7 @@ func (r *httpRunner) Err() error {
 // Serve has not returned when ctx is done. A second Stop waits for the first one's drain.
 func (r *httpRunner) Stop(ctx context.Context) error {
 	r.mu.Lock()
-	r.claimed = true
+	r.stopped = true
 	started, already := r.started, r.stopping
 	r.stopping = started
 	r.mu.Unlock()

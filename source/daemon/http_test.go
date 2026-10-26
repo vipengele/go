@@ -306,8 +306,8 @@ func TestHTTPStartRejectsNilServerListenerAndASecondStart(t *testing.T) {
 	if err := r.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := r.Start(ctx); err == nil {
-		t.Error("second Start = nil, want an error")
+	if err := r.Start(ctx); !errors.Is(err, errHTTPStarted) {
+		t.Errorf("second Start = %v, want errHTTPStarted", err)
 	}
 	if err := r.Stop(ctx); err != nil {
 		t.Errorf("Stop = %v, want nil", err)
@@ -318,8 +318,30 @@ func TestHTTPStartRejectsNilServerListenerAndASecondStart(t *testing.T) {
 	if err := unstarted.Stop(ctx); err != nil {
 		t.Errorf("Stop before Start = %v, want nil", err)
 	}
-	if err := unstarted.Start(ctx); err == nil {
-		t.Error("Start after Stop = nil, want an error")
+	if err := unstarted.Start(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Start after Stop = %v, want context.Canceled", err)
+	}
+	if err := unstarted.Start(ctx); !errors.Is(err, errHTTPStarted) {
+		t.Errorf("second Start after Stop = %v, want errHTTPStarted", err)
+	}
+}
+
+func TestHTTPStopBeforeAPendingStartIsACleanCancellation(t *testing.T) {
+	l := listen(t)
+	r := newLateStart(NewHTTPServerListener(&http.Server{Handler: http.NotFoundHandler()}, l))
+	run := startHTTPRun(t, r)
+	<-r.entered
+	run.cancelRun()
+	if err := <-run.result; err != nil {
+		t.Errorf("Run = %v, want nil", err)
+	}
+	select {
+	case <-r.Done():
+		t.Errorf("Done closed on a Runner stopped before Start")
+	default:
+	}
+	if err := l.Close(); err != nil {
+		t.Errorf("closing the listener a stopped Runner never served = %v, want nil", err)
 	}
 }
 

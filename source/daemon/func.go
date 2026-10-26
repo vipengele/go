@@ -11,8 +11,8 @@ import (
 // once with this error.
 var ErrNilFunc = errors.New("daemon: nil run function")
 
-// errFuncStarted is what Start returns on a Func Runner that has already been started or stopped.
-var errFuncStarted = errors.New("daemon: func runner already started or stopped")
+// errFuncStarted is what a second Start returns on a Func Runner.
+var errFuncStarted = errors.New("daemon: func runner already started")
 
 // FuncOption configures a Runner built by Func.
 type FuncOption interface {
@@ -45,8 +45,11 @@ func (o OrderOption) applyFunc(r *funcRunner) { r.order = o.order }
 // Func does not validate name: New rejects a blank one, as it does for any Runner. A nil run
 // makes a Runner that starts and exits at once with ErrNilFunc.
 //
-// Start may be called once. A second Start, or a Start after Stop, returns an error and changes
-// nothing. Stop before Start returns nil and leaves the Runner never started: Done never closes.
+// Start may be called once: a second Start returns an error and changes nothing. Stop before Start
+// returns nil and leaves the Runner never started: Done never closes, and a Start that follows
+// launches nothing and returns an error wrapping context.Canceled. The Supervisor stops a Runner
+// whose Start is still pending when the start phase ends, so that Start, losing the race to Stop,
+// reports the cancellation it was given rather than a failure.
 func Func(name string, run func(ctx context.Context) error, opts ...FuncOption) Runner {
 	r := &funcRunner{name: name, run: run, done: make(chan struct{})}
 	for _, opt := range opts {
@@ -68,8 +71,10 @@ type funcRunner struct {
 	err  error
 
 	mu sync.Mutex
-	// claimed is set by the first Start or Stop; only a Start that claims the Runner launches run.
+	// claimed is set by the first Start; only a Start that claims the Runner launches run.
 	claimed bool
+	// stopped is set by Stop; a first Start after it launches nothing.
+	stopped bool
 	// cancel cancels the context run gets; it is nil until Start launches run.
 	cancel context.CancelFunc
 }
@@ -80,8 +85,8 @@ func (r *funcRunner) Name() string { return r.name }
 // Order returns the Order set by WithOrder, or 0.
 func (r *funcRunner) Order() int { return r.order }
 
-// Start launches run in a goroutine and returns nil, or an error when the Runner was already
-// started or stopped.
+// Start launches run in a goroutine and returns nil. It returns an error when the Runner was
+// already started, and one wrapping context.Canceled when Stop came first.
 func (r *funcRunner) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -89,6 +94,9 @@ func (r *funcRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("daemon: runner %q: %w", r.name, errFuncStarted)
 	}
 	r.claimed = true
+	if r.stopped {
+		return stoppedBeforeStart(r.name)
+	}
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	r.cancel = cancel
@@ -124,7 +132,7 @@ func (r *funcRunner) Err() error {
 // is done first, leaving run to finish on its own.
 func (r *funcRunner) Stop(ctx context.Context) error {
 	r.mu.Lock()
-	r.claimed = true
+	r.stopped = true
 	cancel := r.cancel
 	r.mu.Unlock()
 	if cancel == nil {
@@ -143,4 +151,11 @@ func (r *funcRunner) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// stoppedBeforeStart is what Start returns on a Runner Stop reached first. It wraps
+// context.Canceled: the Supervisor stops a Runner whose Start is pending only once the start
+// phase has ended, and takes that error as the end of the start context, not a start failure.
+func stoppedBeforeStart(name string) error {
+	return fmt.Errorf("daemon: runner %q: stopped before it started: %w", name, context.Canceled)
 }

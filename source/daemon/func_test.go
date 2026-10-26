@@ -244,8 +244,8 @@ func TestFuncStartTwiceAndStopBeforeStart(t *testing.T) {
 		if err := r.Start(context.Background()); err != nil {
 			t.Fatalf("first Start = %v, want nil", err)
 		}
-		if err := r.Start(context.Background()); err == nil {
-			t.Errorf("second Start = nil, want an error")
+		if err := r.Start(context.Background()); !errors.Is(err, errFuncStarted) {
+			t.Errorf("second Start = %v, want errFuncStarted", err)
 		}
 		if err := r.Stop(context.Background()); err != nil {
 			t.Errorf("Stop = %v, want nil", err)
@@ -263,8 +263,11 @@ func TestFuncStartTwiceAndStopBeforeStart(t *testing.T) {
 		if err := r.Stop(context.Background()); err != nil {
 			t.Errorf("Stop before Start = %v, want nil", err)
 		}
-		if err := r.Start(context.Background()); err == nil {
-			t.Errorf("Start after Stop = nil, want an error")
+		if err := r.Start(context.Background()); !errors.Is(err, context.Canceled) {
+			t.Errorf("Start after Stop = %v, want context.Canceled", err)
+		}
+		if err := r.Start(context.Background()); !errors.Is(err, errFuncStarted) {
+			t.Errorf("second Start after Stop = %v, want errFuncStarted", err)
 		}
 		select {
 		case <-r.Done():
@@ -275,6 +278,46 @@ func TestFuncStartTwiceAndStopBeforeStart(t *testing.T) {
 			t.Errorf("run called on a Runner stopped before Start")
 		}
 	})
+}
+
+// lateStart holds its Runner's Start until its Stop has returned. It reports on entered once the
+// Supervisor has called Start, so a test can end the start phase while that Start is pending.
+type lateStart struct {
+	Runner
+	entered chan struct{}
+	stopped chan struct{}
+}
+
+func newLateStart(r Runner) *lateStart {
+	return &lateStart{Runner: r, entered: make(chan struct{}), stopped: make(chan struct{})}
+}
+
+func (l *lateStart) Start(ctx context.Context) error {
+	close(l.entered)
+	<-l.stopped
+	return l.Runner.Start(ctx)
+}
+
+func (l *lateStart) Stop(ctx context.Context) error {
+	defer close(l.stopped)
+	return l.Runner.Stop(ctx)
+}
+
+func TestFuncStopBeforeAPendingStartIsACleanCancellation(t *testing.T) {
+	called := make(chan struct{}, 1)
+	r := newLateStart(Func("a", func(ctx context.Context) error {
+		called <- struct{}{}
+		return untilStopped(ctx)
+	}))
+	run := startFuncRun(t, context.Background(), nil, r)
+	<-r.entered
+	run.cancel()
+	if err := <-run.result; err != nil {
+		t.Errorf("Run = %v, want nil", err)
+	}
+	if len(called) != 0 {
+		t.Errorf("run called on a Runner stopped before Start")
+	}
 }
 
 func TestFuncOrderPlacesTheRunnerInTheStartOrder(t *testing.T) {
