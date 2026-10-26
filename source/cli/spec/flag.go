@@ -50,6 +50,9 @@ type Flag interface {
 	// Inherited reports whether the flag is available to every descendant of the command that
 	// declares it, as well as to that command.
 	Inherited() bool
+	// Completion is how a shell completes the flag's value, as [Complete] attaches it: the zero
+	// [Completion] when none is attached.
+	Completion() Completion
 
 	problems() []error
 }
@@ -68,6 +71,7 @@ type FlagOf[T FlagValue] struct {
 	def        T
 	inherited  bool
 	defaultErr error
+	completion Completion
 }
 
 // FlagOption configures a flag at construction.
@@ -78,6 +82,7 @@ type flagConfig struct {
 	inherited  bool
 	def        any
 	hasDefault bool
+	completion Completion
 }
 
 // Shorthand gives the flag a one-character short name: an ASCII letter or digit.
@@ -98,6 +103,12 @@ func Default[T FlagValue](v T) FlagOption {
 		c.def = v
 		c.hasDefault = true
 	}
+}
+
+// Complete attaches c to the flag, so a shell completes the flag's value with it. A bool flag
+// takes no value to complete, and [Command.Validate] reports one given a completion.
+func Complete(c Completion) FlagOption {
+	return func(cfg *flagConfig) { cfg.completion = c }
 }
 
 // BoolFlag returns the handle of a bool flag, which defaults to false.
@@ -123,10 +134,11 @@ func newFlag[T FlagValue](name, usage string, opts []FlagOption) *FlagOf[T] {
 		}
 	}
 	f := &FlagOf[T]{
-		name:      name,
-		shorthand: cfg.shorthand,
-		usage:     usage,
-		inherited: cfg.inherited,
+		name:       name,
+		shorthand:  cfg.shorthand,
+		usage:      usage,
+		inherited:  cfg.inherited,
+		completion: cfg.completion,
 	}
 	if cfg.hasDefault {
 		if v, ok := cfg.def.(T); ok {
@@ -176,6 +188,9 @@ func (f *FlagOf[T]) Usage() string { return f.usage }
 // Inherited reports whether the flag is available to the descendants of its command.
 func (f *FlagOf[T]) Inherited() bool { return f.inherited }
 
+// Completion returns how a shell completes the flag's value, the zero [Completion] for none.
+func (f *FlagOf[T]) Completion() Completion { return f.completion }
+
 // Default returns the flag's default value.
 func (f *FlagOf[T]) Default() T { return f.def }
 
@@ -194,7 +209,8 @@ func (f *FlagOf[T]) Kind() FlagKind {
 	}
 }
 
-// problems reports an invalid name, an invalid shorthand and a mistyped default.
+// problems reports an invalid name, an invalid shorthand, a mistyped default, a completion on a
+// bool flag and a completion function that is nil.
 func (f *FlagOf[T]) problems() []error {
 	var errs []error
 	if err := validate.Slug("flag name", f.name); err != nil {
@@ -209,6 +225,13 @@ func (f *FlagOf[T]) problems() []error {
 	}
 	if f.defaultErr != nil {
 		errs = append(errs, fmt.Errorf("flag %q: %w", f.name, f.defaultErr))
+	}
+	if f.completion.Kind() != NoCompletion && f.Kind() == BoolKind {
+		errs = append(errs, fmt.Errorf("flag %q: %w: a bool flag takes no completion",
+			f.name, validate.ErrInvalid))
+	}
+	if err := f.completion.problem(); err != nil {
+		errs = append(errs, fmt.Errorf("flag %q: %w", f.name, err))
 	}
 	return errs
 }
