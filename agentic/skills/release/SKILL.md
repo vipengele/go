@@ -75,6 +75,8 @@ export GOWORK=off
 go mod edit -json | jq -e '(.Replace // []) | length == 0'   # no replace left
 go mod tidy && test -z "$(git status --porcelain -- go.mod go.sum)"   # tidy leaves no diff
 go build ./...
+# only when the project holds a *_windows.go file, in any of its packages
+GOOS=windows go vet ./...
 go vet ./...
 go test -race -shuffle=on ./...
 ```
@@ -121,9 +123,9 @@ gh run watch <run-id>
 
 The jobs are `tag` (validates the tag, the project, the commit and the notes, and that the tagged
 project's `go.mod` carries no `replace` and requires only tagged siblings), `test` (with
-`GOWORK=off`, `go mod tidy` with no diff, `go build`, `go vet` and the module's suite) and
-`announce` (asks the module proxy for the version, then creates the GitHub Release). Re-running
-finishes a partial release.
+`GOWORK=off`, `go mod tidy` with no diff, `go build`, `GOOS=windows go vet` when the project holds a
+`*_windows.go` file, `go vet` and the module's suite) and `announce` (asks the module proxy for the
+version, then creates the GitHub Release). Re-running finishes a partial release.
 
 ## 9 — Verify
 

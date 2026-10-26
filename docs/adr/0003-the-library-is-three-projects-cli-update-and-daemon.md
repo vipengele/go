@@ -5,9 +5,11 @@ shared project, by ADR-0006, which replaces how `daemon` requires its siblings a
 feature spanning two projects is released in, by ADR-0007, which makes `cli` the owner of the
 `version --json` contract, by ADR-0009, which reverses the clause that has `update` keep its own
 platform-directory resolver, by ADR-0010, which moves the version comparison rule `update` owned
-into `cli/spec/version`, and by ADR-0016, which gives `Config.Source` a default, the GitHub release
-source. Partially superseded by ADR-0005, which replaces the rule on where cobra
-is allowed ("The CLI framework dependency") and the rule that `update` requires no sibling
+into `cli/spec/version`, by ADR-0012, which moves config loading from `cli` to the `config`
+project, by ADR-0016, which gives `Config.Source` a default, the GitHub release source, by
+ADR-0018, which makes the state store the project `cli/state`, and by ADR-0019, which makes the
+file lock the project `filelock`. Partially superseded by ADR-0005, which replaces the rule on where
+cobra is allowed ("The CLI framework dependency") and the rule that `update` requires no sibling
 ("Dependency direction").
 
 The library serves two shapes of tool: one-shot command-line tools and long-running daemons.
