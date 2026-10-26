@@ -114,6 +114,58 @@ func (e *AssetNotFoundError) Error() string {
 	return fmt.Sprintf("update: release %s has no asset %q", e.Tag, e.Name)
 }
 
+// ChecksumMismatchError reports a downloaded archive whose SHA-256 digest differs from the one the
+// checksums file lists for it.
+type ChecksumMismatchError struct {
+	// Name is the archive's asset name.
+	Name string
+	// Want is the hex digest the checksums file lists.
+	Want string
+	// Got is the hex digest of the downloaded bytes.
+	Got string
+}
+
+// Error implements error.
+func (e *ChecksumMismatchError) Error() string {
+	return fmt.Sprintf("update: checksum mismatch for %q: want %s, got %s", e.Name, e.Want, e.Got)
+}
+
+// ChecksumNotFoundError reports a checksums file with no entry for the archive.
+type ChecksumNotFoundError struct {
+	// Name is the archive's asset name.
+	Name string
+}
+
+// Error implements error.
+func (e *ChecksumNotFoundError) Error() string {
+	return fmt.Sprintf("update: checksums file has no entry for %q", e.Name)
+}
+
+// ChecksumConflictError reports a checksums file that lists two different digests for the archive.
+type ChecksumConflictError struct {
+	// Name is the archive's asset name.
+	Name string
+}
+
+// Error implements error.
+func (e *ChecksumConflictError) Error() string {
+	return fmt.Sprintf("update: checksums file lists conflicting digests for %q", e.Name)
+}
+
+// SizeLimitError reports a download that exceeded its byte cap, whether the archive or the
+// checksums file.
+type SizeLimitError struct {
+	// URL is the address that was downloaded.
+	URL string
+	// Limit is the most bytes the download may carry.
+	Limit int64
+}
+
+// Error implements error.
+func (e *SizeLimitError) Error() string {
+	return fmt.Sprintf("update: GET %s: exceeds the limit of %d bytes", e.URL, e.Limit)
+}
+
 // classifyError turns an error from a request to url into the error a caller sees. A cancellation
 // is returned as it is, because it is the caller's own doing and not a timeout. An expired context
 // deadline or a [net.Error] reporting Timeout becomes a [*TimeoutError]. Any other error,
