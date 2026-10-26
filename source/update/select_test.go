@@ -42,7 +42,7 @@ func TestSelect_Listed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
-	if want := (Selection{Archive: testArchive(), Checksums: testChecksums()}); got != want {
+	if want := (Selection{Tag: "v1.2.3", Archive: testArchive(), Checksums: testChecksums()}); got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
 	}
 }
@@ -131,6 +131,8 @@ func TestSelect_UnlistedThroughGitHubSource(t *testing.T) {
 		t.Fatalf("Select() error = %v", err)
 	}
 	want := Selection{
+		Tag:     "v1.2.3+meta/x",
+		Located: true,
 		Archive: Asset{
 			Name: "my tool#_linux_amd64.tar.gz",
 			URL:  "https://web.test/octo/tool/releases/download/v1.2.3+meta%2Fx/my%20tool%23_linux_amd64.tar.gz",
@@ -157,11 +159,52 @@ func TestSelect_UnlistedThroughTheDefaultSource(t *testing.T) {
 	}
 	const base = "https://github.com/pedromvgomes/agentic-toolkit/releases/download/v1.2.3/"
 	want := Selection{
+		Tag:       "v1.2.3",
+		Located:   true,
 		Archive:   Asset{Name: "atk_linux_amd64.tar.gz", URL: base + "atk_linux_amd64.tar.gz"},
 		Checksums: Asset{Name: "checksums.txt", URL: base + "checksums.txt"},
 	}
 	if got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
+	}
+}
+
+func TestSelect_TagAndLocated(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		rel         Release
+		wantLocated bool
+	}{
+		{
+			name:        "listed",
+			rel:         Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), testChecksums()}},
+			wantLocated: false,
+		},
+		{
+			name:        "unlisted",
+			rel:         Release{Tag: "v4.5.6"},
+			wantLocated: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := selectConfig(t)
+			c.Source = &GitHubSource{Owner: testOwner, Repo: testRepo, WebURL: "https://web.test/"}
+			got, err := c.Select(tt.rel)
+			if err != nil {
+				t.Fatalf("Select() error = %v", err)
+			}
+			if got.Tag != tt.rel.Tag {
+				t.Errorf("Tag = %q, want %q", got.Tag, tt.rel.Tag)
+			}
+			if got.Located != tt.wantLocated {
+				t.Errorf("Located = %v, want %v", got.Located, tt.wantLocated)
+			}
+		})
 	}
 }
 
@@ -210,7 +253,7 @@ func TestSelect_CustomTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
-	if want := (Selection{Archive: archive, Checksums: checksums}); got != want {
+	if want := (Selection{Tag: "v1.2.3", Archive: archive, Checksums: checksums}); got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
 	}
 }

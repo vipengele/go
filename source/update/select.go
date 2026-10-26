@@ -19,6 +19,12 @@ var _ AssetLocator = (*GitHubSource)(nil)
 
 // Selection is the pair of release assets an update downloads for one platform.
 type Selection struct {
+	// Tag is the tag of the release the assets belong to.
+	Tag string
+	// Located reports that Select built the asset URLs through [AssetLocator] instead of reading
+	// them from a listing of the release. A 404 on a located asset is an [*AssetNotFoundError],
+	// because the URL was constructed, not listed.
+	Located bool
 	// Archive holds the binary for the platform.
 	Archive Asset
 	// Checksums lists the checksum of every asset of the release.
@@ -62,6 +68,8 @@ func (r Config) selectAssets(rel Release) (Selection, error) {
 			return Selection{}, fmt.Errorf("%w: release %s, source %T", ErrAssetsNotListed, rel.Tag, r.Source)
 		}
 		return Selection{
+			Tag:       rel.Tag,
+			Located:   true,
 			Archive:   Asset{Name: archiveName, URL: loc.AssetURL(rel.Tag, archiveName)},
 			Checksums: Asset{Name: checksumsName, URL: loc.AssetURL(rel.Tag, checksumsName)},
 		}, nil
@@ -72,7 +80,7 @@ func (r Config) selectAssets(rel Release) (Selection, error) {
 	if err := errors.Join(archiveErr, checksumsErr); err != nil {
 		return Selection{}, err
 	}
-	return Selection{Archive: archive, Checksums: checksums}, nil
+	return Selection{Tag: rel.Tag, Archive: archive, Checksums: checksums}, nil
 }
 
 // findAsset returns the asset of rel named name exactly, or a [*AssetNotFoundError].
