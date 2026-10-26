@@ -33,7 +33,9 @@ it, and imports nothing of it.
   `paths.Options.LookupEnv` convention. `Options.Disabled` carries the consumer's own flag, and the
   package exports the flag-name constant `no-completion`, which the consumer registers on its own
   `update` command. A disabled `Install` returns `Result{Skipped: true, Reason: ReasonDisabled}` and
-  a nil error.
+  a nil error. `Options` takes the tool's `spec.Identity`: its `Name` names the completion file and
+  its `EnvVar` names the opt-out variable, so no prefix is spelled out in the package. `Disabled`
+  returns before the identity is validated.
 - **Files only.** The installer writes one completion file and never edits an rc file or a profile.
   bash, zsh and fish skip on `GOOS=windows`. PowerShell writes
   `${XDG_CONFIG_HOME:-~/.config}/powershell/Completions/<name>.ps1` on Unix and
@@ -53,8 +55,10 @@ it, and imports nothing of it.
   (deferred), and in sh by `[ -d ]` and `[ -w ]`.
 - **Result.** `Result{Shell, Path, Note, Skipped, Reason, Changed}`. `Reason` is an enumerated
   constant set: disabled, shell not detected, unsupported shell, no home, unsupported on this OS. A
-  skip returns a nil error. An error is returned only for failing to locate the executable, to
-  generate the script, or to write the file.
+  skip returns a nil error. An unset or empty `$SHELL` is "shell not detected", and a `$SHELL`
+  naming any other program is "unsupported shell". An error is returned only when `Options.Identity`
+  fails `Validate`, and for failing to locate the executable, to generate the script, or to write
+  the file.
 - **Writes.** A write is atomic: `MkdirAll` at 0755, a temporary file in the target directory, a
   rename onto the target, mode 0644. The temporary file is removed on every failure path. When the
   existing content is identical, nothing is written and `Changed` is false; an existing target that
