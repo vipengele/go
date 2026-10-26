@@ -18,6 +18,11 @@
 // decided for the standard output and the standard error separately by [ColorAllowed]. The
 // [Styler] of a stream writes the glyphs and coloured text that decision allows.
 //
+// A flag's value and a command's positional arguments can be given a [Completion], built by
+// [CompleteChoices], [CompleteFiles], [CompleteDirs] or [CompleteFunc]: [Complete] attaches it to
+// a flag and [Command].ArgCompletion sets it for the arguments. It describes what a shell
+// proposes and runs nothing itself; the adapter maps it to its framework.
+//
 // A command's Annotations are key-value metadata, such as [SkipUpdateCheck], that the framework
 // and its hooks read through the [CommandInfo] of the command that runs.
 //
