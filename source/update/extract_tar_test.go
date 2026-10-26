@@ -6,11 +6,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math"
-	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -96,14 +97,13 @@ func tarGzOf(t *testing.T, entries ...tarEntry) []byte {
 
 // noise returns n bytes that deflate barely compresses, the same for every call.
 func noise(n int) []byte {
-	r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // test data, not a secret
-
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = byte(r.Uint32())
+	b := make([]byte, 0, n+sha256.Size)
+	for i := uint64(0); len(b) < n; i++ {
+		sum := sha256.Sum256(binary.BigEndian.AppendUint64(nil, i))
+		b = append(b, sum[:]...)
 	}
 
-	return b
+	return b[:n]
 }
 
 // rawTarHeader returns a ustar header block for name, of typeflag and body size, with a valid
