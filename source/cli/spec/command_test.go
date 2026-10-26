@@ -352,6 +352,17 @@ func TestCommandValidateRejects(t *testing.T) {
 			wantInErr: "ArgCompletion on a command that accepts no arguments",
 		},
 		{
+			name: "ArgCompletion on a command group with no Run",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[0].Args = spec.AnyArgs()
+				c.Commands[0].ArgCompletion = spec.CompleteChoices("a")
+				return c
+			},
+			wantPath:  "tool remote",
+			wantInErr: "ArgCompletion on a command with no Run",
+		},
+		{
 			name: "ArgCompletion with a nil function",
 			cmd: func() *spec.Command {
 				c := validTree()

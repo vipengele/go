@@ -76,7 +76,8 @@ func (e *CommandError) Unwrap() error {
 //   - two subcommands of one command with the same name;
 //   - a command with neither Run nor Commands;
 //   - an invalid Args, as [ArgPolicy.Validate] reports it;
-//   - an ArgCompletion on a command whose Args accepts no argument, and an ArgCompletion built
+//   - an ArgCompletion on a command whose Args accepts no argument or that has no Run, and an
+//     ArgCompletion built
 //     by [CompleteFunc] with a nil function;
 //   - a flag with an invalid name, an invalid shorthand, or a default of another type;
 //   - a bool flag given a completion by [Complete], and a flag completion built by
@@ -135,6 +136,8 @@ func (c *Command) validate(parent string, inherited flagScope, errs *[]error) {
 	if c.ArgCompletion.Kind() != NoCompletion {
 		if limit, bounded := c.Args.Max(); bounded && limit == 0 {
 			report(fmt.Errorf("%w: ArgCompletion on a command that accepts no arguments", validate.ErrInvalid))
+		} else if c.Run == nil {
+			report(fmt.Errorf("%w: ArgCompletion on a command with no Run, which takes no positional argument of its own", validate.ErrInvalid))
 		}
 	}
 	if err := c.ArgCompletion.problem(); err != nil {
