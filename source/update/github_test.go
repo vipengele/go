@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.vipengele.org/update/updatetest"
 )
 
 const (
@@ -85,6 +87,25 @@ func (f *fakeGitHub) source() *GitHubSource {
 	}
 }
 
+// newKitServer starts an updatetest server with opts publishing release v1.2.3 of
+// testOwner/testRepo.
+func newKitServer(t *testing.T, opts ...updatetest.Option) *updatetest.Server {
+	t.Helper()
+
+	return updatetest.NewServer(t, updatetest.NewRelease(t, testOwner, testRepo, "v1.2.3", "tool"), opts...)
+}
+
+// kitSource returns a GitHubSource whose web and API addresses and HTTP client are srv's.
+func kitSource(srv *updatetest.Server) *GitHubSource {
+	return &GitHubSource{
+		Owner:      testOwner,
+		Repo:       testRepo,
+		HTTPClient: srv.Client(),
+		WebURL:     srv.WebURL(),
+		APIURL:     srv.APIURL(),
+	}
+}
+
 func redirectTo(status int, location string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		if location != "" {
@@ -108,6 +129,55 @@ func unexpected(t *testing.T, name string) http.HandlerFunc {
 		t.Errorf("unexpected request to the %s endpoint", name)
 		w.WriteHeader(http.StatusTeapot)
 	}
+}
+
+func TestGitHubSource_LatestFromTheServer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("redirect", func(t *testing.T) {
+		t.Parallel()
+
+		srv := newKitServer(t)
+
+		got, err := kitSource(srv).Latest(context.Background())
+		if err != nil {
+			t.Fatalf("Latest() error = %v", err)
+		}
+		if want := (Release{Tag: "v1.2.3", URL: srv.TagURL()}); !reflect.DeepEqual(got, want) {
+			t.Errorf("Latest() = %#v, want %#v", got, want)
+		}
+		if n := srv.Requests(updatetest.TargetLatest); n != 1 {
+			t.Errorf("web requests = %d, want 1", n)
+		}
+		if n := srv.Requests(updatetest.TargetLatestAPI); n != 0 {
+			t.Errorf("API requests = %d, want 0", n)
+		}
+	})
+
+	t.Run("API", func(t *testing.T) {
+		t.Parallel()
+
+		rel := updatetest.NewRelease(t, testOwner, testRepo, "v1.2.3", "tool")
+		srv := updatetest.NewServer(t, rel, updatetest.APIOnly())
+
+		got, err := kitSource(srv).Latest(context.Background())
+		if err != nil {
+			t.Fatalf("Latest() error = %v", err)
+		}
+		want := Release{Tag: "v1.2.3", URL: srv.TagURL(), Assets: []Asset{
+			{Name: rel.ArchiveName, URL: srv.AssetURL(rel.ArchiveName), Size: int64(len(rel.Archive))},
+			{Name: rel.ChecksumsName, URL: srv.AssetURL(rel.ChecksumsName), Size: int64(len(srv.ChecksumsFile()))},
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Latest() = %#v, want %#v", got, want)
+		}
+		if n := srv.Requests(updatetest.TargetLatest); n != 1 {
+			t.Errorf("web requests = %d, want 1", n)
+		}
+		if n := srv.Requests(updatetest.TargetLatestAPI); n != 1 {
+			t.Errorf("API requests = %d, want 1", n)
+		}
+	})
 }
 
 func TestGitHubSource_RedirectHit(t *testing.T) {
@@ -531,9 +601,11 @@ func TestGitHubSource_Timeout(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                 string
-		web                  http.HandlerFunc
-		api                  http.HandlerFunc
+		name string
+		// target is the request that stalls. A stalled redirect ends the lookup, so the API is
+		// never asked.
+		target               updatetest.Target
+		apiOnly              bool
 		timeout              time.Duration
 		ctxTimeout           time.Duration
 		client               func(*http.Client)
@@ -542,29 +614,29 @@ func TestGitHubSource_Timeout(t *testing.T) {
 	}{
 		{
 			name:                 "source timeout on the redirect",
-			web:                  blockUntilDone,
+			target:               updatetest.TargetLatest,
 			timeout:              50 * time.Millisecond,
 			wantPath:             webPath,
 			wantDeadlineExceeded: true,
 		},
 		{
 			name:                 "source timeout on the API",
-			web:                  respond(http.StatusOK, ""),
-			api:                  blockUntilDone,
+			target:               updatetest.TargetLatestAPI,
+			apiOnly:              true,
 			timeout:              50 * time.Millisecond,
 			wantPath:             apiPath,
 			wantDeadlineExceeded: true,
 		},
 		{
 			name:                 "shorter caller deadline",
-			web:                  blockUntilDone,
+			target:               updatetest.TargetLatest,
 			ctxTimeout:           50 * time.Millisecond,
 			wantPath:             webPath,
 			wantDeadlineExceeded: true,
 		},
 		{
 			name:     "HTTP client timeout",
-			web:      blockUntilDone,
+			target:   updatetest.TargetLatest,
 			client:   func(c *http.Client) { c.Timeout = 50 * time.Millisecond },
 			wantPath: webPath,
 		},
@@ -574,12 +646,12 @@ func TestGitHubSource_Timeout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			api := tc.api
-			if api == nil {
-				api = unexpected(t, "API")
+			opts := []updatetest.Option{updatetest.Slow(tc.target, make(chan struct{}))}
+			if tc.apiOnly {
+				opts = append(opts, updatetest.APIOnly())
 			}
-			f := newFakeGitHub(t, tc.web, api)
-			s := f.source()
+			srv := newKitServer(t, opts...)
+			s := kitSource(srv)
 			s.Timeout = tc.timeout
 			if tc.client != nil {
 				c := *s.HTTPClient
@@ -600,11 +672,17 @@ func TestGitHubSource_Timeout(t *testing.T) {
 			if !errors.As(err, &timeoutErr) {
 				t.Fatalf("Latest() error = %v, want a *TimeoutError", err)
 			}
-			if want := f.server.URL + tc.wantPath; timeoutErr.URL != want {
+			if want := srv.WebURL() + tc.wantPath; timeoutErr.URL != want {
 				t.Errorf("TimeoutError.URL = %q, want %q", timeoutErr.URL, want)
 			}
 			if tc.wantDeadlineExceeded && !errors.Is(err, context.DeadlineExceeded) {
 				t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, want true")
+			}
+			if n := srv.Requests(updatetest.TargetLatest); n != 1 {
+				t.Errorf("web requests = %d, want 1", n)
+			}
+			if got, want := srv.Requests(updatetest.TargetLatestAPI), btoi(tc.target == updatetest.TargetLatestAPI); got != want {
+				t.Errorf("API requests = %d, want %d", got, want)
 			}
 		})
 	}
@@ -639,50 +717,35 @@ func TestGitHubSource_CallerCancellation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		web  func(arrived chan<- struct{}) http.HandlerFunc
-		api  func(arrived chan<- struct{}) http.HandlerFunc
+		name    string
+		target  updatetest.Target
+		apiOnly bool
 	}{
-		{
-			name: "during the redirect",
-			web: func(arrived chan<- struct{}) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					close(arrived)
-					blockUntilDone(w, r)
-				}
-			},
-		},
-		{
-			name: "during the API request",
-			web:  func(chan<- struct{}) http.HandlerFunc { return respond(http.StatusOK, "") },
-			api: func(arrived chan<- struct{}) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					close(arrived)
-					blockUntilDone(w, r)
-				}
-			},
-		},
+		{name: "during the redirect", target: updatetest.TargetLatest},
+		{name: "during the API request", target: updatetest.TargetLatestAPI, apiOnly: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			arrived := make(chan struct{})
-			api := unexpected(t, "API")
-			if tc.api != nil {
-				api = tc.api(arrived)
+			opts := []updatetest.Option{updatetest.Slow(tc.target, make(chan struct{}))}
+			if tc.apiOnly {
+				opts = append(opts, updatetest.APIOnly())
 			}
-			f := newFakeGitHub(t, tc.web(arrived), api)
+			srv := newKitServer(t, opts...)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			go func() {
-				<-arrived
-				cancel()
+				select {
+				case <-srv.Blocked(tc.target):
+					cancel()
+				case <-ctx.Done():
+				}
 			}()
 
-			_, err := f.source().Latest(ctx)
+			_, err := kitSource(srv).Latest(ctx)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Latest() error = %v, want context.Canceled", err)
 			}
@@ -690,16 +753,27 @@ func TestGitHubSource_CallerCancellation(t *testing.T) {
 			if errors.As(err, &timeoutErr) {
 				t.Errorf("Latest() error = %v, want no *TimeoutError", err)
 			}
+			if got, want := srv.Requests(updatetest.TargetLatestAPI), btoi(tc.apiOnly); got != want {
+				t.Errorf("API requests = %d, want %d", got, want)
+			}
 		})
 	}
+}
+
+// btoi is 1 for true and 0 for false.
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func TestGitHubSource_DoesNotFollowOrModifyCallerClient(t *testing.T) {
 	t.Parallel()
 
-	f := newFakeGitHub(t, redirectTo(http.StatusFound, tagPagePath+"v1.2.3"), unexpected(t, "API"))
-	client := f.server.Client()
-	s := f.source()
+	srv := newKitServer(t)
+	client := srv.Client()
+	s := kitSource(srv)
 	s.HTTPClient = client
 
 	if _, err := s.Latest(context.Background()); err != nil {
@@ -707,6 +781,9 @@ func TestGitHubSource_DoesNotFollowOrModifyCallerClient(t *testing.T) {
 	}
 	if client.CheckRedirect != nil {
 		t.Error("Latest() set CheckRedirect on the caller's HTTPClient")
+	}
+	if n := srv.Requests(updatetest.TargetLatestAPI); n != 0 {
+		t.Errorf("API requests = %d, want 0", n)
 	}
 }
 
@@ -735,18 +812,18 @@ func TestGitHubSource_RedirectRequestFailureFallsBackToAPI(t *testing.T) {
 func TestGitHubSource_TrailingSlashInBaseURLs(t *testing.T) {
 	t.Parallel()
 
-	f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, apiReleaseJSON("v1.0.0")))
-	s := f.source()
+	srv := newKitServer(t, updatetest.APIOnly())
+	s := kitSource(srv)
 	s.WebURL += "/"
 	s.APIURL += "/"
 
 	if _, err := s.Latest(context.Background()); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
-	if n := f.webCalls.Load(); n != 1 {
+	if n := srv.Requests(updatetest.TargetLatest); n != 1 {
 		t.Errorf("web requests = %d, want 1", n)
 	}
-	if n := f.apiCalls.Load(); n != 1 {
+	if n := srv.Requests(updatetest.TargetLatestAPI); n != 1 {
 		t.Errorf("API requests = %d, want 1", n)
 	}
 }
