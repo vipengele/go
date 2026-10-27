@@ -5,18 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+// fakeRunner is a Runner that has exited as soon as it starts.
 type fakeRunner struct{ name string }
 
 func (f *fakeRunner) Name() string                { return f.name }
 func (f *fakeRunner) Start(context.Context) error { return nil }
+func (f *fakeRunner) Err() error                  { return nil }
 func (f *fakeRunner) Stop(context.Context) error  { return nil }
+
+func (f *fakeRunner) Done() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
 
 func TestNewRejects(t *testing.T) {
 	tests := []struct {
@@ -32,6 +42,8 @@ func TestNewRejects(t *testing.T) {
 		{name: "duplicate names", runners: []Runner{&fakeRunner{"a"}, &fakeRunner{"b"}, &fakeRunner{"a"}}},
 		{name: "zero grace", runners: []Runner{&fakeRunner{"a"}}, opts: []Option{WithGrace(0)}},
 		{name: "negative grace", runners: []Runner{&fakeRunner{"a"}}, opts: []Option{WithGrace(-time.Second)}},
+		{name: "zero start timeout", runners: []Runner{&fakeRunner{"a"}}, opts: []Option{WithStartTimeout(0)}},
+		{name: "negative start timeout", runners: []Runner{&fakeRunner{"a"}}, opts: []Option{WithStartTimeout(-time.Second)}},
 		{name: "unknown policy", runners: []Runner{&fakeRunner{"a"}}, opts: []Option{WithPanicPolicy(PanicPolicy(99))}},
 		{name: "negative policy", runners: []Runner{&fakeRunner{"a"}}, opts: []Option{WithPanicPolicy(PanicPolicy(-1))}},
 		{name: "nil option", runners: []Runner{&fakeRunner{"a"}}, opts: []Option{nil}},
@@ -187,10 +199,60 @@ func TestDefaultStopContextIsBoundedByGrace(t *testing.T) {
 	}
 }
 
-// recorder is the ordered log of Stop calls shared by the scripted Runners of one test.
+func TestStartContextIsBoundedByTheStartTimeoutAndFollowsTheParent(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []Option
+		want time.Duration
+	}{
+		{name: "default", want: 30 * time.Second},
+		{name: "custom", opts: []Option{WithStartTimeout(time.Minute)}, want: time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := New([]Runner{&fakeRunner{"a"}}, tt.opts...)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if s.startTimeout != tt.want {
+				t.Errorf("startTimeout = %v, want %v", s.startTimeout, tt.want)
+			}
+			parent, cancelParent := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "run"))
+			ctx, cancel := s.newStartContext(parent)
+			defer cancel()
+
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("start context already done: %v", err)
+			}
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatalf("start context has no deadline")
+			}
+			if time.Until(deadline) > tt.want {
+				t.Errorf("deadline is %v away, want at most %v", time.Until(deadline), tt.want)
+			}
+			if got := ctx.Value(ctxKey{}); got != "run" {
+				t.Errorf("start context carries %v, want the parent's value", got)
+			}
+			cancelParent()
+			if err := ctx.Err(); !errors.Is(err, context.Canceled) {
+				t.Errorf("start context after the parent is cancelled = %v, want cancelled", err)
+			}
+		})
+	}
+}
+
+// recorder is the ordered log of Start and Stop calls shared by the scripted Runners of one test.
 type recorder struct {
-	mu    sync.Mutex
-	stops []string
+	mu     sync.Mutex
+	starts []string
+	stops  []string
+}
+
+func (r *recorder) started(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts = append(r.starts, name)
 }
 
 func (r *recorder) stopped(name string) {
@@ -199,39 +261,53 @@ func (r *recorder) stopped(name string) {
 	r.stops = append(r.stops, name)
 }
 
+func (r *recorder) startOrder() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.starts)
+}
+
 func (r *recorder) stopOrder() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return slices.Clone(r.stops)
 }
 
-// scriptedRunner is a Runner driven by its test through channels. Start reports its context on
-// started and returns what the test sends on exit, panics with what the test sends on startPanic,
-// or returns the cancellation of its context. Stop reports itself on stopCalled and returns
-// stopErr, or panics with stopPanic. With hangStart or hangStop the call blocks until the test
-// closes release.
+// scriptedRunner is a Runner driven by its test. Start reports its context on started and returns
+// nil, startErr, or panics with startPanicValue when startPanics is set; with hangStart it blocks
+// until its context is done, returning the context's error, or until the test frees it, returning
+// nil. The test ends a running Runner with exit or panicExit. Stop reports itself on stopCalled,
+// ends the Runner with stopExit (by default an error wrapping context.Canceled), or with a panic
+// exit of stopExitPanic, and returns stopErr; with keepRunning it leaves the Runner running, with
+// hangStop it blocks until the test frees it, and with stopPanic it panics.
 type scriptedRunner struct {
 	name string
 	rec  *recorder
 
 	started    chan context.Context
-	exit       chan error
-	startPanic chan any
 	stopCalled chan struct{}
 	release    chan struct{}
+	freeOnce   sync.Once
+	done       chan struct{}
+	exitOnce   sync.Once
 
-	hangStart bool
-	hangStop  bool
-	stopErr   error
+	mu  sync.Mutex
+	err error
 
-	// stopPanic, when set, is what Stop panics with after reporting itself.
-	stopPanic any
+	startErr        error
+	startPanics     bool
+	startPanicValue any
+	hangStart       bool
 
-	// cancelPanic, when set, is what Start panics with once its context is cancelled.
-	cancelPanic any
+	stopErr       error
+	stopPanic     any
+	hangStop      bool
+	stopExit      error
+	stopExitPanic any
+	keepRunning   bool
 
-	// cancelErr, when set, is what Start returns once its context is cancelled.
-	cancelErr error
+	// onStart, when set, runs inside Start once it has reported its context, before it returns.
+	onStart func()
 
 	// onStop, when set, runs inside Stop before it returns.
 	onStop func()
@@ -241,44 +317,48 @@ func newScripted(name string) *scriptedRunner {
 	return &scriptedRunner{
 		name:       name,
 		started:    make(chan context.Context, 1),
-		exit:       make(chan error, 1),
-		startPanic: make(chan any, 1),
 		stopCalled: make(chan struct{}, 1),
 		release:    make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 }
 
 func (r *scriptedRunner) Name() string { return r.name }
 
 func (r *scriptedRunner) Start(ctx context.Context) error {
+	r.rec.started(r.name)
 	r.started <- ctx
-	if r.hangStart {
+	if r.onStart != nil {
+		r.onStart()
+	}
+	switch {
+	case r.startPanics:
+		panic(r.startPanicValue)
+	case r.hangStart:
 		select {
-		case err := <-r.exit:
-			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-r.release:
 			return nil
 		}
 	}
-	select {
-	case err := <-r.exit:
-		return err
-	case v := <-r.startPanic:
-		panic(v)
-	case <-ctx.Done():
-		if r.cancelPanic != nil {
-			panic(r.cancelPanic)
-		}
-		if r.cancelErr != nil {
-			return r.cancelErr
-		}
-		return fmt.Errorf("%s: %w", r.name, ctx.Err())
-	}
+	return r.startErr
+}
+
+func (r *scriptedRunner) Done() <-chan struct{} { return r.done }
+
+func (r *scriptedRunner) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
 }
 
 func (r *scriptedRunner) Stop(context.Context) error {
 	r.rec.stopped(r.name)
 	r.stopCalled <- struct{}{}
+	if !r.keepRunning {
+		defer r.endByStop()
+	}
 	if r.onStop != nil {
 		r.onStop()
 	}
@@ -291,42 +371,116 @@ func (r *scriptedRunner) Stop(context.Context) error {
 	return r.stopErr
 }
 
-// waitingContext is a run context that reports each call to Done on waiting. Run's wait for
-// shutdown calls Done once each time it starts waiting, so the second report means Run has dealt
-// with a Start that returned or panicked and is waiting again.
-type waitingContext struct {
-	context.Context
-	waiting chan struct{}
-}
-
-func (c *waitingContext) Done() <-chan struct{} {
-	select {
-	case c.waiting <- struct{}{}:
+// endByStop ends the Runner the way Stop has it exit.
+func (r *scriptedRunner) endByStop() {
+	switch {
+	case r.stopExitPanic != nil:
+		r.panicExit(r.stopExitPanic)
+	case r.stopExit != nil:
+		r.exit(r.stopExit)
 	default:
+		r.exit(fmt.Errorf("%s: %w", r.name, context.Canceled))
 	}
-	return c.Context.Done()
 }
 
-// ctxKey keys the value the run context carries, to check that each Start context inherits it.
+// exit ends the Runner with err, once.
+func (r *scriptedRunner) exit(err error) {
+	r.exitOnce.Do(func() {
+		r.mu.Lock()
+		r.err = err
+		r.mu.Unlock()
+		close(r.done)
+	})
+}
+
+// panicExit ends the Runner with the *PanicError of a panic with v, recovered as a Runner
+// recovers a panic in its own work.
+func (r *scriptedRunner) panicExit(v any) {
+	defer func() { r.exit(&PanicError{Runner: r.name, Value: recover(), Stack: debug.Stack()}) }()
+	panic(v)
+}
+
+// free releases a hung Start or Stop.
+func (r *scriptedRunner) free() {
+	r.freeOnce.Do(func() { close(r.release) })
+}
+
+// orderedRunner is a scripted Runner with an Order.
+type orderedRunner struct {
+	*scriptedRunner
+	order int
+}
+
+func (r orderedRunner) Order() int { return r.order }
+
+// ctxKey keys the value the run context carries, to check that the Start context inherits it.
 type ctxKey struct{}
 
-// harness runs a Supervisor over scripted Runners. Its stop context has no deadline: the test
-// ends the grace period by calling cancelStop.
+// harness runs a Supervisor over scripted Runners. Its start and stop contexts have no deadline:
+// the test ends the start phase by calling expireStart and the grace period by calling cancelStop.
 type harness struct {
-	t          *testing.T
-	baseline   int
-	rec        *recorder
-	runners    []*scriptedRunner
-	startCtx   []context.Context
-	cancelRun  context.CancelFunc
-	cancelStop context.CancelFunc
-	result     chan error
+	t           *testing.T
+	baseline    int
+	rec         *recorder
+	runners     []*scriptedRunner
+	startCtx    []context.Context
+	cancelRun   context.CancelFunc
+	expireStart context.CancelFunc
+	cancelStop  context.CancelFunc
+	result      chan error
 
-	// waiting receives a value each time Run starts waiting for shutdown.
+	// waiting receives a value each time Run starts waiting for shutdown with every Runner running.
 	waiting chan struct{}
 }
 
-// runScripted starts Run over runners and returns once every Start has been entered.
+// launchRun starts Run over list, whose Runners are scripted or ordered scripted ones, and returns
+// at once.
+func launchRun(t *testing.T, opts []Option, list ...Runner) *harness {
+	t.Helper()
+	h := &harness{t: t, baseline: runtime.NumGoroutine(), rec: &recorder{}}
+	for _, r := range list {
+		var sr *scriptedRunner
+		switch r := r.(type) {
+		case *scriptedRunner:
+			sr = r
+		case orderedRunner:
+			sr = r.scriptedRunner
+		default:
+			t.Fatalf("launchRun: unexpected runner %T", r)
+		}
+		sr.rec = h.rec
+		h.runners = append(h.runners, sr)
+	}
+	s, err := New(list, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	expire, expireStart := context.WithCancel(context.Background())
+	s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		stop := context.AfterFunc(expire, cancel)
+		return ctx, func() { stop(); cancel() }
+	}
+	stopCtx, cancelStop := context.WithCancel(context.Background())
+	s.newStopContext = func() (context.Context, context.CancelFunc) { return stopCtx, cancelStop }
+	h.waiting = make(chan struct{}, 16)
+	s.waiting = func() {
+		select {
+		case h.waiting <- struct{}{}:
+		default:
+		}
+	}
+	runCtx, cancelRun := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "run"))
+	h.cancelRun, h.expireStart, h.cancelStop = cancelRun, expireStart, cancelStop
+
+	h.result = make(chan error, 1)
+	go func() { h.result <- s.Run(runCtx) }()
+	return h
+}
+
+// runScripted starts Run over runners and returns once every Runner has started and Run is
+// waiting for shutdown.
 func runScripted(t *testing.T, runners ...*scriptedRunner) *harness {
 	t.Helper()
 	return runScriptedWith(t, nil, runners...)
@@ -335,28 +489,15 @@ func runScripted(t *testing.T, runners ...*scriptedRunner) *harness {
 // runScriptedWith is runScripted with options for New.
 func runScriptedWith(t *testing.T, opts []Option, runners ...*scriptedRunner) *harness {
 	t.Helper()
-	h := &harness{t: t, baseline: runtime.NumGoroutine(), rec: &recorder{}, runners: runners}
 	list := make([]Runner, len(runners))
 	for i, r := range runners {
-		r.rec = h.rec
 		list[i] = r
 	}
-	s, err := New(list, opts...)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	stopCtx, cancelStop := context.WithCancel(context.Background())
-	s.newStopContext = func() (context.Context, context.CancelFunc) { return stopCtx, cancelStop }
-	runCtx, cancelRun := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "run"))
-	h.cancelRun, h.cancelStop = cancelRun, cancelStop
-	h.waiting = make(chan struct{}, 16)
-	waitCtx := &waitingContext{Context: runCtx, waiting: h.waiting}
-
-	h.result = make(chan error, 1)
-	go func() { h.result <- s.Run(waitCtx) }()
+	h := launchRun(t, opts, list...)
 	for _, r := range runners {
 		h.startCtx = append(h.startCtx, <-r.started)
 	}
+	<-h.waiting
 	return h
 }
 
@@ -364,9 +505,10 @@ func runScriptedWith(t *testing.T, opts []Option, runners ...*scriptedRunner) *h
 func (h *harness) finish() {
 	h.t.Helper()
 	for _, r := range h.runners {
-		close(r.release)
+		r.free()
 	}
 	h.cancelRun()
+	h.expireStart()
 	h.cancelStop()
 	settle(h.t, h.baseline)
 }
@@ -394,19 +536,46 @@ func joined(t *testing.T, err error) []error {
 	return j.Unwrap()
 }
 
+func checkOrder(t *testing.T, what string, got, want []string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("%s order = %v, want %v", what, got, want)
+	}
+}
+
 func TestRunStopsInReverseOrderAndReturnsNilOnParentCancel(t *testing.T) {
 	h := runScripted(t, newScripted("a"), newScripted("b"), newScripted("c"))
 	h.cancelRun()
 	if err := <-h.result; err != nil {
 		t.Errorf("Run = %v, want nil", err)
 	}
-	if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
-		t.Errorf("stop order = %v, want %v", got, want)
-	}
+	checkOrder(t, "start", h.rec.startOrder(), []string{"a", "b", "c"})
+	checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 	h.finish()
 }
 
-func TestRunFailureStopsEveryRunnerAndIsReturnedFirst(t *testing.T) {
+func TestRunStartsInAscendingOrderAwaitingEachAndStopsInReverse(t *testing.T) {
+	a, b, c, d := newScripted("a"), newScripted("b"), newScripted("c"), newScripted("d")
+	c.hangStart = true
+	h := launchRun(t, nil,
+		orderedRunner{a, 1}, b, orderedRunner{c, -1}, orderedRunner{d, 1})
+
+	<-c.started
+	if got := h.rec.startOrder(); len(got) != 1 {
+		t.Errorf("Start calls while c's Start runs = %v, want only c", got)
+	}
+	c.free()
+	<-h.waiting
+	h.cancelRun()
+	if err := <-h.result; err != nil {
+		t.Errorf("Run = %v, want nil", err)
+	}
+	checkOrder(t, "start", h.rec.startOrder(), []string{"c", "b", "a", "d"})
+	checkOrder(t, "stop", h.rec.stopOrder(), []string{"d", "a", "b", "c"})
+	h.finish()
+}
+
+func TestRunExitBeforeShutdownStopsEveryRunnerAndIsReturnedFirst(t *testing.T) {
 	boom := errors.New("boom")
 	tests := []struct {
 		name    string
@@ -414,16 +583,17 @@ func TestRunFailureStopsEveryRunnerAndIsReturnedFirst(t *testing.T) {
 		exitErr error
 		want    error
 	}{
-		{name: "start error from the first runner", failing: 0, exitErr: boom, want: boom},
-		{name: "start error from the last runner", failing: 2, exitErr: boom, want: boom},
-		{name: "early nil from the middle runner", failing: 1, want: ErrRunnerExited},
-		{name: "early nil from the first runner", failing: 0, want: ErrRunnerExited},
+		{name: "exit error from the first runner", failing: 0, exitErr: boom, want: boom},
+		{name: "exit error from the last runner", failing: 2, exitErr: boom, want: boom},
+		{name: "exit with nil from the middle runner", failing: 1, want: ErrRunnerExited},
+		{name: "exit with nil from the first runner", failing: 0, want: ErrRunnerExited},
+		{name: "exit with cancellation", failing: 1, exitErr: context.Canceled, want: context.Canceled},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := runScripted(t, newScripted("a"), newScripted("b"), newScripted("c"))
 			failing := h.runners[tt.failing]
-			failing.exit <- tt.exitErr
+			failing.exit(tt.exitErr)
 
 			err := <-h.result
 			errs := joined(t, err)
@@ -436,17 +606,15 @@ func TestRunFailureStopsEveryRunnerAndIsReturnedFirst(t *testing.T) {
 			if !strings.Contains(errs[0].Error(), fmt.Sprintf("%q", failing.name)) {
 				t.Errorf("first error = %v, want it to name %q", errs[0], failing.name)
 			}
-			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
-				t.Errorf("stop order = %v, want %v", got, want)
-			}
+			checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 			h.finish()
 		})
 	}
 }
 
-func TestRunDropsStartErrorsThatReportCancellation(t *testing.T) {
+func TestRunDropsExitErrorsThatReportCancellation(t *testing.T) {
 	a, b := newScripted("a"), newScripted("b")
-	b.cancelErr = fmt.Errorf("serve: %w", context.Canceled)
+	b.stopExit = fmt.Errorf("serve: %w", context.Canceled)
 	h := runScripted(t, a, b)
 	h.cancelRun()
 	if err := <-h.result; err != nil {
@@ -470,13 +638,275 @@ func TestRunTwiceReturnsErrAlreadyRan(t *testing.T) {
 	settle(t, baseline)
 }
 
+func TestRunWithADoneContextStartsNothing(t *testing.T) {
+	a := newScripted("a")
+	a.rec = &recorder{}
+	s, err := New([]Runner{a})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Errorf("Run = %v, want nil", err)
+	}
+	if got := a.rec.startOrder(); len(got) != 0 {
+		t.Errorf("Start called on %v, want none", got)
+	}
+	if got := a.rec.stopOrder(); len(got) != 0 {
+		t.Errorf("Stop called on %v, want none", got)
+	}
+}
+
+func TestRunStartFailureStopsTheStartedRunnersInReverse(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name   string
+		policy PanicPolicy
+		// setup makes b's Start fail.
+		setup func(b *scriptedRunner)
+		// panicValue is what b's Start panics with, when panics is set.
+		panics     bool
+		panicValue any
+	}{
+		{name: "start error", setup: func(b *scriptedRunner) { b.startErr = boom }},
+		{name: "start panic with an error under fail", panics: true, panicValue: boom},
+		{name: "start panic with a string under fail", panics: true, panicValue: "oops"},
+		{name: "start panic with nil under fail", panics: true},
+		{name: "start panic under isolate", policy: PanicIsolate, panics: true, panicValue: "oops"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			if tt.setup != nil {
+				tt.setup(b)
+			}
+			b.startPanics, b.startPanicValue = tt.panics, tt.panicValue
+			h := launchRun(t, []Option{WithPanicPolicy(tt.policy)}, a, b, c)
+
+			err := <-h.result
+			if tt.panics {
+				checkJoined(t, err, []wantErr{{panicked: "b"}})
+				checkPanic(t, err, "b", tt.panicValue, "Start")
+			} else {
+				checkJoined(t, err, []wantErr{{is: boom}})
+				if !strings.Contains(err.Error(), `"b"`) {
+					t.Errorf("Run = %v, want it to name %q", err, "b")
+				}
+			}
+			checkOrder(t, "start", h.rec.startOrder(), []string{"a", "b"})
+			checkOrder(t, "stop", h.rec.stopOrder(), []string{"b", "a"})
+			h.finish()
+		})
+	}
+}
+
+func TestRunStartTimeoutStopsTheStartedRunnersInReverse(t *testing.T) {
+	a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+	b.hangStart = true
+	h := launchRun(t, nil, a, b, c)
+	<-a.started
+	<-b.started
+	h.expireStart()
+
+	err := <-h.result
+	checkJoined(t, err, []wantErr{{is: ErrStartTimeout}})
+	if !strings.Contains(err.Error(), `"b"`) {
+		t.Errorf("Run = %v, want it to name %q", err, "b")
+	}
+	checkOrder(t, "start", h.rec.startOrder(), []string{"a", "b"})
+	checkOrder(t, "stop", h.rec.stopOrder(), []string{"b", "a"})
+	h.finish()
+}
+
+func TestRunParentCancelDuringStartStopsTheStartedRunnersAndReturnsNil(t *testing.T) {
+	a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+	b.hangStart = true
+	h := launchRun(t, nil, a, b, c)
+	<-a.started
+	<-b.started
+	h.cancelRun()
+
+	if err := <-h.result; err != nil {
+		t.Errorf("Run = %v, want nil", err)
+	}
+	checkOrder(t, "start", h.rec.startOrder(), []string{"a", "b"})
+	checkOrder(t, "stop", h.rec.stopOrder(), []string{"b", "a"})
+	h.finish()
+}
+
+// phaseContext is a start context whose phase a test ends from inside a Start: Err reports the
+// phase over once ended is set, but Done never closes, so only the check Run makes before calling
+// the next Start sees the end.
+type phaseContext struct {
+	context.Context
+	ended *atomic.Bool
+}
+
+func (c phaseContext) Done() <-chan struct{} { return nil }
+
+func (c phaseContext) Err() error {
+	if c.ended.Load() {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func TestRunStartPhaseEndingBetweenTwoStartsStopsTheStartedRunners(t *testing.T) {
+	tests := []struct {
+		name string
+		// cancelRun cancels the run context as the start phase ends; otherwise the phase times out.
+		cancelRun bool
+	}{
+		{name: "start timeout"},
+		{name: "parent cancel", cancelRun: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			rec := &recorder{}
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			for _, r := range []*scriptedRunner{a, b, c} {
+				r.rec = rec
+			}
+			s, err := New([]Runner{a, b, c})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			defer cancelRun()
+			var ended atomic.Bool
+			s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+				return phaseContext{Context: context.WithoutCancel(parent), ended: &ended}, func() {}
+			}
+			s.newStopContext = func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			}
+			waited := make(chan struct{}, 1)
+			s.waiting = func() {
+				select {
+				case waited <- struct{}{}:
+				default:
+				}
+			}
+			b.onStart = func() {
+				if tt.cancelRun {
+					cancelRun()
+				}
+				ended.Store(true)
+			}
+
+			result := make(chan error, 1)
+			go func() { result <- s.Run(runCtx) }()
+			select {
+			case err = <-result:
+			case <-waited:
+				t.Error("Run waited for shutdown after the start phase ended")
+				cancelRun()
+				err = <-result
+			}
+			select {
+			case <-waited:
+				t.Error("Run waited for shutdown after the start phase ended")
+			default:
+			}
+
+			if tt.cancelRun {
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			} else {
+				checkJoined(t, err, []wantErr{{is: ErrStartTimeout}})
+				for _, name := range []string{"a", "b", "c"} {
+					if strings.Contains(err.Error(), fmt.Sprintf("%q", name)) {
+						t.Errorf("Run = %v, want it to name no runner", err)
+					}
+				}
+			}
+			checkOrder(t, "start", rec.startOrder(), []string{"a", "b"})
+			checkOrder(t, "stop", rec.stopOrder(), []string{"b", "a"})
+			cancelRun()
+			settle(t, baseline)
+		})
+	}
+}
+
+func TestRunStartReturningTheEndOfItsContextAfterThePhaseEndedIsNoStartFailure(t *testing.T) {
+	expired := fmt.Errorf("dial: %w", context.DeadlineExceeded)
+	tests := []struct {
+		name string
+		// endPhase ends the start phase from inside b's Start, before it returns.
+		endPhase bool
+		// cancelRun cancels the run context as the start phase ends.
+		cancelRun bool
+		// panics makes b's Start panic with expired instead of returning it.
+		panics bool
+		want   []wantErr
+	}{
+		{name: "start timeout", endPhase: true, want: []wantErr{{is: ErrStartTimeout}}},
+		{name: "parent cancel", endPhase: true, cancelRun: true},
+		{name: "phase still running", want: []wantErr{{is: context.DeadlineExceeded}}},
+		{name: "panic after the phase ended", endPhase: true, panics: true, want: []wantErr{{panicked: "b"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			rec := &recorder{}
+			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
+			for _, r := range []*scriptedRunner{a, b, c} {
+				r.rec = rec
+			}
+			b.startErr = expired
+			b.startPanics, b.startPanicValue = tt.panics, expired
+			s, err := New([]Runner{a, b, c})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			defer cancelRun()
+			var ended atomic.Bool
+			s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+				return phaseContext{Context: context.WithoutCancel(parent), ended: &ended}, func() {}
+			}
+			s.newStopContext = func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			}
+			b.onStart = func() {
+				if tt.cancelRun {
+					cancelRun()
+				}
+				ended.Store(tt.endPhase)
+			}
+
+			err = s.Run(runCtx)
+			if tt.want == nil {
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			} else {
+				checkJoined(t, err, tt.want)
+				if !strings.Contains(err.Error(), `"b"`) {
+					t.Errorf("Run = %v, want it to name %q", err, "b")
+				}
+			}
+			if tt.endPhase && !tt.panics && errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Run = %v, want the end of the start context not reported as a start failure", err)
+			}
+			checkOrder(t, "start", rec.startOrder(), []string{"a", "b"})
+			checkOrder(t, "stop", rec.stopOrder(), []string{"b", "a"})
+			cancelRun()
+			settle(t, baseline)
+		})
+	}
+}
+
 func TestRunReportsAStopProblemAndStillStopsTheRest(t *testing.T) {
 	stopBoom := errors.New("stop boom")
 	tests := []struct {
 		name string
 		// setup configures runner b, which is stopped second of three.
 		setup func(b *scriptedRunner)
-		// hangs reports that b blocks until the grace period ends.
+		// hangs reports that b stays pending until the grace period ends.
 		hangs bool
 		want  []error
 	}{
@@ -492,8 +922,8 @@ func TestRunReportsAStopProblemAndStillStopsTheRest(t *testing.T) {
 			want:  []error{ErrStopTimeout},
 		},
 		{
-			name:  "start hangs past the deadline",
-			setup: func(b *scriptedRunner) { b.hangStart = true },
+			name:  "done stays open past the deadline after stop returns",
+			setup: func(b *scriptedRunner) { b.keepRunning = true },
 			hangs: true,
 			want:  []error{ErrStopTimeout},
 		},
@@ -536,52 +966,67 @@ func TestRunReportsAStopProblemAndStillStopsTheRest(t *testing.T) {
 			if len(errs) != wantLen {
 				t.Errorf("Run joined %d errors (%v), want %d", len(errs), errs, wantLen)
 			}
-			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
-				t.Errorf("stop order = %v, want %v", got, want)
-			}
-			if err := h.startCtx[0].Err(); !errors.Is(err, context.Canceled) {
-				t.Errorf("a's Start context = %v, want it cancelled", err)
-			}
+			checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 			h.finish()
 		})
 	}
 }
 
-func TestRunKeepsEachStartContextLiveUntilItsTurn(t *testing.T) {
+func TestRunStartContextCarriesTheRunValuesAndEndsWithTheStartPhase(t *testing.T) {
+	h := runScripted(t, newScripted("a"), newScripted("b"))
+	for i, ctx := range h.startCtx {
+		if got := ctx.Value(ctxKey{}); got != "run" {
+			t.Errorf("Start context %d carries %v, want the run context's value", i, got)
+		}
+		if err := ctx.Err(); !errors.Is(err, context.Canceled) {
+			t.Errorf("Start context %d once every Runner started = %v, want cancelled", i, err)
+		}
+	}
+	h.cancelRun()
+	if err := <-h.result; err != nil {
+		t.Errorf("Run = %v, want nil", err)
+	}
+	h.finish()
+}
+
+func TestRunStopsEachRunnerOnlyAfterTheLaterOnesHaveExited(t *testing.T) {
 	a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
-	var liveWhileCStops, liveWhileBStops []bool
+	var exitedWhenBStops, exitedWhenAStops []bool
+	isDone := func(r *scriptedRunner) bool {
+		select {
+		case <-r.done:
+			return true
+		default:
+			return false
+		}
+	}
+	b.onStop = func() { exitedWhenBStops = []bool{isDone(a), isDone(c)} }
+	a.onStop = func() { exitedWhenAStops = []bool{isDone(b)} }
 	h := runScripted(t, a, b, c)
-	c.onStop = func() { liveWhileCStops = []bool{h.startCtx[0].Err() == nil, h.startCtx[1].Err() == nil} }
-	b.onStop = func() { liveWhileBStops = []bool{h.startCtx[0].Err() == nil} }
 
 	h.cancelRun()
 	if err := <-h.result; err != nil {
 		t.Fatalf("Run = %v, want nil", err)
 	}
-	if !slices.Equal(liveWhileCStops, []bool{true, true}) {
-		t.Errorf("a and b Start contexts live while c stops = %v, want both live", liveWhileCStops)
+	if !slices.Equal(exitedWhenBStops, []bool{false, true}) {
+		t.Errorf("a and c exited when b stops = %v, want a running and c exited", exitedWhenBStops)
 	}
-	if !slices.Equal(liveWhileBStops, []bool{true}) {
-		t.Errorf("a Start context live while b stops = %v, want live", liveWhileBStops)
-	}
-	for i, ctx := range h.startCtx {
-		if got := ctx.Value(ctxKey{}); got != "run" {
-			t.Errorf("Start context %d carries %v, want the run context's value", i, got)
-		}
+	if !slices.Equal(exitedWhenAStops, []bool{true}) {
+		t.Errorf("b exited when a stops = %v, want exited", exitedWhenAStops)
 	}
 	h.finish()
 }
 
 func TestRunJoinsTheFailureFirstThenStopProblemsInStopOrder(t *testing.T) {
-	startBoom, stopBoom, flushBoom := errors.New("start boom"), errors.New("stop boom"), errors.New("flush boom")
+	exitBoom, stopBoom, flushBoom := errors.New("exit boom"), errors.New("stop boom"), errors.New("flush boom")
 	a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
-	b.cancelErr = flushBoom
+	b.stopExit = flushBoom
 	c.stopErr = stopBoom
 	h := runScripted(t, a, b, c)
-	a.exit <- startBoom
+	a.exit(exitBoom)
 
 	errs := joined(t, <-h.result)
-	want := []error{startBoom, stopBoom, flushBoom}
+	want := []error{exitBoom, stopBoom, flushBoom}
 	if len(errs) != len(want) {
 		t.Fatalf("Run joined %d errors (%v), want %d", len(errs), errs, len(want))
 	}
@@ -653,7 +1098,7 @@ func checkPanic(t *testing.T, err error, runner string, value any, method string
 	}
 }
 
-func TestRunStartPanicUnderPanicFailBeginsShutdown(t *testing.T) {
+func TestRunPanicExitUnderPanicFailBeginsShutdown(t *testing.T) {
 	tests := []struct {
 		name  string
 		value any
@@ -666,26 +1111,24 @@ func TestRunStartPanicUnderPanicFailBeginsShutdown(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			a, b, c := newScripted("a"), newScripted("b"), newScripted("c")
 			h := runScriptedWith(t, []Option{WithPanicPolicy(PanicFail)}, a, b, c)
-			b.startPanic <- tt.value
+			b.panicExit(tt.value)
 
 			err := <-h.result
 			checkJoined(t, err, []wantErr{{panicked: "b"}})
-			checkPanic(t, err, "b", tt.value, "Start")
-			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
-				t.Errorf("stop order = %v, want %v", got, want)
-			}
+			checkPanic(t, err, "b", tt.value, "panicExit")
+			checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 			h.finish()
 		})
 	}
 }
 
-func TestRunIsolatesAStartPanicAndKeepsTheSiblingsRunning(t *testing.T) {
+func TestRunIsolatesAPanicExitAndKeepsTheSiblingsRunning(t *testing.T) {
 	boom, stopBoom := errors.New("boom"), errors.New("stop boom")
 	tests := []struct {
 		name string
 		// setup configures runners a, b and c before Run starts.
 		setup func(a, b, c *scriptedRunner)
-		// panics lists, by index, the Runners whose Start panics, in the order they panic.
+		// panics lists, by index, the Runners that exit with a panic, in the order they do.
 		panics []int
 		// end begins shutdown once every panic has been isolated.
 		end  func(h *harness)
@@ -706,7 +1149,7 @@ func TestRunIsolatesAStartPanicAndKeepsTheSiblingsRunning(t *testing.T) {
 		{
 			name:   "a later failure comes first",
 			panics: []int{1},
-			end:    func(h *harness) { h.runners[2].exit <- boom },
+			end:    func(h *harness) { h.runners[2].exit(boom) },
 			want:   []wantErr{{is: boom}, {panicked: "b"}},
 		},
 		{
@@ -724,30 +1167,21 @@ func TestRunIsolatesAStartPanicAndKeepsTheSiblingsRunning(t *testing.T) {
 				tt.setup(a, b, c)
 			}
 			h := runScriptedWith(t, []Option{WithPanicPolicy(PanicIsolate)}, a, b, c)
-			<-h.waiting
-			panicked := make(map[int]bool, len(tt.panics))
 			for _, i := range tt.panics {
-				h.runners[i].startPanic <- errors.New(h.runners[i].name)
+				h.runners[i].panicExit(errors.New(h.runners[i].name))
 				<-h.waiting
-				panicked[i] = true
 			}
 
-			for i, r := range h.runners {
+			for _, r := range h.runners {
 				if len(r.stopCalled) != 0 {
 					t.Errorf("%s stopped while a sibling's panic was isolated", r.name)
-				}
-				if !panicked[i] && h.startCtx[i].Err() != nil {
-					t.Errorf("%s Start context = %v, want it live while a sibling's panic is isolated",
-						r.name, h.startCtx[i].Err())
 				}
 			}
 
 			tt.end(h)
 			err := <-h.result
 			checkJoined(t, err, tt.want)
-			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
-				t.Errorf("stop order = %v, want %v", got, want)
-			}
+			checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 			h.finish()
 		})
 	}
@@ -757,8 +1191,7 @@ func TestRunIsolatedPanicIsTheResultWhenItIsTheOnlyProblem(t *testing.T) {
 	cause := errors.New("cause")
 	a, b := newScripted("a"), newScripted("b")
 	h := runScriptedWith(t, []Option{WithPanicPolicy(PanicIsolate)}, a, b)
-	<-h.waiting
-	a.startPanic <- cause
+	a.panicExit(cause)
 	<-h.waiting
 	h.cancelRun()
 
@@ -766,7 +1199,7 @@ func TestRunIsolatedPanicIsTheResultWhenItIsTheOnlyProblem(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Run = nil, want the isolated panic")
 	}
-	checkPanic(t, err, "a", cause, "Start")
+	checkPanic(t, err, "a", cause, "panicExit")
 	h.finish()
 }
 
@@ -795,18 +1228,18 @@ func TestRunReportsAPanicDuringShutdownAsAStopProblem(t *testing.T) {
 			method: "Stop",
 		},
 		{
-			name:   "start panic on cancellation under fail",
+			name:   "panic exit on stop under fail",
 			policy: PanicFail,
-			setup:  func(a, b *scriptedRunner) { b.cancelPanic = cause; a.stopErr = stopBoom },
+			setup:  func(a, b *scriptedRunner) { b.stopExitPanic = cause; a.stopErr = stopBoom },
 			want:   []wantErr{{panicked: "b", is: cause}, {is: stopBoom}},
-			method: "Start",
+			method: "panicExit",
 		},
 		{
-			name:   "start panic on cancellation under isolate",
+			name:   "panic exit on stop under isolate",
 			policy: PanicIsolate,
-			setup:  func(a, b *scriptedRunner) { b.cancelPanic = cause; a.stopErr = stopBoom },
+			setup:  func(a, b *scriptedRunner) { b.stopExitPanic = cause; a.stopErr = stopBoom },
 			want:   []wantErr{{panicked: "b", is: cause}, {is: stopBoom}},
-			method: "Start",
+			method: "panicExit",
 		},
 	}
 	for _, tt := range tests {
@@ -819,15 +1252,13 @@ func TestRunReportsAPanicDuringShutdownAsAStopProblem(t *testing.T) {
 			err := <-h.result
 			checkJoined(t, err, tt.want)
 			checkPanic(t, joined(t, err)[0], "b", cause, tt.method)
-			if got, want := h.rec.stopOrder(), []string{"c", "b", "a"}; !slices.Equal(got, want) {
-				t.Errorf("stop order = %v, want %v", got, want)
-			}
+			checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 			h.finish()
 		})
 	}
 }
 
-func TestRunCallsStopOnceOnARunnerWhoseStartPanicked(t *testing.T) {
+func TestRunCallsStopOnceOnARunnerThatExitedWithAPanic(t *testing.T) {
 	tests := []struct {
 		name   string
 		policy PanicPolicy
@@ -839,18 +1270,219 @@ func TestRunCallsStopOnceOnARunnerWhoseStartPanicked(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			a, b := newScripted("a"), newScripted("b")
 			h := runScriptedWith(t, []Option{WithPanicPolicy(tt.policy)}, a, b)
-			<-h.waiting
-			a.startPanic <- "oops"
+			a.panicExit("oops")
 			if tt.policy == PanicIsolate {
 				<-h.waiting
 				h.cancelRun()
 			}
 
-			checkPanic(t, <-h.result, "a", "oops", "Start")
-			if got, want := h.rec.stopOrder(), []string{"b", "a"}; !slices.Equal(got, want) {
-				t.Errorf("stop order = %v, want %v", got, want)
-			}
+			checkPanic(t, <-h.result, "a", "oops", "panicExit")
+			checkOrder(t, "stop", h.rec.stopOrder(), []string{"b", "a"})
 			h.finish()
+		})
+	}
+}
+
+func TestRunJoinsWorkThatEndsOnlyWhenStoppedAndReturnsAfterIt(t *testing.T) {
+	// hangGuard bounds each wait so that a Run that never returns fails the test instead of
+	// hanging it; it orders nothing.
+	const hangGuard = 10 * time.Second
+
+	cancelled, release := make(chan struct{}), make(chan struct{})
+	finished := false
+	work := Func("work", func(ctx context.Context) error {
+		<-ctx.Done()
+		close(cancelled)
+		<-release
+		finished = true
+		return ctx.Err()
+	})
+	run := startFuncRun(t, context.Background(), nil, work)
+	<-run.waiting
+	run.cancel()
+
+	select {
+	case <-cancelled:
+	case err := <-run.result:
+		t.Fatalf("Run = %v before the work saw its cancellation", err)
+	case <-time.After(hangGuard):
+		t.Fatalf("the work was not cancelled within %v of shutdown", hangGuard)
+	}
+	select {
+	case err := <-run.result:
+		t.Fatalf("Run = %v while the work is still running", err)
+	default:
+	}
+	close(release)
+
+	select {
+	case err := <-run.result:
+		if err != nil {
+			t.Errorf("Run = %v, want nil", err)
+		}
+	case <-time.After(hangGuard):
+		t.Fatalf("Run did not return within %v of the work finishing", hangGuard)
+	}
+	if !finished {
+		t.Errorf("Run returned before the work finished")
+	}
+}
+
+// heldStart is a Runner whose Start reports on entered and then, ignoring its context, waits for
+// the test to send on start what it comes to. Stop reports on stopped and returns stopErr. Done
+// closes when the test calls exit.
+type heldStart struct {
+	name    string
+	entered chan struct{}
+	start   chan func() error
+	stopped chan struct{}
+	stopErr error
+	done    chan struct{}
+	err     error
+}
+
+func newHeldStart(name string) *heldStart {
+	return &heldStart{
+		name:    name,
+		entered: make(chan struct{}),
+		start:   make(chan func() error),
+		stopped: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (r *heldStart) Name() string { return r.name }
+
+func (r *heldStart) Start(context.Context) error {
+	close(r.entered)
+	return (<-r.start)()
+}
+
+func (r *heldStart) Done() <-chan struct{} { return r.done }
+
+func (r *heldStart) Err() error { return r.err }
+
+func (r *heldStart) Stop(context.Context) error {
+	close(r.stopped)
+	return r.stopErr
+}
+
+// exit ends the Runner with err.
+func (r *heldStart) exit(err error) {
+	r.err = err
+	close(r.done)
+}
+
+// graceEndingInFinish is a stop context whose grace period ends once Run has seen Stop return:
+// the first Done, which Run selects on while Stop runs, never closes, and every later Done is
+// closed, as is Err from then on.
+type graceEndingInFinish struct {
+	context.Context
+	calls atomic.Int32
+	ended chan struct{}
+}
+
+func newGraceEndingInFinish() *graceEndingInFinish {
+	c := &graceEndingInFinish{Context: context.Background(), ended: make(chan struct{})}
+	close(c.ended)
+	return c
+}
+
+func (c *graceEndingInFinish) Done() <-chan struct{} {
+	if c.calls.Add(1) == 1 {
+		return nil
+	}
+	return c.ended
+}
+
+func (c *graceEndingInFinish) Err() error {
+	if c.calls.Load() > 1 {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func TestRunWaitsForAStartThatReturnsAfterStop(t *testing.T) {
+	boom, stopBoom := errors.New("boom"), errors.New("stop boom")
+	tests := []struct {
+		name string
+		// start is what the late Start comes to; nil leaves it pending past the grace period.
+		start func() error
+		// exitErr, when exit is set, is the Err the Runner exits with once its late Start returned.
+		exit    bool
+		exitErr error
+		stopErr error
+		want    []wantErr
+	}{
+		{name: "late error is reported", start: func() error { return boom }, want: []wantErr{{is: boom}}},
+		{name: "late panic is reported", start: func() error { panic("oops") }, want: []wantErr{{panicked: "late"}}},
+		{
+			name:  "late end of its context is dropped",
+			start: func() error { return fmt.Errorf("start: %w", context.Canceled) },
+		},
+		{name: "late nil then a clean exit", start: func() error { return nil }, exit: true},
+		{
+			name:    "late nil then an exit error",
+			start:   func() error { return nil },
+			exit:    true,
+			exitErr: boom,
+			want:    []wantErr{{is: boom}},
+		},
+		{name: "start pending past the grace period", want: []wantErr{{is: ErrStopTimeout}}},
+		{
+			name:    "start pending past the grace period after a stop error",
+			stopErr: stopBoom,
+			want:    []wantErr{{is: stopBoom}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			r := newHeldStart("late")
+			r.stopErr = tt.stopErr
+			if tt.exit {
+				r.exit(tt.exitErr)
+			}
+			s, err := New([]Runner{r})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if tt.start == nil {
+				s.newStopContext = func() (context.Context, context.CancelFunc) {
+					return newGraceEndingInFinish(), func() {}
+				}
+			} else {
+				s.newStopContext = func() (context.Context, context.CancelFunc) {
+					return context.WithCancel(context.Background())
+				}
+			}
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			defer cancelRun()
+			result := make(chan error, 1)
+			go func() { result <- s.Run(runCtx) }()
+
+			<-r.entered
+			cancelRun()
+			<-r.stopped
+			if tt.start != nil {
+				r.start <- tt.start
+			}
+			err = <-result
+			if tt.start == nil {
+				r.start <- func() error { return nil }
+			}
+
+			if tt.want == nil {
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			} else {
+				checkJoined(t, err, tt.want)
+				if !strings.Contains(err.Error(), `"late"`) {
+					t.Errorf("Run = %v, want it to name %q", err, "late")
+				}
+			}
+			settle(t, baseline)
 		})
 	}
 }

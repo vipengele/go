@@ -26,6 +26,8 @@ const tempPrefixSuffix = "-update-"
 const (
 	// defaultMaxDownloadBytes is the [Config.MaxDownloadBytes] a zero value resolves to.
 	defaultMaxDownloadBytes int64 = 256 << 20
+	// defaultMaxExtractBytes is the [Config.MaxExtractBytes] a zero value resolves to.
+	defaultMaxExtractBytes int64 = 512 << 20
 	// defaultDownloadTimeout is the [Config.DownloadTimeout] a zero value resolves to.
 	defaultDownloadTimeout = 5 * time.Minute
 )
@@ -49,6 +51,9 @@ type Config struct {
 	// MaxDownloadBytes is the most bytes a single download may read. Zero means 256 MiB; a negative
 	// value is invalid.
 	MaxDownloadBytes int64
+	// MaxExtractBytes is the most bytes extracting a single archive may write. Zero means 512 MiB; a
+	// negative value is invalid.
+	MaxExtractBytes int64
 	// DownloadTimeout bounds the whole of a single download. Zero means 5 minutes; a negative value
 	// is invalid.
 	DownloadTimeout time.Duration
@@ -56,8 +61,10 @@ type Config struct {
 	// template language of package asset: {name}, {version}, {tag}, {os}, {arch} and {ext}. Empty
 	// means [asset.DefaultTemplate].
 	AssetTemplate string
-	// AssetExt is the archive extension {ext} stands for, without a leading ".". Empty means
-	// [asset.DefaultExt]. It carries no per-OS rules: a tool whose assets differ by platform
+	// AssetExt is the archive extension {ext} stands for, without a leading ".", and it decides the
+	// archive format: "tar.gz" or "tgz" is a gzip-compressed tar, "zip" a zip, matched exactly in
+	// lower case. Empty means [asset.DefaultExt]. An AssetTemplate without {ext} names a raw binary
+	// and ignores AssetExt. It carries no per-OS rules: a tool whose assets differ by platform
 	// writes the difference into AssetTemplate, and a raw-binary tool leaves {ext} out of it.
 	AssetExt string
 	// ChecksumsAsset is the name of the release asset that lists every asset's checksum, written
@@ -104,7 +111,8 @@ type Config struct {
 // [validate.ErrEmpty] or [validate.ErrInvalid]. Every other field is optional, and a non-empty
 // AssetTemplate, ChecksumsAsset or AssetExt must be valid: AssetTemplate by [asset.Validate],
 // ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
-// "}" and not starting with ".". MaxDownloadBytes and DownloadTimeout must not be negative. Each of
+// "}" and not starting with ".", and, when the AssetTemplate holds {ext}, being "tar.gz", "tgz" or
+// "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative. Each of
 // those is a [validate.FieldError] wrapping [validate.ErrInvalid], and the AssetTemplate and
 // ChecksumsAsset ones also wrap the error of package asset.
 func (c Config) Validate() error {
@@ -112,8 +120,9 @@ func (c Config) Validate() error {
 		c.Identity.Validate(),
 		checkTemplate("AssetTemplate", c.AssetTemplate, asset.Validate),
 		checkTemplate("ChecksumsAsset", c.ChecksumsAsset, asset.ValidateChecksums),
-		checkAssetExt(c.AssetExt),
+		checkAssetExt(c.AssetTemplate, c.AssetExt),
 		checkNotNegative("MaxDownloadBytes", c.MaxDownloadBytes),
+		checkNotNegative("MaxExtractBytes", c.MaxExtractBytes),
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
 	)
 }
@@ -137,17 +146,66 @@ func checkTemplate(field, tmpl string, check func(string) error) error {
 	return nil
 }
 
+// assetFormat is the layout of a release asset.
+type assetFormat int
+
+const (
+	// formatRaw is a binary published as is.
+	formatRaw assetFormat = iota + 1
+	// formatTarGz is a gzip-compressed tar archive.
+	formatTarGz
+	// formatZip is a zip archive.
+	formatZip
+)
+
+// deriveFormat returns the format of the asset an AssetTemplate and an AssetExt name, with an empty
+// one standing for its default. A template without {ext} is raw whatever the extension. Otherwise
+// the extension decides, matched exactly; ok is false for one that names no supported format.
+func deriveFormat(tmpl, ext string) (f assetFormat, ok bool) {
+	if tmpl == "" {
+		tmpl = asset.DefaultTemplate
+	}
+	if !asset.UsesExt(tmpl) {
+		return formatRaw, true
+	}
+	if ext == "" {
+		ext = asset.DefaultExt
+	}
+	switch ext {
+	case "tar.gz", "tgz":
+		return formatTarGz, true
+	case "zip":
+		return formatZip, true
+	default:
+		return 0, false
+	}
+}
+
+// format returns the format of the asset c names. It reads the fields as given, so it is meant for
+// a Config [Config.resolve] returned, which has passed [Config.Validate]: any extension a
+// validated Config carries names a format.
+func (c Config) format() assetFormat {
+	f, _ := deriveFormat(c.AssetTemplate, c.AssetExt)
+	return f
+}
+
 // checkAssetExt rejects an extension that would change the asset name's structure: a path
 // separator, a brace that could open a placeholder, or a leading "." the template already writes.
-func checkAssetExt(ext string) error {
-	if ext == "" {
-		return nil
-	}
+// It also rejects an extension that names no supported format when the template, which an empty
+// value defaults, holds {ext}.
+func checkAssetExt(tmpl, ext string) error {
 	if strings.ContainsAny(ext, `/\{}`) || strings.HasPrefix(ext, ".") {
 		return &validate.FieldError{
 			Field: "AssetExt",
 			Value: ext,
 			Err:   fmt.Errorf("%w: must not contain '/', '\\', '{' or '}' or start with '.'", validate.ErrInvalid),
+		}
+	}
+	if _, ok := deriveFormat(tmpl, ext); !ok {
+		return &validate.FieldError{
+			Field: "AssetExt",
+			Value: ext,
+			Err:   fmt.Errorf("%w: must be \"tar.gz\", \"tgz\" or \"zip\" when AssetTemplate holds {ext}", validate.ErrInvalid),
 		}
 	}
 	return nil
@@ -175,6 +233,9 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.MaxDownloadBytes == 0 {
 		r.MaxDownloadBytes = defaultMaxDownloadBytes
+	}
+	if r.MaxExtractBytes == 0 {
+		r.MaxExtractBytes = defaultMaxExtractBytes
 	}
 	if r.DownloadTimeout == 0 {
 		r.DownloadTimeout = defaultDownloadTimeout

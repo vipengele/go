@@ -13,8 +13,10 @@ func TestSentinelMessages(t *testing.T) {
 		want string
 	}{
 		{"runner exited", ErrRunnerExited, "daemon: runner exited before shutdown"},
+		{"start timeout", ErrStartTimeout, "daemon: runner start timed out"},
 		{"stop timeout", ErrStopTimeout, "daemon: runner stop timed out"},
 		{"already ran", ErrAlreadyRan, "daemon: supervisor already ran"},
+		{"restart required", ErrRestartRequired, "daemon: restart required"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -31,6 +33,7 @@ func TestSentinelsMatchThroughWrapping(t *testing.T) {
 		err  error
 	}{
 		{"runner exited", ErrRunnerExited},
+		{"start timeout", ErrStartTimeout},
 		{"stop timeout", ErrStopTimeout},
 		{"already ran", ErrAlreadyRan},
 	}
@@ -56,6 +59,45 @@ func TestSentinelsMatchThroughWrapping(t *testing.T) {
 		}
 	}
 }
+
+func TestRestartRequired(t *testing.T) {
+	restart := fmt.Errorf("reload: %w", ErrRestartRequired)
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"bare", ErrRestartRequired, true},
+		{"wrapped", fmt.Errorf("run: %w", ErrRestartRequired), true},
+		{"wrapped twice", fmt.Errorf("outer: %w", restart), true},
+		{"joined restarts only", errors.Join(ErrRestartRequired, restart), true},
+		{"joined restarts inside a wrapper", fmt.Errorf("run: %w", errors.Join(ErrRestartRequired, restart)), true},
+		{"joined with stop timeout", errors.Join(ErrRestartRequired, ErrStopTimeout), false},
+		{"wrapped join with stop timeout", fmt.Errorf("run: %w", errors.Join(restart, ErrStopTimeout)), false},
+		{"panic", &PanicError{Runner: "http", Value: "oops"}, false},
+		{"panic wrapping a restart", &PanicError{Runner: "http", Value: ErrRestartRequired}, false},
+		{"panic joined with a restart", errors.Join(ErrRestartRequired, &PanicError{Runner: "http", Value: "oops"}), false},
+		{"wrapped panic wrapping a restart", fmt.Errorf("run: %w", &PanicError{Runner: "http", Value: ErrRestartRequired}), false},
+		{"nil", nil, false},
+		{"unrelated", errors.New("other"), false},
+		{"wrapped unrelated", fmt.Errorf("run: %w", ErrRunnerExited), false},
+		{"joined with no members", emptyJoin{}, false},
+		{"wrapped join with no members", fmt.Errorf("run: %w", emptyJoin{}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RestartRequested(tt.err); got != tt.want {
+				t.Errorf("RestartRequested(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// emptyJoin is a joined error with no members.
+type emptyJoin struct{}
+
+func (emptyJoin) Error() string   { return "empty" }
+func (emptyJoin) Unwrap() []error { return nil }
 
 type valueError struct{}
 

@@ -154,6 +154,9 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if want := int64(256 << 20); r.MaxDownloadBytes != want {
 		t.Errorf("MaxDownloadBytes = %d, want %d", r.MaxDownloadBytes, want)
 	}
+	if want := int64(512 << 20); r.MaxExtractBytes != want {
+		t.Errorf("MaxExtractBytes = %d, want %d", r.MaxExtractBytes, want)
+	}
 	if want := 5 * time.Minute; r.DownloadTimeout != want {
 		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, want)
 	}
@@ -217,6 +220,7 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	c.TempPrefix = "tk-tmp-"
 	c.TempDir = filepath.Join(t.TempDir(), "scratch")
 	c.MaxDownloadBytes = 1024
+	c.MaxExtractBytes = 2048
 	c.DownloadTimeout = 7 * time.Second
 	c.AssetTemplate = "{name}-{os}-{arch}.{ext}"
 	c.AssetExt = "zip"
@@ -245,6 +249,9 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	}
 	if r.MaxDownloadBytes != 1024 {
 		t.Errorf("MaxDownloadBytes = %d, want %d", r.MaxDownloadBytes, 1024)
+	}
+	if r.MaxExtractBytes != 2048 {
+		t.Errorf("MaxExtractBytes = %d, want %d", r.MaxExtractBytes, 2048)
 	}
 	if r.DownloadTimeout != 7*time.Second {
 		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, 7*time.Second)
@@ -651,6 +658,13 @@ func TestValidateChecksAssetFields(t *testing.T) {
 		{"AssetExt with an opening brace", func(c *Config) { c.AssetExt = "{ext" }, []error{validate.ErrInvalid}},
 		{"AssetExt with a closing brace", func(c *Config) { c.AssetExt = "ext}" }, []error{validate.ErrInvalid}},
 		{"AssetExt with a leading dot", func(c *Config) { c.AssetExt = ".zip" }, []error{validate.ErrInvalid}},
+		{"unsupported AssetExt tar.xz", func(c *Config) { c.AssetExt = "tar.xz" }, []error{validate.ErrInvalid}},
+		{"unsupported AssetExt tar.zst", func(c *Config) { c.AssetExt = "tar.zst" }, []error{validate.ErrInvalid}},
+		{"upper-case AssetExt TGZ", func(c *Config) { c.AssetExt = "TGZ" }, []error{validate.ErrInvalid}},
+		{"unsupported AssetExt with an explicit {ext} template", func(c *Config) {
+			c.AssetTemplate = "{name}.{ext}"
+			c.AssetExt = "7z"
+		}, []error{validate.ErrInvalid}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -678,6 +692,7 @@ func TestValidateRejectsNegativeDownloadLimits(t *testing.T) {
 		field string
 	}{
 		{"negative MaxDownloadBytes", func(c *Config) { c.MaxDownloadBytes = -1 }, "MaxDownloadBytes"},
+		{"negative MaxExtractBytes", func(c *Config) { c.MaxExtractBytes = -1 }, "MaxExtractBytes"},
 		{"negative DownloadTimeout", func(c *Config) { c.DownloadTimeout = -time.Second }, "DownloadTimeout"},
 	}
 	for _, tc := range tests {
@@ -709,6 +724,7 @@ func TestValidateAcceptsZeroAndPositiveDownloadLimits(t *testing.T) {
 		{"zero limits", func(*Config) {}},
 		{"positive limits", func(c *Config) {
 			c.MaxDownloadBytes = 1
+			c.MaxExtractBytes = 1
 			c.DownloadTimeout = time.Nanosecond
 		}},
 	}
@@ -737,7 +753,11 @@ func TestValidateAcceptsEmptyAndValidAssetFields(t *testing.T) {
 			c.AssetExt = "zip"
 		}},
 		{"raw binary template", func(c *Config) { c.AssetTemplate = "{name}-{os}-{arch}" }},
-		{"multi-part extension", func(c *Config) { c.AssetExt = "tar.xz" }},
+		{"tgz extension", func(c *Config) { c.AssetExt = "tgz" }},
+		{"any extension on a raw binary template", func(c *Config) {
+			c.AssetTemplate = "{name}-{os}-{arch}"
+			c.AssetExt = "tar.xz"
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -746,6 +766,104 @@ func TestValidateAcceptsEmptyAndValidAssetFields(t *testing.T) {
 			tc.set(&c)
 			if err := c.Validate(); err != nil {
 				t.Errorf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestDeriveFormat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		tmpl   string
+		ext    string
+		want   assetFormat
+		wantOK bool
+	}{
+		{"tar.gz", "{name}.{ext}", "tar.gz", formatTarGz, true},
+		{"tgz", "{name}.{ext}", "tgz", formatTarGz, true},
+		{"zip", "{name}.{ext}", "zip", formatZip, true},
+		{"empty template and extension", "", "", formatTarGz, true},
+		{"empty extension", "{name}.{ext}", "", formatTarGz, true},
+		{"empty template with zip", "", "zip", formatZip, true},
+		{"template without {ext}", "{name}-{os}-{arch}", "zip", formatRaw, true},
+		{"template without {ext} and an unsupported extension", "{name}", "tar.xz", formatRaw, true},
+		{"template without {ext} and an empty extension", "{name}", "", formatRaw, true},
+		{"unparseable template", "{name", "tar.xz", formatRaw, true},
+		{"tar.xz", "{name}.{ext}", "tar.xz", 0, false},
+		{"tar.zst", "{name}.{ext}", "tar.zst", 0, false},
+		{"upper-case TGZ", "{name}.{ext}", "TGZ", 0, false},
+		{"upper-case ZIP", "{name}.{ext}", "ZIP", 0, false},
+		{"unsupported extension on the default template", "", "tar.xz", 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := deriveFormat(tc.tmpl, tc.ext)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("deriveFormat(%q, %q) = %v, %v, want %v, %v", tc.tmpl, tc.ext, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestResolvedConfigFormat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  func(*Config)
+		want assetFormat
+	}{
+		{"defaults", func(*Config) {}, formatTarGz},
+		{"tgz", func(c *Config) { c.AssetExt = "tgz" }, formatTarGz},
+		{"zip", func(c *Config) { c.AssetExt = "zip" }, formatZip},
+		{"raw template", func(c *Config) { c.AssetTemplate = "{name}-{os}-{arch}" }, formatRaw},
+		{"raw template ignores the extension", func(c *Config) {
+			c.AssetTemplate = "{name}"
+			c.AssetExt = "zip"
+		}, formatRaw},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(t.TempDir())
+			tc.set(&c)
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() = %v, want nil", err)
+			}
+			if got := r.format(); got != tc.want {
+				t.Errorf("format() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateAssetTemplateAndExtTogether(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		tmpl    string
+		ext     string
+		wantErr bool
+	}{
+		{"empty template and extension", "", "", false},
+		{"empty template with an unsupported extension", "", "tar.xz", true},
+		{"empty template with zip", "", "zip", false},
+		{"unparseable template reports the template alone", "{name", "tar.xz", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.AssetTemplate, c.AssetExt = tc.tmpl, tc.ext
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() = %v, want error: %v", err, tc.wantErr)
+			}
+			var fe *validate.FieldError
+			if tc.tmpl == "{name" && (!errors.As(err, &fe) || fe.Field != "AssetTemplate" || errors.Is(err, asset.ErrEmptyTemplate)) {
+				t.Errorf("Validate() = %v, want a FieldError for AssetTemplate", err)
 			}
 		})
 	}

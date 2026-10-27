@@ -63,6 +63,13 @@ func Validate(tmpl string) error {
 	return err
 }
 
+// UsesExt reports whether tmpl holds an {ext} placeholder. A template [Validate] rejects holds
+// none: UsesExt reports false for it, whatever text it carries.
+func UsesExt(tmpl string) bool {
+	segs, err := parse(tmpl)
+	return err == nil && hasExt(segs)
+}
+
 // ValidateChecksums returns nil when tmpl is a valid checksums template: one [Validate] accepts
 // that holds no {ext}. The error wraps any error of Validate, or [ErrMisplacedExt].
 func ValidateChecksums(tmpl string) error {
