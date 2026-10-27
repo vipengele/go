@@ -5,17 +5,18 @@ import (
 	"time"
 )
 
-// PanicPolicy decides what a panic in a Runner's Start or Stop means for the other Runners. The
-// zero value is PanicFail.
+// PanicPolicy decides what a running Runner that exits with a *PanicError means for the other
+// Runners. It does not apply to a panic in Start, which is always a start failure, nor to a panic
+// during shutdown, which is always a stop problem. The zero value is PanicFail.
 type PanicPolicy int
 
 const (
-	// PanicFail recovers a panic in a Runner's Start or Stop into a *PanicError and counts it as
-	// that Runner's failure, which shuts the rest of the Runners down.
+	// PanicFail counts a panic exit as that Runner's failure, which shuts the rest of the Runners
+	// down.
 	PanicFail PanicPolicy = iota
 
-	// PanicIsolate recovers the panic into a *PanicError and records the Runner as failed, while
-	// its siblings keep running. The error joins into the result of Run.
+	// PanicIsolate records the Runner as failed while its siblings keep running. The *PanicError
+	// joins into the result of Run.
 	PanicIsolate
 )
 
@@ -40,7 +41,20 @@ func WithGrace(grace time.Duration) Option {
 	}
 }
 
-// WithPanicPolicy sets what a panic in a Runner means for its siblings. The default is PanicFail.
+// WithStartTimeout sets the start timeout: how long the whole start phase, every Runner's Start
+// in turn, may take. The default is thirty seconds. A timeout that is zero or negative is rejected
+// by New.
+func WithStartTimeout(timeout time.Duration) Option {
+	return func(s *Supervisor) error {
+		if timeout <= 0 {
+			return fmt.Errorf("daemon: start timeout must be positive, got %v", timeout)
+		}
+		s.startTimeout = timeout
+		return nil
+	}
+}
+
+// WithPanicPolicy sets what a panic exit of a running Runner means for its siblings. The default is PanicFail.
 // A value that is not a defined PanicPolicy is rejected by New.
 func WithPanicPolicy(policy PanicPolicy) Option {
 	return func(s *Supervisor) error {

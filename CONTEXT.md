@@ -255,13 +255,14 @@ _Avoid_: executable, artifact, current binary
 
 **Runner**:
 One unit of long-running work in a daemon (the HTTP server, a scheduled task, the update check)
-with a start that blocks until its context is cancelled and a stop that returns once it has
-released everything. It knows nothing of its siblings or of restarts.
+with a start that returns once it is ready, an exit it reports once its work has ended, and a stop
+that returns once it has released everything. It knows nothing of its siblings; it can ask for the
+process to be restarted only by the error it exits with.
 _Avoid_: worker, task, job, goroutine
 
 **Supervisor**:
-The `daemon` component that starts every **Runner**, stops them in reverse order on shutdown or
-when one fails, and owns the process lifecycle and health. One per process.
+The `daemon` component that starts every **Runner** in turn, each once the one before is ready,
+stops them in reverse order on shutdown or when one fails, and owns the process lifecycle and health. One per process.
 _Avoid_: manager (a **Service** manager is the operating system's), orchestrator, scheduler
 
 **Grace period**:
