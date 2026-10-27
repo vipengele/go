@@ -151,6 +151,34 @@ func TestValidate_Accepts(t *testing.T) {
 	}
 }
 
+func TestUsesExt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		tmpl string
+		want bool
+	}{
+		{"default template", DefaultTemplate, true},
+		{"only the placeholder", "{ext}", true},
+		{"repeated placeholder", "{name}.{ext}.{ext}", true},
+		{"raw binary", "{name}-{os}-{arch}", false},
+		{"checksums template", DefaultChecksumsTemplate, false},
+		{"empty", "", false},
+		{"unclosed placeholder", "{name}.{ext", false},
+		{"unknown placeholder beside {ext}", "{nope}.{ext}", false},
+		{"literal text naming ext", "ext", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := UsesExt(tc.tmpl); got != tc.want {
+				t.Errorf("UsesExt(%q) = %v, want %v", tc.tmpl, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateChecksums(t *testing.T) {
 	t.Parallel()
 
