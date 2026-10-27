@@ -260,7 +260,8 @@ func brewPrefix() (string, error) {
 // run runs exe with args and returns its standard output. A non-zero exit is an error carrying
 // what the process printed on standard error.
 func run(exe string, args ...string) ([]byte, error) {
-	out, err := exec.Command(exe, args...).Output()
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- exe is the embedding tool's own binary, given by the program as Options.ExecutablePath or os.Executable, or the fixed name brew; it runs without a shell, with the fixed argument completion and a Shell constant, or --prefix
+	out, err := exec.Command(exe, args...).Output() // #nosec G204 -- exe is the embedding tool's own binary, given by the program as Options.ExecutablePath or os.Executable, or the fixed name brew; it runs without a shell, with the fixed argument completion and a Shell constant, or --prefix; running it is the purpose of Install
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
