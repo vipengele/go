@@ -6,7 +6,9 @@
 `docs/adr/0009-platform-paths-live-in-cli-spec-paths.md`,
 `docs/adr/0010-version-comparison-lives-in-cli-spec-version.md` and
 `docs/adr/0015-table-helper-lives-in-cli-spec-table.md` and
-`docs/adr/0020-completion-is-an-opt-in-app-option-over-a-neutral-spec-model.md` at the repo root.
+`docs/adr/0020-completion-is-an-opt-in-app-option-over-a-neutral-spec-model.md` and
+`docs/adr/0021-the-completion-installer-is-cli-spec-completioninstall-with-an-update-post-hook.md` at
+the repo root.
 
 ## Commands (run from `source/cli/spec`)
 
@@ -88,6 +90,13 @@ golangci-lint run
   cell and padding follows the measured width, so colour never alters alignment; width is the rune
   count. `New` with no columns and `Add` with the wrong number of values panic. See
   `docs/adr/0015-table-helper-lives-in-cli-spec-table.md`.
+- `completioninstall/` — `Install(Options)` writes the script `<exe> completion <shell>` prints to the
+  per-shell file `Target(shell, name, Env)` chooses (zsh, bash, fish, powershell), and `Snippet(name)`
+  renders the same table as POSIX sh; a test holds the two equal. Files only: no rc file or profile
+  is edited, a `Note` says what the user adds. Needs `core.WithCompletion()` in the tool, else
+  `Install` errors. Opt-out is `<PREFIX>_NO_COMPLETION=1` or `Options.Disabled`
+  (`NoCompletionFlag`); every side effect is an `Options` seam. See
+  `docs/adr/0021-the-completion-installer-is-cli-spec-completioninstall-with-an-update-post-hook.md`.
 
 ## Conventions
 

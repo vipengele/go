@@ -80,6 +80,9 @@ type Config struct {
 	// Source reports the releases the tool can update to. Nil means the [GitHubSource] for the
 	// Identity's Owner and Repo, making its requests through HTTPClient.
 	Source Source
+	// PostUpdate lists the hooks [RunPostUpdate] runs, in order, once the installed binary has
+	// replaced the old one. Empty means none.
+	PostUpdate []PostUpdate
 
 	// HTTPClient makes every HTTP request. Nil means a new [http.Client] of the Config's own,
 	// never [http.DefaultClient].

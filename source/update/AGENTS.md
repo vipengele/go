@@ -49,6 +49,10 @@ golangci-lint run
   the archive request, and the bounded, hashed copy to the temp file.
 - `archive.go` — `Archive`, the verified temp file `Download` returns, and its lifecycle.
 - `checksums.go` — `parseChecksum`, which finds the archive's digest in a checksums file.
+- `hook.go` — `PostUpdate`, a step that receives the installed binary's path (the old process is still
+  running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
+  runs the hooks in order and joins their errors. A failure is non-fatal. `update` does not import
+  `cli/spec/completioninstall` outside tests (ADR-0021).
 - `extract.go` — `Config.Extract`, `Staged`, the extractor dispatch by format, the raw extractor, the
   bounded copy (`copyBounded`), the context-aware reader and the entry-name check
   (`unsafeEntryName`).
