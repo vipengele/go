@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,6 +161,55 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if want := 5 * time.Minute; r.DownloadTimeout != want {
 		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, want)
 	}
+	if r.EvalSymlinks == nil {
+		t.Fatal("EvalSymlinks = nil, want filepath.EvalSymlinks")
+	}
+	dir := t.TempDir()
+	wantDir, wantErr := filepath.EvalSymlinks(dir)
+	if got, err := r.EvalSymlinks(dir); got != wantDir || (err == nil) != (wantErr == nil) {
+		t.Errorf("EvalSymlinks(%q) = %q, %v, want %q, %v", dir, got, err, wantDir, wantErr)
+	}
+	if _, err := r.EvalSymlinks(filepath.Join(dir, "missing")); err == nil {
+		t.Error("EvalSymlinks(missing path) error = nil, want the filesystem's error")
+	}
+	if r.InContainer == nil {
+		t.Error("InContainer = nil, want paths.InContainer")
+	}
+	if r.Detectors != nil {
+		t.Errorf("Detectors = %d entries, want nil", len(r.Detectors))
+	}
+}
+
+func TestResolveDefaultInContainerFollowsTheSeams(t *testing.T) {
+	t.Parallel()
+	kubernetes := map[string]string{"KUBERNETES_SERVICE_HOST": "10.0.0.1"}
+	tests := []struct {
+		name string
+		goos string
+		env  map[string]string
+		want bool
+	}{
+		{"linux with a container variable", "linux", kubernetes, true},
+		{"linux with a podman container variable", "linux", map[string]string{"container": "podman"}, true},
+		{"darwin with a container variable", "darwin", kubernetes, false},
+		{"windows with a container variable", "windows", kubernetes, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(t.TempDir())
+			c.GOOS = tc.goos
+			c.Getenv = envOf(tc.env)
+
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if got := r.InContainer(); got != tc.want {
+				t.Errorf("InContainer() = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestResolveDefaultStateDirReadsTheProcessEnvironment(t *testing.T) {
@@ -232,6 +282,12 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	c.Executable = func() (string, error) { return "/opt/toolkit/bin/toolkit", nil }
 	c.Getenv = envOf(map[string]string{"XDG_STATE_HOME": stateHome})
 	c.UserHomeDir = func() (string, error) { return home, nil }
+	c.EvalSymlinks = func(path string) (string, error) { return "/resolved" + path, nil }
+	c.InContainer = func() bool { return true }
+	c.Detectors = []Detector{
+		func(string) (Install, bool) { return Install{Manager: "first"}, true },
+		func(string) (Install, bool) { return Install{Manager: "second"}, true },
+	}
 
 	r, err := c.resolve()
 	if err != nil {
@@ -288,6 +344,20 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	}
 	if want := filepath.Join(stateHome, "agentic-toolkit"); r.StateDir != want {
 		t.Errorf("StateDir = %q, want %q", r.StateDir, want)
+	}
+	if got, err := r.EvalSymlinks("/bin/toolkit"); err != nil || got != "/resolved/bin/toolkit" {
+		t.Errorf("EvalSymlinks(%q) = %q, %v, want %q, nil", "/bin/toolkit", got, err, "/resolved/bin/toolkit")
+	}
+	if !r.InContainer() {
+		t.Error("InContainer() = false, want the Config's true")
+	}
+	if len(r.Detectors) != 2 {
+		t.Fatalf("Detectors = %d entries, want 2", len(r.Detectors))
+	}
+	for i, want := range []string{"first", "second"} {
+		if got, ok := r.Detectors[i](""); !ok || got.Manager != want {
+			t.Errorf("Detectors[%d]() = %+v, %v, want Manager %q, true", i, got, ok, want)
+		}
 	}
 }
 
@@ -468,7 +538,7 @@ func TestResolveDoesNotModifyItsReceiver(t *testing.T) {
 	if after := plainFieldsOf(c); after != before {
 		t.Errorf("Config after resolve = %+v, want %+v", after, before)
 	}
-	if c.Now != nil || c.Executable != nil {
+	if c.Now != nil || c.Executable != nil || c.EvalSymlinks != nil || c.InContainer != nil {
 		t.Error("resolve set a func field on its receiver, want the receiver's nil func fields left nil")
 	}
 }
@@ -771,6 +841,37 @@ func TestValidateAcceptsEmptyAndValidAssetFields(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsANilDetector(t *testing.T) {
+	t.Parallel()
+	detector := func(string) (Install, bool) { return Install{}, false }
+	tests := []struct {
+		name      string
+		detectors []Detector
+		field     string
+	}{
+		{"only entry nil", []Detector{nil}, "Detectors[0]"},
+		{"second entry nil", []Detector{detector, nil}, "Detectors[1]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.Detectors = tc.detectors
+			err := c.Validate()
+			if !errors.Is(err, validate.ErrInvalid) {
+				t.Errorf("Validate() = %v, want one wrapping %v", err, validate.ErrInvalid)
+			}
+			var fe *validate.FieldError
+			if !errors.As(err, &fe) || fe.Field != tc.field || fe.Value != "nil" {
+				t.Errorf("Validate() = %v, want a FieldError for %q with Value %q", err, tc.field, "nil")
+			}
+			if _, rerr := c.resolve(); rerr == nil {
+				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
 func TestDeriveFormat(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -804,6 +905,35 @@ func TestDeriveFormat(t *testing.T) {
 				t.Errorf("deriveFormat(%q, %q) = %v, %v, want %v, %v", tc.tmpl, tc.ext, got, ok, tc.want, tc.wantOK)
 			}
 		})
+	}
+}
+
+func TestValidateReportsEveryNilDetector(t *testing.T) {
+	t.Parallel()
+	detector := func(string) (Install, bool) { return Install{}, false }
+	c := validConfig("")
+	c.Detectors = []Detector{nil, detector, nil}
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want the nil detectors rejected")
+	}
+	for field, want := range map[string]bool{"Detectors[0]": true, "Detectors[1]": false, "Detectors[2]": true} {
+		if got := strings.Contains(err.Error(), field); got != want {
+			t.Errorf("Validate() = %v, names %s: %v, want %v", err, field, got, want)
+		}
+	}
+}
+
+func TestValidateAcceptsDetectors(t *testing.T) {
+	t.Parallel()
+	detector := func(string) (Install, bool) { return Install{}, false }
+	for _, detectors := range [][]Detector{nil, {}, {detector, detector}} {
+		c := validConfig("")
+		c.Detectors = detectors
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with %d detectors = %v, want nil", len(detectors), err)
+		}
 	}
 }
 

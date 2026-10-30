@@ -270,3 +270,26 @@ func classifyError(url string, err error) error {
 
 	return err
 }
+
+// ManagedInstallError reports a running executable that an external manager owns, which an
+// in-place update would fight with.
+type ManagedInstallError struct {
+	// Path is the path of the running executable.
+	Path string
+	// Resolved is Path with its symbolic links resolved; it equals Path when there are none or
+	// they could not be resolved.
+	Resolved string
+	// Manager names what manages the install, such as "Homebrew".
+	Manager string
+	// Instead is a full clause saying what to do instead of updating the binary in place.
+	Instead string
+}
+
+// Error implements error.
+func (e *ManagedInstallError) Error() string {
+	if e.Resolved == e.Path {
+		return fmt.Sprintf("update: %s is managed by %s; %s", e.Path, e.Manager, e.Instead)
+	}
+
+	return fmt.Sprintf("update: %s (resolves to %s) is managed by %s; %s", e.Path, e.Resolved, e.Manager, e.Instead)
+}

@@ -16,7 +16,8 @@ golangci-lint run
 
 - `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries every
   seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user home
-  dir). `Validate` reports problems; `resolve` returns a copy with each zero field set to its
+  dir, `EvalSymlinks`, `InContainer`) and the tool's own `Detectors`; a nil `Detectors` entry is
+  invalid. `Validate` reports problems; `resolve` returns a copy with each zero field set to its
   production default and never mutates the receiver. The default state dir comes from
   `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
   env lookup and user home dir seams; only the state kind is resolved, so the home directory is
@@ -40,11 +41,16 @@ golangci-lint run
   name and the one `Select` looks for differ. A raw-binary tool leaves `{ext}` out of its template.
 - `errors.go` — `StatusError`, `TimeoutError` (a `net.Error`), `TagError`, `AssetNotFoundError`,
   `ChecksumMismatchError`, `ChecksumNotFoundError`, `ChecksumConflictError`, `SizeLimitError`,
-  `ErrPrerelease` and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download`
+  `ManagedInstallError`, `ErrPrerelease` and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download`
   returns; `classifyError` maps deadline and timeout failures to `TimeoutError` and passes
   cancellation through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
   `MultipleBinariesError`, `UnsupportedFormatError`, `ErrEmptyAsset`, `ErrNotGzip` and
   `ErrTruncatedGzip` are the errors `Extract` returns.
+- `managed.go` — `Config.CheckManaged`, `Detector` and `Install`: resolves the symlinks of the
+  executable (an unresolvable path is matched as it is) and returns a `*ManagedInstallError` for
+  the first match among the built-in Nix, Homebrew and container detectors, then `Config.Detectors`.
+  Prefixes match on a directory boundary, case-sensitively, with "/" separators, so a Windows
+  executable never matches; only the default Nix and Homebrew prefixes are known.
 - `download.go` — `Config.Download`, `DownloadOption` and `WithProgress`: the checksums request,
   the archive request, and the bounded, hashed copy to the temp file.
 - `archive.go` — `Archive`, the verified temp file `Download` returns, and its lifecycle.

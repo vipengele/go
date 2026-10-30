@@ -340,3 +340,49 @@ func TestErrAssetsNotListed_Is(t *testing.T) {
 		t.Error("errors.Is does not match ErrAssetsNotListed through a wrap")
 	}
 }
+
+func TestManagedInstallError_Error(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  *ManagedInstallError
+		want string
+	}{
+		{
+			name: "path resolves to itself",
+			err:  &ManagedInstallError{Path: "/opt/homebrew/bin/atk", Resolved: "/opt/homebrew/bin/atk", Manager: "Homebrew", Instead: "run `brew upgrade atk`"},
+			want: "update: /opt/homebrew/bin/atk is managed by Homebrew; run `brew upgrade atk`",
+		},
+		{
+			name: "path resolves elsewhere",
+			err:  &ManagedInstallError{Path: "/usr/local/bin/atk", Resolved: "/usr/local/Cellar/atk/1/bin/atk", Manager: "Homebrew", Instead: "run `brew upgrade atk`"},
+			want: "update: /usr/local/bin/atk (resolves to /usr/local/Cellar/atk/1/bin/atk) is managed by Homebrew; run `brew upgrade atk`",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestManagedInstallError_As(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("check: %w", &ManagedInstallError{Path: "/p", Resolved: "/p", Manager: "Nix", Instead: "x"})
+
+	var managed *ManagedInstallError
+	if !errors.As(err, &managed) {
+		t.Fatal("errors.As did not find *ManagedInstallError")
+	}
+
+	if managed.Manager != "Nix" {
+		t.Errorf("Manager = %q, want Nix", managed.Manager)
+	}
+}

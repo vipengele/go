@@ -253,6 +253,13 @@ binary. For a daemon it is also the file the **Service** starts, which makes pen
 rollback states of the replacement visible to the **Supervisor**.
 _Avoid_: executable, artifact, current binary
 
+**Externally managed install**:
+A **Managed binary** whose file a package manager or a container image owns, so `update` refuses to
+replace it and names the owner and the command that updates it instead. Detected on the path the
+executable resolves to after symlinks, or, for a container, from the environment and the
+filesystem.
+_Avoid_: managed install, package-managed install, foreign install
+
 **Runner**:
 One unit of long-running work in a daemon (the HTTP server, a scheduled task, the update check)
 with a start that returns once it is ready, an exit it reports once its work has ended, and a stop
