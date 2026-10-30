@@ -384,6 +384,78 @@ func TestInstallPermissionRefused(t *testing.T) {
 	}
 }
 
+func TestInstallStatFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		// permission is whether the result is a *PermissionError.
+		permission bool
+	}{
+		{"plain error", errors.New("stat refused"), false},
+		{"permission refused", &fs.PathError{Op: "stat", Path: "atk", Err: fs.ErrPermission}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fx := newInstallFixture(t)
+			name := fx.staged.Name()
+
+			s := defaultSteps()
+			s.stat = func(string) (os.FileInfo, error) { return nil, tt.err }
+
+			_, err := fx.config.install(fx.staged, s)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("install = %v, want it to wrap %v", err, tt.err)
+			}
+
+			var perr *PermissionError
+
+			if got := errors.As(err, &perr); got != tt.permission {
+				t.Fatalf("install = %v, *PermissionError %t, want %t", err, got, tt.permission)
+			}
+
+			if tt.permission && (perr.Op != "stat" || perr.Path != fx.exe || perr.Hint == "") {
+				t.Errorf("PermissionError = %+v, want Op %q, Path %q and a Hint", perr, "stat", fx.exe)
+			}
+
+			if strings.Contains(err.Error(), "removing staged binary") {
+				t.Errorf("install = %v, want no mention of removing the staged binary", err)
+			}
+
+			if got := readFile(t, fx.exe); got != "old" {
+				t.Errorf("executable holds %q, want %q", got, "old")
+			}
+
+			assertMissing(t, fx.exe+".old")
+			assertMissing(t, name)
+		})
+	}
+}
+
+func TestInstallFailedCleanupJoinsTheRemoveError(t *testing.T) {
+	t.Parallel()
+
+	fx := newInstallFixture(t)
+	errStat, errRemove := errors.New("stat refused"), errors.New("remove refused")
+
+	s := defaultSteps()
+	s.stat = func(string) (os.FileInfo, error) { return nil, errStat }
+	s.remove = func(string) error { return errRemove }
+
+	_, err := fx.config.install(fx.staged, s)
+	if !errors.Is(err, errStat) || !errors.Is(err, errRemove) {
+		t.Fatalf("install = %v, want it to wrap both the step and the remove error", err)
+	}
+
+	if !strings.Contains(err.Error(), "removing staged binary") {
+		t.Errorf("install = %v, want it to mention removing the staged binary", err)
+	}
+}
+
 func TestInstallSymlinkedExecutable(t *testing.T) {
 	t.Parallel()
 

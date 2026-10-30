@@ -128,9 +128,13 @@ func TestTargetDanglingSymlink(t *testing.T) {
 		t.Skipf("creating a symbolic link: %v", err)
 	}
 
-	_, err := executableConfig(t, link).Target()
+	got, err := executableConfig(t, link).Target()
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Target error = %v, want one matching fs.ErrNotExist", err)
+	}
+
+	if got != "" {
+		t.Errorf("Target = %q, want the empty path on error", got)
 	}
 
 	if !strings.HasPrefix(err.Error(), "update: ") {
@@ -141,9 +145,13 @@ func TestTargetDanglingSymlink(t *testing.T) {
 func TestTargetMissingPath(t *testing.T) {
 	t.Parallel()
 
-	_, err := executableConfig(t, filepath.Join(t.TempDir(), "missing")).Target()
+	got, err := executableConfig(t, filepath.Join(t.TempDir(), "missing")).Target()
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Target error = %v, want one matching fs.ErrNotExist", err)
+	}
+
+	if got != "" {
+		t.Errorf("Target = %q, want the empty path on error", got)
 	}
 }
 
@@ -154,8 +162,13 @@ func TestTargetExecutableError(t *testing.T) {
 	c := validConfig(t.TempDir())
 	c.Executable = func() (string, error) { return "", cause }
 
-	if _, err := c.Target(); !errors.Is(err, cause) {
+	got, err := c.Target()
+	if !errors.Is(err, cause) {
 		t.Errorf("Target error = %v, want one wrapping %v", err, cause)
+	}
+
+	if got != "" {
+		t.Errorf("Target = %q, want the empty path on error", got)
 	}
 }
 
@@ -173,8 +186,13 @@ func TestTargetInvalidConfig(t *testing.T) {
 		return "", nil
 	}}
 
-	if _, err := c.target(steps); err == nil {
+	got, err := c.target(steps)
+	if err == nil {
 		t.Error("target error = nil, want the validation error")
+	}
+
+	if got != "" {
+		t.Errorf("target = %q, want the empty path on error", got)
 	}
 }
 
