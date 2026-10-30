@@ -32,5 +32,16 @@
 // file, whether it succeeds or fails. [Staged.Keep] leaves the file on disk and [Staged.Discard]
 // removes it; whichever is called first decides.
 //
+// [Config.Install] replaces the executable [Config.Target] names, symbolic links resolved, with a
+// [*Staged] binary that lives in Target's directory. It copies the executable's permission bits to
+// the staged file, renames the executable to a backup beside it, ".old" after its name, and renames
+// the staged file into place; if that second rename fails, the backup is renamed back. The two
+// renames are what let Windows replace a running executable, which it can rename but not overwrite.
+// Install owns the [*Staged] as Extract owns the archive. The returned [*Installed] keeps the
+// backup until [Installed.Discard] removes it or [Installed.Rollback] puts it back, and whichever is
+// called first decides. A lack of permission is a [*PermissionError] with a hint for the user, which
+// [Config.CheckWritable] can report before anything is downloaded. A [PostUpdate] hook receives
+// [Installed.Path]; Install runs none itself.
+//
 // The package depends on no command-line framework.
 package update
