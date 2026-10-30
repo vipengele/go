@@ -338,8 +338,6 @@ func TestInstallPermissionRefused(t *testing.T) {
 		steps func(s *fsSteps, staged, exe string)
 		// op and path are the step the PermissionError names; path is "staged" or "exe".
 		op, path string
-		// renamed is whether the executable is moved aside and back.
-		renamed bool
 	}{
 		{
 			name: "chmod",
@@ -374,9 +372,8 @@ func TestInstallPermissionRefused(t *testing.T) {
 					return os.Rename(oldpath, newpath)
 				}
 			},
-			op:      "rename",
-			path:    "staged",
-			renamed: true,
+			op:   "rename",
+			path: "staged",
 		},
 	}
 
