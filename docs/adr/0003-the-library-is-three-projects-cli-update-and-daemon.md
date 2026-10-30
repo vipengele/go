@@ -7,8 +7,9 @@ feature spanning two projects is released in, by ADR-0007, which makes `cli` the
 platform-directory resolver, by ADR-0010, which moves the version comparison rule `update` owned
 into `cli/spec/version`, by ADR-0012, which moves config loading from `cli` to the `config`
 project, by ADR-0016, which gives `Config.Source` a default, the GitHub release source, by
-ADR-0018, which makes the state store the project `cli/state`, and by ADR-0019, which makes the
-file lock the project `filelock`. Partially superseded by ADR-0005, which replaces the rule on where
+ADR-0018, which makes the state store the project `cli/state`, by ADR-0019, which makes the
+file lock the project `filelock`, and by ADR-0021, which assigns the completion install-script
+snippet to `cli/spec/completioninstall` instead of `update`. Partially superseded by ADR-0005, which replaces the rule on where
 cobra is allowed ("The CLI framework dependency") and the rule that `update` requires no sibling
 ("Dependency direction").
 
