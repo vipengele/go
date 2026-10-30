@@ -256,7 +256,8 @@ _Avoid_: executable, artifact, current binary
 **Externally managed install**:
 A **Managed binary** whose file a package manager or a container image owns, so `update` refuses to
 replace it and names the owner and the command that updates it instead. Detected on the path the
-executable resolves to after symlinks.
+executable resolves to after symlinks, or, for a container, from the environment and the
+filesystem.
 _Avoid_: managed install, package-managed install, foreign install
 
 **Runner**:
