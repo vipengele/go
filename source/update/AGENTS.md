@@ -182,7 +182,8 @@ golangci-lint run
 
 - Reach the outside world only through a `Config` field, never through `http.DefaultClient`,
   `time.Now`, `runtime.GOOS`, `os.Getenv` and the like called directly. A new seam is a new
-  `Config` field with a documented zero-value default, resolved in `resolve`.
+  `Config` field with a documented zero-value default, resolved in `resolve`; the one exception is
+  `Install`'s unexported `fsSteps` (see the Install contract), which only in-package tests set.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `go.vipengele.org/cli/core/**` anywhere, and `github.com/spf13/cobra`
   outside an `updatecmd` package. The library depends on no command-line framework.
