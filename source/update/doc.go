@@ -21,5 +21,18 @@
 // is removed on every failure and by [Archive.Close]. [WithProgress] reports the archive's progress.
 // HTTPS is not enforced; the digest check is the integrity guarantee.
 //
+// [Config.CheckManaged] refuses an executable that an external manager owns, which an in-place
+// update would fight with. It resolves the symlinks of the path Config.Executable returns through
+// EvalSymlinks and returns a [*ManagedInstallError], matched with [errors.As], that names the
+// manager and says what to do instead; it returns nil when the executable is not managed. The
+// built-in detectors know Nix, Homebrew (macOS and Linuxbrew) and containers, and cannot be turned
+// off. A tool adds its own [Detector]s through Config.Detectors, consulted in order after the
+// built-in ones; the first match wins.
+//
+// The check has limits. The path detectors match Unix install locations, case-sensitively and on a
+// directory boundary, so a Windows executable is never refused by them. Only the default Nix and
+// Homebrew prefixes are known, so an install under another prefix is missed. The container check
+// is a heuristic: InContainer reports what the environment and the filesystem suggest.
+//
 // The package depends on no command-line framework.
 package update
