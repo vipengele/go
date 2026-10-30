@@ -481,6 +481,133 @@ func TestInstallFailedCleanupJoinsTheRemoveError(t *testing.T) {
 	}
 }
 
+func TestInstallResolveFailureFailsBeforeAnyDestructiveStep(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("resolve refused")
+
+	tests := []struct {
+		name string
+		// steps makes the step under test fail with cause for a path in the fixture's dir.
+		steps func(s *fsSteps, dir, exe string)
+		// want is the message the error carries ahead of cause.
+		want string
+	}{
+		{
+			name: "executable made absolute",
+			steps: func(s *fsSteps, _, exe string) {
+				s.abs = func(path string) (string, error) {
+					if path == exe {
+						return "", cause
+					}
+
+					return filepath.Abs(path)
+				}
+			},
+			want: "resolving the executable",
+		},
+		{
+			name: "staged directory symlinks",
+			steps: func(s *fsSteps, dir, _ string) {
+				s.evalSymlinks = func(path string) (string, error) {
+					if path == dir {
+						return "", cause
+					}
+
+					return filepath.EvalSymlinks(path)
+				}
+			},
+			want: "resolving the staged binary's directory",
+		},
+		{
+			name: "staged directory made absolute",
+			steps: func(s *fsSteps, dir, _ string) {
+				s.abs = func(path string) (string, error) {
+					if path == dir {
+						return "", cause
+					}
+
+					return filepath.Abs(path)
+				}
+			},
+			want: "resolving the staged binary's directory",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fx := newInstallFixture(t)
+			name := fx.staged.Name()
+
+			var log stepLog
+
+			s := loggedSteps(&log)
+			tt.steps(&s, fx.dir, fx.exe)
+
+			inst, err := fx.config.install(fx.staged, s)
+			if !errors.Is(err, cause) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("install = %v, want %q wrapping %v", err, tt.want, cause)
+			}
+
+			var perr *PermissionError
+			if errors.As(err, &perr) {
+				t.Errorf("install = %v, want no *PermissionError", err)
+			}
+
+			if inst != nil {
+				t.Errorf("install = %v, want a nil *Installed on error", inst)
+			}
+
+			if got, want := log.list(), []string{"remove " + filepath.Base(name)}; !slices.Equal(got, want) {
+				t.Errorf("steps = %q, want %q", got, want)
+			}
+
+			if got := readFile(t, fx.exe); got != "old" {
+				t.Errorf("executable holds %q, want %q", got, "old")
+			}
+
+			assertMissing(t, name)
+			assertMissing(t, fx.exe+".old")
+		})
+	}
+}
+
+func TestInstallFailingKeepRemovesTheStagedFile(t *testing.T) {
+	t.Parallel()
+
+	fx := newInstallFixture(t)
+	name := fx.staged.Name()
+
+	// A file already closed makes the close in Keep fail.
+	if err := fx.staged.f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var log stepLog
+
+	inst, err := fx.config.install(fx.staged, loggedSteps(&log))
+	if !errors.Is(err, os.ErrClosed) || !strings.Contains(err.Error(), "closing staged binary") {
+		t.Fatalf("install = %v, want a close error matching os.ErrClosed", err)
+	}
+
+	if inst != nil {
+		t.Errorf("install = %v, want a nil *Installed on error", inst)
+	}
+
+	if got, want := log.list(), []string{"remove " + filepath.Base(name)}; !slices.Equal(got, want) {
+		t.Errorf("steps = %q, want %q", got, want)
+	}
+
+	if got := readFile(t, fx.exe); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+
+	assertMissing(t, name)
+	assertMissing(t, fx.exe+".old")
+}
+
 func TestInstallSymlinkedExecutable(t *testing.T) {
 	t.Parallel()
 
@@ -660,6 +787,62 @@ func TestInstalledDiscardPermissionRefused(t *testing.T) {
 	var perr *PermissionError
 	if err := inst.Discard(); !errors.As(err, &perr) || perr.Path != backup {
 		t.Errorf("Discard = %v, want a *PermissionError for %q", err, backup)
+	}
+}
+
+func TestInstalledRollbackRenameFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		// permission is whether the result is a *PermissionError.
+		permission bool
+	}{
+		{"plain error", errors.New("rename refused"), false},
+		{"permission refused", &fs.PathError{Op: "rename", Path: "atk.old", Err: fs.ErrPermission}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fx := newInstallFixture(t)
+
+			inst, err := fx.config.install(fx.staged, defaultSteps())
+			if err != nil {
+				t.Fatalf("install: %v", err)
+			}
+
+			inst.steps.rename = func(string, string) error { return tt.err }
+
+			err = inst.Rollback()
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("Rollback = %v, want it to wrap %v", err, tt.err)
+			}
+
+			var perr *PermissionError
+
+			if got := errors.As(err, &perr); got != tt.permission {
+				t.Fatalf("Rollback = %v, *PermissionError %t, want %t", err, got, tt.permission)
+			}
+
+			if tt.permission && (perr.Op != "rename" || perr.Path != inst.Backup() || perr.Hint == "") {
+				t.Errorf("PermissionError = %+v, want Op %q, Path %q and a Hint", perr, "rename", inst.Backup())
+			}
+
+			if !tt.permission && !strings.Contains(err.Error(), "rename "+inst.Backup()) {
+				t.Errorf("Rollback = %v, want it to name the rename of %q", err, inst.Backup())
+			}
+
+			if got := readFile(t, fx.exe); got != "new" {
+				t.Errorf("executable holds %q, want %q", got, "new")
+			}
+
+			if got := readFile(t, inst.Backup()); got != "old" {
+				t.Errorf("backup holds %q, want %q", got, "old")
+			}
+		})
 	}
 }
 

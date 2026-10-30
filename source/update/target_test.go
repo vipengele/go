@@ -196,6 +196,25 @@ func TestTargetInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestTargetAbsFailure(t *testing.T) {
+	t.Parallel()
+
+	exe := writeExecutable(t, t.TempDir(), "atk")
+	cause := errors.New("abs refused")
+
+	steps := defaultSteps()
+	steps.abs = func(string) (string, error) { return "", cause }
+
+	got, err := executableConfig(t, exe).target(steps)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "resolving the executable") {
+		t.Errorf("target error = %v, want one resolving the executable wrapping %v", err, cause)
+	}
+
+	if got != "" {
+		t.Errorf("target = %q, want the empty path on error", got)
+	}
+}
+
 func TestCheckWritable(t *testing.T) {
 	t.Parallel()
 
@@ -371,6 +390,33 @@ func TestCheckWritableOtherError(t *testing.T) {
 	var perr *PermissionError
 	if errors.As(err, &perr) {
 		t.Errorf("checkWritable error = %v, want no *PermissionError", err)
+	}
+}
+
+func TestCheckWritableInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	steps := defaultSteps()
+	steps.evalSymlinks = func(string) (string, error) {
+		t.Error("evalSymlinks called for an invalid Config")
+		return "", nil
+	}
+	steps.createTemp = func(string, string) (*os.File, error) {
+		t.Error("createTemp called for an invalid Config")
+		return nil, errors.New("unreachable")
+	}
+	steps.remove = func(string) error {
+		t.Error("remove called for an invalid Config")
+		return nil
+	}
+
+	c := Config{Executable: func() (string, error) {
+		t.Error("Executable called for an invalid Config")
+		return "", nil
+	}}
+
+	if err := c.checkWritable(steps); err == nil {
+		t.Error("checkWritable error = nil, want the validation error")
 	}
 }
 

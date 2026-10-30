@@ -63,8 +63,8 @@ golangci-lint run
 - `extract_zip.go` — the zip extractor and its entry policy (`zipEntryCheck`).
 - `target.go` — `Config.Target` (the executable with symlinks resolved, absolute), `Config.CheckWritable`
   (create and remove a temp file in the target's directory), `fsSteps` (the unexported filesystem
-  seam: createTemp, remove, chmod, rename, evalSymlinks, stat), `defaultSteps` and `fsError`, which
-  maps a permission failure to `*PermissionError`.
+  seam: createTemp, remove, chmod, rename, evalSymlinks, stat, abs), `defaultSteps` and `fsError`,
+  which maps a permission failure to `*PermissionError`.
 - `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
   `backupLocked`.
 - `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a

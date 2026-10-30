@@ -143,7 +143,7 @@ func checkStagedDir(name, target string, s fsSteps) error {
 		return fmt.Errorf("update: resolving the staged binary's directory %q: %w", dir, err)
 	}
 
-	abs, err := filepath.Abs(resolved)
+	abs, err := s.abs(resolved)
 	if err != nil {
 		return fmt.Errorf("update: resolving the staged binary's directory %q: %w", dir, err)
 	}
