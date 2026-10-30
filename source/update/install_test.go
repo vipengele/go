@@ -179,6 +179,34 @@ func TestInstallNilStaged(t *testing.T) {
 	}
 }
 
+func TestInstallInvalidConfigRemovesTheStagedFileAndLeavesTheExecutable(t *testing.T) {
+	t.Parallel()
+
+	fx := newInstallFixture(t)
+	name := fx.staged.Name()
+
+	c := Config{Executable: func() (string, error) {
+		t.Error("Executable called for an invalid Config")
+		return fx.exe, nil
+	}}
+
+	inst, err := c.Install(fx.staged)
+	if err == nil {
+		t.Error("Install error = nil, want the validation error")
+	}
+
+	if inst != nil {
+		t.Errorf("Install = %v, want a nil *Installed on error", inst)
+	}
+
+	assertMissing(t, name)
+	assertMissing(t, fx.exe+".old")
+
+	if got := readFile(t, fx.exe); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
 func TestInstallStagedInAnotherDirectoryFailsBeforeAnyDestructiveStep(t *testing.T) {
 	t.Parallel()
 
