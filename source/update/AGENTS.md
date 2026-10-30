@@ -44,7 +44,9 @@ golangci-lint run
   returns; `classifyError` maps deadline and timeout failures to `TimeoutError` and passes
   cancellation through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
   `MultipleBinariesError`, `UnsupportedFormatError`, `ErrEmptyAsset`, `ErrNotGzip` and
-  `ErrTruncatedGzip` are the errors `Extract` returns.
+  `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
+  `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
+  errors `CheckWritable`, `Install` and `Installed` return.
 - `download.go` — `Config.Download`, `DownloadOption` and `WithProgress`: the checksums request,
   the archive request, and the bounded, hashed copy to the temp file.
 - `archive.go` — `Archive`, the verified temp file `Download` returns, and its lifecycle.
@@ -59,6 +61,12 @@ golangci-lint run
 - `extract_tar.go` — the tar.gz extractor: the validating pass, the copy pass, the entry policy
   (`checkTarEntry`) and the cumulative budget reader.
 - `extract_zip.go` — the zip extractor and its entry policy (`zipEntryCheck`).
+- `target.go` — `Config.Target` (the executable with symlinks resolved, absolute), `Config.CheckWritable`
+  (create and remove a temp file in the target's directory), `fsSteps` (the unexported filesystem
+  seam: createTemp, remove, chmod, rename, evalSymlinks, stat), `defaultSteps` and `fsError`, which
+  maps a permission failure to `*PermissionError`.
+- `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
+  `backupLocked`.
 - `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
   `Release` in the redirect and REST-API modes, in-memory tar.gz and zip archive (`BuildArchive`) and
   checksums (`Checksums`) builders, and the fault options `BadChecksum`, `MissingAsset`, `Slow` and
@@ -138,6 +146,37 @@ golangci-lint run
   `zip.ErrFormat`.
 - `ctx` is checked before each entry and between reads; a cancelled `ctx` returns an error matching
   `context.Canceled`.
+
+## Install contract
+
+- `Install` order (ADR-0022): reject a nil `*Staged`; `resolve` the `Config`; resolve the target
+  (`Executable`, `filepath.EvalSymlinks`, `filepath.Abs`); stat it for its mode; check the staged
+  file's directory is the target's; `Keep` the staged file; chmod it by path to the target's
+  `Mode().Perm()` (setuid, setgid and sticky are dropped); rename the target to `<target>.old`;
+  rename the staged file to the target. Nothing at the target changes before the first rename.
+- `Install` owns the `*Staged`. On every failure the staged file is removed by path and a failed
+  removal is joined onto the error. When the rename into place fails the backup is renamed back
+  first; if that fails too the error is a `*RestoreError` carrying the backup path.
+- **The two renames are load-bearing.** Windows lets a running `.exe` be renamed but not
+  overwritten or deleted, so the old binary must move aside before the new one moves in. Never
+  collapse them into one rename over the target, or into a copy onto it.
+- `Installed` is in memory only. A backup orphaned by a crash is invisible to the API; the next
+  `Install` overwrites it. `Discard` and `Rollback` settle once: the first call decides and later
+  calls of either return nil.
+- Only the resolved path is replaced. A symlink to it follows the new binary; another hard link to
+  the same file keeps the old one.
+- `Discard` returns `*BackupLockedError` only when the resolved `Config.GOOS` is `windows` and the
+  remove error unwraps to errno 5 (access denied) or 32 (sharing violation). Access denied matches
+  too, so an ACL denial on Windows reads as locked. The update has succeeded, and a caller may ignore
+  it. Any other remove failure is a `*PermissionError` or a wrapped error.
+- `*PermissionError` comes from `CheckWritable` and from any write step of `Install`, `Discard` and
+  `Rollback`. `CheckWritable` is best-effort; `Install` is the authority.
+- Windows behaviour is unverified: one code path, no `_windows.go` file, so the `GOOS=windows go
+  vet` gate stays off for this project (ADR-0022). The injected-error tests cover the locked-backup
+  branch.
+- The seams are the unexported `fsSteps`, set by in-package tests; `Config` has no field for them.
+  Tests run as root in CI, so injection is what covers the permission path.
+- `Install` runs no `PostUpdate` hook. The caller runs `RunPostUpdate` with `Installed.Path()`.
 
 ## Conventions
 
