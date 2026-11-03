@@ -25,6 +25,9 @@ const harnessTag = "v1.2.3"
 // answers fails the test instead of hanging it.
 const scriptTimeout = 2 * time.Minute
 
+// noTool, as a harness's Downloader or Hasher, leaves every candidate for that role off PathDir.
+const noTool = "none"
+
 // scriptTools returns the external commands the install script and the completion snippet run,
 // other than the downloader and the hasher. printf is among them: `find -exec printf` runs the
 // command, not the shell builtin. brew is not, so the zsh target never depends on the host.
@@ -43,9 +46,10 @@ type harnessOptions struct {
 	Config update.Config
 	// Tag is the tag of the one release the server publishes; "" is harnessTag.
 	Tag string
-	// Downloader is the one of curl and wget on PATH; "" is curl.
+	// Downloader is the one of curl and wget on PATH; "" is curl and [noTool] puts neither.
 	Downloader string
-	// Hasher is the one of sha256sum and shasum on PATH; "" is sha256sum.
+	// Hasher is the one of sha256sum and shasum on PATH; "" is sha256sum and [noTool] puts
+	// neither.
 	Hasher string
 	// ServerOptions are the faults the release server is started with.
 	ServerOptions []updatetest.Option
@@ -127,7 +131,13 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		PathDir:    mkdir(t, root, "path"),
 		TmpDir:     mkdir(t, root, "tmp"),
 	}
-	linkTools(t, h.PathDir, append(scriptTools(), opts.Downloader, opts.Hasher))
+	tools := scriptTools()
+	for _, tool := range []string{opts.Downloader, opts.Hasher} {
+		if tool != noTool {
+			tools = append(tools, tool)
+		}
+	}
+	linkTools(t, h.PathDir, tools)
 	h.Release = fakeRelease(t, cfg, opts.Tag, opts.CompletionFails)
 	h.Server = updatetest.NewServer(t, h.Release, opts.ServerOptions...)
 

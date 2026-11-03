@@ -578,8 +578,10 @@ func TestResolveRejectsInvalidConfig(t *testing.T) {
 
 func TestResolvedFillsDefaultsFromTheIdentity(t *testing.T) {
 	t.Parallel()
-	id := validIdentity()
-	r, err := Config{Identity: id, Source: &stubSource{}}.Resolved()
+	c := validConfig(t.TempDir())
+	id := c.Identity
+	c.BinaryName, c.AssetTemplate, c.AssetExt, c.ChecksumsAsset = "", "", "", ""
+	r, err := c.Resolved()
 	if err != nil {
 		t.Fatalf("Resolved() error = %v, want nil", err)
 	}

@@ -159,6 +159,34 @@ func TestScriptRejectsABadChecksumAndLeavesNothingBehind(t *testing.T) {
 	requireNoLeftovers(t, h.InstallDir)
 }
 
+func TestScriptFailsWithoutADownloaderOrAHasher(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opts harnessOptions
+		want string
+	}{
+		{"no downloader", harnessOptions{Downloader: noTool}, "neither curl nor wget is installed"},
+		{"no hasher", harnessOptions{Hasher: noTool}, "neither sha256sum nor shasum is installed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, tc.opts)
+
+			res := h.Run()
+
+			if res.Code == 0 {
+				t.Errorf("script exited 0, want a failure\nstderr:\n%s", res.Stderr)
+			}
+			if !strings.Contains(res.Stderr, tc.want) {
+				t.Errorf("stderr = %q, want it to contain %q", res.Stderr, tc.want)
+			}
+			requireNoFile(t, h.BinaryPath())
+		})
+	}
+}
+
 func TestScriptNamesTheMissingAsset(t *testing.T) {
 	t.Parallel()
 	cfg, err := testConfig("", "").Resolved()
