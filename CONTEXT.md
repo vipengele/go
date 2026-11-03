@@ -268,8 +268,10 @@ and the check interval has passed since the last **Check attempt**.
 _Avoid_: update poll, version check, ping
 
 **Check attempt**:
-An **Update check** that ran to an outcome, a newer release, none, or a failure, timeouts included.
-A check cancelled because its command ended is not an attempt and does not restart the interval.
+An **Update check** that ran to an outcome: a newer release, none, or a failure, including a request
+to the **Release source** that timed out. A check stopped because its command ended, whether
+cancelled or past the bound the process waits for it, is not an attempt and does not restart the
+interval.
 _Avoid_: try, run, last check (when a cancelled check is meant)
 
 **Update state**:
