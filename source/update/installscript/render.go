@@ -27,14 +27,14 @@ const (
 //go:embed install.sh.tmpl
 var scriptTemplate string
 
-// runtimeVar returns the shell variable holding the value of a placeholder expanded when the
-// script runs. It reports false for {name} and {ext}, which are fixed at render time.
-func runtimeVar(placeholder string) (string, bool) {
+// expandsAtRuntime reports whether a placeholder is expanded when the script runs, from the shell
+// variable of the same name, rather than fixed at render time as {name} and {ext} are.
+func expandsAtRuntime(placeholder string) bool {
 	switch placeholder {
 	case "os", "arch", "tag", "version":
-		return placeholder, true
+		return true
 	default:
-		return "", false
+		return false
 	}
 }
 
@@ -104,12 +104,19 @@ func Render(cfg update.Config) ([]byte, error) {
 		{&data.BaseURLEnv, baseURLEnvSuffix},
 		{&data.NoCompletionEnv, completioninstall.NoCompletionEnvSuffix},
 	} {
-		if *v.dst, err = r.EnvVar(v.suffix); err != nil {
-			return nil, fmt.Errorf("installscript: %w", err)
-		}
+		// EnvVar cannot fail once Resolved passes: the prefix is a valid identifier of at most
+		// spec.MaxEnvPrefixLen (32) bytes, every suffix is a valid identifier of at most 13, and the
+		// joined name stays within the 64 bytes validate.MaxEnvVarLen allows.
+		*v.dst, _ = r.EnvVar(v.suffix)
 	}
 
-	tmpl, err := template.New("install.sh").Option("missingkey=error").Parse(scriptTemplate)
+	return execute(scriptTemplate, data)
+}
+
+// execute parses src as the script template and executes it with data. A field that src names and data
+// lacks is an error rather than an empty string.
+func execute(src string, data any) ([]byte, error) {
+	tmpl, err := template.New("install.sh").Option("missingkey=error").Parse(src)
 	if err != nil {
 		return nil, fmt.Errorf("installscript: parsing the script template: %w", err)
 	}
@@ -124,10 +131,10 @@ func Render(cfg update.Config) ([]byte, error) {
 func identity(s string) string { return s }
 
 // shellWord returns one shell word that evaluates to the asset template tmpl rendered with name for
-// {name}, ext for {ext} and, at run time, the shell variables of [runtimeVar] for the others. Each
-// run of literal text, name and ext included, goes through enc and is single-quoted; each run-time
-// placeholder becomes "${var}". tmpl is a template a resolved Config carries, so every "{" opens a
-// known placeholder that a "}" closes.
+// {name}, ext for {ext} and, at run time, the shell variable of the same name for each placeholder
+// [expandsAtRuntime] accepts. Each run of literal text, name and ext included, goes through enc and
+// is single-quoted; each run-time placeholder becomes "${placeholder}". tmpl is a template a
+// resolved Config carries, so every "{" opens a known placeholder that a "}" closes.
 func shellWord(tmpl, name, ext string, enc func(string) string) string {
 	var word, literal strings.Builder
 	flush := func() {
@@ -145,9 +152,9 @@ func shellWord(tmpl, name, ext string, enc func(string) string) string {
 		}
 		placeholder, after, _ := strings.Cut(afterOpen, "}")
 		rest = after
-		if v, ok := runtimeVar(placeholder); ok {
+		if expandsAtRuntime(placeholder) {
 			flush()
-			word.WriteString(`"${` + v + `}"`)
+			word.WriteString(`"${` + placeholder + `}"`)
 			continue
 		}
 		if placeholder == "name" {

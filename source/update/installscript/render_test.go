@@ -179,3 +179,46 @@ func TestRenderHostileAssetTemplateStaysLiteral(t *testing.T) {
 		})
 	}
 }
+
+// scriptLine returns the first line of out that starts with prefix.
+func scriptLine(t *testing.T, out, prefix string) string {
+	t.Helper()
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, prefix) {
+			return l
+		}
+	}
+	t.Fatalf("script has no %s line", prefix)
+	return ""
+}
+
+func TestRenderNamesAssetsWithoutEmptyLiterals(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, tmpl, ext string
+		want            map[string]string
+	}{
+		{"default", "", "", map[string]string{
+			"asset=":         `asset='atk_'"${os}"'_'"${arch}"'.tar.gz'`,
+			"asset_url=":     `asset_url=$base/$owner/$repo/releases/download/$tag/'atk_'"${os}"'_'"${arch}"'.tar.gz'`,
+			"checksums=":     `checksums='checksums.txt'`,
+			"checksums_url=": `checksums_url=$base/$owner/$repo/releases/download/$tag/'checksums.txt'`,
+		}},
+		{"leading placeholder", "{os}-{name}", "", map[string]string{
+			"asset=": `asset="${os}"'-atk'`,
+		}},
+		{"trailing placeholder", "{name}-{os}", "", map[string]string{
+			"asset=": `asset='atk-'"${os}"`,
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := render(t, testConfig(tt.tmpl, tt.ext))
+			for prefix, want := range tt.want {
+				if got := scriptLine(t, out, prefix); got != want {
+					t.Errorf("%s line = %q, want %q", prefix, got, want)
+				}
+			}
+		})
+	}
+}
