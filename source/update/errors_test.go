@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"strings"
 	"testing"
@@ -330,6 +331,103 @@ func TestChecksumAndSizeErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPermissionError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("EACCES")
+
+	tests := []struct {
+		name   string
+		err    *PermissionError
+		want   string
+		wantIs error
+	}{
+		{
+			name:   "with cause and hint",
+			err:    &PermissionError{Path: "/usr/bin/atk", Op: "create", Hint: "rerun as root", Err: cause},
+			want:   "update: create /usr/bin/atk: permission denied: EACCES (rerun as root)",
+			wantIs: cause,
+		},
+		{
+			name: "bare",
+			err:  &PermissionError{Path: "/usr/bin/atk", Op: "rename"},
+			want: "update: rename /usr/bin/atk: permission denied",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+
+			wrapped := fmt.Errorf("install: %w", tc.err)
+
+			var permErr *PermissionError
+			if !errors.As(wrapped, &permErr) {
+				t.Fatal("errors.As did not find *PermissionError")
+			}
+
+			if !errors.Is(wrapped, fs.ErrPermission) {
+				t.Error("errors.Is does not match fs.ErrPermission")
+			}
+
+			if tc.wantIs != nil && !errors.Is(wrapped, tc.wantIs) {
+				t.Error("errors.Is does not reach the cause")
+			}
+		})
+	}
+}
+
+func TestBackupLockedError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("sharing violation")
+	err := fmt.Errorf("discard: %w", &BackupLockedError{Path: "/bin/atk.old", Err: cause})
+
+	var lockedErr *BackupLockedError
+	if !errors.As(err, &lockedErr) {
+		t.Fatal("errors.As did not find *BackupLockedError")
+	}
+
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is does not reach the cause")
+	}
+
+	for _, want := range []string{"update: ", "/bin/atk.old", "sharing violation"} {
+		if !strings.Contains(lockedErr.Error(), want) {
+			t.Errorf("Error() = %q, missing %q", lockedErr.Error(), want)
+		}
+	}
+}
+
+func TestRestoreError(t *testing.T) {
+	t.Parallel()
+
+	renameErr := errors.New("rename failed")
+	restoreErr := errors.New("restore failed")
+	err := fmt.Errorf("install: %w", &RestoreError{
+		Path: "/bin/atk", Backup: "/bin/atk.old", Err: renameErr, RestoreErr: restoreErr,
+	})
+
+	var re *RestoreError
+	if !errors.As(err, &re) {
+		t.Fatal("errors.As did not find *RestoreError")
+	}
+
+	if !errors.Is(err, renameErr) || !errors.Is(err, restoreErr) {
+		t.Error("errors.Is does not reach both causes")
+	}
+
+	for _, want := range []string{"update: ", "/bin/atk", "/bin/atk.old", "rename failed", "restore failed"} {
+		if !strings.Contains(re.Error(), want) {
+			t.Errorf("Error() = %q, missing %q", re.Error(), want)
+		}
 	}
 }
 
