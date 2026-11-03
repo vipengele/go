@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -104,6 +105,17 @@ type Config struct {
 	// the home directory: never when <PREFIX>_HOME is set, on Linux when XDG_STATE_HOME is an
 	// absolute path, or on Windows when LocalAppData is set.
 	UserHomeDir func() (string, error)
+	// EvalSymlinks returns a path with every symbolic link in it resolved. Nil means
+	// [filepath.EvalSymlinks]. It resolves the path Executable returns before the path is matched
+	// against the detectors of externally managed installs.
+	EvalSymlinks func(string) (string, error)
+	// Detectors are the tool's own detectors of externally managed installs, consulted in order
+	// after the built-in ones. Nil means the built-in detectors alone; a nil entry is invalid.
+	Detectors []Detector
+	// InContainer reports whether the process runs inside a container. Nil means
+	// [paths.InContainer] for the resolved GOOS, reading the environment through Getenv and the
+	// real filesystem.
+	InContainer func() bool
 }
 
 // Validate returns nil when the Config can be used. Otherwise it returns one error listing every
@@ -112,8 +124,9 @@ type Config struct {
 // AssetTemplate, ChecksumsAsset or AssetExt must be valid: AssetTemplate by [asset.Validate],
 // ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
 // "}" and not starting with ".", and, when the AssetTemplate holds {ext}, being "tar.gz", "tgz" or
-// "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative. Each of
-// those is a [validate.FieldError] wrapping [validate.ErrInvalid], and the AssetTemplate and
+// "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative, and no entry
+// of Detectors may be nil. Each of those is a [validate.FieldError] wrapping [validate.ErrInvalid],
+// the one for a nil detector naming its index as Detectors[i], and the AssetTemplate and
 // ChecksumsAsset ones also wrap the error of package asset.
 func (c Config) Validate() error {
 	return validate.Join(
@@ -124,7 +137,32 @@ func (c Config) Validate() error {
 		checkNotNegative("MaxDownloadBytes", c.MaxDownloadBytes),
 		checkNotNegative("MaxExtractBytes", c.MaxExtractBytes),
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
+		checkDetectors(c.Detectors),
 	)
+}
+
+// checkDetectors rejects every nil entry of detectors; a nil slice means the built-ins alone.
+func checkDetectors(detectors []Detector) error {
+	var errs []error
+	for i, d := range detectors {
+		if d == nil {
+			errs = append(errs, &validate.FieldError{
+				Field: "Detectors[" + strconv.Itoa(i) + "]",
+				Value: "nil",
+				Err:   fmt.Errorf("%w: must not be nil", validate.ErrInvalid),
+			})
+		}
+	}
+	return validate.Join(errs...)
+}
+
+// lookupEnvOf adapts getenv to the LookupEnv of package paths, which counts a variable set to ""
+// as unset.
+func lookupEnvOf(getenv func(string) string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		v := getenv(key)
+		return v, v != "" // [lydite:exclude_from_mutation][paths counts a variable set to "" as unset and reads only the value, so the flag is unobservable]
+	}
 }
 
 // checkNotNegative rejects a negative limit; zero means the default.
@@ -216,7 +254,8 @@ func checkAssetExt(tmpl, ext string) error {
 // [paths.State] kind alone, for the Identity with the resolved GOOS, Getenv and UserHomeDir, so a
 // substituted seam decides it too; resolve fails when StateDir is empty and the state directory
 // needs a home directory the resolver cannot find.
-// An explicit StateDir is kept without consulting the resolver.
+// An explicit StateDir is kept without consulting the resolver. A nil InContainer is likewise
+// built over the resolved GOOS and Getenv.
 func (c Config) resolve() (Config, error) {
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -274,19 +313,22 @@ func (c Config) resolve() (Config, error) {
 		r.UserHomeDir = os.UserHomeDir
 	}
 	if r.StateDir == "" {
-		getenv := r.Getenv
 		dirs, err := paths.Resolve(r.Identity, paths.Options{
-			GOOS: r.GOOS,
-			LookupEnv: func(key string) (string, bool) {
-				v := getenv(key)
-				return v, v != "" // [lydite:exclude_from_mutation][paths counts a variable set to "" as unset and reads only the value, so the flag is unobservable]
-			},
+			GOOS:        r.GOOS,
+			LookupEnv:   lookupEnvOf(r.Getenv),
 			UserHomeDir: r.UserHomeDir,
 		}, paths.State)
 		if err != nil {
 			return Config{}, fmt.Errorf("update: resolving StateDir: %w", err)
 		}
 		r.StateDir = dirs.State()
+	}
+	if r.EvalSymlinks == nil {
+		r.EvalSymlinks = filepath.EvalSymlinks
+	}
+	if r.InContainer == nil {
+		probes := paths.Probes{GOOS: r.GOOS, LookupEnv: lookupEnvOf(r.Getenv)}
+		r.InContainer = func() bool { return paths.InContainer(probes) }
 	}
 	return r, nil
 }

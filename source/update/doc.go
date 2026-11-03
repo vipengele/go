@@ -32,6 +32,18 @@
 // file, whether it succeeds or fails. [Staged.Keep] leaves the file on disk and [Staged.Discard]
 // removes it; whichever is called first decides.
 //
+// [Config.CheckManaged] refuses an executable that an external manager owns, which an in-place
+// update would fight with. It resolves the symlinks of the path Config.Executable returns through
+// EvalSymlinks and returns a [*ManagedInstallError], matched with [errors.As], that names the
+// manager and says what to do instead; it returns nil when the executable is not managed. The
+// built-in detectors know Nix, Homebrew (macOS and Linuxbrew) and containers, and cannot be turned
+// off. A tool adds its own [Detector]s through Config.Detectors, consulted in order after the
+// built-in ones; the first match wins.
+//
+// The check has limits. The path detectors match Unix install locations, case-sensitively and on a
+// directory boundary, so a Windows executable is never refused by them. Only the default Nix and
+// Homebrew prefixes are known, so an install under another prefix is missed. The container check
+// is a heuristic: InContainer reports what the environment and the filesystem suggest.
 // [Config.Install] replaces the executable [Config.Target] names, symbolic links resolved, with a
 // [*Staged] binary that lives in Target's directory. It copies the executable's permission bits to
 // the staged file, renames the executable to a backup beside it, ".old" after its name, and renames
