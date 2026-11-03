@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -192,6 +193,54 @@ func TestAcquireInstanceWrapsResolveFailure(t *testing.T) {
 	_, err := daemon.AcquireInstance(spec.Identity{}, paths.Options{RuntimeDir: t.TempDir()})
 	if err == nil {
 		t.Fatal("AcquireInstance with an invalid identity succeeded")
+	}
+
+	if errors.Is(err, daemon.ErrAlreadyRunning) {
+		t.Errorf("error %v matches ErrAlreadyRunning", err)
+	}
+}
+
+func TestAcquireInstanceWrapsEnsureFailure(t *testing.T) {
+	t.Parallel()
+
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := daemon.AcquireInstance(testIdentity(), paths.Options{RuntimeDir: file})
+	if err == nil {
+		t.Fatal("AcquireInstance with a regular file as runtime directory succeeded")
+	}
+
+	if !strings.HasPrefix(err.Error(), "daemon: instance: ") {
+		t.Errorf("error %q lacks the daemon: instance: prefix", err.Error())
+	}
+
+	if errors.Is(err, daemon.ErrAlreadyRunning) {
+		t.Errorf("error %v matches ErrAlreadyRunning", err)
+	}
+}
+
+func TestAcquireInstanceWrapsLockFailure(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("opening a directory as the lock file fails differently on Windows")
+	}
+
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "instance.lock"), 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	_, err := daemon.AcquireInstance(testIdentity(), paths.Options{RuntimeDir: dir})
+	if err == nil {
+		t.Fatal("AcquireInstance with a directory as lock file succeeded")
+	}
+
+	if !strings.HasPrefix(err.Error(), "daemon: instance: ") {
+		t.Errorf("error %q lacks the daemon: instance: prefix", err.Error())
 	}
 
 	if errors.Is(err, daemon.ErrAlreadyRunning) {

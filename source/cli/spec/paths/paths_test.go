@@ -688,6 +688,8 @@ func TestResolveFailsOnlyForARequestedKind(t *testing.T) {
 			map[string]string{"XDG_STATE_HOME": "/xdg/state"}, paths.Options{}, []paths.Kind{paths.State, paths.Cache}},
 		{"linux log whose state needs the home directory", "linux",
 			map[string]string{"XDG_CONFIG_HOME": "/xdg/config"}, paths.Options{}, []paths.Kind{paths.Log}},
+		{"linux runtime whose state needs the home directory", "linux",
+			map[string]string{"XDG_CONFIG_HOME": "/xdg/config"}, paths.Options{}, []paths.Kind{paths.Runtime}},
 		{"darwin state whose config needs the home directory", "darwin", nil, paths.Options{},
 			[]paths.Kind{paths.State}},
 		{"darwin data whose config needs the home directory", "darwin", nil, paths.Options{CacheDir: "/x/cache"},
