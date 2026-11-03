@@ -55,5 +55,14 @@
 // [Config.CheckWritable] can report before anything is downloaded. A [PostUpdate] hook receives
 // [Installed.Path]; Install runs none itself.
 //
+// Whether a background update check may run is decided from the Config and the stored [State]. The
+// gates are tried in order and the first that fails decides: the running Version is not a release
+// version, the CI environment variable is set, stderr is not a terminal (IsTerminal), DisableCheck
+// is set, the user set the opt-out variable of the Identity, or the last attempt is less than
+// CheckInterval old. A check attempt is recorded in State, as LastAttempt and, when it succeeded,
+// LatestVersion, through Config.StateStore, which keeps the State between runs; a nil StateStore is
+// a file in the state directory. A check stopped because the command ended is not an attempt: it
+// neither throttles the next run nor erases the LatestVersion already known.
+//
 // The package depends on no command-line framework.
 package update
