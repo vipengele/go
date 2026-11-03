@@ -17,7 +17,8 @@ golangci-lint run
 - `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries every
   seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user home
   dir). `Validate` reports problems; `resolve` returns a copy with each zero field set to its
-  production default and never mutates the receiver. The default state dir comes from
+  production default and never mutates the receiver. `Resolved` is its exported wrapper, the one
+  place other packages read the defaults from (ADR-0022). The default state dir comes from
   `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
   env lookup and user home dir seams; only the state kind is resolved, so the home directory is
   needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
@@ -51,8 +52,30 @@ golangci-lint run
 - `checksums.go` — `parseChecksum`, which finds the archive's digest in a checksums file.
 - `hook.go` — `PostUpdate`, a step that receives the installed binary's path (the old process is still
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
-  runs the hooks in order and joins their errors. A failure is non-fatal. `update` does not import
-  `cli/spec/completioninstall` outside tests (ADR-0021).
+  runs the hooks in order and joins their errors. A failure is non-fatal. Package `update` does not
+  import `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that
+  does (ADR-0022).
+- `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
+  tool (`install.sh.tmpl`, embedded), which downloads the release asset, verifies it against the
+  checksums file, places the binary with one rename and installs the shell completion.
+  - Input: `Render` calls `Config.Resolved` and never re-derives a default. A template holding
+    `{ext}` with `AssetExt` `tar.gz` or `tgz` renders the archive path (extract exactly one regular
+    file named `BinaryName`); a template without `{ext}` renders the raw-binary path (no `tar`).
+    `{ext}` with `zip` fails with `ErrZipAsset`. `{name}` and `{ext}` are fixed at render time;
+    `{os}`, `{arch}`, `{tag}` and `{version}` are shell variables expanded when the script runs.
+    Every value reaches the script as a single-quoted shell literal.
+  - Overrides, each named by `Identity.EnvVar`, so no prefix is spelled out: `<P>_VERSION` (`v1.2.3`
+    or `1.2.3`; the latest release when unset), `<P>_INSTALL_DIR` (`$HOME/.local/bin`),
+    `<P>_BASE_URL` (`https://github.com`) and `<P>_NO_COMPLETION` (`1` skips the completion).
+  - The template inserts `completioninstall.Snippet(BinaryName)` verbatim and never copies the
+    completion path table. `completion_target` is called as `if completion_target ...`, never bare,
+    because it returns non-zero by design under `set -e`. A completion failure is a warning and the
+    exit status stays 0.
+  - Not handled: zip, Windows, an API fallback for the latest version (only the `releases/latest`
+    redirect is read) and a non-GitHub `Source`. `Config.Source`, `HTTPClient`, the `GOOS` and
+    `GOARCH` overrides and the size limits are ignored.
+  - Tests run the rendered script under `sh` against `updatetest.NewServer`, with a `PATH` of
+    symlinked tools so a test can leave one out; a test skips when a tool the host lacks is needed.
 - `extract.go` — `Config.Extract`, `Staged`, the extractor dispatch by format, the raw extractor, the
   bounded copy (`copyBounded`), the context-aware reader and the entry-name check
   (`unsafeEntryName`).

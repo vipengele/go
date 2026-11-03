@@ -14,4 +14,10 @@
 // 1.2.3, in place of the latest; <PREFIX>_INSTALL_DIR replaces $HOME/.local/bin;
 // <PREFIX>_BASE_URL replaces https://github.com; and <PREFIX>_NO_COMPLETION set to 1 skips the
 // completion. A completion that cannot be installed is a warning, never a failure.
+//
+// Without <PREFIX>_VERSION the latest release is the last path segment of the Location header of
+// the unfollowed redirect from <base>/<owner>/<repo>/releases/latest; there is no API fallback.
+// The script is Unix only (Linux and macOS, amd64 and arm64) and reads releases from a GitHub-style
+// server alone: Config.Source, HTTPClient, the GOOS and GOARCH overrides and the size limits belong
+// to the Go updater and are ignored.
 package installscript

@@ -6,6 +6,9 @@
 // platform, the running executable, the environment and the user's home directory — is a
 // field of Config, so a test substitutes any of them. A field left at its zero value takes its
 // production default; a nil Source is the [GitHubSource] for the Identity's Owner and Repo.
+// [Config.Resolved] validates a Config and returns that fully defaulted copy, so a second reader of
+// the defaults, such as package [go.vipengele.org/update/installscript], which renders the tool's
+// Unix install script, never derives them itself.
 //
 // [Config.Select] names the archive and checksums assets of a [Release] for the Config's platform.
 // Their names are the AssetTemplate and ChecksumsAsset templates rendered with the placeholders of
