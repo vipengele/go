@@ -123,15 +123,15 @@ func (in *Instance) writeHolder(tmp string) {
 
 // readHolder returns the pid in the record at path, and 0 when it cannot be read or parsed.
 func readHolder(path string) int {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return 0
 	}
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
+	if err != nil {
 		return 0
 	}
 
-	return pid
+	return max(pid, 0)
 }
