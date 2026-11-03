@@ -1,0 +1,10 @@
+mkdir "$tmp/extract"
+tar -xzf "$tmp/asset" -C "$tmp/extract" || fail "extracting $asset failed"
+count=$(find "$tmp/extract" -type f -name "$name" -exec printf . \;)
+case $count in
+.) ;;
+'') fail "$asset holds no file named $name" ;;
+*) fail "$asset holds more than one file named $name" ;;
+esac
+find "$tmp/extract" -type f -name "$name" -exec mv {} "$tmp/binary" \;
+binary=$tmp/binary

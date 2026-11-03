@@ -2,17 +2,17 @@
 # Installs a command-line tool from its GitHub releases: the binary, then its shell completion.
 #
 # Environment:
-#   {{.VersionEnv}}        the release to install, as v1.2.3 or 1.2.3; the latest when unset
-#   {{.InstallDirEnv}}    the directory the binary is placed in; $HOME/.local/bin when unset
-#   {{.BaseURLEnv}}       the server releases are downloaded from; https://github.com when unset
-#   {{.NoCompletionEnv}}  1 skips installing the shell completion
+#   @@VERSION_ENV@@        the release to install, as v1.2.3 or 1.2.3; the latest when unset
+#   @@INSTALL_DIR_ENV@@    the directory the binary is placed in; $HOME/.local/bin when unset
+#   @@BASE_URL_ENV@@       the server releases are downloaded from; https://github.com when unset
+#   @@NO_COMPLETION_ENV@@  1 skips installing the shell completion
 #
 # The asset is verified against the release's checksums file before it is extracted or installed.
 set -eu
 
-name={{.Name}}
-owner={{.Owner}}
-repo={{.Repo}}
+name=@@NAME@@
+owner=@@OWNER@@
+repo=@@REPO@@
 
 tmp=
 stage=
@@ -150,18 +150,18 @@ aarch64 | arm64) arch=arm64 ;;
 *) fail "unsupported architecture: $(uname -m)" ;;
 esac
 
-base=${ {{- .BaseURLEnv}}:-https://github.com}
+base=${@@BASE_URL_ENV@@:-https://github.com}
 base=${base%/}
 
-install_dir=${ {{- .InstallDirEnv}}:-}
+install_dir=${@@INSTALL_DIR_ENV@@:-}
 if [ -z "$install_dir" ]; then
-	[ -n "${HOME:-}" ] || fail "HOME is not set; set {{.InstallDirEnv}} to the directory to install into"
+	[ -n "${HOME:-}" ] || fail "HOME is not set; set @@INSTALL_DIR_ENV@@ to the directory to install into"
 	install_dir=$HOME/.local/bin
 fi
 
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t "$name")
 
-tag=${ {{- .VersionEnv}}:-}
+tag=${@@VERSION_ENV@@:-}
 if [ -n "$tag" ]; then
 	case $tag in
 	v*) ;;
@@ -182,10 +182,10 @@ case $tag in
 esac
 version=${tag#v}
 
-asset={{.Asset}}
-asset_url=$base/$owner/$repo/releases/download/$tag/{{.AssetURL}}
-checksums={{.Checksums}}
-checksums_url=$base/$owner/$repo/releases/download/$tag/{{.ChecksumsURL}}
+asset=@@ASSET@@
+asset_url=$base/$owner/$repo/releases/download/$tag/@@ASSET_URL@@
+checksums=@@CHECKSUMS@@
+checksums_url=$base/$owner/$repo/releases/download/$tag/@@CHECKSUMS_URL@@
 
 say "installing $tag for $os/$arch"
 
@@ -210,22 +210,8 @@ conflict) fail "$checksums lists two different checksums for $asset" ;;
 esac
 actual=$(sha256 "$tmp/asset")
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $asset: $checksums lists $expected, the download is $actual"
-{{- if .Archive}}
 
-mkdir "$tmp/extract"
-tar -xzf "$tmp/asset" -C "$tmp/extract" || fail "extracting $asset failed"
-count=$(find "$tmp/extract" -type f -name "$name" -exec printf . \;)
-case $count in
-.) ;;
-'') fail "$asset holds no file named $name" ;;
-*) fail "$asset holds more than one file named $name" ;;
-esac
-find "$tmp/extract" -type f -name "$name" -exec mv {} "$tmp/binary" \;
-binary=$tmp/binary
-{{- else}}
-
-binary=$tmp/asset
-{{- end}}
+@@INSTALL_STEP@@
 
 mkdir -p "$install_dir"
 stage=$(mktemp "$install_dir/.$name.XXXXXX")
@@ -251,7 +237,7 @@ if [ -z "$on_path" ]; then
 	warn "$install_dir is not on PATH; add it to run $name by name"
 fi
 
-{{.Snippet}}
+@@SNIPPET@@
 # install_completion installs the completion script of the binary for the user's login shell.
 # Every failure is a warning: the binary is already in place.
 install_completion() {
@@ -299,6 +285,6 @@ install_completion() {
 	fi
 }
 
-if [ "${ {{- .NoCompletionEnv}}:-}" != 1 ]; then
+if [ "${@@NO_COMPLETION_ENV@@:-}" != 1 ]; then
 	install_completion
 fi

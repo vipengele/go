@@ -64,7 +64,7 @@ golangci-lint run
   import `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that
   does (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
-  tool (`install.sh.tmpl`, embedded), which downloads the release asset, verifies it against the
+  tool (`install.sh.in`, embedded), which downloads the release asset, verifies it against the
   checksums file, places the binary with one rename and installs the shell completion.
   - Input: `Render` calls `Config.Resolved` and never re-derives a default. A template holding
     `{ext}` with `AssetExt` `tar.gz` or `tgz` renders the archive path (extract exactly one regular
@@ -75,10 +75,12 @@ golangci-lint run
   - Overrides, each named by `Identity.EnvVar`, so no prefix is spelled out: `<P>_VERSION` (`v1.2.3`
     or `1.2.3`; the latest release when unset), `<P>_INSTALL_DIR` (`$HOME/.local/bin`),
     `<P>_BASE_URL` (`https://github.com`) and `<P>_NO_COMPLETION` (`1` skips the completion).
-  - The template inserts `completioninstall.Snippet(BinaryName)` verbatim and never copies the
-    completion path table. `completion_target` is called as `if completion_target ...`, never bare,
-    because it returns non-zero by design under `set -e`. A completion failure is a warning and the
-    exit status stays 0.
+  - The script source carries `@@NAME@@`-style tokens that one `strings.Replacer` pass fills, so a
+    value holding a token stays literal; `@@INSTALL_STEP@@` takes `extract-archive.sh.in` or
+    `install-raw.sh.in`. Render inserts `completioninstall.Snippet(BinaryName)` verbatim and never
+    copies the completion path table. `completion_target` is called as `if completion_target ...`,
+    never bare, because it returns non-zero by design under `set -e`. A completion failure is a
+    warning and the exit status stays 0.
   - Not handled: zip, Windows, an API fallback for the latest version (only the `releases/latest`
     redirect is read) and a non-GitHub `Source`. `Config.Source`, `HTTPClient`, the `GOOS` and
     `GOARCH` overrides and the size limits are ignored.

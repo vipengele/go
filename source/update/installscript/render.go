@@ -1,12 +1,10 @@
 package installscript
 
 import (
-	"bytes"
 	_ "embed"
 	"fmt"
 	"net/url"
 	"strings"
-	"text/template"
 
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/update"
@@ -21,11 +19,23 @@ const (
 	baseURLEnvSuffix    = "BASE_URL"
 )
 
-// scriptTemplate is the text/template source of the install script. Every value it receives is
-// already a shell word or an environment-variable identifier, so the template never quotes.
+// scriptSource is the install script with a token, an upper-case name between "@@" pairs, in
+// place of each value Render fixes. "@@" is no shell operator and appears nowhere else in the
+// script, so a token is only ever one of these placeholders. Render replaces each with a shell word,
+// an environment-variable identifier, the completion snippet or an install-step fragment, all
+// complete as they stand, so the script never quotes a token.
 //
-//go:embed install.sh.tmpl
-var scriptTemplate string
+//go:embed install.sh.in
+var scriptSource string
+
+// Each of these replaces @@INSTALL_STEP@@: extractArchive leaves the binary extracted from a tar
+// archive in $binary, installRaw names the downloaded asset itself as $binary.
+var (
+	//go:embed extract-archive.sh.in
+	extractArchive string
+	//go:embed install-raw.sh.in
+	installRaw string
+)
 
 // expandsAtRuntime reports whether a placeholder is expanded when the script runs, from the shell
 // variable of the same name, rather than fixed at render time as {name} and {ext} are.
@@ -36,31 +46,6 @@ func expandsAtRuntime(placeholder string) bool {
 	default:
 		return false
 	}
-}
-
-// scriptData is what the template is executed with.
-type scriptData struct {
-	// Name is the binary name as a shell word.
-	Name string
-	// Owner and Repo are the repository's path segments, URL-escaped, as shell words.
-	Owner string
-	Repo  string
-	// Archive selects the tar extraction path; false installs the asset as the binary itself.
-	Archive bool
-	// Asset and AssetURL are shell words evaluating to the asset's name and to that name escaped
-	// as a URL path segment.
-	Asset    string
-	AssetURL string
-	// Checksums and ChecksumsURL are the same two words for the checksums file.
-	Checksums    string
-	ChecksumsURL string
-	// The environment variables the script reads, as identifiers.
-	VersionEnv      string
-	InstallDirEnv   string
-	BaseURLEnv      string
-	NoCompletionEnv string
-	// Snippet is the completion snippet, inserted verbatim.
-	Snippet string
 }
 
 // Render returns the install script for the tool cfg describes. It resolves cfg with
@@ -84,47 +69,37 @@ func Render(cfg update.Config) ([]byte, error) {
 		return nil, fmt.Errorf("installscript: %w", err)
 	}
 
-	data := scriptData{
-		Name:     shellQuote(r.BinaryName),
-		Owner:    shellQuote(url.PathEscape(r.Owner)),
-		Repo:     shellQuote(url.PathEscape(r.Repo)),
-		Archive:  archive,
-		Asset:    shellWord(r.AssetTemplate, r.BinaryName, r.AssetExt, identity),
-		AssetURL: shellWord(r.AssetTemplate, r.BinaryName, r.AssetExt, url.PathEscape),
-		Snippet:  snippet,
+	step := installRaw
+	if archive {
+		step = extractArchive
 	}
-	data.Checksums = shellWord(r.ChecksumsAsset, r.BinaryName, "", identity)
-	data.ChecksumsURL = shellWord(r.ChecksumsAsset, r.BinaryName, "", url.PathEscape)
-	for _, v := range []struct {
-		dst    *string
-		suffix string
-	}{
-		{&data.VersionEnv, versionEnvSuffix},
-		{&data.InstallDirEnv, installDirEnvSuffix},
-		{&data.BaseURLEnv, baseURLEnvSuffix},
-		{&data.NoCompletionEnv, completioninstall.NoCompletionEnvSuffix},
+	pairs := []string{
+		"@@NAME@@", shellQuote(r.BinaryName),
+		"@@OWNER@@", shellQuote(url.PathEscape(r.Owner)),
+		"@@REPO@@", shellQuote(url.PathEscape(r.Repo)),
+		"@@ASSET@@", shellWord(r.AssetTemplate, r.BinaryName, r.AssetExt, identity),
+		"@@ASSET_URL@@", shellWord(r.AssetTemplate, r.BinaryName, r.AssetExt, url.PathEscape),
+		"@@CHECKSUMS@@", shellWord(r.ChecksumsAsset, r.BinaryName, "", identity),
+		"@@CHECKSUMS_URL@@", shellWord(r.ChecksumsAsset, r.BinaryName, "", url.PathEscape),
+		"@@INSTALL_STEP@@", strings.TrimSuffix(step, "\n"),
+		"@@SNIPPET@@", snippet,
+	}
+	for _, v := range []struct{ token, suffix string }{
+		{"@@VERSION_ENV@@", versionEnvSuffix},
+		{"@@INSTALL_DIR_ENV@@", installDirEnvSuffix},
+		{"@@BASE_URL_ENV@@", baseURLEnvSuffix},
+		{"@@NO_COMPLETION_ENV@@", completioninstall.NoCompletionEnvSuffix},
 	} {
 		// EnvVar cannot fail once Resolved passes: the prefix is a valid identifier of at most
 		// spec.MaxEnvPrefixLen (32) bytes, every suffix is a valid identifier of at most 13, and the
 		// joined name stays within the 64 bytes validate.MaxEnvVarLen allows.
-		*v.dst, _ = r.EnvVar(v.suffix)
+		name, _ := r.EnvVar(v.suffix)
+		pairs = append(pairs, v.token, name)
 	}
 
-	return execute(scriptTemplate, data)
-}
-
-// execute parses src as the script template and executes it with data. A field that src names and data
-// lacks is an error rather than an empty string.
-func execute(src string, data any) ([]byte, error) {
-	tmpl, err := template.New("install.sh").Option("missingkey=error").Parse(src)
-	if err != nil {
-		return nil, fmt.Errorf("installscript: parsing the script template: %w", err)
-	}
-	var b bytes.Buffer
-	if err := tmpl.Execute(&b, data); err != nil {
-		return nil, fmt.Errorf("installscript: rendering the script: %w", err)
-	}
-	return b.Bytes(), nil
+	// One pass of a Replacer never scans the text it inserts, so a token inside a value, such as
+	// an asset template holding "@@NAME@@", stays literal.
+	return []byte(strings.NewReplacer(pairs...).Replace(scriptSource)), nil
 }
 
 // identity returns s unchanged.

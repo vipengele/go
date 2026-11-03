@@ -222,3 +222,32 @@ func TestRenderNamesAssetsWithoutEmptyLiterals(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderFillsEveryToken(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, tmpl, ext string
+	}{
+		{"archive", "{name}_{os}_{arch}.{ext}", "tar.gz"},
+		{"raw", "{name}_{os}_{arch}", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := render(t, testConfig(tt.tmpl, tt.ext))
+			if i := strings.Index(out, "@@"); i >= 0 {
+				line := out[strings.LastIndex(out[:i], "\n")+1:]
+				line, _, _ = strings.Cut(line, "\n")
+				t.Errorf("script keeps an unfilled token: %q", line)
+			}
+		})
+	}
+}
+
+func TestRenderLeavesTokenInValueLiteral(t *testing.T) {
+	t.Parallel()
+	out := render(t, testConfig("@@SNIPPET@@-@@NAME@@-{name}", ""))
+	want := `asset='@@SNIPPET@@-@@NAME@@-atk'`
+	if got := scriptLine(t, out, "asset="); got != want {
+		t.Errorf("asset= line = %q, want %q", got, want)
+	}
+}
