@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"unicode/utf8"
 )
@@ -248,6 +249,83 @@ type UnsupportedFormatError struct {
 func (e *UnsupportedFormatError) Error() string {
 	return fmt.Sprintf("update: no extractor for archive format %q", e.Ext)
 }
+
+// PermissionError reports a filesystem operation on the installed executable's path that the
+// operating system refused for lack of permission.
+type PermissionError struct {
+	// Path is the file or directory the operation was refused on.
+	Path string
+	// Op names the operation that was refused, such as "create" or "rename".
+	Op string
+	// Hint is a sentence for the user on how to get write access, such as reinstalling into a
+	// directory they own or rerunning with elevated privileges.
+	Hint string
+	// Err is the underlying cause.
+	Err error
+}
+
+// Error implements error.
+func (e *PermissionError) Error() string {
+	msg := fmt.Sprintf("update: %s %s: permission denied", e.Op, e.Path)
+	if e.Err != nil {
+		msg = fmt.Sprintf("%s: %v", msg, e.Err)
+	}
+
+	if e.Hint != "" {
+		msg = fmt.Sprintf("%s (%s)", msg, e.Hint)
+	}
+
+	return msg
+}
+
+// Unwrap returns the underlying cause.
+func (e *PermissionError) Unwrap() error { return e.Err }
+
+// Is reports whether target is [fs.ErrPermission], so errors.Is matches whatever the underlying
+// cause is.
+func (*PermissionError) Is(target error) bool { return target == fs.ErrPermission }
+
+// BackupLockedError reports a backup of the previous binary that could not be removed because
+// another process holds it open, as a running executable is on Windows. The backup stays on disk
+// and the update itself has succeeded.
+type BackupLockedError struct {
+	// Path is the backup file.
+	Path string
+	// Err is the underlying cause.
+	Err error
+}
+
+// Error implements error.
+func (e *BackupLockedError) Error() string {
+	return fmt.Sprintf("update: backup %q is in use and was not removed: %v", e.Path, e.Err)
+}
+
+// Unwrap returns the underlying cause.
+func (e *BackupLockedError) Unwrap() error { return e.Err }
+
+// RestoreError reports an install whose rename of the new binary into place failed and whose
+// restore of the previous binary failed too, so the executable's path may hold no binary.
+type RestoreError struct {
+	// Path is the executable's path.
+	Path string
+	// Backup is the file holding the previous binary, to be moved back to Path by hand.
+	Backup string
+	// Err is why the new binary could not be moved into place.
+	Err error
+	// RestoreErr is why the previous binary could not be moved back.
+	RestoreErr error
+}
+
+// Error implements error.
+func (e *RestoreError) Error() string {
+	return fmt.Sprintf(
+		"update: installing %q failed: %v; restoring the previous binary from %q failed: %v",
+		e.Path, e.Err, e.Backup, e.RestoreErr,
+	)
+}
+
+// Unwrap returns both causes, so errors.Is and errors.As reach either.
+func (e *RestoreError) Unwrap() []error { return []error{e.Err, e.RestoreErr} }
 
 // classifyError turns an error from a request to url into the error a caller sees. A cancellation
 // is returned as it is, because it is the caller's own doing and not a timeout. An expired context
