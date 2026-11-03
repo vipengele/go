@@ -64,6 +64,22 @@ func TestRenderRejectsZipArchive(t *testing.T) {
 	if !errors.Is(err, installscript.ErrZipAsset) {
 		t.Fatalf("Render error = %v, want it to match ErrZipAsset", err)
 	}
+	if n := strings.Count(err.Error(), "installscript"); n != 1 {
+		t.Fatalf("Render error %q names installscript %d times, want once", err, n)
+	}
+}
+
+func TestRenderRejectsBinaryNameThatIsNotASlug(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig("", "")
+	cfg.BinaryName = "My Tool"
+	out, err := installscript.Render(cfg)
+	if err == nil {
+		t.Fatal("Render with a BinaryName that is not a slug succeeded")
+	}
+	if out != nil {
+		t.Fatalf("Render returned a script alongside the error: %q", out)
+	}
 }
 
 func TestRenderArchiveExtractsTar(t *testing.T) {
