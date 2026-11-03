@@ -31,7 +31,7 @@ func ExampleNew() {
 		fmt.Println(err)
 		return
 	}
-	for _, dir := range []string{dirs.Config(), dirs.State(), dirs.Cache(), dirs.Data(), dirs.Log()} {
+	for _, dir := range []string{dirs.Config(), dirs.State(), dirs.Cache(), dirs.Data(), dirs.Log(), dirs.Runtime()} {
 		fmt.Println(filepath.ToSlash(dir))
 	}
 	// Output:
@@ -40,6 +40,7 @@ func ExampleNew() {
 	// /var/cache/agentic-toolkit
 	// /home/ada/.local/share/agentic-toolkit
 	// /srv/atk/state/log
+	// /srv/atk/state/runtime
 }
 
 func ExampleResolve() {
