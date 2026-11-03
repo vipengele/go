@@ -2,12 +2,17 @@ package daemon_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"time"
 
+	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/daemon"
 )
 
@@ -80,4 +85,60 @@ func ExampleSupervisor() {
 	// worker stopped
 	// restart requested
 	// serve: <nil>
+}
+
+// exampleIdentity is the identity of the tool in the instance lock examples.
+func exampleIdentity() spec.Identity {
+	return spec.Identity{
+		Name:      "demo",
+		Owner:     "vipengele",
+		Repo:      "demo",
+		EnvPrefix: "DEMO",
+		DirName:   "demo",
+	}
+}
+
+// A program without a Supervisor holds the instance lock itself for as long as it works.
+func ExampleAcquireInstance() {
+	in, err := daemon.AcquireInstance(exampleIdentity(), paths.Options{})
+	if err != nil {
+		var running *daemon.AlreadyRunningError
+		if errors.As(err, &running) {
+			fmt.Println("another instance holds", running.Path, "pid", running.PID)
+			return
+		}
+		fmt.Println("instance lock:", err)
+		return
+	}
+	defer in.Release()
+
+	fmt.Println("running as the only instance; lock", in.Path())
+}
+
+// A program run by a Supervisor has Run hold the instance lock from before the first Start until
+// every Runner has been stopped.
+func ExampleWithInstanceLock() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	worker := daemon.Func("worker", func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	sup, err := daemon.New([]daemon.Runner{worker},
+		daemon.WithInstanceLock(exampleIdentity(), paths.Options{}))
+	if err != nil {
+		fmt.Println("new:", err)
+		return
+	}
+
+	err = sup.Run(ctx)
+	if errors.Is(err, daemon.ErrAlreadyRunning) {
+		fmt.Println("already running:", err)
+		return
+	}
+	if err != nil {
+		fmt.Println("run:", err)
+	}
 }
