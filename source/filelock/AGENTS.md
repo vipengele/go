@@ -20,8 +20,10 @@ go mod tidy
 
 ## Structure
 
-- `New(path)`, `NewNoop()`, `Locker`, `ErrUnsupported` (`filelock.go`) — `Lock` opens the file at
-  0600, then tries every `pollInterval` until it holds the lock, an attempt fails or the context is
+- `New(path)`, `NewNoop()`, `Locker`, `ErrUnsupported`, `ErrLocked` (`filelock.go`) — `TryLock`
+  opens the file and makes one `tryLock` attempt, with no context and no polling: held is an error
+  wrapping `ErrLocked`, and the file is closed on every failure. `Lock` opens the file at 0600,
+  then tries every `pollInterval` until it holds the lock, an attempt fails or the context is
   done. The context is checked before every attempt, so a done context fails even a free lock. The
   lock file is never removed and the directory is never created.
 - `lockCalls` (`filelock.go`) — the platform's part: `tryLock` (one non-blocking attempt) and
@@ -44,7 +46,8 @@ breaks the build or links two `tryLock`s. Change the lists in both files togethe
 - `lock_unix_test.go` — real `flock` between lockers in one process.
 - `lock_process_test.go` — cross-process: `TestMain` re-executes the test binary as a lock holder
   when the `FILELOCK_TEST_CHILD` sentinel is set and runs no tests in that mode. It checks that a
-  holder excludes the parent until it exits and that a killed holder releases the lock.
+  holder excludes the parent (`Lock` waits, `TryLock` is `ErrLocked`) until it exits and that a
+  killed holder releases the lock.
 - `example_test.go` — runnable examples; their `// Output:` check needs a supported platform.
 
 ## Gotchas
