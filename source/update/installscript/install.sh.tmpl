@@ -37,8 +37,9 @@ cleanup() {
 	if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
 }
 
-# cleanup is the one handler for EXIT, INT and TERM. A signal exits with 128 plus its number,
-# which runs cleanup once more through EXIT with nothing left to remove.
+# cleanup is the one cleanup function. INT and TERM run it and then exit with 128 plus the signal
+# number, because a signal handler that returns resumes the script; the exit runs cleanup once
+# more through EXIT with nothing left to remove.
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM

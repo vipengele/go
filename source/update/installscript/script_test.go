@@ -187,6 +187,98 @@ func TestScriptNamesTheMissingAsset(t *testing.T) {
 	requireNoLeftovers(t, h.InstallDir)
 }
 
+func TestScriptNamesTheMissingChecksumsFile(t *testing.T) {
+	t.Parallel()
+	cfg, err := testConfig("", "").Resolved()
+	if err != nil {
+		t.Fatalf("Resolved: %v", err)
+	}
+	name, err := asset.Render(cfg.ChecksumsAsset, asset.Fields{
+		Name: cfg.BinaryName, Tag: harnessTag, OS: runtime.GOOS, Arch: runtime.GOARCH, Ext: cfg.AssetExt,
+	})
+	if err != nil {
+		t.Fatalf("rendering the checksums name: %v", err)
+	}
+	h := newHarness(t, harnessOptions{ServerOptions: []updatetest.Option{updatetest.MissingAsset(name)}})
+
+	res := h.Run()
+
+	if res.Code == 0 {
+		t.Errorf("script exited 0, want a failure\nstderr:\n%s", res.Stderr)
+	}
+	if want := "release " + harnessTag + " has no checksums file " + name; !strings.Contains(res.Stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", res.Stderr, want)
+	}
+	requireNoFile(t, h.BinaryPath())
+	requireNoLeftovers(t, h.InstallDir)
+}
+
+// listedSHA256Function returns the text of the listed_sha256 shell function of script.
+func listedSHA256Function(t *testing.T, script string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(script, "\nlisted_sha256() {\n")
+	if !ok {
+		t.Fatal("the script defines no listed_sha256 function")
+	}
+	body, _, ok := strings.Cut(rest, "\n}\n")
+	if !ok {
+		t.Fatal("the listed_sha256 function has no closing brace")
+	}
+	return "listed_sha256() {\n" + body + "\n}\n"
+}
+
+func TestListedSHA256(t *testing.T) {
+	t.Parallel()
+	sh := shPath(t)
+	var toolDirs []string
+	for _, tool := range []string{"awk", "head"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("%s is not on PATH", tool)
+		}
+		toolDirs = append(toolDirs, filepath.Dir(p))
+	}
+	function := listedSHA256Function(t, render(t, testConfig("", "")))
+
+	const (
+		a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	)
+	upperA := strings.ToUpper(a)
+	for _, tc := range []struct {
+		name string
+		file string
+		want string
+	}{
+		{name: "single line", file: a + "  tool.tar.gz\n", want: a},
+		{name: "upper-case digest", file: upperA + "  tool.tar.gz\n", want: a},
+		{name: "binary-mode separator", file: a + " *tool.tar.gz\n", want: a},
+		{name: "dot-slash prefix", file: a + "  ./tool.tar.gz\n", want: a},
+		{name: "not listed", file: a + "  other.tar.gz\n" + b + "  tool.tar.gz.sig\n", want: ""},
+		{name: "identical duplicates", file: a + "  tool.tar.gz\n" + upperA + " *tool.tar.gz\n", want: a},
+		{name: "conflicting digests", file: a + "  tool.tar.gz\n" + b + "  tool.tar.gz\n", want: "conflict"},
+		{name: "conflict among other entries", file: c + "  other\n" + a + "  tool.tar.gz\n" + b + "  ./tool.tar.gz\n", want: "conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			file := filepath.Join(t.TempDir(), "checksums")
+			if err := os.WriteFile(file, []byte(tc.file), 0o600); err != nil {
+				t.Fatalf("writing the checksums file: %v", err)
+			}
+			cmd := exec.Command(sh, "-c", function+"listed_sha256 \"$1\" \"$2\"", "sh", file, "tool.tar.gz")
+			cmd.Env = []string{"PATH=" + strings.Join(toolDirs, string(os.PathListSeparator))}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("running listed_sha256: %v", err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Errorf("listed_sha256 = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestScriptWarnsOnlyWhenTheInstallDirIsOffPath(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

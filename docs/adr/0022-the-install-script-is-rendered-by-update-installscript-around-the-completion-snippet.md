@@ -57,8 +57,9 @@ shell completion.
     named `BinaryName` (`find -type f`).
   - The script runs `mkdir -p` on the install directory, stages a temporary file inside it, sets
     mode 755 and `mv`s it over the target, so the replacement is one rename on one filesystem. A
-    single `trap` on `EXIT`, `INT` and `TERM` removes the temporary directory and any pending stage
-    file.
+    `cleanup` function, run by a trap on `EXIT` and by traps on `INT` and `TERM`, removes the
+    temporary directory and any pending stage file. The signal traps exit explicitly (130 and 143)
+    after `cleanup`, because a signal handler that returns resumes the script.
   - An HTTP 404 on the asset reports a missing asset naming the asset and the tag.
   - The script warns when no `$PATH` entry equals the install directory, compared literally with a
     trailing `/` trimmed from both sides.
