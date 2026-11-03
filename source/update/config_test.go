@@ -178,6 +178,105 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if r.Detectors != nil {
 		t.Errorf("Detectors = %d entries, want nil", len(r.Detectors))
 	}
+	if r.CheckInterval != 24*time.Hour {
+		t.Errorf("CheckInterval = %v, want %v", r.CheckInterval, 24*time.Hour)
+	}
+	if r.IsTerminal == nil {
+		t.Error("IsTerminal = nil, want the stderr terminal probe")
+	}
+	fs, ok := r.StateStore.(*fileStore)
+	if !ok {
+		t.Fatalf("StateStore = %T, want *fileStore", r.StateStore)
+	}
+	if want := filepath.Join(r.StateDir, "update-state.json"); fs.path() != want {
+		t.Errorf("StateStore path = %q, want %q", fs.path(), want)
+	}
+	if r.Version != "" || r.DisableCheck {
+		t.Errorf("Version = %q, DisableCheck = %v, want the zero values kept", r.Version, r.DisableCheck)
+	}
+}
+
+// memStore is a StateStore that keeps nothing.
+type memStore struct{}
+
+func (memStore) Load(context.Context) (State, error) { return State{}, nil }
+func (memStore) Save(context.Context, State) error   { return nil }
+
+func TestResolveKeepsTheCheckFields(t *testing.T) {
+	t.Parallel()
+	store := &memStore{}
+	c := validConfig(t.TempDir())
+	c.Version = "v1.2.3"
+	c.DisableCheck = true
+	c.CheckInterval = 2 * time.Hour
+	c.StateStore = store
+	c.IsTerminal = func() bool { return true }
+
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if r.Version != "v1.2.3" {
+		t.Errorf("Version = %q, want %q", r.Version, "v1.2.3")
+	}
+	if !r.DisableCheck {
+		t.Error("DisableCheck = false, want true")
+	}
+	if r.CheckInterval != 2*time.Hour {
+		t.Errorf("CheckInterval = %v, want %v", r.CheckInterval, 2*time.Hour)
+	}
+	if r.StateStore != StateStore(store) {
+		t.Errorf("StateStore = %v, want the supplied store", r.StateStore)
+	}
+	if !r.IsTerminal() {
+		t.Error("IsTerminal() = false, want the Config's true")
+	}
+}
+
+func TestValidateChecksCheckInterval(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		interval time.Duration
+		wantErr  bool
+	}{
+		{"zero", 0, false},
+		{"exactly one hour", time.Hour, false},
+		{"two hours", 2 * time.Hour, false},
+		{"negative", -time.Second, true},
+		{"under one hour", 59 * time.Minute, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.Name = ""
+			c.CheckInterval = tc.interval
+			err := c.Validate()
+			if !errors.Is(err, validate.ErrEmpty) {
+				t.Errorf("Validate() = %v, want the other problem reported too", err)
+			}
+			var fe *validate.FieldError
+			found := false
+			for errs := []error{err}; len(errs) > 0 && !found; {
+				e := errs[0]
+				errs = errs[1:]
+				if j, ok := e.(interface{ Unwrap() []error }); ok {
+					errs = append(errs, j.Unwrap()...)
+					continue
+				}
+				if errors.As(e, &fe) && fe.Field == "CheckInterval" {
+					found = true
+				}
+			}
+			if found != tc.wantErr {
+				t.Errorf("Validate() = %v, CheckInterval FieldError: %v, want %v", err, found, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, validate.ErrInvalid) {
+				t.Errorf("Validate() = %v, want one wrapping %v", err, validate.ErrInvalid)
+			}
+		})
+	}
 }
 
 func TestResolveDefaultInContainerFollowsTheSeams(t *testing.T) {
@@ -538,7 +637,8 @@ func TestResolveDoesNotModifyItsReceiver(t *testing.T) {
 	if after := plainFieldsOf(c); after != before {
 		t.Errorf("Config after resolve = %+v, want %+v", after, before)
 	}
-	if c.Now != nil || c.Executable != nil || c.EvalSymlinks != nil || c.InContainer != nil {
+	if c.Now != nil || c.Executable != nil || c.EvalSymlinks != nil || c.InContainer != nil ||
+		c.IsTerminal != nil || c.StateStore != nil || c.CheckInterval != 0 {
 		t.Error("resolve set a func field on its receiver, want the receiver's nil func fields left nil")
 	}
 }
