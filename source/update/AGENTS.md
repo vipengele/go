@@ -19,7 +19,7 @@ golangci-lint run
   dir, `EvalSymlinks`, `InContainer`) and the tool's own `Detectors`; a nil `Detectors` entry is
   invalid. `Validate` reports problems; `resolve` returns a copy with each zero field set to its
   production default and never mutates the receiver. `Resolved` is its exported wrapper, the one
-  place other packages read the defaults from (ADR-0022). The default state dir comes from
+  place other packages read the defaults from (ADR-0023). The default state dir comes from
   `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
   env lookup and user home dir seams; only the state kind is resolved, so the home directory is
   needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
@@ -62,7 +62,7 @@ golangci-lint run
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
   runs the hooks in order and joins their errors. A failure is non-fatal. Package `update` does not
   import `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that
-  does (ADR-0022).
+  does (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
   tool (`install.sh.tmpl`, embedded), which downloads the release asset, verifies it against the
   checksums file, places the binary with one rename and installs the shell completion.

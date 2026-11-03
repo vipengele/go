@@ -5,7 +5,7 @@ saw:
   - docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md
   - source/cli/spec/completioninstall/script.go
   - source/update/updatetest/server.go
-  - docs/adr/0022-the-install-script-is-rendered-by-update-installscript-around-the-completion-snippet.md
+  - docs/adr/0023-the-install-script-is-rendered-by-update-installscript-around-the-completion-snippet.md
 ---
 
 Found while planning issue #64 (install.sh template in source/update).
@@ -22,5 +22,5 @@ Found while planning issue #64 (install.sh template in source/update).
   /repos/... API, and /<o>/<r>/releases/download/<tag>/<name>; checksums are `<sha256>  <name>`.
   Archive name is for runtime GOOS/GOARCH. Server is a Go httptest, so a shell test must be a Go
   test exec'ing sh with the server URL. No shellcheck anywhere in repo or workflows.
-- ADR-0022 reconciles the two: `update/installscript` renders the script and inserts
+- ADR-0023 reconciles the two: `update/installscript` renders the script and inserts
   `completioninstall.Snippet(BinaryName)` verbatim, so the path table stays in cli/spec alone.
