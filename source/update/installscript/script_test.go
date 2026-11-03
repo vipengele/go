@@ -258,3 +258,56 @@ func TestScriptInstallsARawBinaryRelease(t *testing.T) {
 		t.Errorf("install directory holds %q, want %q", got, want)
 	}
 }
+
+func TestScriptInstallsIntoTheHomeLocalBinByDefault(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, harnessOptions{})
+	delete(h.Env, h.envVar("INSTALL_DIR"))
+	h.InstallDir = filepath.Join(h.Env["HOME"], ".local", "bin")
+
+	mustRun(t, h)
+
+	requireVersion(t, h, harnessTag)
+	if got, want := dirEntries(t, h.InstallDir), []string{h.Config.BinaryName}; !slices.Equal(got, want) {
+		t.Errorf("default install directory holds %q, want %q", got, want)
+	}
+}
+
+func TestScriptFailsWithoutHomeOrAnInstallDir(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, harnessOptions{})
+	installDirVar := h.envVar("INSTALL_DIR")
+	defaultBinary := filepath.Join(h.Env["HOME"], ".local", "bin", h.Config.BinaryName)
+	delete(h.Env, installDirVar)
+	delete(h.Env, "HOME")
+
+	res := h.Run()
+
+	if res.Code == 0 {
+		t.Errorf("script exited 0, want a failure\nstderr:\n%s", res.Stderr)
+	}
+	if want := "HOME is not set; set " + installDirVar; !strings.Contains(res.Stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", res.Stderr, want)
+	}
+	requireNoFile(t, defaultBinary)
+	requireNoFile(t, h.BinaryPath())
+}
+
+func TestScriptWarnsWhenShellIsNotSetAndSkipsTheCompletion(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, harnessOptions{})
+	delete(h.Env, "SHELL")
+
+	res := mustRun(t, h)
+
+	want := h.Config.BinaryName + ": warning: SHELL is not set; skipping the shell completion"
+	if !strings.Contains(res.Stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", res.Stderr, want)
+	}
+	requireVersion(t, h, harnessTag)
+	target := h.CompletionPath(completioninstall.Bash)
+	if target == "" {
+		t.Fatal("Target selects no bash completion for the harness environment")
+	}
+	requireNoFile(t, target)
+}
