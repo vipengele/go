@@ -166,6 +166,33 @@ func TestFileStoreSaveCreatesNestedDir(t *testing.T) {
 	}
 }
 
+func TestFileStoreSaveFailsWhenDirCannotBeCreated(t *testing.T) {
+	t.Parallel()
+
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	store := &fileStore{dir: filepath.Join(blocker, "sub")}
+
+	if err := store.Save(context.Background(), State{}); err == nil {
+		t.Error("Save = nil error, want an error")
+	}
+}
+
+func TestFileStoreSaveFailsWhenStateFileCannotBeReplaced(t *testing.T) {
+	t.Parallel()
+
+	store := &fileStore{dir: t.TempDir()}
+	if err := os.MkdirAll(filepath.Join(store.path(), "child"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	if err := store.Save(context.Background(), State{}); err == nil {
+		t.Error("Save = nil error, want an error")
+	}
+}
+
 func TestFileStoreLoadCreatesNothing(t *testing.T) {
 	t.Parallel()
 

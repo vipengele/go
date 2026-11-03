@@ -183,6 +183,9 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	}
 	if r.IsTerminal == nil {
 		t.Error("IsTerminal = nil, want the stderr terminal probe")
+	} else {
+		// The default probes the real stderr, so its value depends on how the tests run.
+		_ = r.IsTerminal()
 	}
 	fs, ok := r.StateStore.(*fileStore)
 	if !ok {
