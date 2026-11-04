@@ -8,16 +8,6 @@ import (
 	"go.vipengele.org/cli/spec/version"
 )
 
-// Notice names a release newer than the running one.
-type Notice struct {
-	// Name is the tool's name, the Identity's Name.
-	Name string
-	// Current is the running program's version.
-	Current string
-	// Latest is the newer release's version.
-	Latest string
-}
-
 // Check is an update check running in the background, which [Config.Start] begins. A nil *Check
 // is valid: its Notice reports nothing and its Finish returns at once.
 //
