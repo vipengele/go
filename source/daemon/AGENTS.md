@@ -42,7 +42,7 @@ golangci-lint run
   `CheckResult` per check) whose JSON keys are the wire contract of
   `docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
 - `health_http.go` — `(*Health).Handler`, serving `/livez`, `/readyz` and `/status`;
-  `writeEnvelope` writes the `/status` body in the layout `spec.WriteJSON` produces.
+  the `/status` body is written by `spec.WriteJSON` at schema 1.
 - `func.go` — `Func`, the Runner adapter for a function run in its own goroutine, and `WithOrder`
   (`OrderOption`, shared with the HTTP Runner).
 - `http.go` — `NewHTTPServer` and `NewHTTPServerListener`, the `*http.Server` Runner, with
@@ -108,7 +108,8 @@ Conventions of the package:
   entry matches by prefix, so a `/**` suffix matches nothing.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
-- The `/status` body and the `status` command's JSON are byte-identical; a change to the
-  `Snapshot` wire form keeps `writeEnvelope` and `spec.WriteJSON` agreeing.
+- The `/status` body and the `status` command's JSON are byte-identical: both are written by
+  `spec.WriteJSON` with the same schema, which `TestStatusJSONIsTheHandlerBody` in
+  `daemoncmd/status_test.go` pins.
 - A new `Run` outcome is documented in the `Errors` section of `doc.go` and tested in
   `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`.

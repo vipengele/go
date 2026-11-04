@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.vipengele.org/cli/spec"
 )
 
 // healthFor returns a Health on a fixed clock holding a passing liveness check and a readiness
@@ -147,7 +149,7 @@ func TestHandlerStatusBodyIsEnvelope(t *testing.T) {
 	rec := serve(h, http.MethodGet, "/status")
 
 	var want bytes.Buffer
-	if err := writeEnvelope(&want, 1, h.Snapshot(context.Background())); err != nil {
+	if err := spec.WriteJSON(&want, statusSchema, h.Snapshot(context.Background())); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Body.String() != want.String() {
@@ -254,21 +256,5 @@ func TestHandlerUsesRequestContext(t *testing.T) {
 	h.Handler().ServeHTTP(httptest.NewRecorder(), req)
 	if got == nil || got.Value(key{}) != "v" {
 		t.Error("check context does not derive from the request context")
-	}
-}
-
-func TestWriteEnvelopeRejectsBadInput(t *testing.T) {
-	var buf bytes.Buffer
-	if err := writeEnvelope(&buf, 0, struct{}{}); err == nil {
-		t.Error("schema 0: want error")
-	}
-	if err := writeEnvelope(&buf, 1, []int{1}); err == nil {
-		t.Error("array: want error")
-	}
-	if buf.Len() != 0 {
-		t.Errorf("wrote %q on error", buf.String())
-	}
-	if err := writeEnvelope(&buf, 2, struct{}{}); err != nil || buf.String() != "{\n  \"schema\": 2\n}\n" {
-		t.Errorf("empty object: %q, %v", buf.String(), err)
 	}
 }

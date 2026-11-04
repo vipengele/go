@@ -64,9 +64,9 @@ result as one **Health snapshot** over HTTP and through a `status` command.
   refuses a value that already carries one. The root `daemon` package takes from `cli/spec` only
   what the instance lock of
   `docs/adr/0023-a-daemons-single-instance-is-a-filelock-try-lock-with-a-holder-record.md` needs,
-  `spec.Identity` and `cli/spec/paths`, and writes the envelope with a helper of its own in the
-  same layout; `daemon/daemoncmd` imports `cli/spec` for its command and its output. Tests on both
-  sides pin the same keys.
+  `spec.Identity` and `cli/spec/paths`, and `spec.WriteJSON`: the handler and the `status` command
+  of `daemon/daemoncmd` both write the envelope with `spec.WriteJSON` at the same schema. Tests on
+  both sides pin the same keys and bytes.
 
 ## Considered options
 
@@ -96,9 +96,9 @@ result as one **Health snapshot** over HTTP and through a `status` command.
 - **Downstream dependencies in liveness.** A failed dependency would restart every daemon that
   uses it, which turns one outage into a restart loop. Liveness holds only what the process knows
   of itself.
-- **Calling `spec.WriteJSON` from the root package.** The root package takes from `cli/spec` only
-  what the instance lock needs; a local helper with a pinned layout keeps the health wire form in
-  the root package, at the cost of two writers of one envelope.
+- **A local envelope writer in the root package.** It would duplicate `spec.WriteJSON`, and the
+  two could drift apart while the handler's body and the command's output are meant to be
+  byte-identical. The root package already imports `cli/spec` for the instance lock.
 
 ## Consequences
 
@@ -116,5 +116,3 @@ result as one **Health snapshot** over HTTP and through a `status` command.
   second run of the same check, so a stuck check costs one goroutine however often probes ask.
 - **A health route on the HTTP Runner stops answering first.** That Runner stops before the
   Runners started earlier (`docs/adr/0021-a-runner-starts-when-ready-and-reports-its-exit-through-done.md`), so the route goes away before the work it reports on.
-- **Two writers of one envelope.** The helper in the root package and `spec.WriteJSON` must stay
-  byte-identical; the key and byte tests on both sides fail when they drift.

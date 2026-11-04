@@ -2,11 +2,10 @@ package daemon
 
 import (
 	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"strconv"
+
+	"go.vipengele.org/cli/spec"
 )
 
 // statusSchema is the schema version of the /status envelope.
@@ -62,7 +61,7 @@ func (h *Health) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		code, text = route(snap)
 		contentType = "text/plain; charset=utf-8"
 		body.WriteString(text)
-	} else if err := writeEnvelope(&body, statusSchema, snap); err != nil {
+	} else if err := spec.WriteJSON(&body, statusSchema, snap); err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -81,39 +80,4 @@ func probeCode(ok bool) int {
 		return http.StatusOK
 	}
 	return http.StatusServiceUnavailable
-}
-
-// writeEnvelope writes v to w as one indented JSON object whose first key is "schema", set to
-// schema, followed by the keys of v in the order v marshals them, and a trailing newline. v must
-// marshal to a JSON object without a "schema" key of its own, and schema must be 1 or more. The
-// layout is the one the JSON envelope of ADR-0014 prescribes: HTML characters are escaped as
-// json.Marshal escapes them, and the output is written in one call after v is marshalled.
-func writeEnvelope(w io.Writer, schema int, v any) error {
-	if schema < 1 {
-		return fmt.Errorf("daemon: JSON schema %d is not 1 or more", schema)
-	}
-	data, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Errorf("daemon: marshal JSON value: %w", err)
-	}
-	if len(data) < len("{}") || data[0] != '{' {
-		return fmt.Errorf("daemon: JSON value is not an object")
-	}
-
-	// json.Marshal writes compact JSON, so data is "{}" or "{" followed by the first key.
-	spliced := strconv.AppendInt([]byte(`{"schema":`), int64(schema), 10)
-	if len(data) > len("{}") {
-		spliced = append(spliced, ',')
-	}
-	spliced = append(spliced, data[1:]...)
-
-	var out bytes.Buffer
-	if err := json.Indent(&out, spliced, "", "  "); err != nil {
-		return fmt.Errorf("daemon: indent JSON value: %w", err)
-	}
-	out.WriteByte('\n')
-	if _, err := w.Write(out.Bytes()); err != nil {
-		return fmt.Errorf("daemon: write JSON: %w", err)
-	}
-	return nil
 }
