@@ -197,3 +197,70 @@ func TestUpdateCheckHooksReturnsAnInvalidConfigsError(t *testing.T) {
 		t.Error("UpdateCheckHooks() returned hooks with an error")
 	}
 }
+
+func TestHooksConfigIsTerminalDecidesOverTheEnv(t *testing.T) {
+	t.Parallel()
+	t.Run("terminal for the tool, not for the Env", func(t *testing.T) {
+		t.Parallel()
+		srv := newKitServer(t)
+		r := newHookRun(false)
+		c := hookConfig(t, srv)
+		c.IsTerminal = func() bool { return true }
+		if err := runHooks(t, c, r, context.Background(), plainCommand(), nil); err != nil {
+			t.Fatalf("post() = %v, want nil", err)
+		}
+		if got := r.stderr.String(); got != wantLine {
+			t.Errorf("stderr = %q, want %q", got, wantLine)
+		}
+		if r.stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want none", r.stdout)
+		}
+	})
+	t.Run("not a terminal for the tool, one for the Env", func(t *testing.T) {
+		t.Parallel()
+		srv := newKitServer(t)
+		r := newHookRun(true)
+		c := hookConfig(t, srv)
+		c.IsTerminal = func() bool { return false }
+		if err := runHooks(t, c, r, context.Background(), plainCommand(), nil); err != nil {
+			t.Fatalf("post() = %v, want nil", err)
+		}
+		if n := latestRequests(srv); n != 0 {
+			t.Errorf("latest requests = %d, want 0", n)
+		}
+		if r.stderr.Len() != 0 || r.stdout.Len() != 0 {
+			t.Errorf("output stderr=%q stdout=%q, want none", r.stderr, r.stdout)
+		}
+	})
+}
+
+func TestHooksDropAStartError(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	r := newHookRun(true)
+	c := hookConfig(t, srv)
+	c.StateDir = ""
+	c.GOOS = "linux"
+	c.Getenv = envOf(nil)
+	c.UserHomeDir = func() (string, error) { return "", errors.New("no home") }
+	if _, err := c.Start(context.Background()); err == nil {
+		t.Fatal("Start() error = nil, want the StateDir resolution to fail")
+	}
+	pre, post := mustHooks(t, c)
+	ctx, err := pre(context.Background(), r.inv, plainCommand())
+	if err != nil {
+		t.Fatalf("pre() error = %v, want nil", err)
+	}
+	if ctx.Value(checkKey{}) != nil {
+		t.Error("pre() stored a check, want none")
+	}
+	if err := post(ctx, r.inv, plainCommand(), nil); err != nil {
+		t.Errorf("post() = %v, want nil", err)
+	}
+	if n := latestRequests(srv); n != 0 {
+		t.Errorf("latest requests = %d, want 0", n)
+	}
+	if r.stderr.Len() != 0 || r.stdout.Len() != 0 {
+		t.Errorf("output stderr=%q stdout=%q, want none", r.stderr, r.stdout)
+	}
+}

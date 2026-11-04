@@ -245,7 +245,9 @@ golangci-lint run
 - Nothing is printed but the notice, and it is written only when stderr is a terminal. A failed
   lock, query or save is never reported and never fails the command.
 - The post-run hook always returns nil, so the run's error passes through. It finishes the check
-  before it reads the notice, and cancels at once when the command's context is done.
+  before it reads the notice, and cancels at once when the command's context is done. It does not
+  probe the terminal: the pre-run hook's `Start` decides that gate once, from `Config.IsTerminal`
+  when set and the Env's stderr otherwise, and a run that fails it has no `*Check`.
 - A command carrying `spec.SkipUpdateCheck` starts no check; the tool's `update` command must carry
   it.
 

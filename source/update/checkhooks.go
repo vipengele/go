@@ -23,10 +23,12 @@ type checkKey struct{}
 // is dropped, since a check never fails a command, and then no check runs.
 //
 // The post-run hook finishes the check, waiting at most CheckWait. When the context is done it
-// cancels the check at once and writes nothing. Otherwise, when stderr is a terminal and the
-// check has a [Notice], it writes the notice as one line to the Env's Stderr, whether the command
-// succeeded or failed. It always returns nil: cli/core reports runErr itself, and an error from
-// the hook after a successful run would turn it into a failure.
+// cancels the check at once and writes nothing. Otherwise, when the check has a [Notice], it
+// writes the notice as one line to the Env's Stderr, whether the command succeeded or failed. The
+// terminal is probed once, by the pre-run hook, as one of the gates of [Config.Start]: from
+// Config.IsTerminal when set and from the Env's stderr otherwise. A run whose check was ineligible
+// has no check to finish, so it writes nothing. It always returns nil: cli/core reports runErr
+// itself, and an error from the hook after a successful run would turn it into a failure.
 func (c Config) UpdateCheckHooks() (
 	pre func(context.Context, *spec.Invocation, spec.CommandInfo) (context.Context, error),
 	post func(context.Context, *spec.Invocation, spec.CommandInfo, error) error,
@@ -59,9 +61,6 @@ func (c Config) UpdateCheckHooks() (
 			return nil
 		}
 		k.Finish()
-		if !inv.Env.IsTerminal(spec.Stderr) {
-			return nil
-		}
 		if n, ok := k.Notice(); ok {
 			_, _ = fmt.Fprintln(inv.Env.Stderr, n.String())
 		}

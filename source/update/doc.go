@@ -82,11 +82,12 @@
 //
 // [Config.UpdateCheckHooks] wires this around a command without importing a framework. A tool
 // passes its pre-run hook to core.WithPreRun and its post-run hook to core.WithPostRun: the first
-// starts the check, the second finishes it and, on a terminal stderr, writes the [Notice] as one
-// line to the Env's Stderr, whether the command succeeded or failed. The hooks write nothing else
-// and the post-run hook always returns nil. The tool's own update command must carry the
-// [spec.SkipUpdateCheck] annotation, or the pre-run hook starts a check in the very command that
-// installs the update.
+// starts the check, the second finishes it and writes the [Notice] as one line to the Env's
+// Stderr, whether the command succeeded or failed. The terminal gate is decided once, when the
+// check starts, so a run whose stderr is not a terminal starts no check and writes nothing. The
+// hooks write nothing else and the post-run hook always returns nil. The tool's own update command
+// must carry the [spec.SkipUpdateCheck] annotation, or the pre-run hook starts a check in the very
+// command that installs the update.
 //
 // The package depends on no command-line framework.
 package update
