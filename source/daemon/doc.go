@@ -1,5 +1,6 @@
 // Package daemon runs the long-running work of a process as Runners under a Supervisor, and
-// keeps a second instance of the same tool from running beside it.
+// keeps a second instance of the same tool from running beside it. Its subpackage daemoncmd holds
+// the commands a tool built on cli/spec uses to manage its daemon.
 //
 // A Runner is one unit of long-running work. Start returns once the Runner is ready, leaving its
 // work running; an error or a panic from Start means it failed to start. Done closes once the
@@ -119,6 +120,10 @@
 // and once a Runner's panic has been isolated, and ok in between. A Runner name already held by
 // the Health, including supervisor.live and supervisor.ready, makes New fail with
 // ErrDuplicateCheck.
+//
+// Handler serves a Health over HTTP: /livez and /readyz answer 200 or 503, and /status the
+// snapshot as JSON. The status command of package daemoncmd is a client of /status: it prints the
+// snapshot as text, or as the same JSON under the App's JSON output, and fails unless it is ok.
 //
 // # Errors
 //
