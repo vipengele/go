@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/cli/spec/terminal"
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/filelock"
 	"go.vipengele.org/update/asset"
 )
 
@@ -36,7 +38,14 @@ const (
 	defaultCheckInterval = 24 * time.Hour
 	// minCheckInterval is the shortest [Config.CheckInterval] that is valid.
 	minCheckInterval = time.Hour
+	// defaultCheckWait is the [Config.CheckWait] a zero value resolves to.
+	defaultCheckWait = 250 * time.Millisecond
+	// maxCheckWait is the longest [Config.CheckWait] that is valid.
+	maxCheckWait = 2 * time.Second
 )
+
+// lockFileName is the name, in the StateDir, of the file the default [Config.Locker] locks.
+const lockFileName = "update.lock"
 
 // Config is everything the update library needs to know about a tool, and every seam through
 // which it reaches the outside world. Any field left at its zero value takes its production
@@ -102,6 +111,12 @@ type Config struct {
 	// StateStore keeps the state of the update check between runs. Nil means a store of the file
 	// "update-state.json" in the resolved StateDir.
 	StateStore StateStore
+	// CheckWait is the longest the background check may delay the command's exit. Zero means 250
+	// milliseconds; a negative value or one over 2 seconds is invalid.
+	CheckWait time.Duration
+	// Locker serialises the check across processes. Nil means a lock on the file "update.lock" in
+	// the resolved StateDir, which is created when it does not exist.
+	Locker filelock.Locker
 
 	// HTTPClient makes every HTTP request. Nil means a new [http.Client] of the Config's own,
 	// never [http.DefaultClient].
@@ -146,10 +161,10 @@ type Config struct {
 // ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
 // "}" and not starting with ".", and, when the AssetTemplate holds {ext}, being "tar.gz", "tgz" or
 // "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative, no entry of
-// Detectors may be nil, and CheckInterval must be zero or at least 1 hour. Each of those is a
-// [validate.FieldError] wrapping [validate.ErrInvalid], the one for a nil detector naming its index
-// as Detectors[i], and the AssetTemplate and ChecksumsAsset ones also wrap the error of package
-// asset.
+// Detectors may be nil, CheckInterval must be zero or at least 1 hour, and CheckWait must be
+// between zero and 2 seconds. Each of those is a [validate.FieldError] wrapping
+// [validate.ErrInvalid], the one for a nil detector naming its index as Detectors[i], and the
+// AssetTemplate and ChecksumsAsset ones also wrap the error of package asset.
 func (c Config) Validate() error {
 	return validate.Join(
 		c.Identity.Validate(),
@@ -161,7 +176,34 @@ func (c Config) Validate() error {
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
 		checkDetectors(c.Detectors),
 		checkInterval("CheckInterval", c.CheckInterval),
+		checkWait(c.CheckWait),
 	)
+}
+
+// checkWait rejects a wait that is negative or over [maxCheckWait]; zero means the default.
+func checkWait(d time.Duration) error {
+	if d < 0 || d > maxCheckWait {
+		return &validate.FieldError{
+			Field: "CheckWait",
+			Value: d.String(),
+			Err:   fmt.Errorf("%w: must be between zero and %v", validate.ErrInvalid, maxCheckWait),
+		}
+	}
+	return nil
+}
+
+// dirLocker locks the file "update.lock" in dir, creating dir first: filelock refuses a missing
+// directory, and nothing else creates the StateDir before the first save.
+type dirLocker struct {
+	dir string
+}
+
+// Lock creates the directory at 0700 and takes the lock under ctx.
+func (l dirLocker) Lock(ctx context.Context) (func(), error) {
+	if err := os.MkdirAll(l.dir, 0o700); err != nil {
+		return nil, fmt.Errorf("update: creating %s: %w", l.dir, err)
+	}
+	return filelock.New(filepath.Join(l.dir, lockFileName)).Lock(ctx)
 }
 
 // checkDetectors rejects every nil entry of detectors; a nil slice means the built-ins alone.
@@ -374,6 +416,12 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.CheckInterval == 0 {
 		r.CheckInterval = defaultCheckInterval
+	}
+	if r.CheckWait == 0 {
+		r.CheckWait = defaultCheckWait
+	}
+	if r.Locker == nil {
+		r.Locker = dirLocker{dir: r.StateDir}
 	}
 	if r.IsTerminal == nil {
 		isTerminal := terminal.Detect(os.Stdin, os.Stdout, os.Stderr)
