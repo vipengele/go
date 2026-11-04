@@ -164,10 +164,19 @@ func TestGitHubSource_LatestFromTheServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Latest() error = %v", err)
 		}
+		sigName := rel.ChecksumsName + ".minisig"
+		var sigSize int64
+		if len(got.Assets) == 3 {
+			sigSize = got.Assets[2].Size
+		}
 		want := Release{Tag: "v1.2.3", URL: srv.TagURL(), Assets: []Asset{
 			{Name: rel.ArchiveName, URL: srv.AssetURL(rel.ArchiveName), Size: int64(len(rel.Archive))},
 			{Name: rel.ChecksumsName, URL: srv.AssetURL(rel.ChecksumsName), Size: int64(len(srv.ChecksumsFile()))},
+			{Name: sigName, URL: srv.AssetURL(sigName), Size: sigSize},
 		}}
+		if sigSize <= 0 {
+			t.Errorf("signature asset size = %d, want > 0", sigSize)
+		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Latest() = %#v, want %#v", got, want)
 		}

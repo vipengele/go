@@ -2,6 +2,7 @@ package updatetest
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.vipengele.org/update/internal/minisigntest"
 )
 
 // Release is the one release a [Server] publishes.
@@ -69,9 +72,11 @@ func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 //   - [TargetLatestAPI], GET /repos/<owner>/<repo>/releases/latest: the REST API release object,
 //     with tag_name, html_url, draft and an assets list giving each asset's name,
 //     browser_download_url and size.
-//   - [TargetArchive] and [TargetChecksums], GET /<owner>/<repo>/releases/download/<tag>/<name>:
-//     the archive's bytes, and the checksums file, one `<sha256 hex>  <name>` line listing the
-//     archive.
+//   - [TargetArchive], [TargetChecksums] and [TargetSignature],
+//     GET /<owner>/<repo>/releases/download/<tag>/<name>: the archive's bytes, the checksums file,
+//     one `<sha256 hex>  <name>` line listing the archive, and the minisign signature of the
+//     checksums file, named like it with ".minisig" appended. The signature is made with a key
+//     generated for the server, whose public key [Server.PublicKey] returns.
 //
 // Owner, repository, tag and asset name each appear in a path escaped as a path segment, as a
 // GitHubSource writes them. Both web and API routes are served from the one address, so a
@@ -81,12 +86,15 @@ func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 // Any other request answers 404 Not Found and fails the test with [testing.TB.Errorf]. A Server is
 // safe for concurrent use.
 type Server struct {
-	t      testing.TB
-	srv    *httptest.Server
-	rel    Release
-	opts   options
-	sums   []byte
-	routes map[string]Target
+	t       testing.TB
+	srv     *httptest.Server
+	rel     Release
+	opts    options
+	archive []byte
+	sums    []byte
+	sig     []byte
+	key     *minisigntest.Key
+	routes  map[string]Target
 
 	// blocked and blockedOnce hold one entry per Target from NewServer on and are never
 	// written after it, so they are read without mu.
@@ -121,7 +129,7 @@ func NewServer(t testing.TB, rel Release, opts ...Option) *Server {
 	for _, opt := range opts {
 		opt(&s.opts)
 	}
-	for _, target := range []Target{TargetLatest, TargetLatestAPI, TargetArchive, TargetChecksums} {
+	for _, target := range []Target{TargetLatest, TargetLatestAPI, TargetArchive, TargetChecksums, TargetSignature} {
 		s.blocked[target] = make(chan struct{})
 		s.blockedOnce[target] = &sync.Once{}
 	}
@@ -131,7 +139,9 @@ func NewServer(t testing.TB, rel Release, opts ...Option) *Server {
 		// A longer body has another digest.
 		listed = append(slices.Clone(rel.Archive), 0)
 	}
+	s.archive = rel.Archive
 	s.sums = []byte(ChecksumLine(rel.ArchiveName, listed) + "\n")
+	s.signChecksums(t)
 
 	repo := "/" + url.PathEscape(rel.Owner) + "/" + url.PathEscape(rel.Repo)
 	s.routes = map[string]Target{
@@ -139,11 +149,61 @@ func NewServer(t testing.TB, rel Release, opts ...Option) *Server {
 		"/repos" + repo + "/releases/latest": TargetLatestAPI,
 		s.downloadPath(rel.ArchiveName):      TargetArchive,
 		s.downloadPath(rel.ChecksumsName):    TargetChecksums,
+		s.downloadPath(s.signatureName()):    TargetSignature,
 	}
 
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.close)
 	return s
+}
+
+// signChecksums generates the server's key, signs the checksums file with it and applies the
+// signature faults: the signature a verifier holding the server's public key rejects, or the swap
+// of the archive and the checksums for ones the signature does not cover.
+func (s *Server) signChecksums(t testing.TB) {
+	t.Helper()
+	key := s.generateKey(t)
+	s.key = key
+	comment := "file:" + s.rel.ChecksumsName
+	s.sig = key.Sign(s.sums, comment)
+
+	switch {
+	case s.opts.badSignature:
+		// The signature over other bytes is well formed, carries the key id and does not verify.
+		s.sig = key.Sign(append(slices.Clone(s.sums), '\n'), comment)
+	case s.opts.unknownKey:
+		other := s.generateKey(t)
+		for other.ID == key.ID {
+			other = s.generateKey(t)
+		}
+		s.sig = other.Sign(s.sums, comment)
+	case s.opts.tampered:
+		// A longer archive has another digest, which the swapped checksums list.
+		s.archive = append(slices.Clone(s.rel.Archive), 0)
+		s.sums = []byte(ChecksumLine(s.rel.ArchiveName, s.archive) + "\n")
+	}
+}
+
+// generateKey returns a new signing key, failing t when the system's randomness fails.
+func (s *Server) generateKey(t testing.TB) *minisigntest.Key {
+	t.Helper()
+	key, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("updatetest: generating the signing key: %v", err)
+	}
+	return key
+}
+
+// signatureName returns the name of the signature asset: the checksums file's name and ".minisig".
+func (s *Server) signatureName() string {
+	return s.rel.ChecksumsName + ".minisig"
+}
+
+// PublicKey returns the server's public key as a Config.TrustedKeys entry holds it: the untrusted
+// comment line and the key line. The signature the server serves verifies under it, unless
+// [UnknownKey], [BadSignature] or [Tampered] says otherwise.
+func (s *Server) PublicKey() string {
+	return s.key.PublicKey()
 }
 
 // WebURL is the base address of the server's web pages, for a GitHubSource's WebURL.
@@ -231,9 +291,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case TargetLatestAPI:
 		s.serveAPI(w)
 	case TargetArchive:
-		s.serveAsset(w, r, s.rel.ArchiveName, s.rel.Archive)
+		s.serveAsset(w, r, s.rel.ArchiveName, s.archive)
 	case TargetChecksums:
 		s.serveAsset(w, r, s.rel.ChecksumsName, s.sums)
+	case TargetSignature:
+		s.serveAsset(w, r, s.signatureName(), s.sig)
 	}
 }
 
@@ -299,7 +361,7 @@ func (s *Server) serveAPI(w http.ResponseWriter) {
 	for _, a := range []struct {
 		name string
 		body []byte
-	}{{s.rel.ArchiveName, s.rel.Archive}, {s.rel.ChecksumsName, s.sums}} {
+	}{{s.rel.ArchiveName, s.archive}, {s.rel.ChecksumsName, s.sums}, {s.signatureName(), s.sig}} {
 		if s.opts.missing[a.name] {
 			continue
 		}
