@@ -28,7 +28,8 @@ golangci-lint run
   bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s) bounds how long the background check
   delays exit. `Locker` (`filelock.Locker`) defaults to `dirLocker`, which runs
   `os.MkdirAll(StateDir, 0o700)` before locking `StateDir/update.lock`, because filelock refuses a
-  missing directory and nothing else creates `StateDir` before the first save.
+  missing directory and nothing else creates `StateDir` before the first save. `dirLocker.TryLock`
+  does the same before its single attempt; the background check uses `Lock` only.
 - `state.go` — `State` (`LastAttempt`, `LatestVersion`), the `StateStore` interface and `fileStore`,
   the default store: `update-state.json` in the state dir through `go.vipengele.org/cli/state`
   (ADR-0023). `Save` creates the directory 0700 and writes the file 0600; a missing or corrupt file

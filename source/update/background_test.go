@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,7 +58,7 @@ func (s *fakeStore) recordedSaves() []State {
 	return append([]State(nil), s.saves...)
 }
 
-// countingLocker counts its Lock calls and delegates them to next.
+// countingLocker counts its Lock calls and delegates them to next. TryLock is not counted.
 type countingLocker struct {
 	calls atomic.Int32
 	next  filelock.Locker
@@ -68,12 +69,18 @@ func (l *countingLocker) Lock(ctx context.Context) (func(), error) {
 	return l.next.Lock(ctx)
 }
 
-// heldLocker is a lock another process holds: Lock blocks until ctx is done.
+func (l *countingLocker) TryLock() (func(), error) { return l.next.TryLock() }
+
+// heldLocker is a lock another process holds: Lock blocks until ctx is done and TryLock fails.
 type heldLocker struct{}
 
 func (heldLocker) Lock(ctx context.Context) (func(), error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+func (heldLocker) TryLock() (func(), error) {
+	return nil, fmt.Errorf("heldLocker: %w", filelock.ErrLocked)
 }
 
 // errSource is a Source whose every lookup fails.

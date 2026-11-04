@@ -1204,6 +1204,8 @@ type fakeLocker struct{}
 
 func (fakeLocker) Lock(context.Context) (func(), error) { return func() {}, nil }
 
+func (fakeLocker) TryLock() (func(), error) { return func() {}, nil }
+
 func TestResolveKeepsASuppliedLocker(t *testing.T) {
 	t.Parallel()
 	c := validConfig(t.TempDir())
@@ -1266,4 +1268,49 @@ func TestDefaultLockerReportsAnUncreatableStateDir(t *testing.T) {
 	if err == nil {
 		t.Fatal("Lock() error = nil, want the directory error")
 	}
+}
+
+func TestResolveDefaultLockerTryLock(t *testing.T) {
+	t.Parallel()
+	stateDir := filepath.Join(t.TempDir(), "missing", "state")
+	c := validConfig("")
+	c.StateDir = stateDir
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+
+	unlock, err := r.Locker.TryLock()
+	if err != nil {
+		t.Fatalf("TryLock() error = %v, want nil", err)
+	}
+	if info, err := os.Stat(stateDir); err != nil || !info.IsDir() {
+		t.Errorf("Stat(%q) = %v, %v, want the directory created", stateDir, info, err)
+	}
+
+	if unlock2, err := r.Locker.TryLock(); err == nil {
+		unlock2()
+		t.Fatal("second TryLock() while held error = nil, want filelock.ErrLocked")
+	} else if !errors.Is(err, filelock.ErrLocked) {
+		t.Errorf("second TryLock() error = %v, want one wrapping %v", err, filelock.ErrLocked)
+	}
+	unlock()
+
+	held, err := r.Locker.Lock(context.Background())
+	if err != nil {
+		t.Fatalf("Lock() after unlock error = %v, want nil", err)
+	}
+	if unlock2, err := r.Locker.TryLock(); err == nil {
+		unlock2()
+		t.Fatal("TryLock() while Lock holds error = nil, want filelock.ErrLocked")
+	} else if !errors.Is(err, filelock.ErrLocked) {
+		t.Errorf("TryLock() error = %v, want one wrapping %v", err, filelock.ErrLocked)
+	}
+	held()
+
+	unlock, err = r.Locker.TryLock()
+	if err != nil {
+		t.Fatalf("TryLock() after unlock error = %v, want nil", err)
+	}
+	unlock()
 }

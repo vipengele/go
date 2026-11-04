@@ -200,10 +200,29 @@ type dirLocker struct {
 
 // Lock creates the directory at 0700 and takes the lock under ctx.
 func (l dirLocker) Lock(ctx context.Context) (func(), error) {
+	locker, err := l.locker()
+	if err != nil {
+		return nil, err
+	}
+	return locker.Lock(ctx)
+}
+
+// TryLock creates the directory at 0700 and makes one attempt at the lock. The error wraps
+// [filelock.ErrLocked] when another descriptor holds it.
+func (l dirLocker) TryLock() (func(), error) {
+	locker, err := l.locker()
+	if err != nil {
+		return nil, err
+	}
+	return locker.TryLock()
+}
+
+// locker creates the directory at 0700 and returns the Locker on the lock file in it.
+func (l dirLocker) locker() (filelock.Locker, error) {
 	if err := os.MkdirAll(l.dir, 0o700); err != nil {
 		return nil, fmt.Errorf("update: creating %s: %w", l.dir, err)
 	}
-	return filelock.New(filepath.Join(l.dir, lockFileName)).Lock(ctx)
+	return filelock.New(filepath.Join(l.dir, lockFileName)), nil
 }
 
 // checkDetectors rejects every nil entry of detectors; a nil slice means the built-ins alone.
