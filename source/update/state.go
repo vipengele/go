@@ -27,6 +27,10 @@ type State struct {
 }
 
 // StateStore keeps a [State] between runs.
+//
+// Load and Save honour ctx: neither blocks past ctx being done. The background check of
+// [Config.Start] calls both on its goroutine, and [Check.Finish] bounds the command's exit only
+// while they return once it cancels them.
 type StateStore interface {
 	// Load returns the stored State. Nothing stored yet, or content that cannot be read as a
 	// State, is the zero State and a nil error; an error means the store itself failed.
