@@ -25,7 +25,8 @@ const statusSchema = 1
 //
 // Any other path answers 404 and any method but GET and HEAD answers 405 with an Allow header. A
 // HEAD request gets the headers of the GET response and no body. Every response carries
-// "Cache-Control: no-store". The handler mounts no prefix: a consumer that serves it under one
+// "Cache-Control: no-store" and "X-Content-Type-Options: nosniff", so no browser sniffs a body as
+// HTML. The handler mounts no prefix: a consumer that serves it under one
 // strips the prefix first, and decides who may reach it.
 func (h *Health) Handler() http.Handler {
 	return http.HandlerFunc(h.serveHTTP)
@@ -33,6 +34,7 @@ func (h *Health) Handler() http.Handler {
 
 func (h *Health) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 
 	var route func(Snapshot) (int, string)
 	var only Kind
@@ -70,6 +72,7 @@ func (h *Health) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 	w.WriteHeader(code)
 	if r.Method != http.MethodHead {
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- the body is a status word as text/plain or JSON as application/json, both sent with nosniff, never HTML
 		_, _ = w.Write(body.Bytes())
 	}
 }

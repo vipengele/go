@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -120,17 +119,19 @@ func NewStatus(resolve Resolver, opts ...StatusOption) *spec.Command {
 
 // fetch requests the status at "/status" below base and decodes it.
 func fetch(ctx context.Context, s statusSettings, base string) (daemon.Snapshot, error) {
-	target, err := url.JoinPath(base, "status")
-	if err != nil {
-		return daemon.Snapshot{}, fmt.Errorf("daemon URL %q: %w", base, err)
-	}
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base, http.NoBody)
 	if err != nil {
 		return daemon.Snapshot{}, fmt.Errorf("daemon URL %q: %w", base, err)
 	}
+	// A base with no path joins as a relative path, which no server accepts as a request target.
+	if req.URL.Path == "" {
+		req.URL.Path = "/"
+	}
+	req.URL = req.URL.JoinPath("status")
+	target := req.URL.String()
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {

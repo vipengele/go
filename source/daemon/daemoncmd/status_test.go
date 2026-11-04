@@ -388,3 +388,145 @@ func TestStatusTimeoutIsAnOrdinaryError(t *testing.T) {
 		t.Errorf("err = %v, want it to wrap context.DeadlineExceeded", err)
 	}
 }
+
+// serveOK starts a server answering /status with an ok snapshot, and calls seen with each request.
+func serveOK(t *testing.T, seen func(*http.Request)) *httptest.Server {
+	t.Helper()
+	handler := newHealth(t, daemon.StateOK).Handler()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen(r)
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestStatusTimeoutThatIsNotPositiveKeepsTheDefault(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		srv := serveOK(t, func(*http.Request) {})
+		cmd := daemoncmd.NewStatus(at(srv.URL), daemoncmd.WithTimeout(timeout))
+		if _, _, err := run(t, cmd, true); err != nil {
+			t.Errorf("WithTimeout(%v): Run = %v, want nil", timeout, err)
+		}
+	}
+}
+
+func TestStatusAcceptsJSON(t *testing.T) {
+	var accept string
+	srv := serveOK(t, func(r *http.Request) { accept = r.Header.Get("Accept") })
+	if _, _, err := run(t, daemoncmd.NewStatus(at(srv.URL)), true); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if accept != "application/json" {
+		t.Errorf("Accept = %q, want application/json", accept)
+	}
+}
+
+func TestStatusReadsABodyOfExactlyTheLimit(t *testing.T) {
+	body := cannedBody + strings.Repeat(" ", daemoncmd.MaxBody-len(cannedBody))
+	srv := serveBody(t, http.StatusOK, body)
+	stdout, _, err := run(t, daemoncmd.NewStatus(at(srv.URL)), false)
+	if !errors.Is(err, daemoncmd.ErrNotOK) {
+		t.Fatalf("err = %v, want ErrNotOK for the unready snapshot", err)
+	}
+	if !strings.Contains(stdout, "unready") {
+		t.Errorf("stdout does not show the snapshot:\n%s", stdout)
+	}
+}
+
+func TestStatusBodyOverTheLimitIsAnOrdinaryError(t *testing.T) {
+	body := cannedBody + strings.Repeat(" ", daemoncmd.MaxBody+1-len(cannedBody))
+	srv := serveBody(t, http.StatusOK, body)
+	stdout, _, err := run(t, daemoncmd.NewStatus(at(srv.URL)), false)
+	assertOrdinary(t, err, stdout)
+	if !errors.Is(err, daemoncmd.ErrBadStatus) {
+		t.Errorf("err = %v, want it to wrap ErrBadStatus", err)
+	}
+	if !strings.Contains(err.Error(), "more than") {
+		t.Errorf("err = %q, want it to say the body is more than the limit", err)
+	}
+}
+
+func TestStatusInvalidBaseURLIsAnOrdinaryError(t *testing.T) {
+	stdout, _, err := run(t, daemoncmd.NewStatus(at("http://127.0.0.1:1/%zz")), false)
+	assertOrdinary(t, err, stdout)
+	if !strings.Contains(err.Error(), "daemon URL") {
+		t.Errorf("err = %q, want it to name the daemon URL", err)
+	}
+}
+
+// failingReader fails every Read with err.
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestStatusBodyReadErrorIsAnOrdinaryError(t *testing.T) {
+	errRead := errors.New("connection reset")
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			Status:     "200 OK",
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       io.NopCloser(failingReader{errRead}),
+			Request:    r,
+		}, nil
+	})}
+	cmd := daemoncmd.NewStatus(at("http://127.0.0.1:1"), daemoncmd.WithHTTPClient(client))
+	stdout, _, err := run(t, cmd, false)
+	assertOrdinary(t, err, stdout)
+	if !errors.Is(err, errRead) {
+		t.Errorf("err = %v, want it to wrap the read error", err)
+	}
+}
+
+// limitWriter accepts n bytes and fails every write past them with err.
+type limitWriter struct {
+	n   int
+	err error
+}
+
+func (w *limitWriter) Write(p []byte) (int, error) {
+	if len(p) <= w.n {
+		w.n -= len(p)
+		return len(p), nil
+	}
+	written := w.n
+	w.n = 0
+	return written, w.err
+}
+
+// runTo runs cmd with text or JSON output written to stdout.
+func runTo(t *testing.T, cmd *spec.Command, asJSON bool, stdout io.Writer) error {
+	t.Helper()
+	inv := spec.NewInvocation(&spec.Env{Stdout: stdout, Stderr: io.Discard}, nil, nil)
+	inv.Output = spec.NewOutput(spec.OutputOptions{JSON: asJSON, NoColorStdout: true, NoColorStderr: true})
+	return cmd.Run(t.Context(), inv)
+}
+
+func TestStatusWriteErrorIsReturned(t *testing.T) {
+	srv := serveBody(t, http.StatusOK, cannedBody)
+	text, _, _ := run(t, daemoncmd.NewStatus(at(srv.URL)), false)
+	overall := strings.Index(text, "\n\n") + 1
+	tests := []struct {
+		name   string
+		asJSON bool
+		limit  int
+	}{
+		{name: "json", asJSON: true},
+		{name: "overall table", limit: 0},
+		{name: "blank line", limit: overall},
+		{name: "checks table", limit: overall + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errWrite := errors.New("broken pipe")
+			err := runTo(t, daemoncmd.NewStatus(at(srv.URL)), tt.asJSON, &limitWriter{n: tt.limit, err: errWrite})
+			if !errors.Is(err, errWrite) {
+				t.Errorf("err = %v, want it to wrap the write error", err)
+			}
+			if errors.Is(err, daemoncmd.ErrNotOK) {
+				t.Errorf("err = %v wraps ErrNotOK, want the write error alone", err)
+			}
+		})
+	}
+}

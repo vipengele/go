@@ -73,6 +73,9 @@ func TestHandlerProbes(t *testing.T) {
 			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 				t.Errorf("Cache-Control = %q", got)
 			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q", got)
+			}
 		})
 	}
 }
@@ -140,6 +143,9 @@ func TestHandlerStatusAlwaysOK(t *testing.T) {
 		}
 		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("Cache-Control = %q", got)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("X-Content-Type-Options = %q", got)
 		}
 	}
 }
@@ -209,6 +215,9 @@ func TestHandlerMethods(t *testing.T) {
 			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 				t.Errorf("%s %s: Cache-Control = %q", method, path, got)
 			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("%s %s: X-Content-Type-Options = %q", method, path, got)
+			}
 		}
 	}
 }
@@ -224,7 +233,7 @@ func TestHandlerHeadHasHeadersAndNoBody(t *testing.T) {
 		if head.Body.Len() != 0 {
 			t.Errorf("%s: HEAD body = %q", path, head.Body.String())
 		}
-		for _, k := range []string{"Content-Type", "Content-Length", "Cache-Control"} {
+		for _, k := range []string{"Content-Type", "Content-Length", "Cache-Control", "X-Content-Type-Options"} {
 			if head.Header().Get(k) != get.Header().Get(k) {
 				t.Errorf("%s: HEAD %s = %q, GET %q", path, k, head.Header().Get(k), get.Header().Get(k))
 			}
@@ -241,6 +250,9 @@ func TestHandlerUnknownPath(t *testing.T) {
 		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("%s: Cache-Control = %q", path, got)
 		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q", path, got)
+		}
 	}
 }
 
@@ -256,5 +268,26 @@ func TestHandlerUsesRequestContext(t *testing.T) {
 	h.Handler().ServeHTTP(httptest.NewRecorder(), req)
 	if got == nil || got.Value(key{}) != "v" {
 		t.Error("check context does not derive from the request context")
+	}
+}
+
+func TestHandlerStatusAnswers500WhenTheSnapshotDoesNotMarshal(t *testing.T) {
+	h := NewHealth()
+	// Add rejects an unknown Kind, so the check is registered past it: a Kind outside Liveness and
+	// Readiness is the one value a Snapshot cannot be marshalled with.
+	h.checks["bad"] = registered{
+		check: func(context.Context) error { return nil },
+		kinds: []Kind{9},
+		state: newCheckState(),
+	}
+	rec := serve(h, http.MethodGet, "/status")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("code = %d, want 500", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q", got)
 	}
 }

@@ -42,7 +42,7 @@ result as one **Health snapshot** over HTTP and through a `status` command.
   `down`. `/status` always
   answers 200, with `application/json` and the envelope of
   `docs/adr/0014-json-output-envelope.md`. Every
-  response carries `Cache-Control: no-store`, and a method other than GET or HEAD is 405. Where the
+  response carries `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and a method other than GET or HEAD is 405. Where the
   handler is mounted, and whether probes bypass authentication or middleware, is the consumer's.
 - **Exit codes.** The `status` command exits 0 only when the overall status is `ok`. It exits 1
   when the status is `unready` or `down`, after printing the snapshot, and when the daemon is

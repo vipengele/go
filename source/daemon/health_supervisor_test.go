@@ -393,3 +393,53 @@ func TestNewFailingLeavesTheHealthAsItWas(t *testing.T) {
 		})
 	}
 }
+
+func TestRunnerPhaseString(t *testing.T) {
+	for p, want := range map[runnerPhase]string{
+		runnerIdle:     "not started",
+		runnerStarting: "starting",
+		runnerRunning:  "running",
+		runnerExited:   "exited",
+		runnerIsolated: "exited with a panic and is isolated",
+	} {
+		if got := p.String(); got != want {
+			t.Errorf("runnerPhase(%d).String() = %q, want %q", int(p), got, want)
+		}
+	}
+}
+
+func TestFeedBetweenTwoStartsIsStartingWithNoRunnerStarting(t *testing.T) {
+	var f feed
+	f.track([]Runner{&fakeRunner{"a"}, &fakeRunner{"b"}})
+	f.setPhase(phaseStarting)
+	f.setRunner("a", runnerRunning, make(chan struct{}))
+
+	if err := f.ready(); err == nil || err.Error() != "daemon: supervisor is starting" {
+		t.Errorf("ready() = %v, want the supervisor starting with no Runner named", err)
+	}
+	if err := f.running("a"); err != nil {
+		t.Errorf("running(a) = %v, want nil", err)
+	}
+	if err := f.running("b"); err == nil || !strings.Contains(err.Error(), "not started") {
+		t.Errorf("running(b) = %v, want b not started", err)
+	}
+}
+
+func TestFeedTakesARunningRunnerWhoseDoneClosedAsExited(t *testing.T) {
+	var f feed
+	f.track([]Runner{&fakeRunner{"a"}})
+	f.setPhase(phaseRunning)
+	done := make(chan struct{})
+	f.setRunner("a", runnerRunning, done)
+	if err := f.ready(); err != nil {
+		t.Fatalf("ready() = %v while a runs, want nil", err)
+	}
+
+	close(done)
+	if err := f.ready(); err == nil || err.Error() != `daemon: runner "a" exited` {
+		t.Errorf("ready() = %v, want a exited", err)
+	}
+	if err := f.running("a"); err == nil || !strings.HasSuffix(err.Error(), "is not running: exited") {
+		t.Errorf("running(a) = %v, want a not running: exited", err)
+	}
+}

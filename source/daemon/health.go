@@ -490,10 +490,7 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 	var err error
 	select {
 	case err = <-done:
-		// A check that gives up because its context ended reports why the context ended.
-		if err != nil && checkCtx.Err() != nil {
-			err = context.Cause(checkCtx)
-		}
+		err = checkErr(checkCtx, err)
 	case <-checkCtx.Done():
 		err = context.Cause(checkCtx)
 		c.state.abandon(cr)
@@ -504,4 +501,14 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 		result.Error = err.Error()
 	}
 	return result
+}
+
+// checkErr is what a check that returned err under ctx fails with. A check that gives up because
+// its context ended reports why the context ended: the cause of ctx when err is not nil and ctx is
+// done, and err itself otherwise.
+func checkErr(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	return err
 }

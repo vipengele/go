@@ -245,11 +245,9 @@ func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error
 				s.feed.setRunner(l.name, runnerRunning, l.done)
 			case !o.isPanic() && startCtx.Err() != nil && isContextErr(o.err):
 				l.state = failed
-				s.feed.setRunner(l.name, runnerFailed, nil)
 				return runs, interrupted(ctx, l.name), false
 			default:
 				l.state = failed
-				s.feed.setRunner(l.name, runnerFailed, nil)
 				return runs, l.wrap(o), false
 			}
 		case <-startCtx.Done():
@@ -308,7 +306,6 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
 				s.feed.setRunner(l.name, runnerIsolated, nil)
 				continue
 			}
-			s.feed.setRunner(l.name, runnerExited, nil)
 			if o.err == nil {
 				return fmt.Errorf("daemon: runner %q: %w", l.name, ErrRunnerExited)
 			}
@@ -490,13 +487,14 @@ type runnerPhase int
 const (
 	// runnerIdle is a Runner whose Start has not been called.
 	runnerIdle runnerPhase = iota
-	// runnerStarting is a Runner whose Start has not returned.
+	// runnerStarting is a Runner whose Start has been called and has not returned nil. A Start
+	// that fails leaves the Runner in this phase: shutdown begins next, and from then on the checks
+	// report the phase of the run, not of the Runner.
 	runnerStarting
-	// runnerRunning is a Runner whose Start returned nil and whose exit Run has not dealt with.
+	// runnerRunning is a Runner whose Start returned nil. It stays in this phase when it exits:
+	// exitPhase reads a closed Done as runnerExited.
 	runnerRunning
-	// runnerFailed is a Runner whose Start returned an error or panicked.
-	runnerFailed
-	// runnerExited is a Runner whose exit before shutdown began shutdown.
+	// runnerExited is a running Runner whose Done has closed. Only exitPhase reports it.
 	runnerExited
 	// runnerIsolated is a Runner whose panic exit was isolated under PanicIsolate.
 	runnerIsolated
@@ -511,8 +509,6 @@ func (p runnerPhase) String() string {
 		return "starting"
 	case runnerRunning:
 		return "running"
-	case runnerFailed:
-		return "failed to start"
 	case runnerExited:
 		return "exited"
 	default:
@@ -581,7 +577,7 @@ func (f *feed) live() error {
 
 // ready is the supervisor.ready check: it passes once every Start has returned while no Runner
 // has exited or been isolated and shutdown has not begun. A Runner whose Done has closed counts as
-// exited before Run has dealt with the exit.
+// exited.
 func (f *feed) ready() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

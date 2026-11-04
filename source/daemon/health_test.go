@@ -485,3 +485,80 @@ func TestKindString(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckResultMarshalJSONNilKindsIsAnEmptyArray(t *testing.T) {
+	got, err := json.Marshal(CheckResult{Name: "x", Status: CheckPass})
+	if err != nil {
+		t.Fatalf("Marshal = %v", err)
+	}
+	const want = `{"name":"x","kinds":[],"status":"pass","duration_ms":0}`
+	if string(got) != want {
+		t.Errorf("Marshal = %s, want %s", got, want)
+	}
+}
+
+func TestCheckStateStartsIdle(t *testing.T) {
+	s := newCheckState()
+	if s.stuck() {
+		t.Error("stuck() = true for a check that never ran")
+	}
+	if !isClosed(s.idleChan()) {
+		t.Error("idleChan() is open for a check that never ran, want it closed")
+	}
+}
+
+func TestCheckStateAbandonAfterFinishCountsNothing(t *testing.T) {
+	s := newCheckState()
+	r := &checkRun{}
+	s.finish(r)
+	s.abandon(r)
+	if r.abandoned {
+		t.Error("a run abandoned after it returned is marked abandoned")
+	}
+	if s.stuck() {
+		t.Error("stuck() = true after abandoning a run that had returned")
+	}
+	if !isClosed(s.idleChan()) {
+		t.Error("idleChan() is open after abandoning a run that had returned, want it closed")
+	}
+}
+
+func TestCheckStateAbandonBeforeFinishIsStuckUntilFinish(t *testing.T) {
+	s := newCheckState()
+	r := &checkRun{}
+	s.abandon(r)
+	idle := s.idleChan()
+	if !s.stuck() || isClosed(idle) {
+		t.Fatalf("after abandon: stuck() = %v, idle closed = %v, want stuck and open", s.stuck(), isClosed(idle))
+	}
+	s.finish(r)
+	if s.stuck() || !isClosed(idle) {
+		t.Errorf("after finish: stuck() = %v, idle closed = %v, want idle", s.stuck(), isClosed(idle))
+	}
+}
+
+func TestCheckErrReportsTheCauseOfAnEndedContext(t *testing.T) {
+	errCause := errors.New("check deadline")
+	errCheck := errors.New("query cancelled")
+	ended, cancel := context.WithCancelCause(context.Background())
+	cancel(errCause)
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want error
+	}{
+		{name: "error under an ended context", ctx: ended, err: errCheck, want: errCause},
+		{name: "error under a live context", ctx: context.Background(), err: errCheck, want: errCheck},
+		{name: "nil under an ended context", ctx: ended, err: nil, want: nil},
+		{name: "nil under a live context", ctx: context.Background(), err: nil, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := checkErr(tt.ctx, tt.err); got != tt.want {
+				t.Errorf("checkErr = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
