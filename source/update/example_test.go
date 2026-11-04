@@ -15,6 +15,9 @@ import (
 	"go.vipengele.org/update/updatetest"
 )
 
+// exampleKey stands for the contents of the tool's minisign.pub, which a real tool embeds.
+const exampleKey = "RWTK5HNWbut4QZxWFxP/JdmOO+Hgwfa3yDDqmYaVeIr4fRJ6jFPjVXum"
+
 // A tool refreshes its shell completion after an update by registering [completioninstall.Install]
 // as a post-update hook. The hook receives the installed binary's path, and the tool's
 // --no-completion flag feeds Options.Disabled.
@@ -35,7 +38,8 @@ func Example_completionHook() {
 	}
 
 	cfg := update.Config{
-		Identity: id,
+		Identity:    id,
+		TrustedKeys: []string{exampleKey},
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				res, err := completioninstall.Install(completioninstall.Options{
@@ -104,11 +108,12 @@ func Example_install() {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
-		GOOS:       "linux",
-		GOARCH:     "amd64",
-		TempDir:    dir,
-		StateDir:   dir,
-		Executable: func() (string, error) { return exe, nil },
+		TrustedKeys: []string{exampleKey},
+		GOOS:        "linux",
+		GOARCH:      "amd64",
+		TempDir:     dir,
+		StateDir:    dir,
+		Executable:  func() (string, error) { return exe, nil },
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				body, err := os.ReadFile(installedPath)

@@ -23,6 +23,7 @@ func testConfig(assetTemplate, assetExt string) update.Config {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
+		TrustedKeys:   []string{"RWTK5HNWbut4QZxWFxP/JdmOO+Hgwfa3yDDqmYaVeIr4fRJ6jFPjVXum"},
 		StateDir:      "/state",
 		AssetTemplate: assetTemplate,
 		AssetExt:      assetExt,

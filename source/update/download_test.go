@@ -1009,6 +1009,7 @@ func newKitRelease(t *testing.T, dir string, opts ...updatetest.Option) kitRelea
 	cfg := validConfig(t.TempDir())
 	rel := updatetest.NewRelease(t, testOwner, testRepo, dlTag, cfg.Name)
 	srv := updatetest.NewServer(t, rel, opts...)
+	cfg.TrustedKeys = []string{srv.PublicKey()}
 	cfg.TempDir = dir
 	cfg.HTTPClient = srv.Client()
 	cfg.Source = kitSource(srv)

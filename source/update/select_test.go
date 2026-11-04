@@ -31,20 +31,52 @@ func testChecksums() Asset {
 	return Asset{Name: "checksums.txt", URL: "https://example.test/checksums", Size: 56}
 }
 
+// testSignature is the signature asset selectConfig names.
+func testSignature() Asset {
+	return Asset{Name: "checksums.txt.minisig", URL: "https://example.test/signature", Size: 7}
+}
+
 func TestSelect_Listed(t *testing.T) {
 	t.Parallel()
 
 	rel := Release{Tag: "v1.2.3", Assets: []Asset{
 		{Name: "atk_darwin_arm64.tar.gz", URL: "https://example.test/other", Size: 1},
 		testChecksums(),
+		testSignature(),
 		testArchive(),
 	}}
 	got, err := selectConfig(t).Select(rel)
 	if err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
+	if want := (Selection{Tag: "v1.2.3", Archive: testArchive(), Checksums: testChecksums(), Signature: testSignature()}); got != want {
+		t.Errorf("Select() = %+v, want %+v", got, want)
+	}
+}
+
+func TestSelect_ListedAllowUnsignedLeavesTheSignatureZero(t *testing.T) {
+	t.Parallel()
+
+	c := selectConfig(t)
+	c.TrustedKeys = nil
+	c.AllowUnsigned = true
+	got, err := c.Select(Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), testChecksums(), testSignature()}})
+	if err != nil {
+		t.Fatalf("Select() error = %v", err)
+	}
 	if want := (Selection{Tag: "v1.2.3", Archive: testArchive(), Checksums: testChecksums()}); got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
+	}
+}
+
+func TestSelect_ListedAllowUnsignedNeedsNoSignatureAsset(t *testing.T) {
+	t.Parallel()
+
+	c := selectConfig(t)
+	c.TrustedKeys = nil
+	c.AllowUnsigned = true
+	if _, err := c.Select(Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), testChecksums()}}); err != nil {
+		t.Errorf("Select() error = %v", err)
 	}
 }
 
@@ -81,18 +113,24 @@ func TestSelect_ListedMissing(t *testing.T) {
 		assets []Asset
 		want   []string
 	}{
-		{name: "archive missing", assets: []Asset{testChecksums()}, want: []string{"atk_linux_amd64.tar.gz"}},
-		{name: "checksums missing", assets: []Asset{testArchive()}, want: []string{"checksums.txt"}},
+		{name: "archive missing", assets: []Asset{testChecksums(), testSignature()}, want: []string{"atk_linux_amd64.tar.gz"}},
+		{name: "checksums missing", assets: []Asset{testArchive(), testSignature()}, want: []string{"checksums.txt"}},
+		{name: "signature missing", assets: []Asset{testArchive(), testChecksums()}, want: []string{"checksums.txt.minisig"}},
 		{
-			name:   "both missing",
-			assets: []Asset{{Name: "unrelated.zip"}},
-			want:   []string{"atk_linux_amd64.tar.gz", "checksums.txt"},
+			name:   "archive and signature missing",
+			assets: []Asset{testChecksums()},
+			want:   []string{"atk_linux_amd64.tar.gz", "checksums.txt.minisig"},
 		},
-		{name: "empty list", assets: []Asset{}, want: []string{"atk_linux_amd64.tar.gz", "checksums.txt"}},
+		{
+			name:   "all missing",
+			assets: []Asset{{Name: "unrelated.zip"}},
+			want:   []string{"atk_linux_amd64.tar.gz", "checksums.txt", "checksums.txt.minisig"},
+		},
+		{name: "empty list", assets: []Asset{}, want: []string{"atk_linux_amd64.tar.gz", "checksums.txt", "checksums.txt.minisig"}},
 		{
 			name:   "names differ only in case",
-			assets: []Asset{{Name: "ATK_linux_amd64.tar.gz"}, {Name: "Checksums.txt"}},
-			want:   []string{"atk_linux_amd64.tar.gz", "checksums.txt"},
+			assets: []Asset{{Name: "ATK_linux_amd64.tar.gz"}, {Name: "Checksums.txt"}, {Name: "checksums.txt.MINISIG"}},
+			want:   []string{"atk_linux_amd64.tar.gz", "checksums.txt", "checksums.txt.minisig"},
 		},
 	}
 	for _, tc := range tests {
@@ -142,6 +180,10 @@ func TestSelect_UnlistedThroughGitHubSource(t *testing.T) {
 			Name: "checksums.txt",
 			URL:  "https://web.test/octo/tool/releases/download/v1.2.3+meta%2Fx/checksums.txt",
 		},
+		Signature: Asset{
+			Name: "checksums.txt.minisig",
+			URL:  "https://web.test/octo/tool/releases/download/v1.2.3+meta%2Fx/checksums.txt.minisig",
+		},
 	}
 	if got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
@@ -170,10 +212,15 @@ func TestSelect_ReleaseFromGitHubSource(t *testing.T) {
 				Located:   !m.listed,
 				Archive:   Asset{Name: k.rel.ArchiveName, URL: k.srv.AssetURL(k.rel.ArchiveName)},
 				Checksums: Asset{Name: k.rel.ChecksumsName, URL: k.srv.AssetURL(k.rel.ChecksumsName)},
+				Signature: Asset{Name: k.rel.ChecksumsName + ".minisig", URL: k.srv.AssetURL(k.rel.ChecksumsName + ".minisig")},
 			}
 			if m.listed {
 				want.Archive.Size = int64(len(k.rel.Archive))
 				want.Checksums.Size = int64(len(k.srv.ChecksumsFile()))
+				if got.Signature.Size <= 0 {
+					t.Errorf("Signature.Size = %d, want the listed size", got.Signature.Size)
+				}
+				want.Signature.Size = got.Signature.Size
 			}
 			if got != want {
 				t.Errorf("Select() = %+v, want %+v", got, want)
@@ -198,6 +245,7 @@ func TestSelect_UnlistedThroughTheDefaultSource(t *testing.T) {
 		Located:   true,
 		Archive:   Asset{Name: "atk_linux_amd64.tar.gz", URL: base + "atk_linux_amd64.tar.gz"},
 		Checksums: Asset{Name: "checksums.txt", URL: base + "checksums.txt"},
+		Signature: Asset{Name: "checksums.txt.minisig", URL: base + "checksums.txt.minisig"},
 	}
 	if got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
@@ -214,7 +262,7 @@ func TestSelect_TagAndLocated(t *testing.T) {
 	}{
 		{
 			name:        "listed",
-			rel:         Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), testChecksums()}},
+			rel:         Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), testChecksums(), testSignature()}},
 			wantLocated: false,
 		},
 		{
@@ -261,7 +309,7 @@ func TestSelect_RendersBinaryNameNotIdentityName(t *testing.T) {
 	c := selectConfig(t)
 	c.BinaryName = "atk-cli"
 	archive := Asset{Name: "atk-cli_linux_amd64.tar.gz", URL: "https://example.test/cli"}
-	rel := Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), archive, testChecksums()}}
+	rel := Release{Tag: "v1.2.3", Assets: []Asset{testArchive(), archive, testChecksums(), testSignature()}}
 
 	got, err := c.Select(rel)
 	if err != nil {
@@ -283,12 +331,13 @@ func TestSelect_CustomTemplates(t *testing.T) {
 	c.ChecksumsAsset = "{name}_{tag}_SHA256SUMS"
 	archive := Asset{Name: "atk-1.2.3-windows-arm64.zip", URL: "https://example.test/zip", Size: 9}
 	checksums := Asset{Name: "atk_v1.2.3_SHA256SUMS", URL: "https://example.test/sums", Size: 3}
+	signature := Asset{Name: "atk_v1.2.3_SHA256SUMS.minisig", URL: "https://example.test/sig", Size: 2}
 
-	got, err := c.Select(Release{Tag: "v1.2.3", Assets: []Asset{checksums, archive}})
+	got, err := c.Select(Release{Tag: "v1.2.3", Assets: []Asset{checksums, archive, signature}})
 	if err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
-	if want := (Selection{Tag: "v1.2.3", Archive: archive, Checksums: checksums}); got != want {
+	if want := (Selection{Tag: "v1.2.3", Archive: archive, Checksums: checksums, Signature: signature}); got != want {
 		t.Errorf("Select() = %+v, want %+v", got, want)
 	}
 }

@@ -17,7 +17,12 @@ golangci-lint run
 - `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries every
   seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user home
   dir, `EvalSymlinks`, `InContainer`) and the tool's own `Detectors`; a nil `Detectors` entry is
-  invalid. `Validate` reports problems; `resolve` returns a copy with each zero field set to its
+  invalid. The signature policy is required (ADR-0024, ADR-0025): `TrustedKeys` (minisign public key
+  entries, each with or without its `untrusted comment:` line, several for a rotation) or
+  `AllowUnsigned`, exactly one. `Validate` rejects an entry that does not parse, a repeated key id,
+  neither field and both fields, so `update.Config{}` is invalid for every operation, `Check` and
+  `CheckManaged` included, because `resolve` runs `Validate`. A test `Config` sets
+  `TrustedKeys: []string{srv.PublicKey()}`. `Validate` reports problems; `resolve` returns a copy with each zero field set to its
   production default and never mutates the receiver. `Resolved` is its exported wrapper, the one
   place other packages read the defaults from (ADR-0023). The default state dir comes from
   `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
@@ -43,7 +48,10 @@ golangci-lint run
 - `select.go` — `Config.Select` names the archive and checksums assets of a `Release`: the
   `AssetTemplate` and `ChecksumsAsset` rendered with `AssetExt`. A non-nil `Assets` is matched by
   exact name; nil `Assets` (the redirect path, ADR-0019) is located through the `Source`'s optional
-  `AssetLocator`, which `GitHubSource.AssetURL` implements.
+  `AssetLocator`, which `GitHubSource.AssetURL` implements. `Selection.Signature` is the checksums
+  asset's name plus `.minisig`, or the zero `Asset` under `AllowUnsigned`; a `Selection` lists
+  exactly what `Download` reads, and a listed release without the signature asset is an
+  `*AssetNotFoundError`.
 - `asset/` — the template language (`{name}`, `{version}`, `{tag}`, `{os}`, `{arch}`, `{ext}`) with
   `Validate`, `ValidateChecksums` and `Render`, and `GoReleaserArchive` / `GoReleaserChecksum`, which
   translate a template into a GoReleaser `name_template`; `UsesExt` reports whether a template holds
