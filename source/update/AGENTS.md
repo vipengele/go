@@ -33,7 +33,9 @@ golangci-lint run
   the default store: `update-state.json` in the state dir through `go.vipengele.org/cli/state`
   (ADR-0023). `Save` creates the directory 0700 and writes the file 0600; a missing or corrupt file
   loads as the zero `State`, an unreadable one is an error. It takes no lock. `StateStore.Load` and
-  `Save` honour `ctx`: the background check's bound depends on it.
+  `Save` honour `ctx`: the background check's bound depends on it. `fileStore` returns `ctx.Err()`
+  at once for a done `ctx` and runs its I/O on a goroutine otherwise, abandoning it when `ctx` ends
+  (the write is atomic); the unexported `readFile` and `writeFile` fields are the test seam.
 - `check.go` — `checkInputs` and `checkInputsFrom` (everything the gates read, through the `Config`
   seams, from a resolved `Config` and the stored `State`), `eligibility` and its `checkReason`: the
   gates in order are dev build, CI, no terminal, disabled, opted out

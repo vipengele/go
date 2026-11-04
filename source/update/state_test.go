@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -204,6 +205,101 @@ func TestFileStoreLoadCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("Stat(%s) = %v, want not exist", dir, err)
+	}
+}
+
+func TestFileStoreDoneContextTouchesNothing(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dir := filepath.Join(t.TempDir(), "state")
+	store := &fileStore{dir: dir}
+
+	if _, err := store.Load(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Load error = %v, want context.Canceled", err)
+	}
+	if err := store.Save(ctx, State{LatestVersion: "v1.0.0"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("Save error = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("Stat(%s) = %v, want not exist", dir, err)
+	}
+}
+
+func TestFileStoreDoneContextLeavesFileUnmodified(t *testing.T) {
+	t.Parallel()
+
+	store := &fileStore{dir: t.TempDir()}
+	if err := store.Save(context.Background(), State{LatestVersion: "v1.0.0"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := store.Save(ctx, State{LatestVersion: "v2.0.0"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Save error = %v, want context.Canceled", err)
+	}
+
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.LatestVersion != "v1.0.0" {
+		t.Errorf("LatestVersion = %q, want v1.0.0", got.LatestVersion)
+	}
+}
+
+func TestFileStoreReturnsWhenContextIsCancelledDuringIO(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	store := &fileStore{
+		dir: t.TempDir(),
+		readFile: func() (State, error) {
+			started <- struct{}{}
+			<-release
+
+			return State{}, nil
+		},
+		writeFile: func(State) error {
+			started <- struct{}{}
+			<-release
+
+			return nil
+		},
+	}
+
+	calls := map[string]func(context.Context) error{
+		"Load": func(ctx context.Context) error { _, err := store.Load(ctx); return err },
+		"Save": func(ctx context.Context) error { return store.Save(ctx, State{}) },
+	}
+
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			done := make(chan error, 1)
+			go func() { done <- call(ctx) }()
+
+			<-started
+			cancel()
+
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("error = %v, want context.Canceled", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("call did not return after cancellation")
+			}
+		})
 	}
 }
 
