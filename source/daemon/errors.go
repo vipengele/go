@@ -40,3 +40,37 @@ func (e *PanicError) Unwrap() error {
 	err, _ := e.Value.(error)
 	return err
 }
+
+// ErrAlreadyRunning reports that another instance of the tool holds the instance lock. The error
+// AcquireInstance returns is an *AlreadyRunningError, which matches it under errors.Is.
+var ErrAlreadyRunning = errors.New("daemon: already running")
+
+// AlreadyRunningError reports that another instance holds the instance lock at Path. PID is the
+// process id the holder recorded, and 0 when the record is missing or unreadable. The lock alone
+// decides which instance runs; PID only describes the holder, and may name a previous holder in
+// the moment between a new holder's acquire and its rewrite of the record.
+type AlreadyRunningError struct {
+	Path string
+	PID  int
+
+	err error
+}
+
+// Error names the lock file and, when known, the pid of the holder.
+func (e *AlreadyRunningError) Error() string {
+	if e.PID > 0 {
+		return fmt.Sprintf("daemon: already running (pid %d, lock %s)", e.PID, e.Path)
+	}
+
+	return fmt.Sprintf("daemon: already running (lock %s)", e.Path)
+}
+
+// Is reports whether target is ErrAlreadyRunning.
+func (e *AlreadyRunningError) Is(target error) bool {
+	return target == ErrAlreadyRunning
+}
+
+// Unwrap returns the error of the lock attempt, which wraps filelock.ErrLocked.
+func (e *AlreadyRunningError) Unwrap() error {
+	return e.err
+}

@@ -38,14 +38,20 @@ drawn inside the module:
 - The layouts are the XDG layout for Linux and every system other than macOS and Windows, the
   Library layout for macOS, and the AppData layout for Windows.
 - `Resolve` resolves only the kinds a caller asks for, plus the kind a requested kind derives from
-  (log from state on the XDG layout, state and data from config on macOS), and `New` resolves all
-  five. A kind not asked for is left empty and nothing is looked up for it, so its failure cannot
-  fail the caller: a tool that needs only state resolves it from an absolute `XDG_STATE_HOME` with
-  no home directory, although config, cache and data would fall back to it.
+  (log and runtime from state on the XDG layout, state and data from config on macOS), and `New`
+  resolves all six. A kind not asked for is left empty and nothing is looked up for it, so its
+  failure cannot fail the caller: a tool that needs only state resolves it from an absolute
+  `XDG_STATE_HOME` with no home directory, although config, cache and data would fall back to it.
 - `Ensure` is lazy: resolving creates nothing, and a directory is created when a caller asks for it.
   It creates missing directories with mode 0700, clears the bits beyond 0700 of a pre-existing
   directory and keeps a narrower mode, and never changes a parent that already exists. It skips the
   mode change on the Windows layout, where mode bits do not describe access.
+- The `Runtime` kind is the directory of a running instance's files (ADR-0023). It is
+  `<State>/runtime` on the XDG layout, `<config>/runtime` on macOS, `%LocalAppData%/<app>/runtime`
+  on Windows and `root/runtime` under a home root, and `Options.RuntimeDir` overrides it. It is
+  never `XDG_RUNTIME_DIR`: the system removes that directory when the user's last session ends, and
+  a daemon that outlives the session would hold a lock on a file that is no longer linked while the
+  next start locks a new one.
 - Container detection is a heuristic that reports and changes no path.
 - `update`'s default `StateDir` is the state directory, not the configuration directory: state is
   what a tool records between runs and a user does not edit, and configuration is what a user edits.

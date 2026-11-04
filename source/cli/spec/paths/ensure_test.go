@@ -90,7 +90,7 @@ func assertMissing(t *testing.T, path string) {
 }
 
 func allDirs(d Dirs) []string {
-	return []string{d.Config(), d.State(), d.Cache(), d.Data(), d.Log()}
+	return []string{d.Config(), d.State(), d.Cache(), d.Data(), d.Log(), d.Runtime()}
 }
 
 func TestEnsureWithNoKindsCreatesEveryKind(t *testing.T) {
@@ -120,7 +120,7 @@ func TestEnsureCreatesOnlyTheKindsGiven(t *testing.T) {
 	}
 	assertDir(t, d.Cache())
 	assertDir(t, d.Data())
-	for _, dir := range []string{d.Config(), d.State(), d.Log()} {
+	for _, dir := range []string{d.Config(), d.State(), d.Log(), d.Runtime()} {
 		assertMissing(t, dir)
 	}
 }
@@ -321,7 +321,7 @@ func TestEnsureRejectsPathThatIsNotADirectory(t *testing.T) {
 func TestEnsureRejectsInvalidKind(t *testing.T) {
 	d := newDirs(t, "linux", t.TempDir())
 
-	for _, k := range []Kind{0, Log + 1, -1} {
+	for _, k := range []Kind{0, Runtime + 1, -1} {
 		if err := d.Ensure(k); err == nil {
 			t.Errorf("Ensure(%v) succeeded, want an error", k)
 		}
@@ -341,7 +341,7 @@ func TestEnsureZeroDirsCreatesNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("Ensure on the zero Dirs succeeded, want an error")
 	}
-	for _, k := range []Kind{Config, State, Cache, Data, Log} {
+	for _, k := range []Kind{Config, State, Cache, Data, Log, Runtime} {
 		if !strings.Contains(err.Error(), k.String()) {
 			t.Errorf("error %q does not name kind %v", err, k)
 		}
@@ -368,4 +368,20 @@ func TestEnsureReportsAKindResolveWasNotAskedFor(t *testing.T) {
 	}
 	assertDir(t, d.State())
 	assertMissing(t, filepath.Join(root, "config"))
+}
+
+func TestEnsureRuntimeCreatesAPrivateDirectory(t *testing.T) {
+	requireModes(t)
+	d := newDirs(t, "linux", filepath.Join(t.TempDir(), "home"))
+
+	if err := d.Ensure(Runtime); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	assertDir(t, d.Runtime())
+	if got := modeOf(t, d.Runtime()); got != 0o700 {
+		t.Errorf("mode of %s = %#o, want 0700", d.Runtime(), got)
+	}
+	for _, dir := range []string{d.Config(), d.State(), d.Cache(), d.Data(), d.Log()} {
+		assertMissing(t, dir)
+	}
 }

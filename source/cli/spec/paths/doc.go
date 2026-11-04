@@ -1,5 +1,5 @@
 // Package paths resolves the directories a command-line tool keeps its files in: one directory
-// for each [Kind], configuration, state, cache, data and logs.
+// for each [Kind], configuration, state, cache, data, logs and runtime files.
 //
 // [Resolve] resolves the kinds a caller names from the tool's [spec.Identity] and an [Options]
 // value, and returns them as a [Dirs]; [New] resolves every kind. Resolving reads only the
@@ -11,10 +11,10 @@
 //
 // Each kind takes the first of these that applies:
 //
-//  1. its explicit option, Options.ConfigDir, StateDir, CacheDir, DataDir or LogDir, used as
-//     given;
+//  1. its explicit option, Options.ConfigDir, StateDir, CacheDir, DataDir, LogDir or RuntimeDir,
+//     used as given;
 //  2. Options.Home, a home root under which the kinds are the subdirectories config, state,
-//     cache, data and log;
+//     cache, data, log and runtime;
 //  3. the environment variable <PREFIX>_HOME, as [spec.Identity.EnvVar] names it with the suffix
 //     "HOME", a home root like Options.Home;
 //  4. on the XDG layout only, the kind's XDG base directory, XDG_CONFIG_HOME, XDG_STATE_HOME,
@@ -38,6 +38,7 @@
 //	cache   $XDG_CACHE_HOME/<app>, or ~/.cache/<app>
 //	data    $XDG_DATA_HOME/<app>, or ~/.local/share/<app>
 //	log     <state>/log
+//	runtime <state>/runtime
 //
 // The "darwin" layout ignores the XDG variables:
 //
@@ -46,6 +47,7 @@
 //	data    <config>/data
 //	cache   ~/Library/Caches/<app>
 //	log     ~/Library/Logs/<app>
+//	runtime <config>/runtime
 //
 // The "windows" layout reads %AppData% and %LocalAppData%, falling back to ~/AppData/Roaming and
 // ~/AppData/Local when either is unset:
@@ -55,10 +57,17 @@
 //	data    %LocalAppData%/<app>/data
 //	cache   %LocalAppData%/<app>/cache
 //	log     %LocalAppData%/<app>/log
+//	runtime %LocalAppData%/<app>/runtime
 //
-// A kind derived from another, as log is from state on the XDG layout, follows that kind as it is
-// resolved: an explicit Options.StateDir moves the default log directory with it. An explicit
-// option for the derived kind itself takes precedence over the derivation.
+// The runtime kind is never XDG_RUNTIME_DIR, on any layout, and never a temporary directory. The
+// system removes XDG_RUNTIME_DIR when the user's last session ends, so a daemon that outlives
+// the session would keep a lock on a file that is no longer linked and a second instance would
+// lock a new one. Runtime files live in a directory of the tool's own that nothing removes.
+//
+// A kind derived from another, as log and runtime are from state on the XDG layout, follows that
+// kind as it is resolved: an explicit Options.StateDir moves the default log and runtime
+// directories with it. An explicit option for the derived kind itself takes precedence over the
+// derivation.
 //
 // Resolve follows a derivation only for a kind it is asked for: resolving log alone on the XDG
 // layout reads state to derive it, and leaves state itself unresolved.

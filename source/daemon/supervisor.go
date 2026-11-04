@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 )
 
 // defaultGrace is the grace period when WithGrace is not given.
@@ -25,6 +28,9 @@ type Supervisor struct {
 	grace        time.Duration
 	startTimeout time.Duration
 	policy       PanicPolicy
+
+	// instance, when set, is the instance lock Run holds while any Runner may be running.
+	instance *instanceLock
 
 	// ran is set by the first Run; a second Run reports ErrAlreadyRan.
 	ran atomic.Bool
@@ -126,10 +132,25 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 // shutdown with an Err wrapping context.Canceled is not a problem and is dropped; any other Err is
 // a stop problem.
 //
-// Run may be called once; a second call returns ErrAlreadyRan.
+// With WithInstanceLock, Run takes the instance lock before the first Start and releases it as it
+// returns, once every Runner has been stopped or, at the end of the grace period, abandoned. A
+// lock that cannot be taken is returned as AcquireInstance reports it, an *AlreadyRunningError
+// while another instance holds it, and no Runner is started.
+//
+// Run may be called once; a second call returns ErrAlreadyRan, even when the first returned
+// without starting a Runner.
 func (s *Supervisor) Run(ctx context.Context) error {
 	if !s.ran.CompareAndSwap(false, true) {
 		return ErrAlreadyRan
+	}
+
+	if s.instance != nil {
+		in, err := AcquireInstance(s.instance.id, s.instance.opts)
+		if err != nil {
+			return err
+		}
+		// Deferred, so the lock is released only after the stop phase below has ended.
+		defer in.Release()
 	}
 
 	runs, failure, complete := s.start(ctx)
@@ -148,6 +169,12 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		errs = append(errs, l.stop(stopCtx)...)
 	}
 	return errors.Join(errs...)
+}
+
+// instanceLock names the instance lock a Supervisor holds while it runs.
+type instanceLock struct {
+	id   spec.Identity
+	opts paths.Options
 }
 
 // start runs the start phase. It returns every Runner whose Start it called, in start order, the

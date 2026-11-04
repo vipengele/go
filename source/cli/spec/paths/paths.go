@@ -24,14 +24,19 @@ const (
 	Data
 	// Log holds the tool's log files.
 	Log
+	// Runtime holds the files a running instance of the tool coordinates through, such as lock
+	// files, pid files and sockets. It is always below the tool's own persistent directories,
+	// never in a system runtime directory such as XDG_RUNTIME_DIR, which the system removes at
+	// logout.
+	Runtime
 )
 
 // numKinds is the number of kinds, the largest Kind value.
-const numKinds = int(Log)
+const numKinds = int(Runtime)
 
 // homeSubdirs are the subdirectory names of the kinds under a home root, indexed by Kind - 1.
 func homeSubdirs() [numKinds]string {
-	return [numKinds]string{"config", "state", "cache", "data", "log"}
+	return [numKinds]string{"config", "state", "cache", "data", "log", "runtime"}
 }
 
 // String returns the kind's lowercase name, as in "config", and "Kind(n)" for a value that is
@@ -44,15 +49,15 @@ func (k Kind) String() string {
 }
 
 func (k Kind) valid() bool {
-	return k >= Config && k <= Log
+	return k >= Config && k <= Runtime
 }
 
-// Options adjusts how [Resolve] and [New] resolve the directories. The zero value resolves the platform
-// defaults from the real environment and home directory.
+// Options adjusts how [Resolve] and [New] resolve the directories. The zero value resolves the
+// platform defaults from the real environment and home directory.
 type Options struct {
-	// ConfigDir, StateDir, CacheDir, DataDir and LogDir set their kind's directory, used as
-	// given. "" leaves the kind to the rest of the precedence.
-	ConfigDir, StateDir, CacheDir, DataDir, LogDir string
+	// ConfigDir, StateDir, CacheDir, DataDir, LogDir and RuntimeDir set their kind's directory,
+	// used as given. "" leaves the kind to the rest of the precedence.
+	ConfigDir, StateDir, CacheDir, DataDir, LogDir, RuntimeDir string
 	// Home is a home root under which every kind without its own option is a subdirectory named
 	// as [Kind.String] names it. It takes precedence over the <PREFIX>_HOME variable. "" leaves
 	// it to that variable.
@@ -91,6 +96,9 @@ func (d Dirs) Data() string { return d.dir(Data) }
 // Log returns the directory of the [Log] kind, and "" when it was not resolved.
 func (d Dirs) Log() string { return d.dir(Log) }
 
+// Runtime returns the directory of the [Runtime] kind, and "" when it was not resolved.
+func (d Dirs) Runtime() string { return d.dir(Runtime) }
+
 func (d Dirs) dir(k Kind) string {
 	return d.dirs[k-1]
 }
@@ -107,8 +115,8 @@ func New(id spec.Identity, opts Options) (Dirs, error) {
 // Resolve resolves the directory of each of kinds for the tool id, in the order the package
 // documentation gives, and of every [Kind] when kinds is empty. A kind kinds does not name is
 // left unresolved in the returned Dirs, and nothing is looked up for it, unless a requested kind
-// derives from it, as log does from state on the XDG layout; such a parent is resolved to derive
-// its child and is left unresolved itself. Repeating a kind is harmless.
+// derives from it, as log and runtime do from state on the XDG layout; such a parent is resolved
+// to derive its child and is left unresolved itself. Repeating a kind is harmless.
 //
 // Resolve returns an error wrapping id's [spec.Identity.Validate] error for an invalid id, an
 // error naming a value of kinds that is not a Kind, and one wrapping [ErrNoHomeDir] when a
@@ -128,7 +136,7 @@ func Resolve(id spec.Identity, opts Options, kinds ...Kind) (Dirs, error) {
 	}
 
 	r := newResolver(id.DirName, opts)
-	explicit := [numKinds]string{opts.ConfigDir, opts.StateDir, opts.CacheDir, opts.DataDir, opts.LogDir}
+	explicit := [numKinds]string{opts.ConfigDir, opts.StateDir, opts.CacheDir, opts.DataDir, opts.LogDir, opts.RuntimeDir}
 
 	root := opts.Home
 	if root == "" {

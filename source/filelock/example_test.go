@@ -2,6 +2,7 @@ package filelock_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,4 +46,28 @@ func ExampleNewNoop() {
 
 	fmt.Println("locked")
 	// Output: locked
+}
+
+func ExampleLocker_TryLock() {
+	dir, err := os.MkdirTemp("", "filelock-example-")
+	if err != nil {
+		fmt.Println(err)
+
+		return
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	l := filelock.New(filepath.Join(dir, "app.lock"))
+
+	unlock, err := l.TryLock()
+	if err != nil {
+		fmt.Println(err)
+
+		return
+	}
+	defer unlock()
+
+	_, err = l.TryLock()
+	fmt.Println(errors.Is(err, filelock.ErrLocked))
+	// Output: true
 }

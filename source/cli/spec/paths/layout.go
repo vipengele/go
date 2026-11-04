@@ -54,8 +54,9 @@ func resolveKinds(explicit [numKinds]string, want [numKinds]bool, def defaultDir
 	return dirs, nil
 }
 
-// xdg resolves the XDG layout: each kind but log under its XDG base directory or its fallback
-// below the home directory, and log under the resolved state directory.
+// xdg resolves the XDG layout: each kind but log and runtime under its XDG base directory or its
+// fallback below the home directory, and those two under the resolved state directory. Runtime
+// never uses XDG_RUNTIME_DIR.
 func (r *resolver) xdg(k Kind, dir func(Kind) (string, error)) (string, error) {
 	base := func(envVar string, fallback ...string) (string, error) {
 		if v := r.env(envVar); filepath.IsAbs(v) {
@@ -72,6 +73,12 @@ func (r *resolver) xdg(k Kind, dir func(Kind) (string, error)) (string, error) {
 		return base("XDG_CACHE_HOME", ".cache")
 	case Data:
 		return base("XDG_DATA_HOME", ".local", "share")
+	case Runtime:
+		state, err := dir(State)
+		if err != nil {
+			return "", err // [lydite:exclude_from_mutation][resolveKinds discards the path when the error is set, so the value returned with it is unobservable]
+		}
+		return filepath.Join(state, k.String()), nil
 	default:
 		state, err := dir(State)
 		if err != nil {
@@ -81,13 +88,13 @@ func (r *resolver) xdg(k Kind, dir func(Kind) (string, error)) (string, error) {
 	}
 }
 
-// darwin resolves the macOS layout: config under Application Support, state and data under the
-// resolved config directory, cache under Caches and log under Logs.
+// darwin resolves the macOS layout: config under Application Support, state, data and runtime under
+// the resolved config directory, cache under Caches and log under Logs.
 func (r *resolver) darwin(k Kind, dir func(Kind) (string, error)) (string, error) {
 	switch k {
 	case Config:
 		return r.underHome("Library", "Application Support", r.app)
-	case State, Data:
+	case State, Data, Runtime:
 		config, err := dir(Config)
 		if err != nil {
 			return "", err // [lydite:exclude_from_mutation][resolveKinds discards the path when the error is set, so the value returned with it is unobservable]

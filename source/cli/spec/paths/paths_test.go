@@ -52,70 +52,75 @@ func noHomeDir(t *testing.T) func() (string, error) {
 }
 
 type want struct {
-	config, state, cache, data, log string
+	config, state, cache, data, log, runtime string
 }
 
 func dirsOf(d paths.Dirs) want {
-	return want{config: d.Config(), state: d.State(), cache: d.Cache(), data: d.Data(), log: d.Log()}
+	return want{config: d.Config(), state: d.State(), cache: d.Cache(), data: d.Data(), log: d.Log(), runtime: d.Runtime()}
 }
 
 func j(elem ...string) string {
 	return filepath.Join(elem...)
 }
 
-// under returns the five kinds as subdirectories of a home root.
+// under returns the six kinds as subdirectories of a home root.
 func under(root string) want {
 	return want{
-		config: j(root, "config"),
-		state:  j(root, "state"),
-		cache:  j(root, "cache"),
-		data:   j(root, "data"),
-		log:    j(root, "log"),
+		config:  j(root, "config"),
+		state:   j(root, "state"),
+		cache:   j(root, "cache"),
+		data:    j(root, "data"),
+		log:     j(root, "log"),
+		runtime: j(root, "runtime"),
 	}
 }
 
 func explicitOptions() paths.Options {
 	return paths.Options{
-		ConfigDir: "/x/config",
-		StateDir:  "/x/state",
-		CacheDir:  "/x/cache",
-		DataDir:   "/x/data",
-		LogDir:    "/x/log",
+		ConfigDir:  "/x/config",
+		StateDir:   "/x/state",
+		CacheDir:   "/x/cache",
+		DataDir:    "/x/data",
+		LogDir:     "/x/log",
+		RuntimeDir: "/x/runtime",
 	}
 }
 
 func explicitWant() want {
-	return want{config: "/x/config", state: "/x/state", cache: "/x/cache", data: "/x/data", log: "/x/log"}
+	return want{config: "/x/config", state: "/x/state", cache: "/x/cache", data: "/x/data", log: "/x/log", runtime: "/x/runtime"}
 }
 
 func linuxDefaults() want {
 	return want{
-		config: j(fakeHome, ".config", app),
-		state:  j(fakeHome, ".local", "state", app),
-		cache:  j(fakeHome, ".cache", app),
-		data:   j(fakeHome, ".local", "share", app),
-		log:    j(fakeHome, ".local", "state", app, "log"),
+		config:  j(fakeHome, ".config", app),
+		state:   j(fakeHome, ".local", "state", app),
+		cache:   j(fakeHome, ".cache", app),
+		data:    j(fakeHome, ".local", "share", app),
+		log:     j(fakeHome, ".local", "state", app, "log"),
+		runtime: j(fakeHome, ".local", "state", app, "runtime"),
 	}
 }
 
 func darwinDefaults() want {
 	config := j(fakeHome, "Library", "Application Support", app)
 	return want{
-		config: config,
-		state:  j(config, "state"),
-		cache:  j(fakeHome, "Library", "Caches", app),
-		data:   j(config, "data"),
-		log:    j(fakeHome, "Library", "Logs", app),
+		config:  config,
+		state:   j(config, "state"),
+		cache:   j(fakeHome, "Library", "Caches", app),
+		data:    j(config, "data"),
+		log:     j(fakeHome, "Library", "Logs", app),
+		runtime: j(config, "runtime"),
 	}
 }
 
 func windowsLayout(roaming, local string) want {
 	return want{
-		config: j(roaming, app),
-		state:  j(local, app, "state"),
-		cache:  j(local, app, "cache"),
-		data:   j(local, app, "data"),
-		log:    j(local, app, "log"),
+		config:  j(roaming, app),
+		state:   j(local, app, "state"),
+		cache:   j(local, app, "cache"),
+		data:    j(local, app, "data"),
+		log:     j(local, app, "log"),
+		runtime: j(local, app, "runtime"),
 	}
 }
 
@@ -153,11 +158,12 @@ func TestNewLayouts(t *testing.T) {
 		// Linux.
 		{"linux defaults", "linux", nil, paths.Options{}, linuxDefaults()},
 		{"linux XDG base directories take DirName appended", "linux", xdgEnv(), paths.Options{}, want{
-			config: j("/xdg/config", app),
-			state:  j("/xdg/state", app),
-			cache:  j("/xdg/cache", app),
-			data:   j("/xdg/data", app),
-			log:    j("/xdg/state", app, "log"),
+			config:  j("/xdg/config", app),
+			state:   j("/xdg/state", app),
+			cache:   j("/xdg/cache", app),
+			data:    j("/xdg/data", app),
+			log:     j("/xdg/state", app, "log"),
+			runtime: j("/xdg/state", app, "runtime"),
 		}},
 		{"linux <PREFIX>_HOME beats XDG", "linux",
 			merge(xdgEnv(), map[string]string{homeVar: "/env/home"}), paths.Options{}, under("/env/home")},
@@ -166,22 +172,52 @@ func TestNewLayouts(t *testing.T) {
 		{"linux explicit options beat Options.Home", "linux",
 			merge(xdgEnv(), map[string]string{homeVar: "/env/home"}),
 			func() paths.Options { o := explicitOptions(); o.Home = "/opt/home"; return o }(), explicitWant()},
+		{"linux explicit runtime directory beats Options.Home", "linux", nil,
+			paths.Options{Home: "/opt/home", RuntimeDir: "/x/runtime"},
+			func() want { w := under("/opt/home"); w.runtime = "/x/runtime"; return w }()},
 		{"linux one explicit option leaves the rest to Options.Home", "linux", nil,
 			paths.Options{Home: "/opt/home", CacheDir: "/x/cache"},
 			func() want { w := under("/opt/home"); w.cache = "/x/cache"; return w }()},
 		{"linux log follows an explicit state directory", "linux", nil, paths.Options{StateDir: "/x/state"},
-			func() want { w := linuxDefaults(); w.state = "/x/state"; w.log = j("/x/state", "log"); return w }()},
+			func() want {
+				w := linuxDefaults()
+				w.state = "/x/state"
+				w.log = j("/x/state", "log")
+				w.runtime = j("/x/state", "runtime")
+				return w
+			}()},
 		{"linux explicit log directory beats the derivation", "linux", nil,
 			paths.Options{StateDir: "/x/state", LogDir: "/x/log"},
-			func() want { w := linuxDefaults(); w.state = "/x/state"; w.log = "/x/log"; return w }()},
+			func() want {
+				w := linuxDefaults()
+				w.state = "/x/state"
+				w.log = "/x/log"
+				w.runtime = j("/x/state", "runtime")
+				return w
+			}()},
+		{"linux runtime ignores XDG_RUNTIME_DIR", "linux",
+			map[string]string{"XDG_RUNTIME_DIR": "/run/user/1000"}, paths.Options{},
+			linuxDefaults()},
+		{"linux runtime follows an explicit state directory", "linux", nil, paths.Options{StateDir: "/x/state"},
+			func() want {
+				w := linuxDefaults()
+				w.state = "/x/state"
+				w.log = j("/x/state", "log")
+				w.runtime = j("/x/state", "runtime")
+				return w
+			}()},
+		{"linux explicit runtime directory beats the derivation", "linux", nil,
+			paths.Options{RuntimeDir: "/x/runtime"},
+			func() want { w := linuxDefaults(); w.runtime = "/x/runtime"; return w }()},
 		{"linux relative XDG base directory is ignored", "linux",
 			map[string]string{"XDG_CONFIG_HOME": "relative/config"}, paths.Options{}, linuxDefaults()},
 		{"other GOOS takes the XDG layout", "freebsd", xdgEnv(), paths.Options{}, want{
-			config: j("/xdg/config", app),
-			state:  j("/xdg/state", app),
-			cache:  j("/xdg/cache", app),
-			data:   j("/xdg/data", app),
-			log:    j("/xdg/state", app, "log"),
+			config:  j("/xdg/config", app),
+			state:   j("/xdg/state", app),
+			cache:   j("/xdg/cache", app),
+			data:    j("/xdg/data", app),
+			log:     j("/xdg/state", app, "log"),
+			runtime: j("/xdg/state", app, "runtime"),
 		}},
 		{"other GOOS defaults", "openbsd", nil, paths.Options{}, linuxDefaults()},
 
@@ -194,18 +230,29 @@ func TestNewLayouts(t *testing.T) {
 			map[string]string{homeVar: "/env/home"}, paths.Options{Home: "/opt/home"}, under("/opt/home")},
 		{"darwin explicit options beat Options.Home", "darwin", nil,
 			func() paths.Options { o := explicitOptions(); o.Home = "/opt/home"; return o }(), explicitWant()},
+		{"darwin runtime follows an explicit config directory", "darwin", nil,
+			paths.Options{ConfigDir: "/x/config"},
+			func() want {
+				w := darwinDefaults()
+				w.config, w.state, w.data, w.runtime = "/x/config", j("/x/config", "state"), j("/x/config", "data"), j("/x/config", "runtime")
+				return w
+			}()},
+		{"darwin explicit runtime directory beats the default", "darwin", nil,
+			paths.Options{RuntimeDir: "/x/runtime"},
+			func() want { w := darwinDefaults(); w.runtime = "/x/runtime"; return w }()},
 		{"darwin state and data follow an explicit config directory", "darwin", nil,
 			paths.Options{ConfigDir: "/x/config"},
 			func() want {
 				w := darwinDefaults()
 				w.config, w.state, w.data = "/x/config", j("/x/config", "state"), j("/x/config", "data")
+				w.runtime = j("/x/config", "runtime")
 				return w
 			}()},
 		{"darwin explicit state and data beat the derivation", "darwin", nil,
 			paths.Options{ConfigDir: "/x/config", StateDir: "/x/state", DataDir: "/x/data"},
 			func() want {
 				w := darwinDefaults()
-				w.config, w.state, w.data = "/x/config", "/x/state", "/x/data"
+				w.config, w.state, w.data, w.runtime = "/x/config", "/x/state", "/x/data", j("/x/config", "runtime")
 				return w
 			}()},
 
@@ -222,6 +269,9 @@ func TestNewLayouts(t *testing.T) {
 			under("/opt/home")},
 		{"windows explicit options beat Options.Home", "windows", windowsEnv(),
 			func() paths.Options { o := explicitOptions(); o.Home = "/opt/home"; return o }(), explicitWant()},
+		{"windows explicit runtime directory beats the default", "windows", windowsEnv(),
+			paths.Options{RuntimeDir: "/x/runtime"},
+			func() want { w := windowsLayout("/w/roaming", "/w/local"); w.runtime = "/x/runtime"; return w }()},
 		{"windows explicit option beats the default", "windows", windowsEnv(), paths.Options{LogDir: "/x/log"},
 			func() want { w := windowsLayout("/w/roaming", "/w/local"); w.log = "/x/log"; return w }()},
 	}
@@ -289,7 +339,7 @@ func TestNewDefaultsAreDistinct(t *testing.T) {
 				t.Fatalf("New() = %v, want nil", err)
 			}
 			seen := map[string]bool{}
-			for _, dir := range []string{d.Config(), d.State(), d.Cache(), d.Data(), d.Log()} {
+			for _, dir := range []string{d.Config(), d.State(), d.Cache(), d.Data(), d.Log(), d.Runtime()} {
 				if seen[dir] {
 					t.Errorf("two kinds share the directory %q", dir)
 				}
@@ -500,8 +550,9 @@ func TestKindString(t *testing.T) {
 		{paths.Cache, "cache"},
 		{paths.Data, "data"},
 		{paths.Log, "log"},
+		{paths.Runtime, "runtime"},
 		{paths.Kind(0), "Kind(0)"},
-		{paths.Kind(6), "Kind(6)"},
+		{paths.Kind(7), "Kind(7)"},
 	}
 	for _, tc := range tests {
 		if got := tc.kind.String(); got != tc.want {
@@ -530,12 +581,14 @@ func only(w want, k paths.Kind) want {
 		out.data = w.data
 	case paths.Log:
 		out.log = w.log
+	case paths.Runtime:
+		out.runtime = w.runtime
 	}
 	return out
 }
 
 func allKinds() []paths.Kind {
-	return []paths.Kind{paths.Config, paths.State, paths.Cache, paths.Data, paths.Log}
+	return []paths.Kind{paths.Config, paths.State, paths.Cache, paths.Data, paths.Log, paths.Runtime}
 }
 
 func TestResolveOneKindMatchesNew(t *testing.T) {
@@ -635,6 +688,8 @@ func TestResolveFailsOnlyForARequestedKind(t *testing.T) {
 			map[string]string{"XDG_STATE_HOME": "/xdg/state"}, paths.Options{}, []paths.Kind{paths.State, paths.Cache}},
 		{"linux log whose state needs the home directory", "linux",
 			map[string]string{"XDG_CONFIG_HOME": "/xdg/config"}, paths.Options{}, []paths.Kind{paths.Log}},
+		{"linux runtime whose state needs the home directory", "linux",
+			map[string]string{"XDG_CONFIG_HOME": "/xdg/config"}, paths.Options{}, []paths.Kind{paths.Runtime}},
 		{"darwin state whose config needs the home directory", "darwin", nil, paths.Options{},
 			[]paths.Kind{paths.State}},
 		{"darwin data whose config needs the home directory", "darwin", nil, paths.Options{CacheDir: "/x/cache"},
@@ -729,7 +784,7 @@ func TestResolveRejectsInvalidKind(t *testing.T) {
 		name  string
 	}{
 		{[]paths.Kind{paths.Kind(0)}, "Kind(0)"},
-		{[]paths.Kind{paths.Kind(6)}, "Kind(6)"},
+		{[]paths.Kind{paths.Kind(7)}, "Kind(7)"},
 		{[]paths.Kind{paths.Kind(-1)}, "Kind(-1)"},
 		{[]paths.Kind{paths.State, paths.Kind(0)}, "Kind(0)"},
 	}

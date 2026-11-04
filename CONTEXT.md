@@ -308,9 +308,28 @@ Exclusive ownership of a **Lock file** that the operating system gives to one pr
 takes back when that process exits, however it exits. A daemon holds one so only one instance runs,
 and `update` holds one so only one check or replacement of the **Managed binary** runs at a time
 (ADR-0019).
-_Avoid_: mutex (guards memory inside one process), semaphore, pidfile
+_Avoid_: mutex (guards memory inside one process), semaphore, pidfile (the **Holder record** is not the Lock)
 
 **Lock file**:
 The file a **Lock** is taken on. Its existence means nothing: the file may be left behind by a
 process that has exited and the next process takes the Lock on it as usual (ADR-0019).
-_Avoid_: pidfile, lockfile
+_Avoid_: pidfile (the **Holder record** is a separate file), lockfile
+
+**Instance lock**:
+The **Lock** a daemon takes so that only one instance of a tool runs at a time for one **Runtime
+directory**. The Lock alone decides which instance runs; a second instance fails fast, without
+waiting, with an error that says an instance is already running (ADR-0023).
+_Avoid_: singleton, pidfile, mutex
+
+**Holder record**:
+A file beside the **Instance lock** in which the running instance writes its process id, so that the
+error of a second instance can name the process. It describes the holder and never decides who
+runs; it may be missing, stale or unreadable (ADR-0023).
+_Avoid_: pidfile (a pidfile is also the lock), lock file (the **Lock file** is the file the Lock is
+taken on)
+
+**Runtime directory**:
+The directory of a tool that holds the files of its running instance, the **Instance lock** and the
+**Holder record**. It is resolved by `cli/spec/paths` like the other directories and persists
+across logins (ADR-0009, ADR-0023).
+_Avoid_: XDG_RUNTIME_DIR (the system removes it at logout), tmp directory, run directory

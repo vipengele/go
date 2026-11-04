@@ -69,11 +69,12 @@ golangci-lint run
   passed as `inv.Info("%s", msg)`. A nil `Env` discards. See
   `docs/adr/0013-stdout-carries-data-stderr-carries-messages.md`.
 - `paths/` — `paths.Resolve(spec.Identity, paths.Options, kinds...)` resolves the requested config,
-  state, cache, data and log directories per OS layout (XDG, darwin, windows), honouring
-  `<PREFIX>_HOME`, `Options.Home` and explicit per-kind options, and `paths.New` resolves all five.
+  state, cache, data, log and runtime directories per OS layout (XDG, darwin, windows), honouring
+  `<PREFIX>_HOME`, `Options.Home` and explicit per-kind options, and `paths.New` resolves all six.
   A kind not requested stays "" and nothing is looked up for it, so a caller that needs only state
   does not fail on a home directory only the other kinds need; a requested kind still resolves the
-  kind it derives from (log from state on XDG, state and data from config on darwin). Resolving
+  kind it derives from (log and runtime from state on XDG, state, data and runtime from config on
+  darwin). Runtime never uses `XDG_RUNTIME_DIR`, which the system removes at logout. Resolving
   creates and stats nothing; `Dirs.Ensure` creates directories 0700 on demand and reports a kind
   that was not resolved. `InContainer` is a heuristic over injectable `Probes` and changes no path.
 - `terminal/` — `terminal.Detect(stdin, stdout, stderr)` returns the `func(spec.Stream) bool` for
