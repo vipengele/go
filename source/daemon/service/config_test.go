@@ -92,6 +92,10 @@ func TestValidateChecksAbsolutePathsByTargetGOOS(t *testing.T) {
 		{"windows", `C:/x`, true},
 		{"windows", `C:\x`, true},
 		{"windows", `c:\x`, true},
+		{"windows", `C:\`, true},
+		{"windows", `Z:/`, true},
+		{"windows", `z:\`, true},
+		{"windows", `C:`, false},
 		{"windows", `\\srv\share\x`, true},
 		{"windows", `\\srv\share`, true},
 		{"windows", `\\srv`, false},
@@ -118,6 +122,47 @@ func TestValidateChecksAbsolutePathsByTargetGOOS(t *testing.T) {
 					t.Fatalf("validate(%q) with %s %q = %v, want one %s violation", tc.goos, field, tc.path, errors.Join(errs...), field)
 				}
 			})
+		}
+	}
+}
+
+func TestASCIIClassesIncludeTheirBoundsAndExcludeTheirNeighbours(t *testing.T) {
+	tests := []struct {
+		name string
+		in   func(byte) bool
+		ok   string
+		bad  string
+	}{
+		{"letter", isASCIILetter, "aAzZ", "`@{["},
+		{"lower", isASCIILower, "az", "`{AZ"},
+		{"digit", isASCIIDigit, "09", "/:"},
+	}
+	for _, tc := range tests {
+		for i := 0; i < len(tc.ok); i++ {
+			if !tc.in(tc.ok[i]) {
+				t.Errorf("%s(%q) = false, want true", tc.name, tc.ok[i])
+			}
+		}
+		for i := 0; i < len(tc.bad); i++ {
+			if tc.in(tc.bad[i]) {
+				t.Errorf("%s(%q) = true, want false", tc.name, tc.bad[i])
+			}
+		}
+	}
+}
+
+func TestValidateAcceptsNamesAndKeysAtTheEdgesOfTheirCharacterSets(t *testing.T) {
+	for _, goos := range []string{"linux", "windows"} {
+		c := validConfig(goos)
+		c.Name = "zZ9aA0"
+		c.Env = map[string]string{"Zz9": "v", "zZ0": "v"}
+		if goos == "linux" {
+			c.User = "z9a0"
+		} else {
+			c.User = `Zz9\aA0`
+		}
+		if err := c.validate(goos); err != nil {
+			t.Errorf("validate(%q) = %v, want nil", goos, err)
 		}
 	}
 }
