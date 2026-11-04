@@ -285,6 +285,12 @@ func checkAssetExt(tmpl, ext string) error {
 	return nil
 }
 
+// Resolved validates c and returns a copy with every zero field set to its production default.
+// It never modifies c, and returns the zero Config with the error when c is invalid.
+func (c Config) Resolved() (Config, error) {
+	return c.resolve()
+}
+
 // resolve validates c and returns a copy with every zero field set to its production default.
 // It never modifies c. An empty StateDir is the state directory [paths.Resolve] resolves, for the
 // [paths.State] kind alone, for the Identity with the resolved GOOS, Getenv and UserHomeDir, so a

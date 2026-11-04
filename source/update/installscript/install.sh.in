@@ -1,0 +1,290 @@
+#!/bin/sh
+# Installs a command-line tool from its GitHub releases: the binary, then its shell completion.
+#
+# Environment:
+#   @@VERSION_ENV@@        the release to install, as v1.2.3 or 1.2.3; the latest when unset
+#   @@INSTALL_DIR_ENV@@    the directory the binary is placed in; $HOME/.local/bin when unset
+#   @@BASE_URL_ENV@@       the server releases are downloaded from; https://github.com when unset
+#   @@NO_COMPLETION_ENV@@  1 skips installing the shell completion
+#
+# The asset is verified against the release's checksums file before it is extracted or installed.
+set -eu
+
+name=@@NAME@@
+owner=@@OWNER@@
+repo=@@REPO@@
+
+tmp=
+stage=
+completion_stage=
+
+say() {
+	printf '%s: %s\n' "$name" "$*"
+}
+
+warn() {
+	printf '%s: warning: %s\n' "$name" "$*" >&2
+}
+
+fail() {
+	printf '%s: error: %s\n' "$name" "$*" >&2
+	exit 1
+}
+
+cleanup() {
+	if [ -n "$stage" ]; then rm -f "$stage"; fi
+	if [ -n "$completion_stage" ]; then rm -f "$completion_stage"; fi
+	if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
+}
+
+# cleanup is the one cleanup function. INT and TERM run it and then exit with 128 plus the signal
+# number, because a signal handler that returns resumes the script; the exit runs cleanup once
+# more through EXIT with nothing left to remove.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+if command -v curl >/dev/null 2>&1; then
+	downloader=curl
+elif command -v wget >/dev/null 2>&1; then
+	downloader=wget
+else
+	fail "neither curl nor wget is installed"
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+	hasher=sha256sum
+elif command -v shasum >/dev/null 2>&1; then
+	hasher=shasum
+else
+	fail "neither sha256sum nor shasum is installed"
+fi
+
+# fetch URL FILE writes the body of URL to FILE, following redirects, and prints the final HTTP
+# status. It fails when no response was received.
+fetch() {
+	if [ "$downloader" = curl ]; then
+		curl -sSL -o "$2" -w '%{http_code}' "$1"
+		return
+	fi
+	wget -S -O "$2" "$1" 2>"$tmp/wget.log" || :
+	_status=$(awk '/^  HTTP\// { s = $2 } END { print s }' "$tmp/wget.log")
+	if [ -z "$_status" ]; then
+		cat "$tmp/wget.log" >&2
+		return 1
+	fi
+	printf '%s' "$_status"
+}
+
+# latest_location URL prints the Location of the redirect URL answers, without following it.
+latest_location() {
+	if [ "$downloader" = curl ]; then
+		_out=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "$1") || return 1
+		_status=${_out%% *}
+		_location=${_out#* }
+	else
+		wget --max-redirect=0 -S -O /dev/null "$1" 2>"$tmp/wget.log" || :
+		_status=$(awk '/^  HTTP\// { s = $2 } END { print s }' "$tmp/wget.log")
+		_location=$(awk '
+			{ sub(/\r$/, "") }
+			/^  / && tolower($1) == "location:" { l = $2 }
+			END { print l }
+		' "$tmp/wget.log")
+	fi
+	case $_status in
+	30[12378]) ;;
+	*) fail "$1 answered HTTP ${_status:-nothing}, not a redirect to the latest release" ;;
+	esac
+	[ -n "$_location" ] || fail "$1 redirected without a Location"
+	printf '%s' "$_location"
+}
+
+# sha256 FILE prints the lower-case hex SHA-256 digest of FILE.
+sha256() {
+	if [ "$hasher" = sha256sum ]; then
+		sha256sum <"$1" | awk '{ print tolower($1) }'
+	else
+		shasum -a 256 <"$1" | awk '{ print tolower($1) }'
+	fi
+}
+
+# listed_sha256 FILE NAME prints the digest the checksums FILE lists for NAME, matched exactly,
+# in lower case. A line is 64 hex digits, spaces or a '*', and the name, with a leading "./"
+# dropped. It prints nothing when NAME is not listed and "conflict" when it is listed with two
+# different digests.
+listed_sha256() {
+	listed_name=$2 awk '
+		BEGIN { want = ENVIRON["listed_name"] }
+		{
+			sub(/\r$/, "")
+			digest = substr($0, 1, 64)
+			if (length(digest) != 64 || digest ~ /[^0-9A-Fa-f]/) next
+			rest = substr($0, 65)
+			entry = rest
+			sub(/^[ *]+/, "", entry)
+			if (entry == rest) next
+			sub(/^\.\//, "", entry)
+			if (entry != want) next
+			digest = tolower(digest)
+			if (found != "" && found != digest) { print "conflict"; exit }
+			found = digest
+		}
+		END { if (found != "") print found }
+	' "$1" | head -n 1
+}
+
+# trim_slash PATH prints PATH without one trailing '/'.
+trim_slash() {
+	printf '%s' "${1%/}"
+}
+
+case $(uname -s) in
+Linux) os=linux ;;
+Darwin) os=darwin ;;
+*) fail "unsupported operating system: $(uname -s)" ;;
+esac
+
+case $(uname -m) in
+x86_64) arch=amd64 ;;
+aarch64 | arm64) arch=arm64 ;;
+*) fail "unsupported architecture: $(uname -m)" ;;
+esac
+
+base=${@@BASE_URL_ENV@@:-https://github.com}
+base=${base%/}
+
+install_dir=${@@INSTALL_DIR_ENV@@:-}
+if [ -z "$install_dir" ]; then
+	[ -n "${HOME:-}" ] || fail "HOME is not set; set @@INSTALL_DIR_ENV@@ to the directory to install into"
+	install_dir=$HOME/.local/bin
+fi
+
+tmp=$(mktemp -d 2>/dev/null || mktemp -d -t "$name")
+
+tag=${@@VERSION_ENV@@:-}
+if [ -n "$tag" ]; then
+	case $tag in
+	v*) ;;
+	*) tag=v$tag ;;
+	esac
+else
+	latest_url=$base/$owner/$repo/releases/latest
+	location=$(latest_location "$latest_url")
+	location=${location%%#*}
+	location=${location%%\?*}
+	tag=${location##*/}
+	[ -n "$tag" ] || fail "$latest_url redirected to $location, which names no release"
+fi
+case $tag in
+*[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._+-]*)
+	fail "invalid release tag: $tag"
+	;;
+esac
+version=${tag#v}
+
+asset=@@ASSET@@
+asset_url=$base/$owner/$repo/releases/download/$tag/@@ASSET_URL@@
+checksums=@@CHECKSUMS@@
+checksums_url=$base/$owner/$repo/releases/download/$tag/@@CHECKSUMS_URL@@
+
+say "installing $tag for $os/$arch"
+
+status=$(fetch "$asset_url" "$tmp/asset") || fail "downloading $asset_url failed"
+case $status in
+200) ;;
+404) fail "release $tag has no asset $asset" ;;
+*) fail "downloading $asset_url answered HTTP $status" ;;
+esac
+
+status=$(fetch "$checksums_url" "$tmp/checksums") || fail "downloading $checksums_url failed"
+case $status in
+200) ;;
+404) fail "release $tag has no checksums file $checksums" ;;
+*) fail "downloading $checksums_url answered HTTP $status" ;;
+esac
+
+expected=$(listed_sha256 "$tmp/checksums" "$asset")
+case $expected in
+'') fail "$checksums lists no checksum for $asset" ;;
+conflict) fail "$checksums lists two different checksums for $asset" ;;
+esac
+actual=$(sha256 "$tmp/asset")
+[ "$actual" = "$expected" ] || fail "checksum mismatch for $asset: $checksums lists $expected, the download is $actual"
+
+@@INSTALL_STEP@@
+
+mkdir -p "$install_dir"
+stage=$(mktemp "$install_dir/.$name.XXXXXX")
+cp "$binary" "$stage"
+chmod 755 "$stage"
+mv -f "$stage" "$install_dir/$name"
+stage=
+say "installed $install_dir/$name"
+
+on_path=
+want_dir=$(trim_slash "$install_dir")
+path_ifs=$IFS
+IFS=:
+set -f
+for entry in ${PATH:-}; do
+	if [ "$(trim_slash "$entry")" = "$want_dir" ]; then
+		on_path=1
+	fi
+done
+set +f
+IFS=$path_ifs
+if [ -z "$on_path" ]; then
+	warn "$install_dir is not on PATH; add it to run $name by name"
+fi
+
+@@SNIPPET@@
+# install_completion installs the completion script of the binary for the user's login shell.
+# Every failure is a warning: the binary is already in place.
+install_completion() {
+	if [ -z "${SHELL:-}" ]; then
+		warn "SHELL is not set; skipping the shell completion"
+		return 0
+	fi
+	shell_name=$(basename "$SHELL")
+	if completion_target "$shell_name" >/dev/null; then
+		:
+	else
+		case $? in
+		1) warn "no home directory for the $shell_name completion; skipping it" ;;
+		*) warn "no completion for the shell $shell_name; skipping it" ;;
+		esac
+		return 0
+	fi
+	completion_dir=$(dirname "$COMPLETION_PATH")
+	if ! mkdir -p "$completion_dir"; then
+		warn "cannot create $completion_dir; skipping the shell completion"
+		return 0
+	fi
+	if ! completion_stage=$(mktemp "$completion_dir/.$name-completion.XXXXXX"); then
+		completion_stage=
+		warn "cannot write to $completion_dir; skipping the shell completion"
+		return 0
+	fi
+	if ! "$install_dir/$name" completion "$shell_name" >"$completion_stage"; then
+		rm -f "$completion_stage"
+		completion_stage=
+		warn "$name completion $shell_name failed; skipping the shell completion"
+		return 0
+	fi
+	chmod 644 "$completion_stage" || :
+	if ! mv -f "$completion_stage" "$COMPLETION_PATH"; then
+		rm -f "$completion_stage"
+		completion_stage=
+		warn "cannot write $COMPLETION_PATH; skipping the shell completion"
+		return 0
+	fi
+	completion_stage=
+	say "installed the $shell_name completion in $COMPLETION_PATH"
+	if [ -n "$COMPLETION_NOTE" ]; then
+		say "$COMPLETION_NOTE"
+	fi
+}
+
+if [ "${@@NO_COMPLETION_ENV@@:-}" != 1 ]; then
+	install_completion
+fi

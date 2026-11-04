@@ -749,6 +749,42 @@ func TestResolveRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestResolvedFillsDefaultsFromTheIdentity(t *testing.T) {
+	t.Parallel()
+	c := validConfig(t.TempDir())
+	id := c.Identity
+	c.BinaryName, c.AssetTemplate, c.AssetExt, c.ChecksumsAsset = "", "", "", ""
+	r, err := c.Resolved()
+	if err != nil {
+		t.Fatalf("Resolved() error = %v, want nil", err)
+	}
+	if r.BinaryName != id.Name {
+		t.Errorf("BinaryName = %q, want the Identity Name %q", r.BinaryName, id.Name)
+	}
+	if r.AssetTemplate != asset.DefaultTemplate {
+		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, asset.DefaultTemplate)
+	}
+	if r.AssetExt != asset.DefaultExt {
+		t.Errorf("AssetExt = %q, want %q", r.AssetExt, asset.DefaultExt)
+	}
+	if r.ChecksumsAsset != asset.DefaultChecksumsTemplate {
+		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, asset.DefaultChecksumsTemplate)
+	}
+}
+
+func TestResolvedRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
+	c := validConfig("")
+	c.Name = ""
+	r, err := c.Resolved()
+	if !errors.Is(err, validate.ErrEmpty) {
+		t.Errorf("Resolved() error = %v, want one wrapping %v", err, validate.ErrEmpty)
+	}
+	if got := plainFieldsOf(r); got != (plainFields{}) {
+		t.Errorf("Resolved() Config = %+v, want the zero Config", got)
+	}
+}
+
 func TestOptOutVariableIsDerivedFromEnvPrefix(t *testing.T) {
 	t.Parallel()
 	name, err := validIdentity().EnvVar(optOutSuffix)
