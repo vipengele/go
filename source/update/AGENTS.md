@@ -25,6 +25,16 @@ golangci-lint run
   needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
   and `AssetExt` to the asset format (raw, tar.gz or zip), which `Validate` and `Extract` share;
   `MaxExtractBytes` (default 512 MiB) bounds extraction.
+- `state.go` — `State` (`LastAttempt`, `LatestVersion`), the `StateStore` interface and `fileStore`,
+  the default store: `update-state.json` in the state dir through `go.vipengele.org/cli/state`
+  (ADR-0023). `Save` creates the directory 0700 and writes the file 0600; a missing or corrupt file
+  loads as the zero `State`, an unreadable one is an error. It takes no lock.
+- `check.go` — `checkInputs` and `checkInputsFrom` (everything the gates read, through the `Config`
+  seams, from a resolved `Config` and the stored `State`), `eligibility` and its `checkReason`: the
+  gates in order are dev build, CI, no terminal, disabled, opted out
+  (`<EnvPrefix>_NO_UPDATE_CHECK`, via `optOutSuffix`), throttled. `afterAttempt` returns the `State`
+  to store: a check stopped by the command ending (`ctx` done or `context.Canceled`) is not an
+  attempt and changes nothing; a failed attempt records `LastAttempt` and keeps `LatestVersion`.
 - `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
 - `github.go` — `GitHubSource`: reads the `releases/latest` redirect without following it, falls back
@@ -218,5 +228,5 @@ golangci-lint run
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `go.vipengele.org/cli/core/**` anywhere, and `github.com/spf13/cobra`
   outside an `updatecmd` package. The library depends on no command-line framework.
-- `cli/spec` and `commons` are siblings reached by directory `replace`s in `go.mod`
-  (`../cli/spec`, `../commons`); see the repo-root rule on sibling replaces.
+- `cli/spec`, `cli/state` and `commons` are siblings reached by directory `replace`s in `go.mod`
+  (`../cli/spec`, `../cli/state`, `../commons`); see the repo-root rule on sibling replaces.
