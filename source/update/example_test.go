@@ -2,6 +2,7 @@ package update_test
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/update"
+	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
 
@@ -91,9 +93,22 @@ func Example_install() {
 	const archiveName = "atk_linux_amd64.tar.gz"
 	sums := updatetest.Checksums(map[string][]byte{archiveName: archive})
 
+	// The release's signing key, which a real tool's release pipeline holds and whose public half
+	// the tool compiles in.
+	key, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sig := key.Sign(sums, "file:checksums.txt")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/checksums.txt" {
+		switch r.URL.Path {
+		case "/checksums.txt":
 			_, _ = w.Write(sums)
+			return
+		case "/checksums.txt.minisig":
+			_, _ = w.Write(sig)
 			return
 		}
 		_, _ = w.Write(archive)
@@ -108,7 +123,7 @@ func Example_install() {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
-		TrustedKeys: []string{exampleKey},
+		TrustedKeys: []string{key.PublicKey()},
 		GOOS:        "linux",
 		GOARCH:      "amd64",
 		TempDir:     dir,
@@ -127,6 +142,7 @@ func Example_install() {
 		Tag:       "v2",
 		Archive:   update.Asset{Name: archiveName, URL: srv.URL + "/" + archiveName},
 		Checksums: update.Asset{Name: "checksums.txt", URL: srv.URL + "/checksums.txt"},
+		Signature: update.Asset{Name: "checksums.txt.minisig", URL: srv.URL + "/checksums.txt.minisig"},
 	}
 
 	ctx := context.Background()

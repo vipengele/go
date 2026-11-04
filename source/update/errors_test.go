@@ -2,12 +2,16 @@ package update
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net"
 	"strings"
 	"testing"
+
+	"go.vipengele.org/update/internal/minisign"
+	"go.vipengele.org/update/internal/minisigntest"
 )
 
 // timeoutNetError is a net.Error with a configurable Timeout.
@@ -483,4 +487,114 @@ func TestManagedInstallError_As(t *testing.T) {
 	if managed.Manager != "Nix" {
 		t.Errorf("Manager = %q, want Nix", managed.Manager)
 	}
+}
+
+func TestSignatureErrors(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("cause")
+
+	tests := []struct {
+		name string
+		err  error
+		as   func(error) bool
+		want string
+		// unwraps reports that errors.Is reaches cause through the error.
+		unwraps bool
+	}{
+		{
+			name:    "malformed",
+			err:     &SignatureMalformedError{Name: "checksums.txt.minisig", Err: cause},
+			as:      func(err error) bool { var e *SignatureMalformedError; return errors.As(err, &e) },
+			want:    `update: signature "checksums.txt.minisig" does not parse: cause`,
+			unwraps: true,
+		},
+		{
+			name: "unknown key",
+			err:  &UnknownKeyError{Name: "checksums.txt.minisig", KeyID: "0123456789ABCDEF"},
+			as:   func(err error) bool { var e *UnknownKeyError; return errors.As(err, &e) },
+			want: `update: signature "checksums.txt.minisig" is made by key 0123456789ABCDEF, which is not trusted`,
+		},
+		{
+			name:    "mismatch",
+			err:     &SignatureMismatchError{Name: "checksums.txt.minisig", KeyID: "0123456789ABCDEF", Err: cause},
+			as:      func(err error) bool { var e *SignatureMismatchError; return errors.As(err, &e) },
+			want:    `update: signature "checksums.txt.minisig" does not verify with key 0123456789ABCDEF: cause`,
+			unwraps: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := fmt.Errorf("download: %w", tc.err)
+			if !tc.as(wrapped) {
+				t.Fatalf("errors.As did not find the error in %v", wrapped)
+			}
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+			if got := errors.Is(wrapped, cause); got != tc.unwraps {
+				t.Errorf("errors.Is(err, cause) = %v, want %v", got, tc.unwraps)
+			}
+		})
+	}
+}
+
+func TestSignatureErrorFromVerify(t *testing.T) {
+	t.Parallel()
+
+	key, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	other, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	for other.ID == key.ID {
+		if other, err = minisigntest.GenerateKey(rand.Reader); err != nil {
+			t.Fatalf("GenerateKey: %v", err)
+		}
+	}
+	trusted, err := minisign.ParsePublicKey(key.PublicKey())
+	if err != nil {
+		t.Fatalf("ParsePublicKey: %v", err)
+	}
+	msg := []byte("the checksums file\n")
+	const name = "checksums.txt.minisig"
+
+	t.Run("malformed", func(t *testing.T) {
+		t.Parallel()
+
+		_, verr := minisign.Verify([]minisign.PublicKey{trusted}, msg, []byte("garbage"))
+		got := signatureError(name, verr)
+		var e *SignatureMalformedError
+		if !errors.As(got, &e) || e.Name != name || !errors.Is(got, verr) {
+			t.Errorf("signatureError() = %v, want a *SignatureMalformedError wrapping %v", got, verr)
+		}
+	})
+
+	t.Run("unknown key", func(t *testing.T) {
+		t.Parallel()
+
+		_, verr := minisign.Verify([]minisign.PublicKey{trusted}, msg, other.Sign(msg, "c"))
+		got := signatureError(name, verr)
+		var e *UnknownKeyError
+		if !errors.As(got, &e) || *e != (UnknownKeyError{Name: name, KeyID: other.ID.String()}) {
+			t.Errorf("signatureError() = %v, want an *UnknownKeyError naming %s", got, other.ID)
+		}
+	})
+
+	t.Run("mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		_, verr := minisign.Verify([]minisign.PublicKey{trusted}, msg, key.Sign([]byte("other"), "c"))
+		got := signatureError(name, verr)
+		var e *SignatureMismatchError
+		if !errors.As(got, &e) || e.Name != name || e.KeyID != key.ID.String() || !errors.Is(got, verr) {
+			t.Errorf("signatureError() = %v, want a *SignatureMismatchError for %s wrapping %v", got, key.ID, verr)
+		}
+	})
 }

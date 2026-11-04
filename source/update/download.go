@@ -10,10 +10,16 @@ import (
 	"io"
 	"math"
 	"net/http"
+
+	"go.vipengele.org/update/internal/minisign"
 )
 
 // errNoURL reports a [Selection] asset with an empty URL, which [Config.Download] cannot request.
 var errNoURL = errors.New("update: asset has no URL")
+
+// maxSignatureBytes is the most bytes of a signature asset [Config.Download] reads: a few times the
+// 300-odd bytes minisign writes, leaving room for a long trusted comment.
+const maxSignatureBytes = 4 << 10
 
 // DownloadOption configures one call to [Config.Download].
 type DownloadOption func(*downloadOptions)
@@ -36,23 +42,32 @@ func WithProgress(fn func(done, total int64)) DownloadOption {
 }
 
 // Download fetches the archive sel names to a temporary file and returns it once its SHA-256
-// digest matches the one sel's checksums file lists for the archive's name.
+// digest matches the one sel's checksums file lists for the archive's name, and, unless
+// AllowUnsigned is set, once the checksums file's minisign signature verifies with one of the
+// TrustedKeys.
 //
 // The Config is resolved first, so an invalid one fails before any request is made, and an empty
-// URL on either asset fails before any request too. The checksums file is fetched and parsed
-// before the archive is requested, so a file with no entry for the archive, or with two different
-// ones, fails without the archive being downloaded: a [*ChecksumNotFoundError] or a
-// [*ChecksumConflictError]. The archive is then written to a file named TempPrefix followed by a
-// random suffix in TempDir, which must exist, with mode 0600, and hashed as it is written; a digest
-// other than the listed one is a [*ChecksumMismatchError]. The returned [Archive] is positioned at
-// offset 0, and its Close removes the file. On any failure every temporary file is already
-// removed, and an error removing one is joined onto the error returned.
+// URL on the archive, the checksums file or, unless AllowUnsigned is set, the signature fails
+// before any request too. The checksums file is read in full first. Unless AllowUnsigned is set,
+// the signature is fetched next and checked against the checksums file's bytes with the trusted
+// key whose key id it carries; a signature that does not parse is a [*SignatureMalformedError], one
+// whose key id no trusted key carries an [*UnknownKeyError], and one that does not verify a
+// [*SignatureMismatchError]. Only a verified checksums file is parsed, and only then is the
+// archive requested, so a failed signature, and a checksums file with no entry for the archive or
+// with two different ones, a [*ChecksumNotFoundError] or a [*ChecksumConflictError], fail without
+// the archive being downloaded. The archive is then written to a file named TempPrefix followed by
+// a random suffix in TempDir, which must exist, with mode 0600, and hashed as it is written; a
+// digest other than the listed one is a [*ChecksumMismatchError]. The returned [Archive] is
+// positioned at offset 0, and its Close removes the file. On any failure every temporary file is
+// already removed, and an error removing one is joined onto the error returned.
 //
-// Each of the two requests goes through the resolved HTTPClient, follows redirects and is bounded
-// by DownloadTimeout, a deadline covering its headers and its body; a shorter deadline on ctx wins.
-// HTTPS is not enforced: the digest check is what the archive's integrity rests on, and the
-// checksums file is trusted as it arrives. The archive may carry at most MaxDownloadBytes and the
-// checksums file at most 1 MiB, or the download fails with a [*SizeLimitError]: up front when the
+// Each request goes through the resolved HTTPClient, follows redirects and is bounded by
+// DownloadTimeout, a deadline covering its headers and its body; a shorter deadline on ctx wins.
+// HTTPS is not enforced: the signature is what authenticates the checksums file, and the digest
+// check carries that to the archive. Under AllowUnsigned no signature is fetched, the checksums
+// file is trusted as it arrives, and the digest check vouches only for the archive's integrity.
+// The archive may carry at most MaxDownloadBytes, the checksums file at most 1 MiB and the
+// signature at most 4 KiB, or the download fails with a [*SizeLimitError]: up front when the
 // response's Content-Length, or else the asset's non-zero Size, is above the limit, and while
 // reading otherwise. The Content-Length and Size are otherwise hints: a body of another length is
 // not an error, and the digest decides.
@@ -72,13 +87,35 @@ func (c Config) Download(ctx context.Context, sel Selection, opts ...DownloadOpt
 		opt(&o)
 	}
 
-	for _, a := range []Asset{sel.Archive, sel.Checksums} {
+	assets := []Asset{sel.Archive, sel.Checksums}
+	if !r.AllowUnsigned {
+		// A Selection built for an unsigned release has a zero Signature, which the error names by
+		// the asset Select would have named.
+		sig := sel.Signature
+		if sig.Name == "" {
+			sig.Name = sel.Checksums.Name + signatureSuffix
+		}
+		assets = append(assets, sig)
+	}
+
+	for _, a := range assets {
 		if a.URL == "" {
 			return nil, fmt.Errorf("%w: %q", errNoURL, a.Name)
 		}
 	}
 
-	want, err := r.fetchChecksum(ctx, sel)
+	sums, err := r.fetchBounded(ctx, sel, sel.Checksums, maxChecksumsBytes, "checksums")
+	if err != nil {
+		return nil, err
+	}
+
+	if !r.AllowUnsigned {
+		if err := r.verifySignature(ctx, sel, sums); err != nil {
+			return nil, err
+		}
+	}
+
+	want, err := parseChecksum(bytes.NewReader(sums), sel.Archive.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -86,42 +123,80 @@ func (c Config) Download(ctx context.Context, sel Selection, opts ...DownloadOpt
 	return r.fetchArchive(ctx, sel, want, o.progress)
 }
 
-// fetchChecksum downloads sel's checksums file and returns the digest it lists for the archive.
-func (r Config) fetchChecksum(ctx context.Context, sel Selection) ([]byte, error) {
-	rawURL := sel.Checksums.URL
+// fetchBounded downloads asset in full and returns its bytes, failing with a [*SizeLimitError]
+// when it carries more than limit. what names the asset in the error a failed read gives.
+func (r Config) fetchBounded(ctx context.Context, sel Selection, asset Asset, limit int64, what string) ([]byte, error) {
+	var data []byte
 
-	var digest []byte
-
-	err := r.get(ctx, sel, sel.Checksums, func(resp *http.Response) error {
-		if expectedSize(resp, sel.Checksums) > maxChecksumsBytes {
-			return &SizeLimitError{URL: rawURL, Limit: maxChecksumsBytes}
+	err := r.get(ctx, sel, asset, func(resp *http.Response) error {
+		if expectedSize(resp, asset) > limit {
+			return &SizeLimitError{URL: asset.URL, Limit: limit}
 		}
 
-		d, err := parseChecksum(resp.Body, sel.Archive.Name)
-
-		var sizeErr *SizeLimitError
-
-		var notFound *ChecksumNotFoundError
-
-		var conflict *ChecksumConflictError
-
-		switch {
-		case err == nil:
-			digest = d
-			return nil
-		case errors.As(err, &sizeErr):
-			return &SizeLimitError{URL: rawURL, Limit: sizeErr.Limit}
-		case errors.As(err, &notFound), errors.As(err, &conflict):
-			return err
-		default:
-			return fmt.Errorf("update: GET %s: reading checksums: %w", rawURL, err)
+		b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		if err != nil {
+			return fmt.Errorf("update: GET %s: reading %s: %w", asset.URL, what, err)
 		}
+
+		if int64(len(b)) > limit {
+			return &SizeLimitError{URL: asset.URL, Limit: limit}
+		}
+
+		data = b
+
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return digest, nil
+	return data, nil
+}
+
+// verifySignature downloads sel's signature and verifies it over sums, the checksums file's bytes,
+// with the resolved TrustedKeys. It returns the error [Config.Download] documents for a signature
+// that does not parse, names an untrusted key or does not verify.
+func (r Config) verifySignature(ctx context.Context, sel Selection, sums []byte) error {
+	sig, err := r.fetchBounded(ctx, sel, sel.Signature, maxSignatureBytes, "signature")
+	if err != nil {
+		return err
+	}
+
+	keys := make([]minisign.PublicKey, 0, len(r.TrustedKeys))
+	for _, entry := range r.TrustedKeys {
+		// resolve has validated every entry, so none fails to parse here; one that did would only
+		// leave its key untrusted.
+		if key, err := minisign.ParsePublicKey(entry); err == nil {
+			keys = append(keys, key)
+		}
+	}
+
+	_, err = minisign.Verify(keys, sums, sig)
+
+	return signatureError(sel.Signature.Name, err)
+}
+
+// signatureError turns an error of [minisign.Verify] for the signature asset name into the error a
+// caller sees. A nil error is returned as nil.
+func signatureError(name string, err error) error {
+	var (
+		malformed *minisign.MalformedSignatureError
+		unknown   *minisign.UnknownKeyError
+		bad       *minisign.BadSignatureError
+	)
+
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &malformed):
+		return &SignatureMalformedError{Name: name, Err: err}
+	case errors.As(err, &unknown):
+		return &UnknownKeyError{Name: name, KeyID: unknown.ID.String()}
+	case errors.As(err, &bad):
+		return &SignatureMismatchError{Name: name, KeyID: bad.ID.String(), Err: err}
+	default:
+		return fmt.Errorf("update: verifying signature %q: %w", name, err)
+	}
 }
 
 // fetchArchive downloads sel's archive to a temporary file, checks its digest against want and

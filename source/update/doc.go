@@ -19,10 +19,16 @@
 //
 // [Config.Download] fetches the archive a [Selection] names to a temporary file in TempDir and
 // returns it as an [*Archive] only once its SHA-256 digest matches the one the release's checksums
-// file lists for it. The download is bounded: the archive may carry at most MaxDownloadBytes, the
-// checksums file at most 1 MiB, and each request has a DownloadTimeout deadline. The temporary file
-// is removed on every failure and by [Archive.Close]. [WithProgress] reports the archive's progress.
-// HTTPS is not enforced; the digest check is the integrity guarantee.
+// file lists for it. With TrustedKeys, the checksums file is trusted only once its minisign
+// signature, the checksums asset's name followed by ".minisig", verifies with the trusted key its
+// key id names; that check precedes parsing the checksums file and requesting the archive, so a
+// [*SignatureMalformedError], an [*UnknownKeyError], a [*SignatureMismatchError] or a missing
+// signature refuses the release with no archive fetched. The signed checksums file vouches for the
+// archive through its digest. Under AllowUnsigned no signature is fetched and the digest check
+// proves integrity only. The download is bounded: the archive may carry at most MaxDownloadBytes,
+// the checksums file at most 1 MiB, the signature at most 4 KiB, and each request has a
+// DownloadTimeout deadline. The temporary file is removed on every failure and by [Archive.Close].
+// [WithProgress] reports the archive's progress. HTTPS is not enforced.
 //
 // [Config.Extract] turns the verified [*Archive] into a [*Staged] binary: a new file, mode 0700 and
 // synced, in a directory the caller supplies, so that a rename into place stays on one filesystem.
