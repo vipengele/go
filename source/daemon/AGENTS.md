@@ -45,9 +45,38 @@ golangci-lint run
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`; `ErrNilFunc` is in `func.go`,
   `ErrNilServer` and `ErrNilListener` in `http.go`.
 
+## The `service` package
+
+`go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd, launchd,
+the Windows service control manager) behind the `Manager` interface: `Prepare`, `Install`,
+`Uninstall`, `Start`, `Stop` and `Status`, each taking only a context. Read its `doc.go` first and
+`docs/adr/0024-service-drivers-are-selected-at-runtime.md`.
+
+- `manager.go` — `Manager` and `New(cfg, opts...)`, which validates the `Config` against the target
+  GOOS and then switches on it to select the driver.
+- `option.go` — `Option` and `WithGOOS`; `""` means `runtime.GOOS`, `"windows"` applies the Windows
+  rules and every other value the POSIX rules.
+- `config.go` — `Config` (`Name`, `Description`, `Binary`, `Args`, `Env`, `WorkingDir`, `User`,
+  `Scope`) and `Validate`.
+- `state.go` — `State` (unknown, not installed, stopped, starting, running, failed) and `Status`.
+- `errors.go` — the sentinel errors, `ErrInvalidConfig` and `ErrUnsupported` among them.
+
+Conventions of the package:
+
+- Validation follows the target GOOS, never the host's: no `filepath.IsAbs`. The rules come
+  from the target GOOS; `runtime.GOOS` is only the default target (`New` without `WithGOOS`, and
+  `Config.Validate`). Tests render and validate any OS's service on any host through `WithGOOS`.
+- No build tags and no `_windows.go` file. Only the operating-system calls themselves, the Windows
+  service control manager, could ever need one.
+- `State` names go through `switch` in `String`, `MarshalText` and `UnmarshalText`, never a
+  package-level table: `gochecknoglobals` is enabled.
+- `Validate` returns `errors.Join` of `ErrInvalidConfig`-wrapped violations in a fixed order: fields
+  in declaration order, `Args` by index, `Env` by sorted key.
+- Standard library only.
+
 ## Conventions
 
-- The package is not stdlib-only: it requires `go.vipengele.org/filelock` and
+- The root `daemon` package is not stdlib-only: it requires `go.vipengele.org/filelock` and
   `go.vipengele.org/cli/spec` (for `spec.Identity` and `cli/spec/paths`), which bring in
   `go.vipengele.org/commons` and `golang.org/x/sys` indirectly.
 - The grace period's context is made from `context.Background()`, never from the cancelled run context.

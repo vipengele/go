@@ -333,3 +333,13 @@ The directory of a tool that holds the files of its running instance, the **Inst
 **Holder record**. It is resolved by `cli/spec/paths` like the other directories and persists
 across logins (ADR-0009, ADR-0023).
 _Avoid_: XDG_RUNTIME_DIR (the system removes it at logout), tmp directory, run directory
+
+**Driver**:
+The library's adapter to one operating system's service manager, which turns a described **Service**
+into that manager's own registration and drives it.
+_Avoid_: backend, provider, plugin
+
+**Service state**:
+The condition of a **Service** as the library reports it: unknown, not installed, stopped, starting,
+running or failed. Unknown means the service manager could not say.
+_Avoid_: status (the report as a whole), health
