@@ -15,9 +15,12 @@ const statusSchema = 1
 // Handler returns the http.Handler that answers the health routes. Each request runs the checks
 // afresh under the request's context.
 //
-//   - /livez answers 200 when the snapshot is live and 503 otherwise.
-//   - /readyz answers 200 when the snapshot is ready and 503 otherwise.
-//   - Both write the overall status ("ok", "unready" or "down") and a newline as text/plain.
+//   - /livez runs only the Liveness checks, a check of both kinds included, and answers 200 with
+//     "ok" when they all pass and 503 with "down" otherwise. A Readiness check never runs for it,
+//     so a slow or failing dependency neither delays nor fails the probe that decides a restart.
+//   - /readyz runs every check and answers 200 when the snapshot is ready and 503 otherwise, with
+//     its overall status: "ok", "unready" or "down".
+//   - Both write their status and a newline as text/plain.
 //   - /status always answers 200 with the snapshot as an application/json envelope whose first key
 //     is "schema".
 //
@@ -33,8 +36,10 @@ func (h *Health) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 
 	var route func(Snapshot) (int, string)
+	var only Kind
 	switch r.URL.Path {
 	case "/livez":
+		only = Liveness
 		route = func(s Snapshot) (int, string) { return probeCode(s.Live), string(s.Status) + "\n" }
 	case "/readyz":
 		route = func(s Snapshot) (int, string) { return probeCode(s.Ready), string(s.Status) + "\n" }
@@ -49,7 +54,7 @@ func (h *Health) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap := h.Snapshot(r.Context())
+	snap := h.snapshot(r.Context(), only)
 	code, contentType := http.StatusOK, "application/json"
 	var body bytes.Buffer
 	if route != nil {

@@ -121,9 +121,14 @@
 // the Health, including supervisor.live and supervisor.ready, makes New fail with
 // ErrDuplicateCheck.
 //
+// A check still running when its timeout expires fails with ErrCheckTimeout and is left to
+// return on its own; until it does, later snapshots report it as failing without running it again.
+//
 // Handler serves a Health over HTTP: /livez and /readyz answer 200 or 503, and /status the
-// snapshot as JSON. The status command of package daemoncmd is a client of /status: it prints the
-// snapshot as text, or as the same JSON under the App's JSON output, and fails unless it is ok.
+// snapshot as JSON. /livez runs only the Liveness checks, so a slow dependency cannot delay the
+// probe that decides a restart; /readyz and /status run every check. The status command of
+// package daemoncmd is a client of /status: it prints the snapshot as text, or as the same JSON
+// under the App's JSON output, and fails unless it is ok.
 //
 // # Errors
 //

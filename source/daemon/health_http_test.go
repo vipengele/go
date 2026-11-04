@@ -3,9 +3,11 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -48,7 +50,7 @@ func TestHandlerProbes(t *testing.T) {
 		body            string
 	}{
 		{"livez ok", "", "", "/livez", 200, "ok\n"},
-		{"livez unready", "", "x", "/livez", 200, "unready\n"},
+		{"livez with readiness failing", "", "x", "/livez", 200, "ok\n"},
 		{"livez down", "x", "", "/livez", 503, "down\n"},
 		{"readyz ok", "", "", "/readyz", 200, "ok\n"},
 		{"readyz unready", "", "x", "/readyz", 503, "unready\n"},
@@ -68,6 +70,58 @@ func TestHandlerProbes(t *testing.T) {
 			}
 			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 				t.Errorf("Cache-Control = %q", got)
+			}
+		})
+	}
+}
+
+func TestHandlerLivezRunsOnlyLivenessChecks(t *testing.T) {
+	tests := []struct {
+		name    string
+		liveErr string
+		code    int
+		body    string
+	}{
+		{name: "liveness passes", code: 200, body: "ok\n"},
+		{name: "liveness fails", liveErr: "stuck", code: 503, body: "down\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var live, both, ready atomic.Int32
+			h := NewHealth()
+			liveCheck := Check(pass)
+			if tt.liveErr != "" {
+				liveCheck = failWith(tt.liveErr)
+			}
+			mustAdd(t, h, "self", func(ctx context.Context) error {
+				live.Add(1)
+				return liveCheck(ctx)
+			}, Liveness)
+			mustAdd(t, h, "loop", func(context.Context) error {
+				both.Add(1)
+				return nil
+			}, Liveness, Readiness)
+			mustAdd(t, h, "db", func(context.Context) error {
+				ready.Add(1)
+				return errors.New("refused")
+			}, Readiness)
+
+			rec := serve(h, http.MethodGet, "/livez")
+
+			if rec.Code != tt.code {
+				t.Errorf("code = %d, want %d", rec.Code, tt.code)
+			}
+			if got := rec.Body.String(); got != tt.body {
+				t.Errorf("body = %q, want %q", got, tt.body)
+			}
+			if got := live.Load(); got != 1 {
+				t.Errorf("liveness check called %d times, want 1", got)
+			}
+			if got := both.Load(); got != 1 {
+				t.Errorf("check of both kinds called %d times, want 1", got)
+			}
+			if got := ready.Load(); got != 0 {
+				t.Errorf("readiness check called %d times, want 0", got)
 			}
 		})
 	}

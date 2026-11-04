@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -171,6 +172,48 @@ func TestSnapshotTimeout(t *testing.T) {
 		if r.Duration < time.Millisecond {
 			t.Errorf("check %q: Duration = %v, want at least the timeout", r.Name, r.Duration)
 		}
+	}
+}
+
+func TestSnapshotDoesNotRerunCheckWithAbandonedRun(t *testing.T) {
+	release, returned := make(chan struct{}), make(chan struct{}, 1)
+	var calls atomic.Int32
+	h := NewHealth(WithCheckTimeout(time.Millisecond))
+	mustAdd(t, h, "stuck", func(context.Context) error {
+		defer func() { returned <- struct{}{} }()
+		if calls.Add(1) == 1 {
+			<-release
+		}
+		return nil
+	})
+	state := h.checks["stuck"].state
+
+	first := h.Snapshot(t.Context()).Checks[0]
+	if first.Status != CheckFail || !strings.HasPrefix(first.Error, ErrCheckTimeout.Error()) {
+		t.Fatalf("first run = %+v, want a fail with the timeout", first)
+	}
+
+	second := h.Snapshot(t.Context()).Checks[0]
+	if second.Status != CheckFail || !strings.Contains(second.Error, "still running") {
+		t.Errorf("run during the abandoned one = %+v, want a fail naming the run still running", second)
+	}
+	if !strings.HasPrefix(second.Error, ErrCheckTimeout.Error()) {
+		t.Errorf("run during the abandoned one: Error = %q, want the timeout error", second.Error)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("check called %d times while its abandoned run was still running, want 1", got)
+	}
+
+	close(release)
+	<-returned
+	<-state.idleChan()
+
+	third := h.Snapshot(t.Context()).Checks[0]
+	if third.Status != CheckPass {
+		t.Errorf("run after the abandoned one returned = %+v, want a pass", third)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("check called %d times, want 2", got)
 	}
 }
 

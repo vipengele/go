@@ -251,7 +251,7 @@ func ExampleHealth() {
 	// Output:
 	// /livez 200 ok
 	// /readyz 200 ok
-	// /livez 200 unready
+	// /livez 200 ok
 	// /readyz 503 unready
 	// serveHealth: <nil>
 }

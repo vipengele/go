@@ -33,9 +33,13 @@ result as one **Health snapshot** over HTTP and through a `status` command.
   a check that panics is recovered as a `fail`.
 - **Execution.** A snapshot runs every check concurrently when it is requested, each under its own
   timeout, two seconds unless `WithCheckTimeout` sets another. A check that outlasts it fails with
-  the timeout. Nothing is cached and nothing runs in the background.
-- **HTTP.** `Health.Handler()` is a plain `http.Handler` serving three paths. `/livez` and
-  `/readyz` answer 200 or 503 with a short text body: `ok`, `unready` or `down`. `/status` always
+  the timeout and is left to return on its own; until it does, that check is not started again,
+  and every snapshot in the meantime reports it as failing with the timeout without calling it.
+  Nothing is cached and nothing runs in the background.
+- **HTTP.** `Health.Handler()` is a plain `http.Handler` serving three paths. `/livez` runs only
+  the liveness checks, a check of both kinds included, and answers 200 `ok` or 503 `down`.
+  `/readyz` runs every check and answers 200 or 503 with the overall status: `ok`, `unready` or
+  `down`. `/status` always
   answers 200, with `application/json` and the envelope of
   `docs/adr/0014-json-output-envelope.md`. Every
   response carries `Cache-Control: no-store`, and a method other than GET or HEAD is 405. Where the
@@ -97,8 +101,16 @@ result as one **Health snapshot** over HTTP and through a `status` command.
 
 - **A restart and a wait are different decisions.** A dependency outage makes the daemon
   `unready` and leaves it `live`.
-- **A snapshot costs the work of its checks.** Each request to `/status` or a probe route runs
-  every check, so a slow check is bounded by its timeout, not hidden by a cache.
+- **A snapshot costs the work of its checks.** Each request to `/status` or `/readyz` runs every
+  check, and each request to `/livez` every liveness check, so a slow check is bounded by its
+  timeout, not hidden by a cache.
+- **A dependency cannot slow the liveness probe.** `/livez` runs no readiness check, so a hung
+  dependency, which costs `/readyz` up to the check timeout, leaves `/livez` as fast as the
+  process's own checks. An orchestrator's liveness probe timeout, one second by default in
+  Kubernetes, below the two-second check timeout, would otherwise turn a dependency outage into
+  restarts.
+- **A check that ignores its context holds one goroutine.** An abandoned run is never joined by a
+  second run of the same check, so a stuck check costs one goroutine however often probes ask.
 - **A health route on the HTTP Runner stops answering first.** That Runner stops before the
   Runners started earlier (`docs/adr/0021-a-runner-starts-when-ready-and-reports-its-exit-through-done.md`), so the route goes away before the work it reports on.
 - **Two writers of one envelope.** The helper in the root package and `spec.WriteJSON` must stay

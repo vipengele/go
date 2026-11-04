@@ -69,7 +69,10 @@ func (k *Kind) UnmarshalText(text []byte) error {
 
 // Check is one health check. It returns nil when the check passes and an error saying what is
 // wrong when it fails. The context is cancelled when the check's timeout expires; a Check that
-// ignores it fails at the timeout all the same.
+// ignores it fails at the timeout all the same, and keeps running until it returns. While such a
+// run of a check is still running, the check is not run again: every Snapshot taken in the
+// meantime reports it as failing with ErrCheckTimeout without calling it, so a Check stuck on
+// something it does not let the context interrupt holds one goroutine, not one per Snapshot.
 type Check func(ctx context.Context) error
 
 // State is the overall status of a Snapshot.
@@ -252,13 +255,84 @@ type Health struct {
 type registered struct {
 	check Check
 	kinds []Kind
+	state *checkState
 }
 
-// namedCheck is one check to add, as Add receives it.
+// namedCheck is one check to add, as Add receives it, or to run, as Snapshot takes it. state is
+// nil until the check is registered.
 type namedCheck struct {
 	name  string
 	check Check
 	kinds []Kind
+	state *checkState
+}
+
+// checkState counts the runs of one registered check that a Snapshot abandoned and that have not
+// returned yet. A check is not started again while the count is above zero.
+type checkState struct {
+	mu        sync.Mutex
+	abandoned int
+
+	// idle is closed while abandoned is zero, and replaced by an open channel when it rises from
+	// zero.
+	idle chan struct{}
+}
+
+// newCheckState returns the state of a check with no abandoned run.
+func newCheckState() *checkState {
+	idle := make(chan struct{})
+	close(idle)
+	return &checkState{idle: idle}
+}
+
+// stuck reports whether an abandoned run of the check has not returned yet.
+func (s *checkState) stuck() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.abandoned > 0
+}
+
+// idleChan returns a channel that is closed once no abandoned run of the check is still running.
+func (s *checkState) idleChan() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idle
+}
+
+// checkRun is one run of a check, shared between the goroutine running it and the run that waits
+// for it. Its fields are guarded by the check's checkState.mu.
+type checkRun struct {
+	returned  bool
+	abandoned bool
+}
+
+// abandon records that the waiter stopped waiting for r. It counts r as abandoned unless the check
+// has already returned.
+func (s *checkState) abandon(r *checkRun) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.returned {
+		return
+	}
+	r.abandoned = true
+	if s.abandoned == 0 {
+		s.idle = make(chan struct{})
+	}
+	s.abandoned++
+}
+
+// finish records that the check of r returned, and uncounts r when it was abandoned.
+func (s *checkState) finish(r *checkRun) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.returned = true
+	if !r.abandoned {
+		return
+	}
+	s.abandoned--
+	if s.abandoned == 0 {
+		close(s.idle)
+	}
 }
 
 // NewHealth returns an empty Health whose uptime counts from now.
@@ -320,7 +394,7 @@ func (h *Health) addAll(checks []namedCheck) error {
 				return fmt.Errorf("%w: check %q has kind %d", ErrUnknownKind, c.name, uint8(k))
 			}
 		}
-		batch[c.name] = registered{check: c.check, kinds: kinds}
+		batch[c.name] = registered{check: c.check, kinds: kinds, state: newCheckState()}
 	}
 	maps.Copy(h.checks, batch)
 	return nil
@@ -329,13 +403,23 @@ func (h *Health) addAll(checks []namedCheck) error {
 // Snapshot runs every registered check and reports the result. The checks run concurrently, each
 // under a context derived from ctx that its timeout bounds. A check that returns an error, panics,
 // or is still running when its timeout expires or ctx is done fails; one that outlasts its timeout
-// fails with ErrCheckTimeout, and Snapshot returns without waiting for it to finish. Snapshot
-// never fails: every problem is the result of a check.
+// fails with ErrCheckTimeout, and Snapshot returns without waiting for it to finish. Until that
+// run returns, the check is not run again: a Snapshot reports it as failing with ErrCheckTimeout
+// and a Duration of zero. Snapshot never fails: every problem is the result of a check.
 func (h *Health) Snapshot(ctx context.Context) Snapshot {
+	return h.snapshot(ctx, 0)
+}
+
+// snapshot is Snapshot over the checks of kind only, or of every kind when only is zero. A check
+// of both kinds is of each.
+func (h *Health) snapshot(ctx context.Context, only Kind) Snapshot {
 	h.mu.Lock()
 	checks := make([]namedCheck, 0, len(h.checks))
 	for name, r := range h.checks {
-		checks = append(checks, namedCheck{name: name, check: r.check, kinds: r.kinds})
+		if only != 0 && !slices.Contains(r.kinds, only) {
+			continue
+		}
+		checks = append(checks, namedCheck{name: name, check: r.check, kinds: r.kinds, state: r.state})
 	}
 	h.mu.Unlock()
 	slices.SortFunc(checks, func(a, b namedCheck) int { return cmp.Compare(a.name, b.name) })
@@ -374,18 +458,27 @@ func (h *Health) Snapshot(ctx context.Context) Snapshot {
 }
 
 // run runs one check under its timeout and returns its result. The check runs in a goroutine of
-// its own, which run abandons when the timeout expires or ctx is done first.
+// its own, which run abandons when the timeout expires or ctx is done first. A check with an
+// abandoned run that has not returned fails at once, without being called.
 func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
+	result := CheckResult{Name: c.name, Kinds: slices.Clone(c.kinds), Status: CheckPass}
+	if c.state.stuck() {
+		result.Status = CheckFail
+		result.Error = fmt.Errorf("%w: an earlier run is still running", ErrCheckTimeout).Error()
+		return result
+	}
+
 	checkCtx, cancel := context.WithTimeoutCause(ctx, h.timeout,
 		fmt.Errorf("%w after %v", ErrCheckTimeout, h.timeout))
 	defer cancel()
 
-	result := CheckResult{Name: c.name, Kinds: slices.Clone(c.kinds), Status: CheckPass}
 	start := h.now()
 
 	// done is buffered so that an abandoned check can still deliver its error and exit.
 	done := make(chan error, 1)
+	cr := &checkRun{}
 	go func() {
+		defer c.state.finish(cr)
 		defer func() {
 			if v := recover(); v != nil {
 				done <- fmt.Errorf("daemon: health check %q panicked: %v", c.name, v)
@@ -403,6 +496,7 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 		}
 	case <-checkCtx.Done():
 		err = context.Cause(checkCtx)
+		c.state.abandon(cr)
 	}
 	result.Duration = h.now().Sub(start)
 	if err != nil {
