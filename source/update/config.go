@@ -12,6 +12,7 @@ import (
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/paths"
+	"go.vipengele.org/cli/spec/terminal"
 	"go.vipengele.org/commons/validate"
 	"go.vipengele.org/update/asset"
 )
@@ -31,6 +32,10 @@ const (
 	defaultMaxExtractBytes int64 = 512 << 20
 	// defaultDownloadTimeout is the [Config.DownloadTimeout] a zero value resolves to.
 	defaultDownloadTimeout = 5 * time.Minute
+	// defaultCheckInterval is the [Config.CheckInterval] a zero value resolves to.
+	defaultCheckInterval = 24 * time.Hour
+	// minCheckInterval is the shortest [Config.CheckInterval] that is valid.
+	minCheckInterval = time.Hour
 )
 
 // Config is everything the update library needs to know about a tool, and every seam through
@@ -84,6 +89,19 @@ type Config struct {
 	// PostUpdate lists the hooks [RunPostUpdate] runs, in order, once the installed binary has
 	// replaced the old one. Empty means none.
 	PostUpdate []PostUpdate
+	// Version is the running program's version. A version that is not a release version, as
+	// version.IsRelease in go.vipengele.org/cli/spec/version defines it (empty, "dev", a
+	// pseudo-version, or any version with build metadata such as "+dirty"), never checks for an
+	// update. The zero value is empty, so a Config that sets no Version never checks.
+	Version string
+	// DisableCheck turns the background update check off when true. The zero value leaves it on.
+	DisableCheck bool
+	// CheckInterval is the minimum time between check attempts. Zero means 24 hours; a negative
+	// value or one under 1 hour is invalid.
+	CheckInterval time.Duration
+	// StateStore keeps the state of the update check between runs. Nil means a store of the file
+	// "update-state.json" in the resolved StateDir.
+	StateStore StateStore
 
 	// HTTPClient makes every HTTP request. Nil means a new [http.Client] of the Config's own,
 	// never [http.DefaultClient].
@@ -116,6 +134,9 @@ type Config struct {
 	// [paths.InContainer] for the resolved GOOS, reading the environment through Getenv and the
 	// real filesystem.
 	InContainer func() bool
+	// IsTerminal reports whether stderr is a terminal. Nil means the real standard streams, as
+	// [terminal.Detect] probes them.
+	IsTerminal func() bool
 }
 
 // Validate returns nil when the Config can be used. Otherwise it returns one error listing every
@@ -124,10 +145,11 @@ type Config struct {
 // AssetTemplate, ChecksumsAsset or AssetExt must be valid: AssetTemplate by [asset.Validate],
 // ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
 // "}" and not starting with ".", and, when the AssetTemplate holds {ext}, being "tar.gz", "tgz" or
-// "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative, and no entry
-// of Detectors may be nil. Each of those is a [validate.FieldError] wrapping [validate.ErrInvalid],
-// the one for a nil detector naming its index as Detectors[i], and the AssetTemplate and
-// ChecksumsAsset ones also wrap the error of package asset.
+// "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative, no entry of
+// Detectors may be nil, and CheckInterval must be zero or at least 1 hour. Each of those is a
+// [validate.FieldError] wrapping [validate.ErrInvalid], the one for a nil detector naming its index
+// as Detectors[i], and the AssetTemplate and ChecksumsAsset ones also wrap the error of package
+// asset.
 func (c Config) Validate() error {
 	return validate.Join(
 		c.Identity.Validate(),
@@ -138,6 +160,7 @@ func (c Config) Validate() error {
 		checkNotNegative("MaxExtractBytes", c.MaxExtractBytes),
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
 		checkDetectors(c.Detectors),
+		checkInterval("CheckInterval", c.CheckInterval),
 	)
 }
 
@@ -169,6 +192,19 @@ func lookupEnvOf(getenv func(string) string) func(string) (string, bool) {
 func checkNotNegative(field string, v int64) error {
 	if v < 0 {
 		return &validate.FieldError{Field: field, Value: strconv.FormatInt(v, 10), Err: fmt.Errorf("%w: must not be negative", validate.ErrInvalid)}
+	}
+	return nil
+}
+
+// checkInterval rejects an interval that is negative or under [minCheckInterval]; zero means the
+// default.
+func checkInterval(field string, d time.Duration) error {
+	if d != 0 && d < minCheckInterval {
+		return &validate.FieldError{
+			Field: field,
+			Value: d.String(),
+			Err:   fmt.Errorf("%w: must be zero or at least %v", validate.ErrInvalid, minCheckInterval),
+		}
 	}
 	return nil
 }
@@ -329,6 +365,16 @@ func (c Config) resolve() (Config, error) {
 	if r.InContainer == nil {
 		probes := paths.Probes{GOOS: r.GOOS, LookupEnv: lookupEnvOf(r.Getenv)}
 		r.InContainer = func() bool { return paths.InContainer(probes) }
+	}
+	if r.CheckInterval == 0 {
+		r.CheckInterval = defaultCheckInterval
+	}
+	if r.IsTerminal == nil {
+		isTerminal := terminal.Detect(os.Stdin, os.Stdout, os.Stderr)
+		r.IsTerminal = func() bool { return isTerminal(spec.Stderr) }
+	}
+	if r.StateStore == nil {
+		r.StateStore = &fileStore{dir: r.StateDir}
 	}
 	return r, nil
 }

@@ -260,6 +260,25 @@ executable resolves to after symlinks, or, for a container, from the environment
 filesystem.
 _Avoid_: managed install, package-managed install, foreign install
 
+**Update check**:
+The background look at the **Release source** for a newer release than the running one. It runs only
+when it is eligible: the binary is not a **Dev build**, the process is not in CI, stderr is a
+terminal, the tool has not disabled it, the user has not opted out through `<PREFIX>_NO_UPDATE_CHECK`,
+and the check interval has passed since the last **Check attempt**.
+_Avoid_: update poll, version check, ping
+
+**Check attempt**:
+An **Update check** that ran to an outcome: a newer release, none, or a failure, including a request
+to the **Release source** that timed out. A check stopped because its command ended, whether
+cancelled or past the bound the process waits for it, is not an attempt and does not restart the
+interval.
+_Avoid_: try, run, last check (when a cancelled check is meant)
+
+**Update state**:
+What `update` remembers between runs: the time of the last **Check attempt** and the latest release
+version it saw. Losing or corrupting it costs one extra **Update check**, nothing more (ADR-0023).
+_Avoid_: cache, update config
+
 **Runner**:
 One unit of long-running work in a daemon (the HTTP server, a scheduled task, the update check)
 with a start that returns once it is ready, an exit it reports once its work has ended, and a stop
