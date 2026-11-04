@@ -13,15 +13,18 @@ result as one **Health snapshot** over HTTP and through a `status` command.
 
 ## The rule
 
-- **Supervisor feed.** `WithHealth(h)` makes the Supervisor register a built-in `supervisor`
-  check, liveness and readiness, from state guarded by a mutex and separate from the fields the
-  `Run` goroutine alone writes. Readiness passes only when every `Start` has returned, no Runner
-  has exited or been isolated, and shutdown has not begun; it fails while starting, during
-  shutdown and after an isolated panic. Liveness passes while `Run` is between the beginning of
-  its start phase and its return. An isolated panic does not fail liveness: isolation exists to
-  keep the process up. A Runner with a `CheckHealth(ctx) error` method is registered as a
-  readiness check named after the Runner, and the method is called only while that Runner is
-  running; at any other time the check fails without calling it.
+- **Supervisor feed.** `WithHealth(h)` makes the Supervisor register two built-in checks,
+  `supervisor.live`, a liveness check, and `supervisor.ready`, a readiness check, from state
+  guarded by a mutex and separate from the fields the `Run` goroutine alone writes.
+  `supervisor.ready` passes only when every `Start` has returned, no Runner has exited or been
+  isolated, and shutdown has not begun; it fails while starting, during shutdown and after an
+  isolated panic. `supervisor.live` passes while `Run` is between the beginning of its start phase
+  and its return. An isolated panic does not fail liveness: isolation exists to keep the process
+  up. A Runner with a `CheckHealth(ctx) error` method is registered as a readiness check named
+  after the Runner, and the method is called only while that Runner is running; at any other time
+  the check fails without calling it. A Runner name already held by the `Health`, including
+  `supervisor.live` and `supervisor.ready`, makes `New` fail. Registration is the last step of
+  `New`, all or none, so a `New` that fails leaves the `Health` as it was.
 - **Vocabulary.** A check result is `pass` or `fail`, with an error text and a duration. The
   overall `status` is `down` when any liveness check fails, else `unready` when any readiness check
   fails, else `ok`. The snapshot also carries `live` and `ready` booleans and the uptime since the
@@ -76,6 +79,10 @@ result as one **Health snapshot** over HTTP and through a `status` command.
 - **Failing liveness on an isolated panic.** `PanicIsolate` exists to keep the process up while
   one Runner is gone. Failing liveness would have the orchestrator kill the process the policy was
   chosen to preserve; the loss shows in readiness instead.
+- **One `supervisor` check with both kinds.** Any failing check of the liveness kind makes the
+  snapshot `down`, so a single check carrying both kinds fails liveness whenever it fails
+  readiness, and cannot report live but unready: while starting, while stopping and after an
+  isolated panic. Two checks, one per kind, keep the two answers apart.
 - **A `schema` field inside `Snapshot`.** The type would then be marshalled alone as a
   different shape from the one on the wire, and `spec.WriteJSON` rejects a value that carries
   `schema`. The envelope is added at the write.
