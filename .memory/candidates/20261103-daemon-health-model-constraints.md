@@ -1,5 +1,5 @@
 ---
-about: "What the daemon health model rests on: supervisor health state is a separate mutex-guarded feed, launched stays Run-goroutine-only, the HTTP Runner stops first, and the root package stays stdlib-only while daemoncmd requires cli/spec"
+about: "What the daemon health model rests on: supervisor health state is a separate mutex-guarded feed, launched stays Run-goroutine-only, the HTTP Runner stops first, and the root package takes only spec.Identity, cli/spec/paths and filelock while daemoncmd uses the rest of cli/spec"
 saw:
   - source/daemon/supervisor.go
   - source/daemon/runner.go
@@ -23,10 +23,12 @@ saw:
 - The HTTP Runner (http.go, `DefaultHTTPOrder` 100) starts last and stops first, so a health
   route mounted on it stops answering before the work it reports on
   (docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md, Consequences).
-- The root package imports only the standard library; `daemoncmd` alone requires `cli/spec`
-  (go.mod, directory replaces for `cli/spec` and `commons`). `.golangci.yml` enforces it with a
-  depguard rule over `!**/daemoncmd/**`. Commands are `*spec.Command` from cli/spec, never
-  cli/core (ADR-0005).
-- `writeEnvelope` (health_http.go) duplicates `spec.WriteJSON`'s layout (cli/spec/json.go)
-  because the root package cannot import cli/spec; `daemoncmd/status_test.go` compares the
-  command's JSON with the handler's `/status` body byte for byte, which is what catches drift.
+- The root package imports from siblings only `cli/spec` (`spec.Identity`), `cli/spec/paths` and
+  `filelock`, for the instance lock
+  (docs/adr/0023-a-daemons-single-instance-is-a-filelock-try-lock-with-a-holder-record.md); only
+  `daemoncmd` imports other `cli/spec` packages. `.golangci.yml` enforces it with a depguard rule
+  over `!**/daemoncmd/**` that allows exactly those, plus `daemon` and `daemon/service`. Commands
+  are `*spec.Command` from cli/spec, never cli/core (ADR-0005).
+- `writeEnvelope` (health_http.go) duplicates `spec.WriteJSON`'s layout (cli/spec/json.go) even
+  though the root package imports cli/spec; `daemoncmd/status_test.go` compares the command's
+  JSON with the handler's `/status` body byte for byte, which is what catches drift.

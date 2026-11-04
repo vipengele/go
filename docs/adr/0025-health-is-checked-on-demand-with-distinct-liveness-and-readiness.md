@@ -61,9 +61,12 @@ result as one **Health snapshot** over HTTP and through a `status` command.
   body and the output of the `status` command under `--json` are byte-identical. A key renamed,
   removed or retyped increments `schema`; an added key does not.
 - **Boundary.** `Snapshot` and `CheckResult` have no `schema` field, because `spec.WriteJSON`
-  refuses a value that already carries one. The root `daemon` package imports only the standard
-  library and writes the envelope with a helper of its own in the same layout; only
-  `daemon/daemoncmd` imports `cli/spec`. Tests on both sides pin the same keys.
+  refuses a value that already carries one. The root `daemon` package takes from `cli/spec` only
+  what the instance lock of
+  `docs/adr/0023-a-daemons-single-instance-is-a-filelock-try-lock-with-a-holder-record.md` needs,
+  `spec.Identity` and `cli/spec/paths`, and writes the envelope with a helper of its own in the
+  same layout; `daemon/daemoncmd` imports `cli/spec` for its command and its output. Tests on both
+  sides pin the same keys.
 
 ## Considered options
 
@@ -93,9 +96,9 @@ result as one **Health snapshot** over HTTP and through a `status` command.
 - **Downstream dependencies in liveness.** A failed dependency would restart every daemon that
   uses it, which turns one outage into a restart loop. Liveness holds only what the process knows
   of itself.
-- **Importing `cli/spec` in the root package for `spec.WriteJSON`.** It would end the root
-  package's standard-library-only imports for one function; a local helper with a pinned layout
-  keeps both.
+- **Calling `spec.WriteJSON` from the root package.** The root package takes from `cli/spec` only
+  what the instance lock needs; a local helper with a pinned layout keeps the health wire form in
+  the root package, at the cost of two writers of one envelope.
 
 ## Consequences
 

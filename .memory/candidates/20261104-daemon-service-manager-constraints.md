@@ -20,8 +20,9 @@ day against origin/main 41e2e24 (#163), which made the first version wrong in th
   `go.vipengele.org/filelock` with directory replaces (`../cli/spec`, `../filelock`, and
   `../commons`, indirect), plus `golang.org/x/sys v0.49.0` indirect. `source/daemon/AGENTS.md`
   Conventions: "The root `daemon` package is not stdlib-only" (the `daemon/service`
-  package itself imports only the standard library). `.golangci.yml` depguard still denies cobra and
-  `cli/core/**` only; `cli/spec` is allowed. A direct `x/sys/windows/svc` requirement would still
+  package itself imports only the standard library). `.golangci.yml` depguard denies cobra and
+  `cli/core` everywhere and, outside `daemoncmd/`, every `go.vipengele.org/` import but `daemon`,
+  `daemon/service`, `cli/spec`, `cli/spec/paths` and `filelock`. A direct `x/sys/windows/svc` requirement would still
   be new for daemon (ADR-0003 expects it; ADR-0019 is the precedent for scoping x/sys to one project).
 - ADR-0003 assigns service managers to `daemon`, service commands to `daemon/daemoncmd`; cobra is
   denied everywhere in daemon by depguard, so that needs its own depguard decision.
