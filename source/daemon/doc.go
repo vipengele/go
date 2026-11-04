@@ -94,6 +94,32 @@
 // Runner abandoned at the end of the grace period may still be running when the lock is
 // released.
 //
+// # Health
+//
+// A Health, built with NewHealth, is a registry of health checks that runs them all, concurrently
+// and each under its own timeout, whenever a Snapshot is asked for. A Liveness check says whether
+// the process should be restarted, a Readiness check whether it should receive traffic. The
+// snapshot is down when a liveness check fails, else unready when a readiness check fails, else
+// ok.
+//
+// WithHealth has New register the Supervisor's own checks in a Health, as its last step and all
+// or none, so a New that fails leaves the Health as it was. They are fed from state Run publishes
+// at each step of the run:
+//
+//   - supervisor.live, a Liveness check, passes from the beginning of the start phase until Run
+//     returns. A panic isolated under PanicIsolate does not fail it: isolation keeps the process
+//     up.
+//   - supervisor.ready, a Readiness check, passes once every Start has returned, while no Runner
+//     has exited or been isolated and shutdown has not begun.
+//   - Each Runner that is a HealthChecker gets a Readiness check named after it. The check calls
+//     CheckHealth only while the Runner is running: its Start has returned nil, it has not exited
+//     and shutdown has not begun. At any other time it fails without calling CheckHealth.
+//
+// A run is therefore down before Run and after it returns, unready while starting, while stopping
+// and once a Runner's panic has been isolated, and ok in between. A Runner name already held by
+// the Health, including supervisor.live and supervisor.ready, makes New fail with
+// ErrDuplicateCheck.
+//
 // # Errors
 //
 // Run returns nil when its context is cancelled and every Runner stops cleanly. Otherwise it

@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,12 @@ type Supervisor struct {
 
 	// instance, when set, is the instance lock Run holds while any Runner may be running.
 	instance *instanceLock
+
+	// health is the registry New registers the health checks in, or nil.
+	health *Health
+
+	// feed is the state of the run the health checks read.
+	feed feed
 
 	// ran is set by the first Run; a second Run reports ErrAlreadyRan.
 	ran atomic.Bool
@@ -95,7 +102,40 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 	s.newStopContext = func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), grace)
 	}
+	s.feed.track(s.runners)
+	if s.health != nil {
+		if err := s.health.addAll(s.checks()); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// checks returns the health checks of the Supervisor: supervisor.live, supervisor.ready, and one
+// Readiness check per HealthChecker Runner, in start order.
+func (s *Supervisor) checks() []namedCheck {
+	checks := []namedCheck{
+		{name: "supervisor.live", check: func(context.Context) error { return s.feed.live() }, kinds: []Kind{Liveness}},
+		{name: "supervisor.ready", check: func(context.Context) error { return s.feed.ready() }, kinds: []Kind{Readiness}},
+	}
+	for _, r := range s.runners {
+		hc, ok := r.(HealthChecker)
+		if !ok {
+			continue
+		}
+		name := r.Name()
+		checks = append(checks, namedCheck{
+			name: name,
+			check: func(ctx context.Context) error {
+				if err := s.feed.running(name); err != nil {
+					return err
+				}
+				return hc.CheckHealth(ctx)
+			},
+			kinds: []Kind{Readiness},
+		})
+	}
+	return checks
 }
 
 // Run starts every Runner, waits until shutdown begins and blocks until they have all been stopped.
@@ -143,6 +183,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	if !s.ran.CompareAndSwap(false, true) {
 		return ErrAlreadyRan
 	}
+	defer s.feed.setPhase(phaseStopped)
 
 	if s.instance != nil {
 		in, err := AcquireInstance(s.instance.id, s.instance.opts)
@@ -155,8 +196,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 	runs, failure, complete := s.start(ctx)
 	if complete {
+		s.feed.setPhase(phaseRunning)
 		failure = s.wait(ctx, runs)
 	}
+	s.feed.setPhase(phaseStopping)
 
 	stopCtx, cancel := s.newStopContext()
 	defer cancel()
@@ -180,6 +223,7 @@ type instanceLock struct {
 // start runs the start phase. It returns every Runner whose Start it called, in start order, the
 // failure that ends the phase early, and whether every Runner started.
 func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error, complete bool) {
+	s.feed.setPhase(phaseStarting)
 	startCtx, cancel := s.newStartContext(ctx)
 	defer cancel()
 
@@ -190,6 +234,7 @@ func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error
 		}
 		l := &launched{runner: r, name: r.Name(), state: starting, result: make(chan outcome, 1)}
 		runs = append(runs, l)
+		s.feed.setRunner(l.name, runnerStarting, nil)
 		go func() { l.result <- guard(l.name, func() error { return r.Start(startCtx) }) }()
 
 		select {
@@ -197,11 +242,14 @@ func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error
 			switch {
 			case o.err == nil:
 				l.running()
+				s.feed.setRunner(l.name, runnerRunning, l.done)
 			case !o.isPanic() && startCtx.Err() != nil && isContextErr(o.err):
 				l.state = failed
+				s.feed.setRunner(l.name, runnerFailed, nil)
 				return runs, interrupted(ctx, l.name), false
 			default:
 				l.state = failed
+				s.feed.setRunner(l.name, runnerFailed, nil)
 				return runs, l.wrap(o), false
 			}
 		case <-startCtx.Done():
@@ -257,8 +305,10 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
 			o := guard(l.name, l.runner.Err)
 			if s.policy == PanicIsolate && o.isPanic() {
 				l.isolated = o.err
+				s.feed.setRunner(l.name, runnerIsolated, nil)
 				continue
 			}
+			s.feed.setRunner(l.name, runnerExited, nil)
 			if o.err == nil {
 				return fmt.Errorf("daemon: runner %q: %w", l.name, ErrRunnerExited)
 			}
@@ -416,4 +466,180 @@ func (l *launched) pending(reportTimeout bool) []error {
 // timeout reports that the Runner did not finish stopping within the grace period.
 func (l *launched) timeout() error {
 	return fmt.Errorf("daemon: runner %q: %w", l.name, ErrStopTimeout)
+}
+
+// runPhase is how far Run has got, as the health checks see it.
+type runPhase int
+
+const (
+	// phaseIdle is a Supervisor whose Run has not begun.
+	phaseIdle runPhase = iota
+	// phaseStarting is the start phase.
+	phaseStarting
+	// phaseRunning is every Start returned and shutdown not begun.
+	phaseRunning
+	// phaseStopping is shutdown begun and Run not returned.
+	phaseStopping
+	// phaseStopped is Run returned.
+	phaseStopped
+)
+
+// runnerPhase is how far one Runner has got, as the health checks see it.
+type runnerPhase int
+
+const (
+	// runnerIdle is a Runner whose Start has not been called.
+	runnerIdle runnerPhase = iota
+	// runnerStarting is a Runner whose Start has not returned.
+	runnerStarting
+	// runnerRunning is a Runner whose Start returned nil and whose exit Run has not dealt with.
+	runnerRunning
+	// runnerFailed is a Runner whose Start returned an error or panicked.
+	runnerFailed
+	// runnerExited is a Runner whose exit before shutdown began shutdown.
+	runnerExited
+	// runnerIsolated is a Runner whose panic exit was isolated under PanicIsolate.
+	runnerIsolated
+)
+
+// String describes the phase for a failing check.
+func (p runnerPhase) String() string {
+	switch p {
+	case runnerIdle:
+		return "not started"
+	case runnerStarting:
+		return "starting"
+	case runnerRunning:
+		return "running"
+	case runnerFailed:
+		return "failed to start"
+	case runnerExited:
+		return "exited"
+	default:
+		return "exited with a panic and is isolated"
+	}
+}
+
+// feed is the state of a run that the health checks read. Run's goroutine writes it at each
+// transition and any goroutine may read it; mu guards every field. It is kept apart from launched,
+// whose fields Run's goroutine alone reads and writes.
+type feed struct {
+	mu      sync.Mutex
+	phase   runPhase
+	runners []runnerFeed
+	index   map[string]int
+}
+
+// runnerFeed is one Runner in a feed. done is the Runner's Done, set while it is running.
+type runnerFeed struct {
+	name  string
+	phase runnerPhase
+	done  <-chan struct{}
+}
+
+// track sets the feed up for runners, in start order.
+func (f *feed) track(runners []Runner) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runners = make([]runnerFeed, len(runners))
+	f.index = make(map[string]int, len(runners))
+	for i, r := range runners {
+		f.runners[i] = runnerFeed{name: r.Name()}
+		f.index[r.Name()] = i
+	}
+}
+
+// setPhase publishes the phase of the run.
+func (f *feed) setPhase(p runPhase) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.phase = p
+}
+
+// setRunner publishes the phase of the Runner called name, with its Done while it is running.
+func (f *feed) setRunner(name string, p runnerPhase, done <-chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := &f.runners[f.index[name]]
+	r.phase, r.done = p, done
+}
+
+// live is the supervisor.live check: it passes from the beginning of the start phase until Run
+// returns, an isolated panic included.
+func (f *feed) live() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch f.phase {
+	case phaseIdle:
+		return errors.New("daemon: supervisor has not started")
+	case phaseStopped:
+		return errors.New("daemon: supervisor has stopped")
+	default:
+		return nil
+	}
+}
+
+// ready is the supervisor.ready check: it passes once every Start has returned while no Runner
+// has exited or been isolated and shutdown has not begun. A Runner whose Done has closed counts as
+// exited before Run has dealt with the exit.
+func (f *feed) ready() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch f.phase {
+	case phaseIdle:
+		return errors.New("daemon: supervisor has not started")
+	case phaseStarting:
+		for _, r := range f.runners {
+			if r.phase == runnerStarting {
+				return fmt.Errorf("daemon: supervisor is starting runner %q", r.name)
+			}
+		}
+		return errors.New("daemon: supervisor is starting")
+	case phaseStopping:
+		return errors.New("daemon: supervisor is stopping")
+	case phaseStopped:
+		return errors.New("daemon: supervisor has stopped")
+	}
+	for _, r := range f.runners {
+		if r.phase != runnerRunning || closed(r.done) {
+			return fmt.Errorf("daemon: runner %q %v", r.name, r.exitPhase())
+		}
+	}
+	return nil
+}
+
+// running returns nil when the Runner called name is running and shutdown has not begun, and an
+// error saying why it is not otherwise.
+func (f *feed) running(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch f.phase {
+	case phaseStopping:
+		return fmt.Errorf("daemon: runner %q is not running: supervisor is stopping", name)
+	case phaseStopped:
+		return fmt.Errorf("daemon: runner %q is not running: supervisor has stopped", name)
+	}
+	r := f.runners[f.index[name]]
+	if r.phase != runnerRunning || closed(r.done) {
+		return fmt.Errorf("daemon: runner %q is not running: %v", name, r.exitPhase())
+	}
+	return nil
+}
+
+// exitPhase is the phase of r, taking a running Runner whose Done has closed as exited.
+func (r runnerFeed) exitPhase() runnerPhase {
+	if r.phase == runnerRunning && closed(r.done) {
+		return runnerExited
+	}
+	return r.phase
+}
+
+// closed reports whether done has closed. A nil done never closes.
+func closed(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
