@@ -3,6 +3,9 @@ package daemon
 import (
 	"fmt"
 	"time"
+
+	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 )
 
 // PanicPolicy decides what a running Runner that exits with a *PanicError means for the other
@@ -62,6 +65,21 @@ func WithPanicPolicy(policy PanicPolicy) Option {
 			return fmt.Errorf("daemon: unknown panic policy %d", int(policy))
 		}
 		s.policy = policy
+		return nil
+	}
+}
+
+// WithInstanceLock makes Run hold the instance lock of the tool id, as AcquireInstance takes it
+// with opts, for as long as any Runner may be running. Run takes the lock before the first Start
+// and releases it once every Runner has been stopped; while another instance holds it, Run starts
+// no Runner and returns the *AlreadyRunningError. An identity that fails its Validate is rejected
+// by New.
+func WithInstanceLock(id spec.Identity, opts paths.Options) Option {
+	return func(s *Supervisor) error {
+		if err := id.Validate(); err != nil {
+			return fmt.Errorf("daemon: instance lock: %w", err)
+		}
+		s.instance = &instanceLock{id: id, opts: opts}
 		return nil
 	}
 }

@@ -5,8 +5,11 @@
 // the function that releases it. New returns a Locker for one path. NewNoop returns a Locker that
 // grants every Lock at once and touches no file, for callers that need no exclusion.
 //
+// TryLock makes one attempt without waiting and takes no context. When another descriptor holds
+// the lock its error wraps ErrLocked, which errors.Is detects.
+//
 // Every Lock opens its own descriptor on the path, so two Lockers in the same process, or two Locks
-// of one Locker, exclude each other as two processes do.
+// or TryLocks of one Locker, exclude each other as two processes do.
 //
 // # Context
 //
@@ -28,7 +31,7 @@
 // # Platforms
 //
 // The lock is flock on linux, darwin, freebsd, netbsd, openbsd and dragonfly, and LockFileEx on
-// windows. On every other system Lock fails with an error that wraps ErrUnsupported.
+// windows. On every other system Lock and TryLock fail with an error that wraps ErrUnsupported.
 //
 // CI cross-compiles and vets the Windows implementation but never runs it, so its behaviour is
 // untested there. The behaviour tests that every platform shares are what to run on a Windows

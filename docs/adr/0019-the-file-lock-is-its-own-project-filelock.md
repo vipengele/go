@@ -13,6 +13,10 @@ be reachable by `update`, which may not require `cli/core` (ADR-0005), as well a
 
 ## Decisions
 
+- **API.** A `Locker` offers `Lock`, which waits for the lock until its context ends, and `TryLock`,
+  which makes one attempt and returns `ErrLocked` when another holder has the file. `daemon`'s
+  single-instance guard takes it with `TryLock` (ADR-0023).
+
 - **Home.** `source/filelock`, a top-level project with its own `go.mod`, lydite component, `gomod`
   entry and `go.work` line. `daemon` and `update` are its consumers and require it when they take
   the lock.

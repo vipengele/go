@@ -289,6 +289,18 @@ What `update` remembers between runs: the time of the last **Check attempt** and
 version it saw. Losing or corrupting it costs one extra **Update check**, nothing more (ADR-0023).
 _Avoid_: cache, update config
 
+**Trusted key**:
+A minisign public key a tool compiles into its `update` configuration. A release is authentic when
+its **Checksums signature** verifies against one of them. Trusted keys come from the tool's code
+only, never from its environment or configuration (ADR-0024).
+_Avoid_: release key, signing key (the secret half, which only the tool's release pipeline holds)
+
+**Checksums signature**:
+The detached minisign signature over a release's checksums file, published beside it as
+`<checksums asset>.minisig`. It authenticates the checksums file, which in turn vouches for every
+archive it lists (ADR-0024).
+_Avoid_: asset signature, manifest signature
+
 **Runner**:
 One unit of long-running work in a daemon (the HTTP server, a scheduled task, the update check)
 with a start that returns once it is ready, an exit it reports once its work has ended, and a stop
@@ -318,9 +330,38 @@ Exclusive ownership of a **Lock file** that the operating system gives to one pr
 takes back when that process exits, however it exits. A daemon holds one so only one instance runs,
 and `update` holds one so only one check or replacement of the **Managed binary** runs at a time
 (ADR-0019).
-_Avoid_: mutex (guards memory inside one process), semaphore, pidfile
+_Avoid_: mutex (guards memory inside one process), semaphore, pidfile (the **Holder record** is not the Lock)
 
 **Lock file**:
 The file a **Lock** is taken on. Its existence means nothing: the file may be left behind by a
 process that has exited and the next process takes the Lock on it as usual (ADR-0019).
-_Avoid_: pidfile, lockfile
+_Avoid_: pidfile (the **Holder record** is a separate file), lockfile
+
+**Instance lock**:
+The **Lock** a daemon takes so that only one instance of a tool runs at a time for one **Runtime
+directory**. The Lock alone decides which instance runs; a second instance fails fast, without
+waiting, with an error that says an instance is already running (ADR-0023).
+_Avoid_: singleton, pidfile, mutex
+
+**Holder record**:
+A file beside the **Instance lock** in which the running instance writes its process id, so that the
+error of a second instance can name the process. It describes the holder and never decides who
+runs; it may be missing, stale or unreadable (ADR-0023).
+_Avoid_: pidfile (a pidfile is also the lock), lock file (the **Lock file** is the file the Lock is
+taken on)
+
+**Runtime directory**:
+The directory of a tool that holds the files of its running instance, the **Instance lock** and the
+**Holder record**. It is resolved by `cli/spec/paths` like the other directories and persists
+across logins (ADR-0009, ADR-0023).
+_Avoid_: XDG_RUNTIME_DIR (the system removes it at logout), tmp directory, run directory
+
+**Driver**:
+The library's adapter to one operating system's service manager, which turns a described **Service**
+into that manager's own registration and drives it.
+_Avoid_: backend, provider, plugin
+
+**Service state**:
+The condition of a **Service** as the library reports it: unknown, not installed, stopped, starting,
+running or failed. Unknown means the service manager could not say.
+_Avoid_: status (the report as a whole), health

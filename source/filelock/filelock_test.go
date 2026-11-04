@@ -332,3 +332,122 @@ func TestEachLockOpensItsOwnDescriptor(t *testing.T) {
 		t.Errorf("descriptors = %v, want two distinct ones", calls.files)
 	}
 }
+
+func TestTryLockAcquires(t *testing.T) {
+	t.Parallel()
+
+	calls := &fakeCalls{grantAt: 1}
+	path := lockPath(t)
+
+	unlock, err := calls.locker(path).TryLock()
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+
+	if got := calls.attempts.Load(); got != 1 {
+		t.Errorf("tryLock attempts = %d, want 1", got)
+	}
+
+	unlock()
+	unlock()
+
+	if got := calls.unlocks.Load(); got != 1 {
+		t.Errorf("unlockFile calls = %d, want 1", got)
+	}
+
+	assertClosed(t, calls.lastFile(t))
+}
+
+func TestTryLockHeldWrapsErrLockedWithoutWaiting(t *testing.T) {
+	t.Parallel()
+
+	calls := &fakeCalls{}
+	path := lockPath(t)
+
+	unlock, err := calls.locker(path).TryLock()
+	if !errors.Is(err, filelock.ErrLocked) {
+		t.Fatalf("TryLock error = %v, want %v", err, filelock.ErrLocked)
+	}
+
+	if unlock != nil {
+		t.Error("TryLock returned an unlock function with its error")
+	}
+
+	if want := "filelock: lock " + path + ": " + filelock.ErrLocked.Error(); err.Error() != want {
+		t.Errorf("TryLock error = %q, want %q", err, want)
+	}
+
+	if got := calls.attempts.Load(); got != 1 {
+		t.Errorf("tryLock attempts = %d, want 1", got)
+	}
+
+	assertClosed(t, calls.lastFile(t))
+}
+
+func TestTryLockWrapsTryLockError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("boom")
+	calls := &fakeCalls{err: cause}
+	path := lockPath(t)
+
+	_, err := calls.locker(path).TryLock()
+	if !errors.Is(err, cause) || errors.Is(err, filelock.ErrLocked) {
+		t.Fatalf("TryLock error = %v, want it to wrap only %v", err, cause)
+	}
+
+	if want := "filelock: lock " + path + ": boom"; err.Error() != want {
+		t.Errorf("TryLock error = %q, want %q", err, want)
+	}
+
+	assertClosed(t, calls.lastFile(t))
+}
+
+func TestTryLockWrapsErrUnsupported(t *testing.T) {
+	t.Parallel()
+
+	calls := &fakeCalls{err: filelock.ErrUnsupported}
+	path := lockPath(t)
+
+	_, err := calls.locker(path).TryLock()
+	if !errors.Is(err, filelock.ErrUnsupported) {
+		t.Fatalf("TryLock error = %v, want %v", err, filelock.ErrUnsupported)
+	}
+
+	assertPrefix(t, err, "filelock: lock "+path+": ")
+	assertClosed(t, calls.lastFile(t))
+}
+
+func TestTryLockMissingDirectoryIsWrappedError(t *testing.T) {
+	t.Parallel()
+
+	calls := &fakeCalls{grantAt: 1}
+	path := filepath.Join(t.TempDir(), "missing", "lock")
+
+	_, err := calls.locker(path).TryLock()
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("TryLock error = %v, want it to wrap %v", err, fs.ErrNotExist)
+	}
+
+	assertPrefix(t, err, "filelock: open "+path+": ")
+}
+
+func TestNoopTryLockAlwaysSucceeds(t *testing.T) {
+	t.Parallel()
+
+	l := filelock.NewNoop()
+
+	first, err := l.TryLock()
+	if err != nil {
+		t.Fatalf("first TryLock: %v", err)
+	}
+	defer first()
+
+	second, err := l.TryLock()
+	if err != nil {
+		t.Fatalf("second TryLock while the first is held: %v", err)
+	}
+
+	second()
+	second()
+}

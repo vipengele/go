@@ -226,3 +226,36 @@ func TestProcessKilledHolderReleasesLock(t *testing.T) {
 		t.Fatalf("lock file after the holder was killed: %v", err)
 	}
 }
+
+func TestProcessHolderMakesTryLockFailUntilKilled(t *testing.T) {
+	t.Parallel()
+
+	path := lockPath(t)
+	h := startHolder(t, path)
+	l := filelock.New(path)
+
+	unlock, err := l.TryLock()
+	if !errors.Is(err, filelock.ErrLocked) {
+		if err == nil {
+			unlock()
+		}
+
+		t.Fatalf("TryLock while the child holds the lock = %v, want %v", err, filelock.ErrLocked)
+	}
+
+	if err := h.cmd.Process.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+
+	var exitErr *exec.ExitError
+	if err := h.wait(t); !errors.As(err, &exitErr) {
+		t.Fatalf("killed child exit = %v, want an *exec.ExitError", err)
+	}
+
+	unlock, err = l.TryLock()
+	if err != nil {
+		t.Fatalf("TryLock after the holder was killed: %v", err)
+	}
+
+	unlock()
+}

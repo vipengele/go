@@ -32,7 +32,7 @@ func (d Dirs) Ensure(kinds ...Kind) error {
 // ensure is Ensure with the function that changes a directory's mode.
 func (d Dirs) ensure(chmod func(string, fs.FileMode) error, kinds []Kind) error {
 	if len(kinds) == 0 {
-		kinds = []Kind{Config, State, Cache, Data, Log}
+		kinds = []Kind{Config, State, Cache, Data, Log, Runtime}
 	}
 	var errs []error
 	seen := make(map[Kind]bool, len(kinds))

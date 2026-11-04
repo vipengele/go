@@ -1,5 +1,5 @@
-// Package daemon runs the long-running work of a process as Runners under a Supervisor. It
-// requires nothing beyond the standard library.
+// Package daemon runs the long-running work of a process as Runners under a Supervisor, and
+// keeps a second instance of the same tool from running beside it.
 //
 // A Runner is one unit of long-running work. Start returns once the Runner is ready, leaving its
 // work running; an error or a panic from Start means it failed to start. Done closes once the
@@ -72,6 +72,28 @@
 // grace period ends first. A nil server makes Start return ErrNilServer, and a nil listener
 // ErrNilListener.
 //
+// # Single instance
+//
+// The instance lock lets one instance of a tool run at a time for one runtime directory. A program
+// that has no Supervisor takes it with AcquireInstance and releases it with Instance.Release; a
+// program run by a Supervisor passes WithInstanceLock to New, and Run takes the lock before the
+// first Start and releases it as Run returns, once every Runner has been stopped or, at the end of
+// the grace period, abandoned. The lock is never released between two Stops, so no second instance
+// starts while a Runner of the first is still stopping. While another instance holds it, Run
+// starts no Runner and returns the *AlreadyRunningError.
+//
+// The lock file, instance.lock, lives in the runtime directory paths.Resolve gives the tool's
+// identity, which is never XDG_RUNTIME_DIR: the system removes that directory when the user's
+// last session ends, and a second instance would then lock a new file. The lock alone decides
+// which instance runs. Beside it the holder records its pid in instance.holder, which only
+// enriches the *AlreadyRunningError, matched with errors.Is against ErrAlreadyRunning; writing
+// it is best effort. Its accepted failure modes follow from that: a loser may read a previous
+// holder's pid while a new holder is rewriting the record, or a stale one on Windows, where a
+// rename can fail while another process reads the file; a PID of 0 means the record could not be
+// read; a crash leaves at most one stray instance.holder.tmp, which the next write replaces. A
+// Runner abandoned at the end of the grace period may still be running when the lock is
+// released.
+//
 // # Errors
 //
 // Run returns nil when its context is cancelled and every Runner stops cleanly. Otherwise it
@@ -80,7 +102,11 @@
 // under PanicIsolate in start order, then the stop problems in stop order. A Start error that only
 // reports the end of its context once the start phase has ended is dropped, and so is an exit
 // during shutdown whose Err wraps context.Canceled; any other exit during shutdown is a stop
-// problem. A second Run returns ErrAlreadyRan. Match with errors.Is and errors.As.
+// problem. With WithInstanceLock, a lock that cannot be taken is Run's only error, an
+// *AlreadyRunningError while another instance holds it, and no Runner is started. A second Run
+// returns ErrAlreadyRan, even after a first that returned because the lock was held: Run marks
+// the Supervisor as run before it takes the lock, so a program that retries builds a new
+// Supervisor with New. Match with errors.Is and errors.As.
 //
 // # Restart
 //

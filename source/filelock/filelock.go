@@ -15,11 +15,19 @@ const pollInterval = 15 * time.Millisecond
 // ErrUnsupported is wrapped by every Lock error on a platform the package has no lock for.
 var ErrUnsupported = errors.New("file locking is not supported on this platform")
 
+// ErrLocked is wrapped by the TryLock error of a lock another descriptor holds.
+var ErrLocked = errors.New("file is locked")
+
 // Locker takes an exclusive lock.
 type Locker interface {
 	// Lock blocks until it holds the lock or ctx is done, and returns the function that releases
 	// the lock. Calling unlock more than once is safe; every call after the first does nothing.
 	Lock(ctx context.Context) (unlock func(), err error)
+
+	// TryLock makes one attempt at the lock and never waits. It returns the function that releases
+	// the lock, with the same idempotence as Lock's, or an error wrapping ErrLocked when another
+	// descriptor holds the lock.
+	TryLock() (unlock func(), err error)
 }
 
 // lockCalls is the platform's part of a lock: the system calls on an open descriptor. Each
@@ -64,7 +72,8 @@ type fileLocker struct {
 // Lock fails, without opening the file, when ctx is already done, even when the lock is free. A
 // directory that does not exist is an error. Every error has the form
 // "filelock: <op> <path>: <cause>" and wraps its cause: the context's error when ctx is done while
-// waiting, ErrUnsupported on a platform without a lock.
+// waiting, ErrUnsupported on a platform without a lock. TryLock takes no context and makes a single
+// attempt; its error wraps ErrLocked when the lock is held.
 func New(path string) Locker {
 	return newLocker(path)
 }
@@ -120,6 +129,29 @@ func (l *fileLocker) Lock(ctx context.Context) (func(), error) {
 	}
 }
 
+// TryLock opens the file and makes one attempt at the lock. It closes the file on every failure.
+func (l *fileLocker) TryLock() (func(), error) {
+	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, l.wrap("open", err)
+	}
+
+	acquired, err := l.calls.tryLock(f)
+	if err != nil {
+		_ = f.Close()
+
+		return nil, l.wrap("lock", err)
+	}
+
+	if !acquired {
+		_ = f.Close()
+
+		return nil, l.wrap("lock", ErrLocked)
+	}
+
+	return l.release(f), nil
+}
+
 // release returns the unlock function for f: it releases the lock and closes f once, however many
 // times it is called.
 func (l *fileLocker) release(f *os.File) func() {
@@ -140,10 +172,10 @@ func (l *fileLocker) wrap(op string, err error) error {
 // noopLocker grants every Lock at once.
 type noopLocker struct{}
 
-// NewNoop returns a Locker whose Lock takes no lock and touches no file. It succeeds immediately
-// every time, repeatedly and concurrently, and its unlock does nothing. It honours ctx as New's
-// Locker does: when ctx is already done, Lock fails with "filelock: lock: <cause>" wrapping the
-// context's error.
+// NewNoop returns a Locker whose Lock and TryLock take no lock and touch no file. They succeed
+// immediately every time, repeatedly and concurrently, and its unlock does nothing. It honours ctx
+// as New's Locker does: when ctx is already done, Lock fails with "filelock: lock: <cause>"
+// wrapping the context's error.
 func NewNoop() Locker {
 	return noopLocker{}
 }
@@ -153,5 +185,9 @@ func (noopLocker) Lock(ctx context.Context) (func(), error) {
 		return nil, fmt.Errorf("filelock: lock: %w", err)
 	}
 
+	return func() {}, nil
+}
+
+func (noopLocker) TryLock() (func(), error) {
 	return func() {}, nil
 }
