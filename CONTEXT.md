@@ -279,6 +279,18 @@ What `update` remembers between runs: the time of the last **Check attempt** and
 version it saw. Losing or corrupting it costs one extra **Update check**, nothing more (ADR-0023).
 _Avoid_: cache, update config
 
+**Trusted key**:
+A minisign public key a tool compiles into its `update` configuration. A release is authentic when
+its **Checksums signature** verifies against one of them. Trusted keys come from the tool's code
+only, never from its environment or configuration (ADR-0024).
+_Avoid_: release key, signing key (the secret half, which only the tool's release pipeline holds)
+
+**Checksums signature**:
+The detached minisign signature over a release's checksums file, published beside it as
+`<checksums asset>.minisig`. It authenticates the checksums file, which in turn vouches for every
+archive it lists (ADR-0024).
+_Avoid_: asset signature, manifest signature
+
 **Runner**:
 One unit of long-running work in a daemon (the HTTP server, a scheduled task, the update check)
 with a start that returns once it is ready, an exit it reports once its work has ended, and a stop
