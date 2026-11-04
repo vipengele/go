@@ -19,7 +19,8 @@ day against origin/main 41e2e24 (#163), which made the first version wrong in th
 - Not stdlib-only. `source/daemon/go.mod` requires `go.vipengele.org/cli/spec` and
   `go.vipengele.org/filelock` with directory replaces (`../cli/spec`, `../filelock`, and
   `../commons`, indirect), plus `golang.org/x/sys v0.49.0` indirect. `source/daemon/AGENTS.md`
-  Conventions: "The package is not stdlib-only". `.golangci.yml` depguard still denies cobra and
+  Conventions: "The root `daemon` package is not stdlib-only" (the `daemon/service`
+  package itself imports only the standard library). `.golangci.yml` depguard still denies cobra and
   `cli/core/**` only; `cli/spec` is allowed. A direct `x/sys/windows/svc` requirement would still
   be new for daemon (ADR-0003 expects it; ADR-0019 is the precedent for scoping x/sys to one project).
 - ADR-0003 assigns service managers to `daemon`, service commands to `daemon/daemoncmd`; cobra is
