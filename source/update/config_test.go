@@ -1270,6 +1270,18 @@ func TestDefaultLockerReportsAnUncreatableStateDir(t *testing.T) {
 	}
 }
 
+func TestDefaultLockerTryLockReportsAnUncreatableStateDir(t *testing.T) {
+	t.Parallel()
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := dirLocker{dir: filepath.Join(blocker, "state")}.TryLock()
+	if err == nil {
+		t.Fatal("TryLock() error = nil, want the directory error")
+	}
+}
+
 func TestResolveDefaultLockerTryLock(t *testing.T) {
 	t.Parallel()
 	stateDir := filepath.Join(t.TempDir(), "missing", "state")
