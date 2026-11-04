@@ -6,6 +6,7 @@ require (
 	go.vipengele.org/cli/spec v0.0.0
 	go.vipengele.org/cli/state v0.0.0
 	go.vipengele.org/commons v0.0.0
+	golang.org/x/crypto v0.58.0
 	golang.org/x/mod v0.42.0
 )
 
