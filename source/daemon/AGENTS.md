@@ -40,7 +40,7 @@ golangci-lint run
   of `Kind` `Liveness` and/or `Readiness`; `Snapshot` runs every check concurrently under its
   timeout and returns a `Snapshot` (`ok`, `unready` or `down`, plus `Live`, `Ready`, uptime and a
   `CheckResult` per check) whose JSON keys are the wire contract of
-  `docs/adr/0023-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
+  `docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
 - `health_http.go` — `(*Health).Handler`, serving `/livez`, `/readyz` and `/status`;
   `writeEnvelope` writes the `/status` body in the layout `spec.WriteJSON` produces.
 - `func.go` — `Func`, the Runner adapter for a function run in its own goroutine, and `WithOrder`

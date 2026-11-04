@@ -8,7 +8,7 @@ saw:
   - source/daemon/.golangci.yml
   - source/daemon/go.mod
   - source/daemon/daemoncmd/status.go
-  - docs/adr/0023-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md
+  - docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md
   - docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md
   - docs/adr/0014-json-output-envelope.md
 ---
@@ -22,7 +22,7 @@ saw:
   exited Runner whatever the timing.
 - The HTTP Runner (http.go, `DefaultHTTPOrder` 100) starts last and stops first, so a health
   route mounted on it stops answering before the work it reports on
-  (docs/adr/0023-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md, Consequences).
+  (docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md, Consequences).
 - The root package imports only the standard library; `daemoncmd` alone requires `cli/spec`
   (go.mod, directory replaces for `cli/spec` and `commons`). `.golangci.yml` enforces it with a
   depguard rule over `!**/daemoncmd/**`. Commands are `*spec.Command` from cli/spec, never

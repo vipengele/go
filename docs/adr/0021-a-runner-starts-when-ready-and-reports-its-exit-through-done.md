@@ -5,7 +5,7 @@ Status: accepted. It supersedes the Runner contract of
 blocking `Start`, the early return as the failure signal, the per-Runner start context cancelled
 just before `Stop`, and the `Start` panic under a policy. Reverse stop order and one grace period
 for the whole shutdown stand. Health, which it leaves out of scope, is decided in
-`docs/adr/0023-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
+`docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
 
 A `Start` that blocks for the Runner's whole life cannot say when the Runner is ready, so a
 Runner started after it cannot rely on it, and a failure to start cannot be told apart from a

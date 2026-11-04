@@ -3,7 +3,7 @@
 Status: accepted. Its Runner contract is superseded by
 `docs/adr/0021-a-runner-starts-when-ready-and-reports-its-exit-through-done.md`; reverse stop order
 and one grace period for the whole shutdown stand. Health is decided in
-`docs/adr/0023-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
+`docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
 
 A daemon runs several pieces of long-running work, and some depend on others: a server on the
 database it queries. `go.vipengele.org/daemon` starts them as **Runners** under a **Supervisor**
