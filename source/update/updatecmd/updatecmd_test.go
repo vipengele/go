@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"go.vipengele.org/cli/spec"
@@ -117,6 +120,12 @@ type run struct {
 // explicit, stdin as its standard input, and terminal as the answer to every terminal query.
 func runCommand(t *testing.T, cfg update.Config, flags map[string]any, stdin string, terminal bool) run {
 	t.Helper()
+	return runCommandWith(t, context.Background(), cfg, flags, strings.NewReader(stdin), terminal)
+}
+
+// runCommandWith is runCommand with the context and the standard input given as they are.
+func runCommandWith(t *testing.T, ctx context.Context, cfg update.Config, flags map[string]any, stdin io.Reader, terminal bool) run {
+	t.Helper()
 
 	cmds := updatecmd.Commands(cfg)
 	if len(cmds) != 1 {
@@ -125,7 +134,7 @@ func runCommand(t *testing.T, cfg update.Config, flags map[string]any, stdin str
 
 	var stdout, stderr bytes.Buffer
 	env := &spec.Env{
-		Stdin:    strings.NewReader(stdin),
+		Stdin:    stdin,
 		Stdout:   &stdout,
 		Stderr:   &stderr,
 		Terminal: func(spec.Stream) bool { return terminal },
@@ -137,7 +146,7 @@ func runCommand(t *testing.T, cfg update.Config, flags map[string]any, stdin str
 	}
 
 	inv := spec.NewInvocation(env, nil, flags, spec.ExplicitFlags(names...))
-	err := cmds[0].Run(context.Background(), inv)
+	err := cmds[0].Run(ctx, inv)
 	return run{stdout: &stdout, stderr: &stderr, err: err}
 }
 
@@ -381,6 +390,54 @@ func TestUpdateAbortedAtThePromptFails(t *testing.T) {
 	}
 }
 
+// cancelOnRead answers "y" to the first read and cancels its context while doing so, as an
+// interrupt arriving while the question waits for its answer does.
+type cancelOnRead struct {
+	cancel context.CancelFunc
+	answer io.Reader
+}
+
+func (r *cancelOnRead) Read(p []byte) (int, error) {
+	r.cancel()
+	return r.answer.Read(p)
+}
+
+// attempts records every request a client sends, whether or not it reaches a server, which a
+// request with a cancelled context does not.
+type attempts struct {
+	next http.RoundTripper
+	n    atomic.Int64
+}
+
+func (a *attempts) RoundTrip(req *http.Request) (*http.Response, error) {
+	a.n.Add(1)
+	return a.next.RoundTrip(req)
+}
+
+func TestUpdateInterruptedAtThePromptDownloadsNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	// The Source keeps the server's own client, so every request through cfg.HTTPClient is a
+	// download.
+	downloads := &attempts{next: f.srv.Client().Transport}
+	f.cfg.HTTPClient = &http.Client{Transport: downloads}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stdin := &cancelOnRead{cancel: cancel, answer: strings.NewReader("y\n")}
+	r := runCommandWith(t, ctx, f.cfg, map[string]any{}, stdin, true)
+
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", r.err)
+	}
+	if n := downloads.n.Load(); n != 0 {
+		t.Errorf("download requests sent = %d, want 0", n)
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
 func TestUpdateConfirmedAtThePromptInstalls(t *testing.T) {
 	t.Parallel()
 
@@ -438,6 +495,40 @@ func TestAFailingHookIsAWarning(t *testing.T) {
 	}
 	if !strings.Contains(r.stderr.String(), "completion broke") {
 		t.Errorf("stderr = %q, want the hook's failure", r.stderr.String())
+	}
+	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
+		t.Errorf("executable holds %q, want %q", got, want)
+	}
+}
+
+func TestABackupThatCannotBeRemovedIsAWarning(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	backup := f.exe + ".old"
+	// A non-empty directory at the backup's path makes its removal fail, as root too.
+	f.cfg.PostUpdate = []update.PostUpdate{func(string) error {
+		if err := os.Remove(backup); err != nil {
+			return err
+		}
+		if err := os.Mkdir(backup, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(backup, "pinned"), nil, 0o600)
+	}}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if !strings.Contains(r.stderr.String(), "the previous binary is left at "+backup) {
+		t.Errorf("stderr = %q, want a warning naming the backup %s", r.stderr.String(), backup)
+	}
+	if strings.Contains(r.stderr.String(), "a post-update step failed") {
+		t.Errorf("stderr = %q, want no hook failure", r.stderr.String())
+	}
+	if !strings.Contains(r.stderr.String(), "updated atk v1.0.0 → v1.1.0") {
+		t.Errorf("stderr = %q, want the update reported", r.stderr.String())
 	}
 	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
 		t.Errorf("executable holds %q, want %q", got, want)
