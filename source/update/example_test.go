@@ -76,10 +76,11 @@ func Example_completionHook() {
 	// Output: skipped=true reason=disabled
 }
 
-// A tool updates itself in four steps: Download verifies the release archive, Extract stages the
-// binary beside the running executable, Install swaps it in keeping the previous binary as a
-// backup, and Discard drops the backup once the new binary is accepted. A post-update hook receives
-// the installed path.
+// A tool updates itself with Apply, which refuses a managed install, checks that the executable's
+// directory is writable, downloads and verifies the release archive, stages the binary beside the
+// running executable and swaps it in, keeping the previous binary as a backup. The tool then runs
+// its post-update hooks on the installed path, reporting a failure without undoing the update, and
+// Discard drops the backup.
 func Example_install() {
 	dir, err := os.MkdirTemp("", "update-example-")
 	if err != nil {
@@ -140,6 +141,8 @@ func Example_install() {
 		TempDir:     dir,
 		StateDir:    dir,
 		Executable:  func() (string, error) { return exe, nil },
+		// The example's executable is never a container's, wherever it runs.
+		InContainer: func() bool { return false },
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				body, err := os.ReadFile(installedPath)
@@ -156,46 +159,15 @@ func Example_install() {
 		Signature: update.Asset{Name: "checksums.txt.minisig", URL: srv.URL + "/checksums.txt.minisig"},
 	}
 
-	ctx := context.Background()
-
-	// A best-effort check before the download; Install is the authority.
-	if err := cfg.CheckWritable(); err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	arc, err := cfg.Download(ctx, sel)
+	installed, err := cfg.Apply(context.Background(), sel)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	// The staged file goes in the executable's directory, so that the rename stays on one
-	// filesystem.
-	target, err := cfg.Target()
-	if err != nil {
-		_ = arc.Close()
-		fmt.Println(err)
-		return
-	}
-
-	staged, err := cfg.Extract(ctx, arc, filepath.Dir(target))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	installed, err := cfg.Install(staged)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
+	// The update has been applied: a hook that fails is reported, and the new binary stays.
 	if err := update.RunPostUpdate(cfg.PostUpdate, installed.Path()); err != nil {
-		// The new binary is unusable: put the previous one back.
-		_ = installed.Rollback()
-		fmt.Println(err)
-		return
+		fmt.Println("post-update:", err)
 	}
 
 	// A locked backup (*update.BackupLockedError) is not a failed update and may be ignored.

@@ -64,6 +64,12 @@
 // [Config.CheckWritable] can report before anything is downloaded. A [PostUpdate] hook receives
 // [Installed.Path]; Install runs none itself.
 //
+// [Config.Apply] is the whole update of a [Selection] in one call: CheckManaged and CheckWritable,
+// both before any request, then Download, Extract into Target's directory and Install, stopping at
+// the first error. It returns the [*Installed] with the backup still on disk; the caller runs its
+// PostUpdate hooks, whose failure is reported and does not undo the update, and then settles it
+// with Discard or Rollback.
+//
 // Whether a background update check may run is decided from the Config and the stored [State]. The
 // gates are tried in order and the first that fails decides: the running Version is not a release
 // version, the CI environment variable is set, stderr is not a terminal (IsTerminal), DisableCheck
