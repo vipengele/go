@@ -13,8 +13,20 @@ import (
 
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/update/asset"
+	"go.vipengele.org/update/internal/minisign"
 	"go.vipengele.org/update/updatetest"
 )
+
+// newSignedHarness returns the harness newHarness(t, opts) builds, with its script rendered to
+// trust the server's key alone, given as [updatetest.Server.PublicKey] returns it, with its comment
+// line. The server's key exists only once the server has started, after the script is rendered.
+func newSignedHarness(t *testing.T, opts harnessOptions) *harness {
+	t.Helper()
+	h := newHarness(t, opts)
+	h.Config.TrustedKeys, h.Config.AllowUnsigned = []string{h.Server.PublicKey()}, false
+	h.Script = render(t, h.Config)
+	return h
+}
 
 // mustRun runs the script and fails the test unless it exits 0.
 func mustRun(t *testing.T, h *harness) runResult {
@@ -63,7 +75,7 @@ func requireNoLeftovers(t *testing.T, dir string) {
 
 func TestScriptInstallsLatestReleaseAndBashCompletion(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{})
+	h := newSignedHarness(t, harnessOptions{})
 
 	res := h.Run()
 	if res.Code != 0 {
@@ -115,7 +127,7 @@ func TestScriptInstallsLatestReleaseAndBashCompletion(t *testing.T) {
 
 func TestScriptInstallsWithWget(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{Downloader: "wget"})
+	h := newSignedHarness(t, harnessOptions{Downloader: "wget"})
 
 	mustRun(t, h)
 
@@ -130,7 +142,7 @@ func TestScriptInstallsThePinnedVersion(t *testing.T) {
 	for _, pin := range []string{"v2.0.1", "2.0.1"} {
 		t.Run(pin, func(t *testing.T) {
 			t.Parallel()
-			h := newHarness(t, harnessOptions{Tag: "v2.0.1"})
+			h := newSignedHarness(t, harnessOptions{Tag: "v2.0.1"})
 			h.Env[h.envVar("VERSION")] = pin
 
 			mustRun(t, h)
@@ -145,7 +157,7 @@ func TestScriptInstallsThePinnedVersion(t *testing.T) {
 
 func TestScriptRejectsABadChecksumAndLeavesNothingBehind(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{ServerOptions: []updatetest.Option{updatetest.BadChecksum()}})
+	h := newSignedHarness(t, harnessOptions{ServerOptions: []updatetest.Option{updatetest.BadChecksum()}})
 
 	res := h.Run()
 
@@ -172,7 +184,7 @@ func TestScriptFailsWithoutADownloaderOrAHasher(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := newHarness(t, tc.opts)
+			h := newSignedHarness(t, tc.opts)
 
 			res := h.Run()
 
@@ -199,7 +211,7 @@ func TestScriptNamesTheMissingAsset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the asset name: %v", err)
 	}
-	h := newHarness(t, harnessOptions{ServerOptions: []updatetest.Option{updatetest.MissingAsset(name)}})
+	h := newSignedHarness(t, harnessOptions{ServerOptions: []updatetest.Option{updatetest.MissingAsset(name)}})
 
 	res := h.Run()
 
@@ -227,7 +239,7 @@ func TestScriptNamesTheMissingChecksumsFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the checksums name: %v", err)
 	}
-	h := newHarness(t, harnessOptions{ServerOptions: []updatetest.Option{updatetest.MissingAsset(name)}})
+	h := newSignedHarness(t, harnessOptions{ServerOptions: []updatetest.Option{updatetest.MissingAsset(name)}})
 
 	res := h.Run()
 
@@ -318,7 +330,7 @@ func TestScriptWarnsOnlyWhenTheInstallDirIsOffPath(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := newHarness(t, harnessOptions{})
+			h := newSignedHarness(t, harnessOptions{})
 			if tc.onPath {
 				h.Env["PATH"] = h.PathDir + string(os.PathListSeparator) + h.InstallDir
 			}
@@ -334,7 +346,7 @@ func TestScriptWarnsOnlyWhenTheInstallDirIsOffPath(t *testing.T) {
 
 func TestScriptSkipsTheCompletionWhenDisabled(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{})
+	h := newSignedHarness(t, harnessOptions{})
 	h.Env[h.envVar(completioninstall.NoCompletionEnvSuffix)] = "1"
 
 	mustRun(t, h)
@@ -349,7 +361,7 @@ func TestScriptSkipsTheCompletionWhenDisabled(t *testing.T) {
 
 func TestScriptWarnsWhenTheCompletionCommandFails(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{CompletionFails: true})
+	h := newSignedHarness(t, harnessOptions{CompletionFails: true})
 	h.Env["PATH"] = h.PathDir + string(os.PathListSeparator) + h.InstallDir
 
 	res := mustRun(t, h)
@@ -369,7 +381,7 @@ func TestScriptWarnsWhenTheCompletionCommandFails(t *testing.T) {
 
 func TestScriptInstallsARawBinaryRelease(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{Config: testConfig("{name}-{version}-{os}-{arch}", "")})
+	h := newSignedHarness(t, harnessOptions{Config: testConfig("{name}-{version}-{os}-{arch}", "")})
 
 	mustRun(t, h)
 
@@ -381,7 +393,7 @@ func TestScriptInstallsARawBinaryRelease(t *testing.T) {
 
 func TestScriptInstallsIntoTheHomeLocalBinByDefault(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{})
+	h := newSignedHarness(t, harnessOptions{})
 	delete(h.Env, h.envVar("INSTALL_DIR"))
 	h.InstallDir = filepath.Join(h.Env["HOME"], ".local", "bin")
 
@@ -395,7 +407,7 @@ func TestScriptInstallsIntoTheHomeLocalBinByDefault(t *testing.T) {
 
 func TestScriptFailsWithoutHomeOrAnInstallDir(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{})
+	h := newSignedHarness(t, harnessOptions{})
 	installDirVar := h.envVar("INSTALL_DIR")
 	defaultBinary := filepath.Join(h.Env["HOME"], ".local", "bin", h.Config.BinaryName)
 	delete(h.Env, installDirVar)
@@ -415,7 +427,7 @@ func TestScriptFailsWithoutHomeOrAnInstallDir(t *testing.T) {
 
 func TestScriptWarnsWhenShellIsNotSetAndSkipsTheCompletion(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, harnessOptions{})
+	h := newSignedHarness(t, harnessOptions{})
 	delete(h.Env, "SHELL")
 
 	res := mustRun(t, h)
@@ -430,4 +442,276 @@ func TestScriptWarnsWhenShellIsNotSetAndSkipsTheCompletion(t *testing.T) {
 		t.Fatal("Target selects no bash completion for the harness environment")
 	}
 	requireNoFile(t, target)
+}
+
+// requireNothingInstalled fails the test when the script left the binary, anything else in the
+// install directory or anything in TMPDIR.
+func requireNothingInstalled(t *testing.T, h *harness) {
+	t.Helper()
+	requireNoFile(t, h.BinaryPath())
+	requireNoLeftovers(t, h.InstallDir)
+	requireNoLeftovers(t, h.TmpDir)
+}
+
+// signatureName returns the name of the signature asset of the harness's release.
+func signatureName(h *harness) string {
+	return h.Release.ChecksumsName + ".minisig"
+}
+
+// requireNoTerminalOffLinux skips the test off linux, where the harness leaves the script in the
+// test's session and a terminal the test runs in would be the script's /dev/tty.
+func requireNoTerminalOffLinux(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("the harness detaches the script from the terminal on linux only, not %s", runtime.GOOS)
+	}
+}
+
+func TestScriptVerifiesTheSignatureWithMinisign(t *testing.T) {
+	t.Parallel()
+	for _, downloader := range []string{"curl", "wget"} {
+		t.Run(downloader, func(t *testing.T) {
+			t.Parallel()
+			h := newSignedHarness(t, harnessOptions{Downloader: downloader})
+
+			res := mustRun(t, h)
+
+			if n := h.Server.Requests(updatetest.TargetSignature); n != 1 {
+				t.Errorf("the signature received %d requests, want 1", n)
+			}
+			if strings.Contains(res.Stderr, "minisign") {
+				t.Errorf("stderr = %q, want no word of minisign when the signature verifies", res.Stderr)
+			}
+			requireVersion(t, h, harnessTag)
+			requireNoLeftovers(t, h.TmpDir)
+		})
+	}
+}
+
+func TestScriptAcceptsASignatureByAnyTrustedKey(t *testing.T) {
+	t.Parallel()
+	h := newSignedHarness(t, harnessOptions{})
+	h.Config.TrustedKeys = []string{generateKey(t).PublicKey(), h.Server.PublicKey()}
+	h.Script = render(t, h.Config)
+
+	mustRun(t, h)
+
+	requireVersion(t, h, harnessTag)
+}
+
+func TestScriptEmbedsTheKeyLineOfACommentedEntry(t *testing.T) {
+	t.Parallel()
+	h := newSignedHarness(t, harnessOptions{})
+	entry := h.Server.PublicKey()
+	if !strings.HasPrefix(entry, "untrusted comment:") {
+		t.Fatalf("PublicKey() = %q, want an entry carrying its comment line", entry)
+	}
+	key, err := minisign.ParsePublicKey(entry)
+	if err != nil {
+		t.Fatalf("ParsePublicKey: %v", err)
+	}
+	h.Config.TrustedKeys = []string{"\n  " + strings.TrimSpace(entry) + " \t\n\n"}
+	h.Script = render(t, h.Config)
+
+	if strings.Contains(h.Script, "untrusted comment") {
+		t.Error("the script carries the entry's comment line")
+	}
+	if want := "\tfor key in '" + key.Line + "'; do\n"; !strings.Contains(h.Script, want) {
+		t.Errorf("the script does not loop over the key line alone, %q", want)
+	}
+	mustRun(t, h)
+	requireVersion(t, h, harnessTag)
+}
+
+func TestScriptRefusesAReleaseWhoseSignatureDoesNotVerify(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opt  updatetest.Option
+	}{
+		{"tampered", updatetest.Tampered()},
+		{"bad signature", updatetest.BadSignature()},
+		{"unknown key", updatetest.UnknownKey()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSignedHarness(t, harnessOptions{ServerOptions: []updatetest.Option{tt.opt}})
+			// The variable lowers the check only when minisign is missing.
+			h.Env[h.envVar("ALLOW_UNSIGNED")] = "1"
+
+			res := h.Run()
+
+			if res.Code == 0 {
+				t.Errorf("script exited 0, want a failure\nstderr:\n%s", res.Stderr)
+			}
+			want := "the signature " + signatureName(h) + " does not verify " + h.Release.ChecksumsName + " under any trusted key"
+			if !strings.Contains(res.Stderr, want) {
+				t.Errorf("stderr = %q, want it to contain %q", res.Stderr, want)
+			}
+			requireNothingInstalled(t, h)
+		})
+	}
+}
+
+func TestScriptRefusesAReleaseWithoutASignature(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		opts harnessOptions
+	}{
+		{"curl", harnessOptions{}},
+		{"wget", harnessOptions{Downloader: "wget"}},
+		{"no minisign", harnessOptions{NoMinisign: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := testConfig("", "").Resolved()
+			if err != nil {
+				t.Fatalf("Resolved: %v", err)
+			}
+			name, err := asset.Render(cfg.ChecksumsAsset, asset.Fields{
+				Name: cfg.BinaryName, Tag: harnessTag, OS: runtime.GOOS, Arch: runtime.GOARCH, Ext: cfg.AssetExt,
+			})
+			if err != nil {
+				t.Fatalf("rendering the checksums name: %v", err)
+			}
+			tt.opts.ServerOptions = []updatetest.Option{updatetest.MissingAsset(name + ".minisig")}
+			h := newSignedHarness(t, tt.opts)
+			h.Env[h.envVar("ALLOW_UNSIGNED")] = "1"
+
+			res := h.Run()
+
+			if res.Code == 0 {
+				t.Errorf("script exited 0, want a failure\nstderr:\n%s", res.Stderr)
+			}
+			if want := "release " + harnessTag + " has no signature " + signatureName(h); !strings.Contains(res.Stderr, want) {
+				t.Errorf("stderr = %q, want it to contain %q", res.Stderr, want)
+			}
+			requireNothingInstalled(t, h)
+		})
+	}
+}
+
+func TestScriptWithoutMinisignOrATerminalRefusesAndNamesBothRemedies(t *testing.T) {
+	t.Parallel()
+	requireNoTerminalOffLinux(t)
+	for _, value := range []string{"", "0", "yes"} {
+		t.Run("ALLOW_UNSIGNED="+value, func(t *testing.T) {
+			t.Parallel()
+			h := newSignedHarness(t, harnessOptions{NoMinisign: true})
+			allow := h.envVar("ALLOW_UNSIGNED")
+			if value != "" {
+				h.Env[allow] = value
+			}
+
+			res := h.Run()
+
+			if res.Code == 0 {
+				t.Errorf("script exited 0, want a failure\nstderr:\n%s", res.Stderr)
+			}
+			for _, want := range []string{
+				"warning: minisign is not installed, so the signature of " + h.Release.ChecksumsName + " cannot be checked",
+				"error: the signature cannot be checked and there is no terminal to ask",
+				"Install minisign",
+				allow + "=1",
+			} {
+				if !strings.Contains(res.Stderr, want) {
+					t.Errorf("stderr = %q, want it to contain %q", res.Stderr, want)
+				}
+			}
+			requireNothingInstalled(t, h)
+		})
+	}
+}
+
+func TestScriptWithoutMinisignInstallsWhenAllowedByTheVariable(t *testing.T) {
+	t.Parallel()
+	h := newSignedHarness(t, harnessOptions{NoMinisign: true})
+	allow := h.envVar("ALLOW_UNSIGNED")
+	h.Env[allow] = "1"
+
+	res := mustRun(t, h)
+
+	for _, want := range []string{
+		"warning: minisign is not installed, so the signature of " + h.Release.ChecksumsName + " cannot be checked",
+		"warning: " + allow + "=1: installing on the checksum alone",
+	} {
+		if !strings.Contains(res.Stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", res.Stderr, want)
+		}
+	}
+	requireVersion(t, h, harnessTag)
+}
+
+func TestScriptWithoutMinisignAsksAtTheTerminal(t *testing.T) {
+	t.Parallel()
+	const prompt = "install " + harnessTag + " verified by its checksum alone? [y/N] "
+	tests := []struct {
+		name    string
+		input   string
+		eof     bool
+		install bool
+	}{
+		{name: "yes", input: "yes\n", install: true},
+		{name: "y", input: "y\n", install: true},
+		{name: "upper-case YES", input: "YES\n", install: true},
+		{name: "no", input: "no\n"},
+		{name: "empty line", input: "\n"},
+		{name: "another word", input: "sure\n"},
+		{name: "end of file", eof: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSignedHarness(t, harnessOptions{NoMinisign: true, TTY: true})
+			h.TTYInput, h.TTYEOF = tt.input, tt.eof
+
+			res := h.Run()
+
+			if !strings.Contains(res.TTY, "warning: minisign is not installed") {
+				t.Errorf("terminal = %q, want the warning that minisign is not installed", res.TTY)
+			}
+			if !strings.Contains(res.TTY, h.Config.BinaryName+": "+prompt) {
+				t.Errorf("terminal = %q, want the prompt %q", res.TTY, prompt)
+			}
+			if tt.install {
+				if res.Code != 0 {
+					t.Fatalf("script exited %d, want 0\nterminal:\n%s", res.Code, res.TTY)
+				}
+				requireVersion(t, h, harnessTag)
+				return
+			}
+			if res.Code == 0 {
+				t.Errorf("script exited 0, want a refusal\nterminal:\n%s", res.TTY)
+			}
+			for _, want := range []string{
+				"error: the install was declined; nothing was installed",
+				"Install minisign",
+				h.envVar("ALLOW_UNSIGNED") + "=1",
+			} {
+				if !strings.Contains(res.TTY, want) {
+					t.Errorf("terminal = %q, want it to contain %q", res.TTY, want)
+				}
+			}
+			requireNothingInstalled(t, h)
+		})
+	}
+}
+
+func TestScriptForUnsignedReleasesFetchesNoSignature(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig("", "")
+	cfg.TrustedKeys, cfg.AllowUnsigned = nil, true
+	h := newHarness(t, harnessOptions{Config: cfg, NoMinisign: true})
+
+	res := mustRun(t, h)
+
+	if n := h.Server.Requests(updatetest.TargetSignature); n != 0 {
+		t.Errorf("the signature received %d requests, want 0", n)
+	}
+	if strings.Contains(res.Stderr, "minisign") {
+		t.Errorf("stderr = %q, want no word of minisign for unsigned releases", res.Stderr)
+	}
+	requireVersion(t, h, harnessTag)
 }

@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"go.vipengele.org/commons/validate"
 	"go.vipengele.org/filelock"
 	"go.vipengele.org/update/asset"
+	"go.vipengele.org/update/internal/minisign"
+	"go.vipengele.org/update/internal/minisigntest"
 )
 
 // stubSource is a Source that reports no release.
@@ -35,6 +38,21 @@ func validIdentity() spec.Identity {
 	}
 }
 
+// testKey and testKey2 return minisign public key lines that parse and carry different key ids.
+func testKey() string  { return seededKeyLine(1) }
+func testKey2() string { return seededKeyLine(2) }
+
+// seededKeyLine returns the key line of the minisign key GenerateKey draws from a stream of seed
+// bytes, the same line on every call. The stream is longer than the key id and Ed25519 seed
+// GenerateKey reads, so it never runs dry.
+func seededKeyLine(seed byte) string {
+	key, err := minisigntest.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{seed}, 64)))
+	if err != nil {
+		panic(err)
+	}
+	return key.PublicKeyLine()
+}
+
 // validConfig is a Config with every required field set and every optional field at its zero
 // value, except the two seams the default StateDir is resolved through: Getenv reports every
 // variable unset and UserHomeDir returns home, so that no test reads the host's environment or
@@ -42,6 +60,7 @@ func validIdentity() spec.Identity {
 func validConfig(home string) Config {
 	return Config{
 		Identity:    validIdentity(),
+		TrustedKeys: []string{testKey()},
 		Source:      &stubSource{},
 		Getenv:      envOf(nil),
 		UserHomeDir: func() (string, error) { return home, nil },
@@ -91,7 +110,7 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	t.Setenv("ATK_HOME", home)
 
 	before := time.Now()
-	r, err := Config{Identity: validIdentity(), Source: &stubSource{}}.resolve()
+	r, err := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}.resolve()
 	if err != nil {
 		t.Fatalf("resolve() error = %v, want nil", err)
 	}
@@ -336,7 +355,7 @@ func TestResolveDefaultStateDirReadsTheProcessEnvironment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", tc.stateHome)
 
-			r, err := Config{Identity: validIdentity(), Source: &stubSource{}}.resolve()
+			r, err := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}.resolve()
 			if err != nil {
 				t.Fatalf("resolve() error = %v, want nil", err)
 			}
@@ -799,7 +818,7 @@ func TestOptOutVariableIsDerivedFromEnvPrefix(t *testing.T) {
 
 func TestValidateAcceptsValidConfig(t *testing.T) {
 	t.Parallel()
-	if err := (Config{Identity: validIdentity(), Source: &stubSource{}}).Validate(); err != nil {
+	if err := (Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}).Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil", err)
 	}
 }
@@ -825,7 +844,7 @@ func TestValidateReportsEachProblem(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := Config{Identity: validIdentity(), Source: &stubSource{}}
+			c := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}
 			tc.set(&c)
 			if err := c.Validate(); !errors.Is(err, tc.want) {
 				t.Errorf("Validate() = %v, want one wrapping %v", err, tc.want)
@@ -836,7 +855,7 @@ func TestValidateReportsEachProblem(t *testing.T) {
 
 func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 	t.Parallel()
-	c := Config{Identity: validIdentity()}
+	c := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}}
 	c.Name = ""
 	c.DirName = ".."
 
@@ -1010,6 +1029,122 @@ func TestValidateRejectsANilDetector(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateAcceptsTheSignaturePolicies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  func(*Config)
+	}{
+		{"one key", func(c *Config) { c.TrustedKeys = []string{testKey()} }},
+		{"several keys", func(c *Config) { c.TrustedKeys = []string{testKey(), testKey2()} }},
+		{"a key with its comment line", func(c *Config) {
+			c.TrustedKeys = []string{"untrusted comment: minisign public key 1\n" + testKey() + "\n"}
+		}},
+		{"AllowUnsigned", func(c *Config) { c.TrustedKeys, c.AllowUnsigned = nil, true }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			tc.set(&c)
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsAKeyThatDoesNotParse(t *testing.T) {
+	t.Parallel()
+	c := validConfig("")
+	c.TrustedKeys = []string{testKey(), "not a key"}
+	err := c.Validate()
+	var fe *validate.FieldError
+	if !errors.As(err, &fe) || fe.Field != "TrustedKeys[1]" {
+		t.Fatalf("Validate() = %v, want a FieldError for TrustedKeys[1]", err)
+	}
+	if !errors.Is(err, validate.ErrInvalid) {
+		t.Errorf("Validate() = %v, want one wrapping %v", err, validate.ErrInvalid)
+	}
+	var mk *minisign.MalformedKeyError
+	if !errors.As(err, &mk) {
+		t.Errorf("Validate() = %v, want one wrapping *minisign.MalformedKeyError", err)
+	}
+	if _, rerr := c.resolve(); rerr == nil {
+		t.Error("resolve() error = nil, want the invalid Config rejected")
+	}
+}
+
+func TestValidateRejectsADuplicateKeyID(t *testing.T) {
+	t.Parallel()
+	c := validConfig("")
+	c.TrustedKeys = []string{testKey(), testKey2(), "untrusted comment: again\n" + testKey()}
+	err := c.Validate()
+	var fe *validate.FieldError
+	if !errors.As(err, &fe) || fe.Field != "TrustedKeys[2]" {
+		t.Fatalf("Validate() = %v, want a FieldError for TrustedKeys[2]", err)
+	}
+	key, perr := minisign.ParsePublicKey(testKey())
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	if fe.Value != key.ID.String() {
+		t.Errorf("FieldError.Value = %q, want the key id %q", fe.Value, key.ID)
+	}
+	if !errors.Is(err, validate.ErrInvalid) {
+		t.Errorf("Validate() = %v, want one wrapping %v", err, validate.ErrInvalid)
+	}
+}
+
+func TestValidateRequiresKeysOrAllowUnsigned(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]Config{
+		"zero Config":        {},
+		"identity alone":     {Identity: validIdentity()},
+		"empty non-nil keys": {Identity: validIdentity(), TrustedKeys: []string{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := c.Validate()
+			var fe *validate.FieldError
+			found := false
+			for _, e := range unwrapAll(err) {
+				if errors.As(e, &fe) && fe.Field == "TrustedKeys" {
+					found = true
+				}
+			}
+			if !found || !errors.Is(err, validate.ErrInvalid) {
+				t.Errorf("Validate() = %v, want a FieldError for TrustedKeys wrapping %v", err, validate.ErrInvalid)
+			}
+			if _, rerr := c.resolve(); rerr == nil {
+				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
+func TestValidateRejectsKeysTogetherWithAllowUnsigned(t *testing.T) {
+	t.Parallel()
+	c := validConfig("")
+	c.AllowUnsigned = true
+	err := c.Validate()
+	var fe *validate.FieldError
+	if !errors.As(err, &fe) || fe.Field != "AllowUnsigned" {
+		t.Fatalf("Validate() = %v, want a FieldError for AllowUnsigned", err)
+	}
+	if !errors.Is(err, validate.ErrInvalid) {
+		t.Errorf("Validate() = %v, want one wrapping %v", err, validate.ErrInvalid)
+	}
+}
+
+// unwrapAll returns the errors err joins, or err alone.
+func unwrapAll(err error) []error {
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		return j.Unwrap()
+	}
+	return []error{err}
 }
 
 func TestDeriveFormat(t *testing.T) {

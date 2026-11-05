@@ -16,6 +16,9 @@ const (
 	// TargetChecksums is the release's checksums file, GET
 	// /<owner>/<repo>/releases/download/<tag>/<checksums>.
 	TargetChecksums
+	// TargetSignature is the minisign signature of the checksums file, GET
+	// /<owner>/<repo>/releases/download/<tag>/<checksums>.minisig.
+	TargetSignature
 )
 
 // String returns the name of the constant t is, or "Target(<n>)" for any other value.
@@ -29,6 +32,8 @@ func (t Target) String() string {
 		return "TargetArchive"
 	case TargetChecksums:
 		return "TargetChecksums"
+	case TargetSignature:
+		return "TargetSignature"
 	default:
 		return fmt.Sprintf("Target(%d)", int(t))
 	}
@@ -39,10 +44,13 @@ type Option func(*options)
 
 // options is what the [Option]s of one [NewServer] call set.
 type options struct {
-	apiOnly     bool
-	badChecksum bool
-	missing     map[string]bool
-	slow        map[Target]<-chan struct{}
+	apiOnly      bool
+	badChecksum  bool
+	badSignature bool
+	unknownKey   bool
+	tampered     bool
+	missing      map[string]bool
+	slow         map[Target]<-chan struct{}
 }
 
 // APIOnly has the latest-release web page answer 404 Not Found instead of redirecting to the
@@ -63,10 +71,35 @@ func BadChecksum() Option {
 	}
 }
 
+// BadSignature has the server serve a signature that is well formed and carries the server's key
+// id, but does not verify under [Server.PublicKey].
+func BadSignature() Option {
+	return func(o *options) {
+		o.badSignature = true
+	}
+}
+
+// UnknownKey has the server serve a valid signature made by another key, with another key id, so
+// a verifier holding only [Server.PublicKey] finds no key for it.
+func UnknownKey() Option {
+	return func(o *options) {
+		o.unknownKey = true
+	}
+}
+
+// Tampered has the server serve an archive and a checksums file that differ from the ones the
+// signature was made over, consistently: the checksums file lists the served archive's digest, so
+// the checksum matches, and the signature does not verify.
+func Tampered() Option {
+	return func(o *options) {
+		o.tampered = true
+	}
+}
+
 // MissingAsset removes the asset called name from the release: its download URL answers
 // 404 Not Found, and the REST API's asset list does not name it. A missing archive is still listed
-// in the checksums file. name is the archive's or the checksums file's name; any other name has
-// no effect.
+// in the checksums file. name is the archive's, the checksums file's or the signature's name, the
+// checksums file's name and ".minisig"; any other name has no effect.
 func MissingAsset(name string) Option {
 	return func(o *options) {
 		if o.missing == nil {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.vipengele.org/update/internal/minisign"
 	"go.vipengele.org/update/updatetest"
 )
 
@@ -17,8 +18,8 @@ func TestAPIOnlyAnswersLatestWithNotFound(t *testing.T) {
 	if resp.status != http.StatusNotFound || resp.header.Get("Location") != "" {
 		t.Errorf("latest = %d Location %q, want 404 with no Location", resp.status, resp.header.Get("Location"))
 	}
-	if rel := latestAPI(t, s); rel.TagName != testTag || len(rel.Assets) != 2 {
-		t.Errorf("API release = %+v, want %s with both assets", rel, testTag)
+	if rel := latestAPI(t, s); rel.TagName != testTag || len(rel.Assets) != 3 {
+		t.Errorf("API release = %+v, want %s with every asset", rel, testTag)
 	}
 }
 
@@ -49,7 +50,7 @@ func TestBadChecksumListsAnotherDigest(t *testing.T) {
 func TestMissingAsset(t *testing.T) {
 	t.Parallel()
 	rel := newRelease(t)
-	for _, name := range []string{rel.ArchiveName, rel.ChecksumsName} {
+	for _, name := range []string{rel.ArchiveName, rel.ChecksumsName, sigName(rel)} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			s := updatetest.NewServer(t, rel, updatetest.MissingAsset(name))
@@ -58,8 +59,13 @@ func TestMissingAsset(t *testing.T) {
 				t.Errorf("GET %s status = %d, want 404", name, resp.status)
 			}
 			api := latestAPI(t, s)
-			if len(api.Assets) != 1 || api.Assets[0].Name == name {
-				t.Errorf("API assets = %+v, want only the asset other than %q", api.Assets, name)
+			if len(api.Assets) != 2 {
+				t.Errorf("API assets = %+v, want the two assets other than %q", api.Assets, name)
+			}
+			for _, a := range api.Assets {
+				if a.Name == name {
+					t.Errorf("API assets = %+v, want none named %q", api.Assets, name)
+				}
 			}
 			if resp := mustGet(t, s, s.WebURL()+"/"+testOwner+"/"+testRepo+"/releases/latest"); resp.status != http.StatusFound {
 				t.Errorf("latest status = %d, want 302", resp.status)
@@ -87,8 +93,10 @@ func slowURL(s *updatetest.Server, rel updatetest.Release, target updatetest.Tar
 		return s.APIURL() + "/repos/" + testOwner + "/" + testRepo + "/releases/latest"
 	case updatetest.TargetArchive:
 		return s.AssetURL(rel.ArchiveName)
-	default:
+	case updatetest.TargetChecksums:
 		return s.AssetURL(rel.ChecksumsName)
+	default:
+		return s.AssetURL(sigName(rel))
 	}
 }
 
@@ -112,6 +120,7 @@ func getAsync(ctx context.Context, s *updatetest.Server, rawURL string) <-chan r
 func slowTargets() []updatetest.Target {
 	return []updatetest.Target{
 		updatetest.TargetLatest, updatetest.TargetLatestAPI, updatetest.TargetArchive, updatetest.TargetChecksums,
+		updatetest.TargetSignature,
 	}
 }
 
@@ -208,10 +217,84 @@ func TestTargetString(t *testing.T) {
 		updatetest.TargetLatestAPI: "TargetLatestAPI",
 		updatetest.TargetArchive:   "TargetArchive",
 		updatetest.TargetChecksums: "TargetChecksums",
+		updatetest.TargetSignature: "TargetSignature",
 		updatetest.Target(0):       "Target(0)",
 	} {
 		if got := target.String(); got != want {
 			t.Errorf("String() = %q, want %q", got, want)
 		}
 	}
+}
+
+// verifySignature parses s's public key and verifies the signature it serves over the checksums
+// it serves.
+func verifySignature(t *testing.T, s *updatetest.Server, rel updatetest.Release) error {
+	t.Helper()
+	key, err := minisign.ParsePublicKey(s.PublicKey())
+	if err != nil {
+		t.Fatalf("ParsePublicKey(%q): %v", s.PublicKey(), err)
+	}
+	sums := mustGet(t, s, s.AssetURL(rel.ChecksumsName))
+	sig := mustGet(t, s, s.AssetURL(sigName(rel)))
+	if sig.status != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", sigName(rel), sig.status)
+	}
+	_, err = minisign.Verify([]minisign.PublicKey{key}, sums.body, sig.body)
+	return err
+}
+
+func TestServerSignsTheChecksums(t *testing.T) {
+	t.Parallel()
+	rel := newRelease(t)
+	s := updatetest.NewServer(t, rel)
+	if err := verifySignature(t, s, rel); err != nil {
+		t.Errorf("Verify = %v, want nil", err)
+	}
+	if got := s.Requests(updatetest.TargetSignature); got != 1 {
+		t.Errorf("Requests(TargetSignature) = %d, want 1", got)
+	}
+}
+
+func TestBadSignatureCarriesTheKeyIDAndFailsToVerify(t *testing.T) {
+	t.Parallel()
+	rel := newRelease(t)
+	s := updatetest.NewServer(t, rel, updatetest.BadSignature())
+	var bad *minisign.BadSignatureError
+	if err := verifySignature(t, s, rel); !errors.As(err, &bad) {
+		t.Errorf("Verify = %v, want a *minisign.BadSignatureError", err)
+	}
+}
+
+func TestUnknownKeySignsWithAnotherKey(t *testing.T) {
+	t.Parallel()
+	rel := newRelease(t)
+	s := updatetest.NewServer(t, rel, updatetest.UnknownKey())
+	var unknown *minisign.UnknownKeyError
+	if err := verifySignature(t, s, rel); !errors.As(err, &unknown) {
+		t.Errorf("Verify = %v, want a *minisign.UnknownKeyError", err)
+	}
+}
+
+func TestTamperedSwapsArchiveAndChecksumsConsistently(t *testing.T) {
+	t.Parallel()
+	rel := newRelease(t)
+	s := updatetest.NewServer(t, rel, updatetest.Tampered())
+
+	archive := mustGet(t, s, s.AssetURL(rel.ArchiveName))
+	if updatetest.Digest(archive.body) == updatetest.Digest(rel.Archive) {
+		t.Errorf("served archive digest is the release's, want another")
+	}
+	sums := mustGet(t, s, s.AssetURL(rel.ChecksumsName))
+	if want := updatetest.ChecksumLine(rel.ArchiveName, archive.body) + "\n"; string(sums.body) != want {
+		t.Errorf("checksums = %q, want %q, the served archive's line", sums.body, want)
+	}
+	var bad *minisign.BadSignatureError
+	if err := verifySignature(t, s, rel); !errors.As(err, &bad) {
+		t.Errorf("Verify = %v, want a *minisign.BadSignatureError", err)
+	}
+}
+
+// sigName returns the name of rel's signature asset.
+func sigName(rel updatetest.Release) string {
+	return rel.ChecksumsName + ".minisig"
 }

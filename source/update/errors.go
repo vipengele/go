@@ -153,8 +153,59 @@ func (e *ChecksumConflictError) Error() string {
 	return fmt.Sprintf("update: checksums file lists conflicting digests for %q", e.Name)
 }
 
-// SizeLimitError reports a download that exceeded its byte cap, whether the archive or the
-// checksums file.
+// SignatureMalformedError reports a signature asset that is not a minisign signature file.
+type SignatureMalformedError struct {
+	// Name is the signature's asset name.
+	Name string
+	// Err says what is wrong with the file.
+	Err error
+}
+
+// Error implements error.
+func (e *SignatureMalformedError) Error() string {
+	return fmt.Sprintf("update: signature %q does not parse: %v", e.Name, e.Err)
+}
+
+// Unwrap returns what is wrong with the file.
+func (e *SignatureMalformedError) Unwrap() error { return e.Err }
+
+// UnknownKeyError reports a signature made by a key that no entry of Config.TrustedKeys carries, as
+// a tool that has not yet learnt of a key rotation sees it.
+type UnknownKeyError struct {
+	// Name is the signature's asset name.
+	Name string
+	// KeyID is the signature's key id as minisign prints it: 16 uppercase hexadecimal digits.
+	KeyID string
+}
+
+// Error implements error.
+func (e *UnknownKeyError) Error() string {
+	return fmt.Sprintf("update: signature %q is made by key %s, which is not trusted", e.Name, e.KeyID)
+}
+
+// SignatureMismatchError reports a signature that does not verify over the checksums file with the
+// trusted key its key id names: the checksums file, or the signature, is not the one the key's
+// holder signed.
+type SignatureMismatchError struct {
+	// Name is the signature's asset name.
+	Name string
+	// KeyID is the key id of the signature and of the trusted key it was checked with, as minisign
+	// prints it.
+	KeyID string
+	// Err says which of the signature's two parts failed.
+	Err error
+}
+
+// Error implements error.
+func (e *SignatureMismatchError) Error() string {
+	return fmt.Sprintf("update: signature %q does not verify with key %s: %v", e.Name, e.KeyID, e.Err)
+}
+
+// Unwrap returns which of the signature's two parts failed.
+func (e *SignatureMismatchError) Unwrap() error { return e.Err }
+
+// SizeLimitError reports a download that exceeded its byte cap: the archive, the checksums file or
+// its signature.
 type SizeLimitError struct {
 	// URL is the address that was downloaded.
 	URL string

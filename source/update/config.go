@@ -17,6 +17,7 @@ import (
 	"go.vipengele.org/commons/validate"
 	"go.vipengele.org/filelock"
 	"go.vipengele.org/update/asset"
+	"go.vipengele.org/update/internal/minisign"
 )
 
 // optOutSuffix is the suffix of the environment variable that turns update checks off. The
@@ -50,6 +51,11 @@ const lockFileName = "update.lock"
 // Config is everything the update library needs to know about a tool, and every seam through
 // which it reaches the outside world. Any field left at its zero value takes its production
 // default, documented on the field. The embedded [spec.Identity] is required in full.
+//
+// A Config must also state its signature policy: TrustedKeys, or AllowUnsigned. A Config with
+// neither, including the zero Config, is invalid for every operation, Check and CheckManaged
+// included, because each resolves the Config and so validates it. A Config with both is invalid
+// too.
 //
 // Config holds func fields, so it is not comparable.
 type Config struct {
@@ -86,6 +92,16 @@ type Config struct {
 	// in the template language of package asset: it takes every placeholder but {ext}. Empty means
 	// [asset.DefaultChecksumsTemplate].
 	ChecksumsAsset string
+	// TrustedKeys are the minisign public keys a release's checksums file may be signed by. Each
+	// entry is the base64 key line of a minisign.pub, optionally preceded by its "untrusted
+	// comment:" line, so an embedded minisign.pub works as is. Several keys may be listed, for a
+	// rotation; a signature by any one of them is accepted. Keys come from here alone. It is
+	// required unless AllowUnsigned is set, and the two are mutually exclusive.
+	TrustedKeys []string
+	// AllowUnsigned states that the tool's releases carry no signature, so no signature is fetched
+	// and the checksum is the only check. It is required unless TrustedKeys is non-empty, and the
+	// two are mutually exclusive.
+	AllowUnsigned bool
 	// StateDir is the directory the library keeps its state in. Empty means the state directory
 	// [paths.Resolve] resolves for the Identity, through the GOOS, Getenv and UserHomeDir seams: on
 	// Linux $XDG_STATE_HOME/<DirName> or ~/.local/state/<DirName>, and <PREFIX>_HOME/state when
@@ -165,6 +181,11 @@ type Config struct {
 // between zero and 2 seconds. Each of those is a [validate.FieldError] wrapping
 // [validate.ErrInvalid], the one for a nil detector naming its index as Detectors[i], and the
 // AssetTemplate and ChecksumsAsset ones also wrap the error of package asset.
+//
+// The signature policy is checked too, each problem a [validate.FieldError] wrapping
+// [validate.ErrInvalid]: an entry of TrustedKeys that does not parse, naming it as TrustedKeys[i]
+// and wrapping the minisign error; an entry whose key id repeats an earlier one; TrustedKeys empty
+// with AllowUnsigned false; and both set.
 func (c Config) Validate() error {
 	return validate.Join(
 		c.Identity.Validate(),
@@ -175,6 +196,7 @@ func (c Config) Validate() error {
 		checkNotNegative("MaxExtractBytes", c.MaxExtractBytes),
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
 		checkDetectors(c.Detectors),
+		checkSignaturePolicy(c.TrustedKeys, c.AllowUnsigned),
 		checkInterval("CheckInterval", c.CheckInterval),
 		checkWait(c.CheckWait),
 	)
@@ -236,6 +258,45 @@ func checkDetectors(detectors []Detector) error {
 				Err:   fmt.Errorf("%w: must not be nil", validate.ErrInvalid),
 			})
 		}
+	}
+	return validate.Join(errs...)
+}
+
+// checkSignaturePolicy requires exactly one of keys and allowUnsigned, and every key to parse
+// under an id no earlier key has.
+func checkSignaturePolicy(keys []string, allowUnsigned bool) error {
+	var errs []error
+	seen := make(map[minisign.KeyID]int, len(keys))
+	for i, entry := range keys {
+		field := "TrustedKeys[" + strconv.Itoa(i) + "]"
+		key, err := minisign.ParsePublicKey(entry)
+		if err != nil {
+			errs = append(errs, &validate.FieldError{Field: field, Value: entry, Err: fmt.Errorf("%w: %w", validate.ErrInvalid, err)})
+			continue
+		}
+		if first, dup := seen[key.ID]; dup {
+			errs = append(errs, &validate.FieldError{
+				Field: field,
+				Value: key.ID.String(),
+				Err:   fmt.Errorf("%w: key id repeats TrustedKeys[%d]", validate.ErrInvalid, first),
+			})
+			continue
+		}
+		seen[key.ID] = i
+	}
+	switch {
+	case len(keys) == 0 && !allowUnsigned:
+		errs = append(errs, &validate.FieldError{
+			Field: "TrustedKeys",
+			Value: "[]",
+			Err:   fmt.Errorf("%w: set TrustedKeys, or AllowUnsigned for a tool whose releases are unsigned", validate.ErrInvalid),
+		})
+	case len(keys) > 0 && allowUnsigned:
+		errs = append(errs, &validate.FieldError{
+			Field: "AllowUnsigned",
+			Value: "true",
+			Err:   fmt.Errorf("%w: must not be set together with TrustedKeys", validate.ErrInvalid),
+		})
 	}
 	return validate.Join(errs...)
 }

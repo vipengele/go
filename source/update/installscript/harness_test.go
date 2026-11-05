@@ -1,8 +1,12 @@
 package installscript_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +19,7 @@ import (
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/asset"
+	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
 
@@ -28,6 +33,55 @@ const scriptTimeout = 2 * time.Minute
 // noTool, as a harness's Downloader or Hasher, leaves every candidate for that role off PathDir.
 const noTool = "none"
 
+// fakeMinisignEnv names the variable through which TestMain hands the tests the path of the
+// minisign stand-in it builds from testdata/fakeminisign.
+const fakeMinisignEnv = "INSTALLSCRIPT_TEST_FAKE_MINISIGN"
+
+// ttyDrainTimeout bounds the wait, once the script has exited, for the last of its terminal output.
+// A process the script left running with the terminal open would otherwise hold Run until it exits.
+const ttyDrainTimeout = 5 * time.Second
+
+func TestMain(m *testing.M) {
+	os.Exit(runTests(m))
+}
+
+// runTests builds the minisign stand-in into a temporary directory, names it in fakeMinisignEnv
+// and runs the tests. A stand-in that does not build fails the whole package rather than skipping
+// the tests that run the script.
+func runTests(m *testing.M) int {
+	dir, err := os.MkdirTemp("", "fakeminisign")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "creating the stand-in's directory: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "removing the stand-in: %v\n", err)
+		}
+	}()
+	bin := filepath.Join(dir, "minisign")
+	build := exec.Command("go", "build", "-o", bin, "./testdata/fakeminisign")
+	if out, err := build.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "building the minisign stand-in: %v\n%s", err, out)
+		return 1
+	}
+	if err := os.Setenv(fakeMinisignEnv, bin); err != nil {
+		fmt.Fprintf(os.Stderr, "naming the stand-in: %v\n", err)
+		return 1
+	}
+	return m.Run()
+}
+
+// fakeMinisign returns the path of the minisign stand-in TestMain built.
+func fakeMinisign(t *testing.T) string {
+	t.Helper()
+	bin := os.Getenv(fakeMinisignEnv)
+	if bin == "" {
+		t.Fatalf("%s is unset: TestMain did not build the minisign stand-in", fakeMinisignEnv)
+	}
+	return bin
+}
+
 // scriptTools returns the external commands the install script and the completion snippet run,
 // other than the downloader and the hasher. printf is among them: `find -exec printf` runs the
 // command, not the shell builtin. brew is not, so the zsh target never depends on the host.
@@ -39,8 +93,10 @@ func scriptTools() []string {
 }
 
 // harnessOptions selects the release a harness publishes and the host the script runs on. The
-// zero value publishes [harnessTag] of testConfig("", "") as a tar.gz archive, downloaded with curl
-// and verified with sha256sum.
+// zero value publishes [harnessTag] of testConfig("", "") as a tar.gz archive, downloaded with curl,
+// checksummed with sha256sum, with the minisign stand-in on PATH, and run with no terminal. The
+// script is rendered before the server exists, so it trusts testConfig's fixed key, not the
+// server's; newSignedHarness renders one whose signature check passes against the server.
 type harnessOptions struct {
 	// Config is the tool the script is rendered for; a Config with no Name is testConfig("", "").
 	Config update.Config
@@ -57,6 +113,16 @@ type harnessOptions struct {
 	CompletionFails bool
 	// NonRoot skips the test when it runs as root, for whom every directory is writable.
 	NonRoot bool
+	// NoMinisign leaves minisign off PathDir. By default PathDir holds, as minisign, the stand-in
+	// TestMain builds from testdata/fakeminisign, never a minisign found on the test's PATH, so
+	// no test depends on the host having one.
+	NoMinisign bool
+	// TTY runs the script with a pseudo-terminal as its controlling terminal, as `curl | sh` typed
+	// into a terminal does: the terminal is the script's /dev/tty and its stderr, and its stdin
+	// is not a terminal. Without TTY the script runs in a session of its own on linux, with no
+	// controlling terminal, so opening /dev/tty fails. A test with TTY skips on a host other than
+	// linux.
+	TTY bool
 }
 
 // harness is one run of the install script against a fake release server, with an environment
@@ -81,19 +147,36 @@ type harness struct {
 	// Env is the script's whole environment. A test edits it before Run; deleting a key unsets
 	// the variable.
 	Env map[string]string
+	// TTYInput is what Run types into the terminal as the script starts, under the TTY option.
+	// The terminal is in canonical mode, so a read sees it a line at a time, and it echoes.
+	TTYInput string
+	// TTYEOF makes Run type the terminal's end-of-file character after TTYInput, under the TTY
+	// option. It ends a read only at the start of a line, so TTYInput is empty or ends in "\n";
+	// a read of /dev/tty then returns end of file. Closing the master instead would hang up the
+	// terminal.
+	TTYEOF bool
+
+	tty bool
 }
 
 // runResult is what one run of the install script printed and how it exited.
 type runResult struct {
+	// Stderr is empty under the TTY option, where the script's stderr is the terminal.
 	Stdout, Stderr string
-	Code           int
+	// TTY is everything written to the terminal, the echo of TTYInput included, with the
+	// terminal's "\r\n" line endings.
+	TTY  string
+	Code int
 }
 
 // newHarness renders the script for opts.Config, starts the server publishing the fake tool, and
 // builds the environment: HOME, XDG_DATA_HOME, XDG_CONFIG_HOME, TMPDIR and the install directory
 // under the test's temporary directory, SHELL naming bash, the base URL naming the server, PATH
-// holding PathDir alone, and no version or completion override. It skips the test when the host is
-// one the script does not install on or a command the script needs is missing.
+// holding PathDir alone, and no version or completion override. PathDir holds the minisign
+// stand-in unless opts.NoMinisign. The script is rendered before the server starts, so it does not
+// hold the server's key; a test that needs a signature to verify uses newSignedHarness. It skips
+// the test when the host is one the script does not install on or a command the script needs is
+// missing.
 func newHarness(t *testing.T, opts harnessOptions) *harness {
 	t.Helper()
 	if opts.NonRoot && os.Geteuid() == 0 {
@@ -130,6 +213,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		InstallDir: filepath.Join(root, "install", "bin"),
 		PathDir:    mkdir(t, root, "path"),
 		TmpDir:     mkdir(t, root, "tmp"),
+		tty:        opts.TTY,
 	}
 	tools := scriptTools()
 	for _, tool := range []string{opts.Downloader, opts.Hasher} {
@@ -138,6 +222,11 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		}
 	}
 	linkTools(t, h.PathDir, tools)
+	if !opts.NoMinisign {
+		if err := os.Symlink(fakeMinisign(t), filepath.Join(h.PathDir, "minisign")); err != nil {
+			t.Fatalf("linking minisign: %v", err)
+		}
+	}
 	h.Release = fakeRelease(t, cfg, opts.Tag, opts.CompletionFails)
 	h.Server = updatetest.NewServer(t, h.Release, opts.ServerOptions...)
 
@@ -184,8 +273,8 @@ func (h *harness) CompletionPath(shell completioninstall.Shell) string {
 	return filepath.FromSlash(loc.Path)
 }
 
-// Run runs the script under sh with exactly Env, failing the test when sh cannot be started or the
-// script outlives scriptTimeout.
+// Run runs the script under sh with exactly Env and, under the TTY option, with the terminal
+// attached, failing the test when sh cannot be started or the script outlives scriptTimeout.
 func (h *harness) Run() runResult {
 	h.t.Helper()
 	script := filepath.Join(h.t.TempDir(), "install.sh")
@@ -203,11 +292,27 @@ func (h *harness) Run() runResult {
 	}
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		h.t.Fatalf("the script did not finish within %v\nstdout:\n%s\nstderr:\n%s", scriptTimeout, stdout.String(), stderr.String())
+	var term *terminal
+	if h.tty {
+		term = h.attachTerminal(cmd)
+	} else {
+		detachTerminal(cmd)
 	}
-	res := runResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	var ttyOut string
+	err := cmd.Start()
+	if err == nil {
+		if term != nil {
+			term.start()
+		}
+		err = cmd.Wait()
+		if term != nil {
+			ttyOut = term.finish()
+		}
+	}
+	if ctx.Err() != nil {
+		h.t.Fatalf("the script did not finish within %v\nstdout:\n%s\nstderr:\n%s\nterminal:\n%s", scriptTimeout, stdout.String(), stderr.String(), ttyOut)
+	}
+	res := runResult{Stdout: stdout.String(), Stderr: stderr.String(), TTY: ttyOut}
 	var exitErr *exec.ExitError
 	switch {
 	case errors.As(err, &exitErr):
@@ -216,6 +321,60 @@ func (h *harness) Run() runResult {
 		h.t.Fatalf("running the script: %v", err)
 	}
 	return res
+}
+
+// terminal is the pseudo-terminal of one run of the script.
+type terminal struct {
+	t             *testing.T
+	master, slave *os.File
+	input         []byte
+	out           bytes.Buffer
+	done          chan struct{}
+}
+
+// attachTerminal attaches a pseudo-terminal to cmd, skipping the test where the harness has none,
+// and prepares TTYInput and TTYEOF to be typed into it.
+func (h *harness) attachTerminal(cmd *exec.Cmd) *terminal {
+	h.t.Helper()
+	master, slave, eof := attachPTY(h.t, cmd)
+	input := []byte(h.TTYInput)
+	if h.TTYEOF {
+		input = append(input, eof)
+	}
+	return &terminal{t: h.t, master: master, slave: slave, input: input, done: make(chan struct{})}
+}
+
+// start runs once the script has started: it closes the harness's copy of the slave, so a read of
+// the master ends when the script's last copy closes, types the input and starts collecting the
+// output.
+func (term *terminal) start() {
+	term.t.Helper()
+	if err := term.slave.Close(); err != nil {
+		term.t.Fatalf("closing the pty slave: %v", err)
+	}
+	if _, err := term.master.Write(term.input); err != nil {
+		term.t.Fatalf("typing into the terminal: %v", err)
+	}
+	go func() {
+		defer close(term.done)
+		// The read ends with EIO once no process holds the slave open.
+		_, _ = io.Copy(&term.out, term.master)
+	}()
+}
+
+// finish returns what the script wrote to the terminal, waiting at most ttyDrainTimeout for a
+// process that still holds the terminal open.
+func (term *terminal) finish() string {
+	term.t.Helper()
+	select {
+	case <-term.done:
+	default:
+		if err := term.master.SetReadDeadline(time.Now().Add(ttyDrainTimeout)); err != nil {
+			term.t.Fatalf("bounding the terminal's last read: %v", err)
+		}
+		<-term.done
+	}
+	return term.out.String()
 }
 
 // fakeToolVersion is what the fake tool tagged tag prints for --version.
@@ -320,4 +479,198 @@ func dirEntries(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// signedFile writes msg to a file in a new temporary directory and the signature file sig beside
+// it, where minisign looks for it by default, and returns the message file's path.
+func signedFile(t *testing.T, msg, sig []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(path, msg, 0o644); err != nil {
+		t.Fatalf("writing the message: %v", err)
+	}
+	if err := os.WriteFile(path+".minisig", sig, 0o644); err != nil {
+		t.Fatalf("writing the signature: %v", err)
+	}
+	return path
+}
+
+// generateKey returns a new minisign key, failing the test on an error.
+func generateKey(t *testing.T) *minisigntest.Key {
+	t.Helper()
+	key, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	return key
+}
+
+func TestFakeMinisignVerifies(t *testing.T) {
+	t.Parallel()
+	const comment = "timestamp:1 file:checksums.txt"
+	msg := []byte("0123  fake-tool.tar.gz\n")
+	key, other := generateKey(t), generateKey(t)
+
+	tests := []struct {
+		name string
+		// args builds the arguments from the message file's path.
+		args       func(file string) []string
+		sig        []byte
+		tamper     bool
+		wantCode   int
+		wantStdout string
+	}{
+		{
+			name:       "valid signature beside the file",
+			args:       func(file string) []string { return []string{"-V", "-P", key.PublicKeyLine(), "-m", file} },
+			sig:        key.Sign(msg, comment),
+			wantStdout: "Signature and comment signature verified\nTrusted comment: " + comment + "\n",
+		},
+		{
+			name: "valid signature, options reordered, quiet",
+			args: func(file string) []string {
+				return []string{"-q", "-m", file, "-x", file + ".minisig", "-P", key.PublicKeyLine(), "-V"}
+			},
+			sig: key.Sign(msg, comment),
+		},
+		{
+			name:       "valid signature, bundled options, trusted comment only",
+			args:       func(file string) []string { return []string{"-VQ", "-P" + key.PublicKeyLine(), "-m" + file} },
+			sig:        key.Sign(msg, comment),
+			wantStdout: comment + "\n",
+		},
+		{
+			name:     "tampered message",
+			args:     func(file string) []string { return []string{"-V", "-P", key.PublicKeyLine(), "-m", file} },
+			sig:      key.Sign(msg, comment),
+			tamper:   true,
+			wantCode: 1,
+		},
+		{
+			name:     "wrong key",
+			args:     func(file string) []string { return []string{"-V", "-P", other.PublicKeyLine(), "-m", file} },
+			sig:      key.Sign(msg, comment),
+			wantCode: 1,
+		},
+		{
+			name:     "legacy signature when prehashed is required",
+			args:     func(file string) []string { return []string{"-V", "-H", "-P", key.PublicKeyLine(), "-m", file} },
+			sig:      key.SignLegacy(msg, comment),
+			wantCode: 1,
+		},
+		{
+			name: "missing signature file",
+			args: func(file string) []string {
+				return []string{"-V", "-P", key.PublicKeyLine(), "-m", file, "-x", file + ".absent"}
+			},
+			sig:      key.Sign(msg, comment),
+			wantCode: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			file := signedFile(t, msg, tt.sig)
+			if tt.tamper {
+				if err := os.WriteFile(file, append(slices.Clone(msg), '\n'), 0o644); err != nil {
+					t.Fatalf("tampering with the message: %v", err)
+				}
+			}
+			cmd := exec.CommandContext(t.Context(), fakeMinisign(t), tt.args(file)...)
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			code := 0
+			var exitErr *exec.ExitError
+			switch {
+			case errors.As(err, &exitErr):
+				code = exitErr.ExitCode()
+			case err != nil:
+				t.Fatalf("running the stand-in: %v", err)
+			}
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d\nstderr:\n%s", code, tt.wantCode, stderr.String())
+			}
+			if stdout.String() != tt.wantStdout {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
+			}
+		})
+	}
+}
+
+func TestHarnessMinisign(t *testing.T) {
+	t.Parallel()
+	t.Run("on PATH by default", func(t *testing.T) {
+		t.Parallel()
+		key := generateKey(t)
+		msg := []byte("signed\n")
+		file := signedFile(t, msg, key.Sign(msg, "comment"))
+		h := newHarness(t, harnessOptions{})
+		h.Script = "command -v minisign\nminisign -V -q -P '" + key.PublicKeyLine() + "' -m '" + file + "'\n"
+		res := h.Run()
+		if res.Code != 0 {
+			t.Fatalf("exit code = %d, want 0\nstderr:\n%s", res.Code, res.Stderr)
+		}
+		if want := filepath.Join(h.PathDir, "minisign") + "\n"; res.Stdout != want {
+			t.Fatalf("stdout = %q, want %q", res.Stdout, want)
+		}
+	})
+	t.Run("off PATH with NoMinisign", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, harnessOptions{NoMinisign: true})
+		h.Script = "command -v minisign\n"
+		if res := h.Run(); res.Code == 0 {
+			t.Fatalf("command -v minisign succeeded, printing %q", res.Stdout)
+		}
+	})
+}
+
+func TestHarnessTTY(t *testing.T) {
+	t.Parallel()
+	const script = `printf 'answer? ' >&2
+if read answer </dev/tty; then printf 'read:%s\n' "$answer"; else printf 'eof:%s\n' "$answer"; fi
+`
+	tests := []struct {
+		name       string
+		input      string
+		eof        bool
+		wantStdout string
+	}{
+		{name: "a line", input: "yes\n", wantStdout: "read:yes\n"},
+		{name: "end of file", eof: true, wantStdout: "eof:\n"},
+		{name: "end of file after a line", input: "no\n", eof: true, wantStdout: "read:no\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, harnessOptions{TTY: true})
+			h.Script = script
+			h.TTYInput, h.TTYEOF = tt.input, tt.eof
+			res := h.Run()
+			if res.Code != 0 {
+				t.Fatalf("exit code = %d, want 0\nterminal:\n%s", res.Code, res.TTY)
+			}
+			if res.Stdout != tt.wantStdout {
+				t.Fatalf("stdout = %q, want %q\nterminal:\n%q", res.Stdout, tt.wantStdout, res.TTY)
+			}
+			if !strings.Contains(res.TTY, "answer? ") {
+				t.Fatalf("terminal = %q, want the prompt written to stderr", res.TTY)
+			}
+			if res.Stderr != "" {
+				t.Fatalf("stderr = %q, want it empty: stderr is the terminal", res.Stderr)
+			}
+		})
+	}
+	t.Run("no terminal", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, harnessOptions{})
+		h.Script = script
+		res := h.Run()
+		if strings.Contains(res.Stdout, "read:") {
+			t.Fatalf("stdout = %q: the script read a line with no terminal", res.Stdout)
+		}
+		if res.TTY != "" {
+			t.Fatalf("terminal = %q, want nothing without the TTY option", res.TTY)
+		}
+	})
 }

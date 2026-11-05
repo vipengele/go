@@ -17,7 +17,10 @@ type AssetLocator interface {
 
 var _ AssetLocator = (*GitHubSource)(nil)
 
-// Selection is the pair of release assets an update downloads for one platform.
+// signatureSuffix follows the checksums asset's name in the name of its signature asset.
+const signatureSuffix = ".minisig"
+
+// Selection is the release assets an update downloads for one platform.
 type Selection struct {
 	// Tag is the tag of the release the assets belong to.
 	Tag string
@@ -29,15 +32,19 @@ type Selection struct {
 	Archive Asset
 	// Checksums lists the checksum of every asset of the release.
 	Checksums Asset
+	// Signature holds the minisign signature of the checksums file, named by the checksums asset
+	// followed by ".minisig". It is the zero Asset under [Config.AllowUnsigned].
+	Signature Asset
 }
 
 // Select returns the assets of rel that the Config names for its platform. The archive's name is
 // AssetTemplate rendered for the BinaryName, rel's Tag, the GOOS and GOARCH and the AssetExt, and
 // the checksums asset's name is ChecksumsAsset rendered for the same values, each after the
-// Config is resolved; Select fails, without looking at rel, when the Config does not resolve.
+// Config is resolved. Unless AllowUnsigned is set, the signature asset's name is the checksums
+// asset's followed by ".minisig"; Select fails, without looking at rel, when the Config does not resolve.
 //
 // When rel lists its assets, a non-nil Assets, each name must match one exactly: an empty list
-// matches nothing. A missing asset is a [*AssetNotFoundError], and when both are missing the error
+// matches nothing. A missing asset is a [*AssetNotFoundError], and when several are missing the error
 // joins one for each. When rel's Assets are nil, meaning not listed, Select asks the resolved
 // Source for each asset's URL through [AssetLocator] and returns assets of Size 0; a Source that
 // is not an AssetLocator gives an error wrapping [ErrAssetsNotListed].
@@ -62,25 +69,39 @@ func (r Config) selectAssets(rel Release) (Selection, error) {
 		return Selection{}, fmt.Errorf("update: rendering ChecksumsAsset: %w", err)
 	}
 
+	var signatureName string
+	if !r.AllowUnsigned {
+		signatureName = checksumsName + signatureSuffix
+	}
+
 	if rel.Assets == nil {
 		loc, ok := r.Source.(AssetLocator)
 		if !ok {
 			return Selection{}, fmt.Errorf("%w: release %s, source %T", ErrAssetsNotListed, rel.Tag, r.Source)
 		}
-		return Selection{
+		sel := Selection{
 			Tag:       rel.Tag,
 			Located:   true,
 			Archive:   Asset{Name: archiveName, URL: loc.AssetURL(rel.Tag, archiveName)},
 			Checksums: Asset{Name: checksumsName, URL: loc.AssetURL(rel.Tag, checksumsName)},
-		}, nil
+		}
+		if signatureName != "" {
+			sel.Signature = Asset{Name: signatureName, URL: loc.AssetURL(rel.Tag, signatureName)}
+		}
+		return sel, nil
 	}
 
 	archive, archiveErr := findAsset(rel, archiveName)
 	checksums, checksumsErr := findAsset(rel, checksumsName)
-	if err := errors.Join(archiveErr, checksumsErr); err != nil {
+	var signature Asset
+	var signatureErr error
+	if signatureName != "" {
+		signature, signatureErr = findAsset(rel, signatureName)
+	}
+	if err := errors.Join(archiveErr, checksumsErr, signatureErr); err != nil {
 		return Selection{}, err
 	}
-	return Selection{Tag: rel.Tag, Archive: archive, Checksums: checksums}, nil
+	return Selection{Tag: rel.Tag, Archive: archive, Checksums: checksums, Signature: signature}, nil
 }
 
 // findAsset returns the asset of rel named name exactly, or a [*AssetNotFoundError].

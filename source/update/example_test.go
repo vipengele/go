@@ -2,20 +2,34 @@ package update_test
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/filelock"
 	"go.vipengele.org/update"
+	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
+
+// exampleKey stands for the contents of the tool's minisign.pub, which a real tool embeds. It is
+// drawn from a fixed stream, longer than the key id and Ed25519 seed GenerateKey reads, so every
+// call returns the same key.
+func exampleKey() string {
+	key, err := minisigntest.GenerateKey(strings.NewReader(strings.Repeat("example key ", 8)))
+	if err != nil {
+		panic(err)
+	}
+	return key.PublicKey()
+}
 
 // A tool refreshes its shell completion after an update by registering [completioninstall.Install]
 // as a post-update hook. The hook receives the installed binary's path, and the tool's
@@ -37,7 +51,8 @@ func Example_completionHook() {
 	}
 
 	cfg := update.Config{
-		Identity: id,
+		Identity:    id,
+		TrustedKeys: []string{exampleKey()},
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				res, err := completioninstall.Install(completioninstall.Options{
@@ -89,9 +104,22 @@ func Example_install() {
 	const archiveName = "atk_linux_amd64.tar.gz"
 	sums := updatetest.Checksums(map[string][]byte{archiveName: archive})
 
+	// The release's signing key, which a real tool's release pipeline holds and whose public half
+	// the tool compiles in.
+	key, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sig := key.Sign(sums, "file:checksums.txt")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/checksums.txt" {
+		switch r.URL.Path {
+		case "/checksums.txt":
 			_, _ = w.Write(sums)
+			return
+		case "/checksums.txt.minisig":
+			_, _ = w.Write(sig)
 			return
 		}
 		_, _ = w.Write(archive)
@@ -106,11 +134,12 @@ func Example_install() {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
-		GOOS:       "linux",
-		GOARCH:     "amd64",
-		TempDir:    dir,
-		StateDir:   dir,
-		Executable: func() (string, error) { return exe, nil },
+		TrustedKeys: []string{key.PublicKey()},
+		GOOS:        "linux",
+		GOARCH:      "amd64",
+		TempDir:     dir,
+		StateDir:    dir,
+		Executable:  func() (string, error) { return exe, nil },
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				body, err := os.ReadFile(installedPath)
@@ -124,6 +153,7 @@ func Example_install() {
 		Tag:       "v2",
 		Archive:   update.Asset{Name: archiveName, URL: srv.URL + "/" + archiveName},
 		Checksums: update.Asset{Name: "checksums.txt", URL: srv.URL + "/checksums.txt"},
+		Signature: update.Asset{Name: "checksums.txt.minisig", URL: srv.URL + "/checksums.txt.minisig"},
 	}
 
 	ctx := context.Background()
@@ -207,13 +237,14 @@ func ExampleConfig_Start() {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
-		Version:    "v1.2.0",
-		Source:     newerSource{},
-		StateStore: &memStore{},
-		Locker:     filelock.NewNoop(),
-		Now:        func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
-		Getenv:     func(string) string { return "" },
-		IsTerminal: func() bool { return true },
+		Version:     "v1.2.0",
+		TrustedKeys: []string{exampleKey()},
+		Source:      newerSource{},
+		StateStore:  &memStore{},
+		Locker:      filelock.NewNoop(),
+		Now:         func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Getenv:      func(string) string { return "" },
+		IsTerminal:  func() bool { return true },
 	}
 
 	check, err := cfg.Start(context.Background())

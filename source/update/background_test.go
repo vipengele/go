@@ -91,12 +91,13 @@ func (errSource) Latest(context.Context) (Release, error) {
 }
 
 // bgConfig is an eligible Config for a background check of srv: release version v1.0.0, a
-// terminal, no CI and no opt-out whatever the host environment holds, the fixed clock bgNow, the
-// fake store and a lock that is always free.
+// terminal, no CI and no opt-out whatever the host environment holds, srv's signing key, the
+// fixed clock bgNow, the fake store and a lock that is always free.
 func bgConfig(t *testing.T, srv *updatetest.Server, store *fakeStore) Config {
 	t.Helper()
 	c := validConfig(t.TempDir())
 	c.Source = kitSource(srv)
+	c.TrustedKeys = []string{srv.PublicKey()}
 	c.Version = "v1.0.0"
 	c.Getenv = envOf(nil)
 	c.IsTerminal = func() bool { return true }
