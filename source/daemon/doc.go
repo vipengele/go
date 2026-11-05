@@ -1,5 +1,6 @@
 // Package daemon runs the long-running work of a process as Runners under a Supervisor, and
-// keeps a second instance of the same tool from running beside it.
+// keeps a second instance of the same tool from running beside it. Its subpackage daemoncmd holds
+// the commands a tool built on cli/spec uses to manage its daemon.
 //
 // A Runner is one unit of long-running work. Start returns once the Runner is ready, leaving its
 // work running; an error or a panic from Start means it failed to start. Done closes once the
@@ -93,6 +94,41 @@
 // read; a crash leaves at most one stray instance.holder.tmp, which the next write replaces. A
 // Runner abandoned at the end of the grace period may still be running when the lock is
 // released.
+//
+// # Health
+//
+// A Health, built with NewHealth, is a registry of health checks that runs them all, concurrently
+// and each under its own timeout, whenever a Snapshot is asked for. A Liveness check says whether
+// the process should be restarted, a Readiness check whether it should receive traffic. The
+// snapshot is down when a liveness check fails, else unready when a readiness check fails, else
+// ok.
+//
+// WithHealth has New register the Supervisor's own checks in a Health, as its last step and all
+// or none, so a New that fails leaves the Health as it was. They are fed from state Run publishes
+// at each step of the run:
+//
+//   - supervisor.live, a Liveness check, passes from the beginning of the start phase until Run
+//     returns. A panic isolated under PanicIsolate does not fail it: isolation keeps the process
+//     up.
+//   - supervisor.ready, a Readiness check, passes once every Start has returned, while no Runner
+//     has exited or been isolated and shutdown has not begun.
+//   - Each Runner that is a HealthChecker gets a Readiness check named after it. The check calls
+//     CheckHealth only while the Runner is running: its Start has returned nil, it has not exited
+//     and shutdown has not begun. At any other time it fails without calling CheckHealth.
+//
+// A run is therefore down before Run and after it returns, unready while starting, while stopping
+// and once a Runner's panic has been isolated, and ok in between. A Runner name already held by
+// the Health, including supervisor.live and supervisor.ready, makes New fail with
+// ErrDuplicateCheck.
+//
+// A check still running when its timeout expires fails with ErrCheckTimeout and is left to
+// return on its own; until it does, later snapshots report it as failing without running it again.
+//
+// Handler serves a Health over HTTP: /livez and /readyz answer 200 or 503, and /status the
+// snapshot as the JSON envelope spec.WriteJSON writes. /livez runs only the Liveness checks, so a slow dependency cannot delay the
+// probe that decides a restart; /readyz and /status run every check. The status command of
+// package daemoncmd is a client of /status: it prints the snapshot as text, or as the same JSON
+// under the App's JSON output, and fails unless it is ok.
 //
 // # Errors
 //
