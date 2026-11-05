@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/commons/validate"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/updatecmd"
 	"go.vipengele.org/update/updatetest"
@@ -635,5 +636,128 @@ func TestToAReleaseMissingItsArchiveFails(t *testing.T) {
 	}
 	if got := f.binary(t); got != "old" {
 		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
+func TestAConfigThatDoesNotResolveFails(t *testing.T) {
+	t.Parallel()
+
+	for name, flags := range map[string]map[string]any{
+		"check":  {"check": true},
+		"update": {"yes": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFixture(t, "v1.0.0", "v1.1.0")
+			f.cfg.MaxExtractBytes = -1
+			r := runCommand(t, f.cfg, flags, "", false)
+
+			var field *validate.FieldError
+			if !errors.As(r.err, &field) || field.Field != "MaxExtractBytes" {
+				t.Fatalf("Run error = %v, want a *validate.FieldError on MaxExtractBytes", r.err)
+			}
+			var dev *update.DevBuildError
+			if errors.As(r.err, &dev) {
+				t.Errorf("Run error = %v, want no *update.DevBuildError", r.err)
+			}
+			if f.requests() != 0 {
+				t.Errorf("server received %d requests, want 0", f.requests())
+			}
+			if got := f.binary(t); got != "old" {
+				t.Errorf("executable holds %q, want %q", got, "old")
+			}
+		})
+	}
+}
+
+// staticSource is a Source whose Latest returns rel and err. It is not an update.AssetLocator.
+type staticSource struct {
+	rel update.Release
+	err error
+}
+
+func (s staticSource) Latest(context.Context) (update.Release, error) {
+	return s.rel, s.err
+}
+
+func TestASourceThatFailsFailsTheRun(t *testing.T) {
+	t.Parallel()
+
+	for name, flags := range map[string]map[string]any{
+		"check":  {"check": true},
+		"update": {"yes": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			unreachable := errors.New("source unreachable")
+			f := newFixture(t, "v1.0.0", "v1.1.0")
+			f.cfg.Source = staticSource{err: unreachable}
+			r := runCommand(t, f.cfg, flags, "", false)
+
+			if !errors.Is(r.err, unreachable) {
+				t.Fatalf("Run error = %v, want %v", r.err, unreachable)
+			}
+			if r.stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want nothing", r.stdout.String())
+			}
+			if f.requests() != 0 {
+				t.Errorf("server received %d requests, want 0", f.requests())
+			}
+			if got := f.binary(t); got != "old" {
+				t.Errorf("executable holds %q, want %q", got, "old")
+			}
+		})
+	}
+}
+
+// failingWriter fails every Write with err.
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestCheckReturnsAFailedWriteOfANewerRelease(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	closed := errors.New("stdout closed")
+	var stderr bytes.Buffer
+	env := &spec.Env{
+		Stdin:    strings.NewReader(""),
+		Stdout:   failingWriter{err: closed},
+		Stderr:   &stderr,
+		Terminal: func(spec.Stream) bool { return false },
+	}
+	inv := spec.NewInvocation(env, nil, map[string]any{"check": true}, spec.ExplicitFlags("check"))
+	err := updatecmd.Commands(f.cfg)[0].Run(context.Background(), inv)
+
+	if !errors.Is(err, closed) {
+		t.Fatalf("Run error = %v, want %v", err, closed)
+	}
+	var coded *spec.CodedError
+	if errors.As(err, &coded) {
+		t.Errorf("Run error %v carries exit code %d, want none", err, coded.Code())
+	}
+}
+
+func TestUpdateToAReleaseWithUnlistedAssetsFails(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.Source = staticSource{rel: update.Release{Tag: "v1.1.0"}}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	if !errors.Is(r.err, update.ErrAssetsNotListed) {
+		t.Fatalf("Run error = %v, want update.ErrAssetsNotListed", r.err)
+	}
+	if f.requests() != 0 {
+		t.Errorf("server received %d requests, want 0", f.requests())
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+	if _, err := os.Stat(f.exe + ".old"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat of the backup = %v, want none", err)
 	}
 }

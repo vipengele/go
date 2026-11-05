@@ -266,3 +266,26 @@ func TestApplyClosesTheArchiveWhenTargetFails(t *testing.T) {
 
 	f.assertUntouched(t)
 }
+
+func TestApplyReturnsTheExtractError(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	f.cfg.MaxExtractBytes = 1
+
+	installed, err := f.cfg.Apply(context.Background(), f.sel)
+	if installed != nil {
+		t.Errorf("Apply Installed = %v, want nil", installed)
+	}
+
+	var limit *ExtractLimitError
+	if !errors.As(err, &limit) {
+		t.Fatalf("Apply error = %v, want a *ExtractLimitError", err)
+	}
+
+	if limit.Limit != 1 {
+		t.Errorf("ExtractLimitError.Limit = %d, want 1", limit.Limit)
+	}
+
+	f.assertUntouched(t)
+}

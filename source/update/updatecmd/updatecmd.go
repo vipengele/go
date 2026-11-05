@@ -88,12 +88,12 @@ func (c *command) run(ctx context.Context, inv *spec.Invocation) error {
 		to = normalized
 	}
 
-	if err := c.cfg.CheckRelease(); err != nil {
+	r, err := c.cfg.Resolved()
+	if err != nil {
 		return err
 	}
 
-	r, err := c.cfg.Resolved()
-	if err != nil {
+	if err := r.CheckRelease(); err != nil {
 		return err
 	}
 

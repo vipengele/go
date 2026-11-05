@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"go.vipengele.org/commons/validate"
 )
 
 func TestCheckRelease(t *testing.T) {
@@ -53,5 +55,25 @@ func TestCheckRelease(t *testing.T) {
 				t.Errorf("Error() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCheckReleaseReturnsTheResolveError(t *testing.T) {
+	t.Parallel()
+
+	c := validConfig(os.TempDir())
+	c.Version = "v1.2.3"
+	c.MaxExtractBytes = -1
+
+	err := c.CheckRelease()
+
+	var field *validate.FieldError
+	if !errors.As(err, &field) || field.Field != "MaxExtractBytes" {
+		t.Fatalf("CheckRelease() = %v, want a *validate.FieldError on MaxExtractBytes", err)
+	}
+
+	var dev *DevBuildError
+	if errors.As(err, &dev) {
+		t.Errorf("CheckRelease() = %v, want no *DevBuildError", err)
 	}
 }
