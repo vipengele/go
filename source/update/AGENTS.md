@@ -128,6 +128,11 @@ golangci-lint run
     the script runs with no controlling terminal, so opening `/dev/tty` fails. The harness renders
     the script before the server's key exists, so a test of a keyed script re-renders it with
     `Server.PublicKey()` (`newSignedHarness`).
+- `internal/minisign/` — the minisign verifier: `ParsePublicKey` (with or without the `untrusted
+  comment:` line; `.Line` is the bare key line), `ParseSignature` and `Verify`, accepting both the
+  hashed `ED` and the legacy `Ed` signature forms. Its `testdata/` holds an interop vector (a key and
+  signatures from an independent implementation; see its `README.md`). `internal/minisigntest` is the signer for tests only
+  (`GenerateKey`, `Sign`, `SignLegacy`); production code never imports it.
 - `extract.go` — `Config.Extract`, `Staged`, the extractor dispatch by format, the raw extractor, the
   bounded copy (`copyBounded`), the context-aware reader and the entry-name check
   (`unsafeEntryName`).
