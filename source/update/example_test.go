@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"time"
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/completioninstall"
+	"go.vipengele.org/filelock"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/updatetest"
 )
@@ -175,4 +177,54 @@ func Example_install() {
 	// Output:
 	// hook sees v2
 	// installed v2, backup removed=true
+}
+
+// newerSource is a Source whose latest release is always v1.3.0.
+type newerSource struct{}
+
+func (newerSource) Latest(context.Context) (update.Release, error) {
+	return update.Release{Tag: "v1.3.0"}, nil
+}
+
+// memStore is a StateStore held in memory.
+type memStore struct{ st update.State }
+
+func (m *memStore) Load(context.Context) (update.State, error) { return m.st, nil }
+
+func (m *memStore) Save(_ context.Context, st update.State) error {
+	m.st = st
+	return nil
+}
+
+// A tool starts the check when a command begins and finishes it when the command ends. Notice
+// reports a release newer than the running version, if the check found one in time.
+func ExampleConfig_Start() {
+	cfg := update.Config{
+		Identity: spec.Identity{
+			Name:      "atk",
+			Owner:     "pedromvgomes",
+			Repo:      "agentic-toolkit",
+			EnvPrefix: "ATK",
+			DirName:   "agentic-toolkit",
+		},
+		Version:    "v1.2.0",
+		Source:     newerSource{},
+		StateStore: &memStore{},
+		Locker:     filelock.NewNoop(),
+		Now:        func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Getenv:     func(string) string { return "" },
+		IsTerminal: func() bool { return true },
+	}
+
+	check, err := cfg.Start(context.Background())
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	// ... the command runs ...
+	check.Finish()
+	if n, ok := check.Notice(); ok {
+		fmt.Println(n.String())
+	}
+	// Output: atk v1.3.0 is available (you're on v1.2.0). Run 'atk update' to install.
 }

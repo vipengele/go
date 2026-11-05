@@ -274,6 +274,16 @@ cancelled or past the bound the process waits for it, is not an attempt and does
 interval.
 _Avoid_: try, run, last check (when a cancelled check is meant)
 
+**Notice**:
+The one line on stderr, after an eligible command, naming a newer release than the running one; at
+most once per check interval.
+_Avoid_: banner, nag, alert
+
+**Check wait**:
+The bound on how long the background **Update check** may delay a command's exit. When it passes,
+the check is cancelled and is not a **Check attempt**.
+_Avoid_: timeout, grace period (the **Supervisor**'s stop bound)
+
 **Update state**:
 What `update` remembers between runs: the time of the last **Check attempt** and the latest release
 version it saw. Losing or corrupting it costs one extra **Update check**, nothing more (ADR-0023).
