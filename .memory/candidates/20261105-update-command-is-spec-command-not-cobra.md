@@ -13,7 +13,7 @@ saw:
 - The `update` command is `updatecmd.Commands(cfg update.Config, opts ...Option) []*spec.Command`
   (source/update/updatecmd/updatecmd.go), framework-neutral per ADR-0005:47-68,90. ADR-0003's
   cobra-in-updatecmd allowance is superseded: source/update/.golangci.yml's `no-cobra` rule denies
-  `github.com/spf13/cobra` for files `**`, beside `core-stays-out` for `cli/core/**` (tests included).
+  `github.com/spf13/cobra` for files `**`, beside `core-stays-out` for `go.vipengele.org/cli/core` (a prefix match; tests included).
 - ADR-0005:68 and ADR-0003:42 write the join as `app.AddCommand(...)`, but `*cli/core.App` has only
   `Add(cmd *spec.Command)` (source/cli/core/app.go:173), one command per call; ADR-0009:29,85 records
   the correct name. A tool's main loops: `for _, c := range updatecmd.Commands(cfg) { app.Add(c) }`.

@@ -330,8 +330,9 @@ golangci-lint run
   `Now` stamps state only.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - Commands are framework-neutral `spec.Command`s (ADR-0005). `depguard` forbids importing
-  `go.vipengele.org/cli/core/**` and cobra anywhere in the module: update depends
-  on no command-line framework. The tool joins the command in its main by passing each command
+  `go.vipengele.org/cli/core` and cobra anywhere in the module: update depends on no
+  command-line framework. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches
+  nothing. The tool joins the command in its main by passing each command
   `updatecmd.Commands(cfg)` returns to `app.Add` (ADR-0009).
 - `cli/spec`, `cli/state`, `commons` and `filelock` are siblings reached by directory `replace`s in
   `go.mod` (`../cli/spec`, `../cli/state`, `../commons`, `../filelock`); see the repo-root rule on
