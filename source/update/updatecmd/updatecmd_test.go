@@ -1,0 +1,548 @@
+package updatecmd_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/update"
+	"go.vipengele.org/update/updatecmd"
+	"go.vipengele.org/update/updatetest"
+)
+
+const (
+	testOwner = "pedromvgomes"
+	testRepo  = "agentic-toolkit"
+	testName  = "atk"
+)
+
+// fixture is an executable holding "old" in a directory of its own, an updatetest server
+// publishing one release of it, and a Config whose executable is that file and whose every request
+// goes to the server.
+type fixture struct {
+	exe string
+	srv *updatetest.Server
+	cfg update.Config
+}
+
+// newFixture serves the release tagged served to a Config running version current.
+func newFixture(t *testing.T, current, served string, opts ...updatetest.Option) fixture {
+	t.Helper()
+
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	exe := filepath.Join(dir, testName)
+	if err := os.WriteFile(exe, []byte("old"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	rel := updatetest.NewRelease(t, testOwner, testRepo, served, testName)
+	srv := updatetest.NewServer(t, rel, opts...)
+	home := t.TempDir()
+
+	cfg := update.Config{
+		Identity: spec.Identity{
+			Name:      testName,
+			Owner:     testOwner,
+			Repo:      testRepo,
+			EnvPrefix: "ATK",
+			DirName:   "agentic-toolkit",
+		},
+		Version:     current,
+		TempDir:     t.TempDir(),
+		StateDir:    t.TempDir(),
+		HTTPClient:  srv.Client(),
+		Executable:  func() (string, error) { return exe, nil },
+		InContainer: func() bool { return false },
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return home, nil },
+		Source: &update.GitHubSource{
+			Owner:      testOwner,
+			Repo:       testRepo,
+			HTTPClient: srv.Client(),
+			WebURL:     srv.WebURL(),
+			APIURL:     srv.APIURL(),
+		},
+	}
+
+	return fixture{exe: exe, srv: srv, cfg: cfg}
+}
+
+// requests returns how many requests the server has received on every route.
+func (f fixture) requests() int {
+	n := 0
+	for _, target := range []updatetest.Target{
+		updatetest.TargetLatest, updatetest.TargetLatestAPI, updatetest.TargetArchive, updatetest.TargetChecksums,
+	} {
+		n += f.srv.Requests(target)
+	}
+	return n
+}
+
+// downloads returns how many requests the server has received for the release's assets.
+func (f fixture) downloads() int {
+	return f.srv.Requests(updatetest.TargetArchive) + f.srv.Requests(updatetest.TargetChecksums)
+}
+
+// binary returns what the executable holds.
+func (f fixture) binary(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(f.exe)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	return string(b)
+}
+
+// releaseBinary is the content of the binary updatetest.NewRelease packs for tag.
+func releaseBinary(tag string) string {
+	return "#!/bin/sh\necho " + tag + "\n"
+}
+
+// run is one execution of the command: its streams and the error it returned.
+type run struct {
+	stdout *bytes.Buffer
+	stderr *bytes.Buffer
+	err    error
+}
+
+// runCommand runs the `update` command of cfg with the flag values flags, every one of them
+// explicit, stdin as its standard input, and terminal as the answer to every terminal query.
+func runCommand(t *testing.T, cfg update.Config, flags map[string]any, stdin string, terminal bool) run {
+	t.Helper()
+
+	cmds := updatecmd.Commands(cfg)
+	if len(cmds) != 1 {
+		t.Fatalf("Commands returned %d commands, want 1", len(cmds))
+	}
+
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{
+		Stdin:    strings.NewReader(stdin),
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Terminal: func(spec.Stream) bool { return terminal },
+	}
+
+	names := make([]string, 0, len(flags))
+	for name := range flags {
+		names = append(names, name)
+	}
+
+	inv := spec.NewInvocation(env, nil, flags, spec.ExplicitFlags(names...))
+	err := cmds[0].Run(context.Background(), inv)
+	return run{stdout: &stdout, stderr: &stderr, err: err}
+}
+
+// managedBy returns a detector claiming every executable for manager.
+func managedBy(manager, instead string) update.Detector {
+	return func(string) (update.Install, bool) {
+		return update.Install{Manager: manager, Instead: instead}, true
+	}
+}
+
+// assertPlainError fails t unless err is an error that asks for no exit code and is no usage
+// error, so that it exits 1.
+func assertPlainError(t *testing.T, err error) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatal("Run error = nil, want an error")
+	}
+	var coded *spec.CodedError
+	if errors.As(err, &coded) {
+		t.Errorf("Run error %v carries exit code %d, want none", err, coded.Code())
+	}
+	var usage *spec.UsageError
+	if errors.As(err, &usage) {
+		t.Errorf("Run error %v is a *spec.UsageError, want a plain error", err)
+	}
+}
+
+func TestCommandsDeclaresTheUpdateCommand(t *testing.T) {
+	t.Parallel()
+
+	cmds := updatecmd.Commands(newFixture(t, "v1.0.0", "v1.0.0").cfg)
+	if len(cmds) != 1 {
+		t.Fatalf("Commands returned %d commands, want 1", len(cmds))
+	}
+	cmd := cmds[0]
+
+	if err := cmd.Validate(); err != nil {
+		t.Errorf("Validate = %v", err)
+	}
+	if cmd.Name != "update" {
+		t.Errorf("Name = %q, want %q", cmd.Name, "update")
+	}
+	if _, ok := cmd.Annotations[spec.SkipUpdateCheck]; !ok {
+		t.Errorf("Annotations %v lack %q", cmd.Annotations, spec.SkipUpdateCheck)
+	}
+	if !strings.Contains(cmd.Description, "exit code is 10") {
+		t.Errorf("Description does not document exit code 10:\n%s", cmd.Description)
+	}
+
+	flags := map[string]string{}
+	for _, f := range cmd.Flags {
+		flags[f.Name()] = f.Shorthand()
+	}
+	want := map[string]string{"check": "", "yes": "y", "to": ""}
+	for name, short := range want {
+		got, ok := flags[name]
+		if !ok {
+			t.Errorf("flag --%s is not declared", name)
+			continue
+		}
+		if got != short {
+			t.Errorf("flag --%s shorthand = %q, want %q", name, got, short)
+		}
+	}
+}
+
+func TestCheckReportsANewerRelease(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{"check": true}, "", false)
+
+	var coded *spec.CodedError
+	if !errors.As(r.err, &coded) || coded.Code() != updatecmd.ExitUpdateAvailable {
+		t.Fatalf("Run error = %v, want one carrying exit code %d", r.err, updatecmd.ExitUpdateAvailable)
+	}
+	var reported *spec.ReportedError
+	if !errors.As(r.err, &reported) {
+		t.Errorf("Run error = %v, want it marked as reported", r.err)
+	}
+
+	if want := "atk v1.1.0 is available (current v1.0.0)\n"; r.stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", r.stdout.String(), want)
+	}
+	if f.downloads() != 0 {
+		t.Errorf("--check made %d download requests, want 0", f.downloads())
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
+func TestCheckReportsUpToDate(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.1.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{"check": true}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if want := "atk v1.1.0 is up to date\n"; r.stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", r.stdout.String(), want)
+	}
+}
+
+func TestCheckOnAManagedInstallAddsWhatToRunInstead(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.Detectors = []update.Detector{managedBy("Tool", "run `tool upgrade atk`")}
+	r := runCommand(t, f.cfg, map[string]any{"check": true}, "", false)
+
+	var coded *spec.CodedError
+	if !errors.As(r.err, &coded) || coded.Code() != updatecmd.ExitUpdateAvailable {
+		t.Fatalf("Run error = %v, want one carrying exit code %d", r.err, updatecmd.ExitUpdateAvailable)
+	}
+	want := "atk v1.1.0 is available (current v1.0.0) (managed by Tool: run `tool upgrade atk`)\n"
+	if r.stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", r.stdout.String(), want)
+	}
+}
+
+func TestCheckOnAManagedInstallThatIsUpToDateGivesNoHint(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.1.0", "v1.1.0")
+	f.cfg.Detectors = []update.Detector{managedBy("Tool", "run `tool upgrade atk`")}
+	r := runCommand(t, f.cfg, map[string]any{"check": true}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if want := "atk v1.1.0 is up to date\n"; r.stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", r.stdout.String(), want)
+	}
+}
+
+func TestADevBuildIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for name, flags := range map[string]map[string]any{
+		"check":  {"check": true},
+		"update": {"yes": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFixture(t, "dev", "v1.1.0")
+			r := runCommand(t, f.cfg, flags, "", false)
+
+			var dev *update.DevBuildError
+			if !errors.As(r.err, &dev) {
+				t.Fatalf("Run error = %v, want a *update.DevBuildError", r.err)
+			}
+			if f.requests() != 0 {
+				t.Errorf("server received %d requests, want 0", f.requests())
+			}
+			if got := f.binary(t); got != "old" {
+				t.Errorf("executable holds %q, want %q", got, "old")
+			}
+		})
+	}
+}
+
+func TestAManagedInstallIsNotUpdated(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.Detectors = []update.Detector{managedBy("Tool", "run `tool upgrade atk`")}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	var managed *update.ManagedInstallError
+	if !errors.As(r.err, &managed) {
+		t.Fatalf("Run error = %v, want a *update.ManagedInstallError", r.err)
+	}
+	if f.requests() != 0 {
+		t.Errorf("server received %d requests, want 0", f.requests())
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
+func TestUpdateWithoutATerminalNeedsYes(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{}, "y\n", false)
+
+	var usage *spec.UsageError
+	if !errors.As(r.err, &usage) {
+		t.Fatalf("Run error = %v, want a *spec.UsageError", r.err)
+	}
+	if usage.Flag != "--yes" {
+		t.Errorf("UsageError.Flag = %q, want %q", usage.Flag, "--yes")
+	}
+	if f.downloads() != 0 {
+		t.Errorf("server received %d download requests, want 0", f.downloads())
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
+func TestUpdateDeclinedAtThePromptChangesNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{}, "n\n", true)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if !strings.Contains(r.stderr.String(), "Update atk from v1.0.0 to v1.1.0?") {
+		t.Errorf("stderr = %q, want the question", r.stderr.String())
+	}
+	if !strings.Contains(r.stderr.String(), "update cancelled") {
+		t.Errorf("stderr = %q, want %q", r.stderr.String(), "update cancelled")
+	}
+	if f.downloads() != 0 {
+		t.Errorf("server received %d download requests, want 0", f.downloads())
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
+func TestUpdateAbortedAtThePromptFails(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{}, "", true)
+
+	if !errors.Is(r.err, spec.ErrAborted) {
+		t.Fatalf("Run error = %v, want spec.ErrAborted", r.err)
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
+func TestUpdateConfirmedAtThePromptInstalls(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{}, "y\n", true)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
+		t.Errorf("executable holds %q, want %q", got, want)
+	}
+}
+
+func TestUpdateWithYesInstallsAndRunsTheHooks(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	var hooked []string
+	f.cfg.PostUpdate = []update.PostUpdate{func(path string) error {
+		hooked = append(hooked, path)
+		return nil
+	}}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
+		t.Errorf("executable holds %q, want %q", got, want)
+	}
+	if len(hooked) != 1 || hooked[0] != f.exe {
+		t.Errorf("hook ran with %v, want [%s]", hooked, f.exe)
+	}
+	if _, err := os.Stat(f.exe + ".old"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat of the backup = %v, want it removed", err)
+	}
+	if !strings.Contains(r.stderr.String(), "updated atk v1.0.0 → v1.1.0") {
+		t.Errorf("stderr = %q, want the update reported", r.stderr.String())
+	}
+	if r.stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", r.stdout.String())
+	}
+}
+
+func TestAFailingHookIsAWarning(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.PostUpdate = []update.PostUpdate{func(string) error { return errors.New("completion broke") }}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if !strings.Contains(r.stderr.String(), "completion broke") {
+		t.Errorf("stderr = %q, want the hook's failure", r.stderr.String())
+	}
+	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
+		t.Errorf("executable holds %q, want %q", got, want)
+	}
+}
+
+func TestUpdateWhenUpToDateDoesNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.1.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if !strings.Contains(r.stderr.String(), "atk v1.1.0 is already up to date") {
+		t.Errorf("stderr = %q, want the up-to-date message", r.stderr.String())
+	}
+	if f.downloads() != 0 {
+		t.Errorf("server received %d download requests, want 0", f.downloads())
+	}
+}
+
+func TestToAnOlderReleaseDowngrades(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v2.0.0", "v1.0.0")
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0"}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if got, want := f.binary(t), releaseBinary("v1.0.0"); got != want {
+		t.Errorf("executable holds %q, want %q", got, want)
+	}
+	if n := f.srv.Requests(updatetest.TargetLatest) + f.srv.Requests(updatetest.TargetLatestAPI); n != 0 {
+		t.Errorf("--to asked for the latest release %d times, want 0", n)
+	}
+}
+
+func TestToTheRunningVersionDoesNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.0.0")
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "v1.0.0"}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if !strings.Contains(r.stderr.String(), "atk is already at v1.0.0") {
+		t.Errorf("stderr = %q, want the no-op message", r.stderr.String())
+	}
+	if f.requests() != 0 {
+		t.Errorf("server received %d requests, want 0", f.requests())
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
+
+func TestToWithCheckIsAPlainError(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	r := runCommand(t, f.cfg, map[string]any{"check": true, "to": "v1.1.0"}, "", false)
+
+	assertPlainError(t, r.err)
+	if f.requests() != 0 {
+		t.Errorf("server received %d requests, want 0", f.requests())
+	}
+}
+
+func TestToANonReleaseVersionIsAPlainError(t *testing.T) {
+	t.Parallel()
+
+	for _, to := range []string{"notsemver", "1.2", "v1.2.3+dirty", ""} {
+		t.Run(to, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFixture(t, "v1.0.0", "v1.1.0")
+			r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": to}, "", false)
+
+			assertPlainError(t, r.err)
+			if f.requests() != 0 {
+				t.Errorf("server received %d requests, want 0", f.requests())
+			}
+		})
+	}
+}
+
+func TestToAReleaseMissingItsArchiveFails(t *testing.T) {
+	t.Parallel()
+
+	archive := updatetest.NewRelease(t, testOwner, testRepo, "v1.1.0", testName).ArchiveName
+	f := newFixture(t, "v1.0.0", "v1.1.0", updatetest.MissingAsset(archive))
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "v1.1.0"}, "", false)
+
+	var notFound *update.AssetNotFoundError
+	if !errors.As(r.err, &notFound) {
+		t.Fatalf("Run error = %v, want a *update.AssetNotFoundError", r.err)
+	}
+	if notFound.Tag != "v1.1.0" || notFound.Name != archive {
+		t.Errorf("AssetNotFoundError = %+v, want tag v1.1.0 and name %q", *notFound, archive)
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+}
