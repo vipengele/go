@@ -1,6 +1,10 @@
 // Package updatecmd provides the `update` command of a tool built on
 // [go.vipengele.org/update], as a framework-neutral [go.vipengele.org/cli/spec.Command] that a
-// tool's main adds next to its own: app.AddCommand(updatecmd.Commands(cfg)...).
+// tool's main adds next to its own, one [go.vipengele.org/cli/core.App.Add] call per command:
+//
+//	for _, cmd := range updatecmd.Commands(cfg) {
+//		app.Add(cmd)
+//	}
 //
 // The command replaces the running executable with a release from the Config's Source. Without
 // flags it updates to the latest release, after asking for confirmation; --yes skips the question,
