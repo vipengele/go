@@ -94,7 +94,9 @@ func scriptTools() []string {
 
 // harnessOptions selects the release a harness publishes and the host the script runs on. The
 // zero value publishes [harnessTag] of testConfig("", "") as a tar.gz archive, downloaded with curl,
-// verified with sha256sum and the minisign stand-in, and run with no terminal.
+// checksummed with sha256sum, with the minisign stand-in on PATH, and run with no terminal. The
+// script is rendered before the server exists, so it trusts testConfig's fixed key, not the
+// server's; newSignedHarness renders one whose signature check passes against the server.
 type harnessOptions struct {
 	// Config is the tool the script is rendered for; a Config with no Name is testConfig("", "").
 	Config update.Config
@@ -171,8 +173,10 @@ type runResult struct {
 // builds the environment: HOME, XDG_DATA_HOME, XDG_CONFIG_HOME, TMPDIR and the install directory
 // under the test's temporary directory, SHELL naming bash, the base URL naming the server, PATH
 // holding PathDir alone, and no version or completion override. PathDir holds the minisign
-// stand-in unless opts.NoMinisign. It skips the test when the host is
-// one the script does not install on or a command the script needs is missing.
+// stand-in unless opts.NoMinisign. The script is rendered before the server starts, so it does not
+// hold the server's key; a test that needs a signature to verify uses newSignedHarness. It skips
+// the test when the host is one the script does not install on or a command the script needs is
+// missing.
 func newHarness(t *testing.T, opts harnessOptions) *harness {
 	t.Helper()
 	if opts.NonRoot && os.Geteuid() == 0 {
