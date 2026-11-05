@@ -18,7 +18,7 @@ golangci-lint run
   every seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user
   home dir, `EvalSymlinks`, `InContainer`, `IsTerminal`, `CheckWait`, `Locker`) and the tool's own
   `Detectors`; a nil `Detectors` entry is invalid. The signature policy is required (ADR-0024,
-  ADR-0025): `TrustedKeys` (minisign public key entries, each with or without its
+  ADR-0026): `TrustedKeys` (minisign public key entries, each with or without its
   `untrusted comment:` line, several for a rotation) or `AllowUnsigned`, exactly one. `Validate`
   rejects an entry that does not parse, a repeated key id, neither field and both fields, so
   `update.Config{}` is invalid for every operation, `Check` and `CheckManaged` included, because
@@ -115,7 +115,7 @@ golangci-lint run
     `<P>_BASE_URL` (`https://github.com`), `<P>_NO_COMPLETION` (`1` skips the completion) and, in a
     script rendered with `TrustedKeys`, `<P>_ALLOW_UNSIGNED` (`1` installs on the checksum alone
     when `minisign` is not on `PATH`; no effect when it is).
-  - Signature (ADR-0025): `Render` fails on a `Config` that `Validate` rejects. Under
+  - Signature (ADR-0026): `Render` fails on a `Config` that `Validate` rejects. Under
     `AllowUnsigned` the script is the one with no signature check at all: the lines between
     `@@SIGNED_BEGIN@@` and `@@SIGNED_END@@` in `install.sh.in` are dropped, markers included, before
     the tokens are filled. With keys they are kept: after the checksums file the script fetches
@@ -175,7 +175,7 @@ golangci-lint run
 - The download step maps a 404 on a URL `Select` located to a `*AssetNotFoundError`, not a
   `*StatusError`: a missing asset on the redirect path surfaces there (ADR-0019). `Selection.Located`
   marks such a selection and `Selection.Tag` names the release; any other non-200 is a `*StatusError`.
-- `Download` order (ADR-0020, ADR-0024, ADR-0025): `resolve` the `Config`; reject an empty URL on
+- `Download` order (ADR-0020, ADR-0024, ADR-0026): `resolve` the `Config`; reject an empty URL on
   the archive, the checksums file and, unless `AllowUnsigned`, the signature (an unexported sentinel
   wrapping "update: asset has no URL", not matchable with `errors.Is`; a zero `Signature` is named
   `<checksums>.minisig`); read the checksums file into memory; unless `AllowUnsigned`, fetch the

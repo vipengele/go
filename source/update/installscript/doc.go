@@ -18,7 +18,7 @@
 // completion. A completion that cannot be installed is a warning, never a failure. A script
 // rendered with TrustedKeys also reads <PREFIX>_ALLOW_UNSIGNED, described below.
 //
-// The script's signature policy is the Config's (ADR-0025). Under AllowUnsigned it checks the
+// The script's signature policy is the Config's (ADR-0026). Under AllowUnsigned it checks the
 // digest alone and fetches no signature. With TrustedKeys it fetches <checksums>.minisig after the
 // checksums file and fails when the release has none; each key is embedded as its 56-character key
 // line, never as the TrustedKeys entry, so no comment line or whitespace reaches the shell. When

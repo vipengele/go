@@ -9,9 +9,9 @@ saw:
   - source/update/installscript/script_test.go
   - source/update/installscript/harness_test.go
   - source/update/updatetest/server.go
-  - docs/adr/0025-a-release-is-refused-unsigned-unless-the-consumer-opts-out.md
+  - docs/adr/0026-a-release-is-refused-unsigned-unless-the-consumer-opts-out.md
 ---
-- Policy: Config.Validate requires exactly one of TrustedKeys and AllowUnsigned (checkSignaturePolicy, config.go), so `update.Config{}` fails every operation, Check included, because resolve validates. ADR-0025 records why; ADR-0024's "empty TrustedKeys = checksum only" no longer holds.
+- Policy: Config.Validate requires exactly one of TrustedKeys and AllowUnsigned (checkSignaturePolicy, config.go), so `update.Config{}` fails every operation, Check included, because resolve validates. ADR-0026 records why; ADR-0024's "empty TrustedKeys = checksum only" no longer holds.
 - Download order (download.go): fetchBounded reads the checksums file in full under 1 MiB, verifySignature fetches `<checksums>.minisig` under maxSignatureBytes (4 KiB) and runs internal/minisign.Verify, and only then parseChecksum and fetchArchive. With keys set, a hand-built Selection whose Signature is zero fails closed with errNoURL rather than skipping verification.
 - Selection.Signature is the zero Asset under AllowUnsigned (select.go); on the listed path a missing signature is joined into Select's AssetNotFoundError, so Download is never reached.
 - Install script: the check lives between `@@SIGNED_BEGIN@@`/`@@SIGNED_END@@` lines in install.sh.in; render.go's signedRegions drops those regions whole under AllowUnsigned, so that script is byte-identical to an unsigned one. Keys reach the script as minisign.PublicKey.Line only.
