@@ -87,7 +87,8 @@ golangci-lint run
   does (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
   tool (`install.sh.in`, embedded), which downloads the release asset, verifies it against the
-  checksums file, places the binary with one rename and installs the shell completion.
+  checksums file (and, with `TrustedKeys`, the checksums file against its minisign signature),
+  places the binary with one rename and installs the shell completion.
   - Input: `Render` calls `Config.Resolved` and never re-derives a default. A template holding
     `{ext}` with `AssetExt` `tar.gz` or `tgz` renders the archive path (extract exactly one regular
     file named `BinaryName`); a template without `{ext}` renders the raw-binary path (no `tar`).
@@ -96,7 +97,19 @@ golangci-lint run
     Every value reaches the script as a single-quoted shell literal.
   - Overrides, each named by `Identity.EnvVar`, so no prefix is spelled out: `<P>_VERSION` (`v1.2.3`
     or `1.2.3`; the latest release when unset), `<P>_INSTALL_DIR` (`$HOME/.local/bin`),
-    `<P>_BASE_URL` (`https://github.com`) and `<P>_NO_COMPLETION` (`1` skips the completion).
+    `<P>_BASE_URL` (`https://github.com`), `<P>_NO_COMPLETION` (`1` skips the completion) and, in a
+    script rendered with `TrustedKeys`, `<P>_ALLOW_UNSIGNED` (`1` installs on the checksum alone
+    when `minisign` is not on `PATH`; no effect when it is).
+  - Signature (ADR-0025): `Render` fails on a `Config` that `Validate` rejects. Under
+    `AllowUnsigned` the script is the one with no signature check at all: the lines between
+    `@@SIGNED_BEGIN@@` and `@@SIGNED_END@@` in `install.sh.in` are dropped, markers included, before
+    the tokens are filled. With keys they are kept: after the checksums file the script fetches
+    `<checksums>.minisig` (a 404 fails), then runs `minisign -V -q -P <key>` once per key and fails
+    unless one verifies. Each key reaches the script as `minisign.ParsePublicKey(entry).Line`,
+    single-quoted, never the raw entry. Without `minisign` it warns, then proceeds only on
+    `<P>_ALLOW_UNSIGNED=1` or a `y`/`yes` (any case) read from `/dev/tty`; it treats `/dev/tty` as
+    usable only when `(: </dev/tty)` succeeds, and with no terminal it fails naming both remedies.
+    Every refusal happens before the install directory is touched.
   - The script source carries `@@NAME@@`-style tokens that one `strings.Replacer` pass fills, so a
     value holding a token stays literal; `@@INSTALL_STEP@@` takes `extract-archive.sh.in` or
     `install-raw.sh.in`. Render inserts `completioninstall.Snippet(BinaryName)` verbatim and never
@@ -108,6 +121,13 @@ golangci-lint run
     `GOARCH` overrides and the size limits are ignored.
   - Tests run the rendered script under `sh` against `updatetest.NewServer`, with a `PATH` of
     symlinked tools so a test can leave one out; a test skips when a tool the host lacks is needed.
+    `minisign` is never the host's: `TestMain` builds a stand-in from `testdata/fakeminisign` and
+    the harness links it onto `PATH` unless `NoMinisign`, so no test needs minisign installed. The
+    `TTY` option gives the script a pty as controlling terminal and stderr (linux only; elsewhere
+    the test skips), with input from `TTYInput`/`TTYEOF` and output in `runResult.TTY`; without it
+    the script runs with no controlling terminal, so opening `/dev/tty` fails. The harness renders
+    the script before the server's key exists, so a test of a keyed script re-renders it with
+    `Server.PublicKey()` (`newSignedHarness`).
 - `extract.go` — `Config.Extract`, `Staged`, the extractor dispatch by format, the raw extractor, the
   bounded copy (`copyBounded`), the context-aware reader and the entry-name check
   (`unsafeEntryName`).
