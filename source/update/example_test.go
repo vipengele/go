@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.vipengele.org/cli/spec"
@@ -19,8 +20,16 @@ import (
 	"go.vipengele.org/update/updatetest"
 )
 
-// exampleKey stands for the contents of the tool's minisign.pub, which a real tool embeds.
-const exampleKey = "RWTK5HNWbut4QZxWFxP/JdmOO+Hgwfa3yDDqmYaVeIr4fRJ6jFPjVXum"
+// exampleKey stands for the contents of the tool's minisign.pub, which a real tool embeds. It is
+// drawn from a fixed stream, longer than the key id and Ed25519 seed GenerateKey reads, so every
+// call returns the same key.
+func exampleKey() string {
+	key, err := minisigntest.GenerateKey(strings.NewReader(strings.Repeat("example key ", 8)))
+	if err != nil {
+		panic(err)
+	}
+	return key.PublicKey()
+}
 
 // A tool refreshes its shell completion after an update by registering [completioninstall.Install]
 // as a post-update hook. The hook receives the installed binary's path, and the tool's
@@ -43,7 +52,7 @@ func Example_completionHook() {
 
 	cfg := update.Config{
 		Identity:    id,
-		TrustedKeys: []string{exampleKey},
+		TrustedKeys: []string{exampleKey()},
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				res, err := completioninstall.Install(completioninstall.Options{
@@ -229,7 +238,7 @@ func ExampleConfig_Start() {
 			DirName:   "agentic-toolkit",
 		},
 		Version:     "v1.2.0",
-		TrustedKeys: []string{exampleKey},
+		TrustedKeys: []string{exampleKey()},
 		Source:      newerSource{},
 		StateStore:  &memStore{},
 		Locker:      filelock.NewNoop(),

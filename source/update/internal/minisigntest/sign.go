@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/blake2b"
@@ -48,12 +49,7 @@ func (k *Key) Public() ed25519.PublicKey {
 // PublicKeyLine returns the 56-character base64 line of the public key: "Ed", the key id and the
 // Ed25519 public key.
 func (k *Key) PublicKeyLine() string {
-	raw := make([]byte, 0, 2+len(k.ID)+ed25519.PublicKeySize)
-	raw = append(raw, minisign.AlgorithmLegacy...)
-	raw = append(raw, k.ID[:]...)
-	raw = append(raw, k.Public()...)
-
-	return base64.StdEncoding.EncodeToString(raw)
+	return base64.StdEncoding.EncodeToString(slices.Concat([]byte(minisign.AlgorithmLegacy), k.ID[:], k.Public()))
 }
 
 // PublicKey returns the public key as minisign.pub holds it: the untrusted comment minisign -G
@@ -83,10 +79,7 @@ func (k *Key) sign(alg string, signed []byte, trustedComment string) []byte {
 	sig := ed25519.Sign(k.Private, signed)
 	global := ed25519.Sign(k.Private, append(append([]byte{}, sig...), trustedComment...))
 
-	line := make([]byte, 0, 2+len(k.ID)+len(sig))
-	line = append(line, alg...)
-	line = append(line, k.ID[:]...)
-	line = append(line, sig...)
+	line := slices.Concat([]byte(alg), k.ID[:], sig)
 
 	var b strings.Builder
 	b.WriteString(minisign.UntrustedCommentPrefix + "signature from minisign secret key\n")

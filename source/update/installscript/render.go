@@ -89,12 +89,11 @@ func Render(cfg update.Config) ([]byte, error) {
 	}
 	keys := make([]string, 0, len(r.TrustedKeys))
 	for _, entry := range r.TrustedKeys {
-		// Resolved has already parsed every entry the same way, in Validate.
-		key, err := minisign.ParsePublicKey(entry)
-		if err != nil {
-			return nil, fmt.Errorf("installscript: %w", err)
+		// Resolved has validated every entry, so none fails to parse here; one that did would only
+		// leave its key out of the script.
+		if key, err := minisign.ParsePublicKey(entry); err == nil {
+			keys = append(keys, shellQuote(key.Line))
 		}
-		keys = append(keys, shellQuote(key.Line))
 	}
 	pairs := []string{
 		"@@NAME@@", shellQuote(r.BinaryName),

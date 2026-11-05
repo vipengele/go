@@ -267,6 +267,21 @@ func TestParseSignatureMalformed(t *testing.T) {
 	}
 }
 
+func TestParseSignatureCarriageReturnNamesItsLine(t *testing.T) {
+	t.Parallel()
+
+	valid := generateKey(t).Sign([]byte("message"), "comment")
+
+	var malformed *minisign.MalformedSignatureError
+	if _, err := minisign.ParseSignature(replaceLine(valid, 2, "trusted comment: a\rb")); !errors.As(err, &malformed) {
+		t.Fatalf("ParseSignature = %v, want a *MalformedSignatureError", err)
+	}
+
+	if want := "line 3 holds a carriage return"; malformed.Reason != want {
+		t.Errorf("Reason = %q, want %q", malformed.Reason, want)
+	}
+}
+
 func TestParseSignatureLineEndings(t *testing.T) {
 	t.Parallel()
 

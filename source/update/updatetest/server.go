@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -141,7 +142,7 @@ func NewServer(t testing.TB, rel Release, opts ...Option) *Server {
 	}
 	s.archive = rel.Archive
 	s.sums = []byte(ChecksumLine(rel.ArchiveName, listed) + "\n")
-	s.signChecksums(t)
+	s.signChecksums(t, rand.Reader)
 
 	repo := "/" + url.PathEscape(rel.Owner) + "/" + url.PathEscape(rel.Repo)
 	s.routes = map[string]Target{
@@ -159,10 +160,11 @@ func NewServer(t testing.TB, rel Release, opts ...Option) *Server {
 
 // signChecksums generates the server's key, signs the checksums file with it and applies the
 // signature faults: the signature a verifier holding the server's public key rejects, or the swap
-// of the archive and the checksums for ones the signature does not cover.
-func (s *Server) signChecksums(t testing.TB) {
+// of the archive and the checksums for ones the signature does not cover. Every key is drawn from
+// random.
+func (s *Server) signChecksums(t testing.TB, random io.Reader) {
 	t.Helper()
-	key := s.generateKey(t)
+	key := generateKey(t, random)
 	s.key = key
 	comment := "file:" + s.rel.ChecksumsName
 	s.sig = key.Sign(s.sums, comment)
@@ -172,10 +174,10 @@ func (s *Server) signChecksums(t testing.TB) {
 		// The signature over other bytes is well formed, carries the key id and does not verify.
 		s.sig = key.Sign(append(slices.Clone(s.sums), '\n'), comment)
 	case s.opts.unknownKey:
-		other := s.generateKey(t)
-		for other.ID == key.ID {
-			other = s.generateKey(t)
-		}
+		// Another key pair, whose id differs from the server's in its first byte even when random
+		// draws the same id twice, so it names no key the verifier trusts.
+		other := generateKey(t, random)
+		other.ID[0] = key.ID[0] ^ 0xff
 		s.sig = other.Sign(s.sums, comment)
 	case s.opts.tampered:
 		// A longer archive has another digest, which the swapped checksums list.
@@ -184,10 +186,10 @@ func (s *Server) signChecksums(t testing.TB) {
 	}
 }
 
-// generateKey returns a new signing key, failing t when the system's randomness fails.
-func (s *Server) generateKey(t testing.TB) *minisigntest.Key {
+// generateKey returns a new signing key drawn from random, failing t when random fails.
+func generateKey(t testing.TB, random io.Reader) *minisigntest.Key {
 	t.Helper()
-	key, err := minisigntest.GenerateKey(rand.Reader)
+	key, err := minisigntest.GenerateKey(random)
 	if err != nil {
 		t.Fatalf("updatetest: generating the signing key: %v", err)
 	}

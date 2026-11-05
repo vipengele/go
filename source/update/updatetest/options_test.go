@@ -217,6 +217,7 @@ func TestTargetString(t *testing.T) {
 		updatetest.TargetLatestAPI: "TargetLatestAPI",
 		updatetest.TargetArchive:   "TargetArchive",
 		updatetest.TargetChecksums: "TargetChecksums",
+		updatetest.TargetSignature: "TargetSignature",
 		updatetest.Target(0):       "Target(0)",
 	} {
 		if got := target.String(); got != want {

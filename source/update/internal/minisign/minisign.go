@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/blake2b"
@@ -220,9 +221,7 @@ func (s Signature) Verify(key PublicKey, msg []byte) error {
 		return &BadSignatureError{ID: s.KeyID, Global: false}
 	}
 
-	global := make([]byte, 0, len(s.Signature)+len(s.TrustedComment))
-	global = append(global, s.Signature...)
-	global = append(global, s.TrustedComment...)
+	global := slices.Concat(s.Signature, []byte(s.TrustedComment))
 
 	if !ed25519.Verify(key.Key, global, s.GlobalSignature) {
 		return &BadSignatureError{ID: s.KeyID, Global: true}

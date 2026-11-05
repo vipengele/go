@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"go.vipengele.org/filelock"
 	"go.vipengele.org/update/asset"
 	"go.vipengele.org/update/internal/minisign"
+	"go.vipengele.org/update/internal/minisigntest"
 )
 
 // stubSource is a Source that reports no release.
@@ -36,11 +38,20 @@ func validIdentity() spec.Identity {
 	}
 }
 
-// testKey and testKey2 are minisign public key lines that parse and carry different key ids.
-const (
-	testKey  = "RWTK5HNWbut4QZxWFxP/JdmOO+Hgwfa3yDDqmYaVeIr4fRJ6jFPjVXum"
-	testKey2 = "RWSaWXaN5zSqDnBekEpNTszq/DxGIddofbkmi3l9k7Sc2VIxFAbWW/kN"
-)
+// testKey and testKey2 return minisign public key lines that parse and carry different key ids.
+func testKey() string  { return seededKeyLine(1) }
+func testKey2() string { return seededKeyLine(2) }
+
+// seededKeyLine returns the key line of the minisign key GenerateKey draws from a stream of seed
+// bytes, the same line on every call. The stream is longer than the key id and Ed25519 seed
+// GenerateKey reads, so it never runs dry.
+func seededKeyLine(seed byte) string {
+	key, err := minisigntest.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{seed}, 64)))
+	if err != nil {
+		panic(err)
+	}
+	return key.PublicKeyLine()
+}
 
 // validConfig is a Config with every required field set and every optional field at its zero
 // value, except the two seams the default StateDir is resolved through: Getenv reports every
@@ -49,7 +60,7 @@ const (
 func validConfig(home string) Config {
 	return Config{
 		Identity:    validIdentity(),
-		TrustedKeys: []string{testKey},
+		TrustedKeys: []string{testKey()},
 		Source:      &stubSource{},
 		Getenv:      envOf(nil),
 		UserHomeDir: func() (string, error) { return home, nil },
@@ -99,7 +110,7 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	t.Setenv("ATK_HOME", home)
 
 	before := time.Now()
-	r, err := Config{Identity: validIdentity(), TrustedKeys: []string{testKey}, Source: &stubSource{}}.resolve()
+	r, err := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}.resolve()
 	if err != nil {
 		t.Fatalf("resolve() error = %v, want nil", err)
 	}
@@ -344,7 +355,7 @@ func TestResolveDefaultStateDirReadsTheProcessEnvironment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", tc.stateHome)
 
-			r, err := Config{Identity: validIdentity(), TrustedKeys: []string{testKey}, Source: &stubSource{}}.resolve()
+			r, err := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}.resolve()
 			if err != nil {
 				t.Fatalf("resolve() error = %v, want nil", err)
 			}
@@ -807,7 +818,7 @@ func TestOptOutVariableIsDerivedFromEnvPrefix(t *testing.T) {
 
 func TestValidateAcceptsValidConfig(t *testing.T) {
 	t.Parallel()
-	if err := (Config{Identity: validIdentity(), TrustedKeys: []string{testKey}, Source: &stubSource{}}).Validate(); err != nil {
+	if err := (Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}).Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil", err)
 	}
 }
@@ -833,7 +844,7 @@ func TestValidateReportsEachProblem(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := Config{Identity: validIdentity(), TrustedKeys: []string{testKey}, Source: &stubSource{}}
+			c := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}
 			tc.set(&c)
 			if err := c.Validate(); !errors.Is(err, tc.want) {
 				t.Errorf("Validate() = %v, want one wrapping %v", err, tc.want)
@@ -844,7 +855,7 @@ func TestValidateReportsEachProblem(t *testing.T) {
 
 func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 	t.Parallel()
-	c := Config{Identity: validIdentity(), TrustedKeys: []string{testKey}}
+	c := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}}
 	c.Name = ""
 	c.DirName = ".."
 
@@ -1026,10 +1037,10 @@ func TestValidateAcceptsTheSignaturePolicies(t *testing.T) {
 		name string
 		set  func(*Config)
 	}{
-		{"one key", func(c *Config) { c.TrustedKeys = []string{testKey} }},
-		{"several keys", func(c *Config) { c.TrustedKeys = []string{testKey, testKey2} }},
+		{"one key", func(c *Config) { c.TrustedKeys = []string{testKey()} }},
+		{"several keys", func(c *Config) { c.TrustedKeys = []string{testKey(), testKey2()} }},
 		{"a key with its comment line", func(c *Config) {
-			c.TrustedKeys = []string{"untrusted comment: minisign public key 1\n" + testKey + "\n"}
+			c.TrustedKeys = []string{"untrusted comment: minisign public key 1\n" + testKey() + "\n"}
 		}},
 		{"AllowUnsigned", func(c *Config) { c.TrustedKeys, c.AllowUnsigned = nil, true }},
 	}
@@ -1048,7 +1059,7 @@ func TestValidateAcceptsTheSignaturePolicies(t *testing.T) {
 func TestValidateRejectsAKeyThatDoesNotParse(t *testing.T) {
 	t.Parallel()
 	c := validConfig("")
-	c.TrustedKeys = []string{testKey, "not a key"}
+	c.TrustedKeys = []string{testKey(), "not a key"}
 	err := c.Validate()
 	var fe *validate.FieldError
 	if !errors.As(err, &fe) || fe.Field != "TrustedKeys[1]" {
@@ -1069,13 +1080,13 @@ func TestValidateRejectsAKeyThatDoesNotParse(t *testing.T) {
 func TestValidateRejectsADuplicateKeyID(t *testing.T) {
 	t.Parallel()
 	c := validConfig("")
-	c.TrustedKeys = []string{testKey, testKey2, "untrusted comment: again\n" + testKey}
+	c.TrustedKeys = []string{testKey(), testKey2(), "untrusted comment: again\n" + testKey()}
 	err := c.Validate()
 	var fe *validate.FieldError
 	if !errors.As(err, &fe) || fe.Field != "TrustedKeys[2]" {
 		t.Fatalf("Validate() = %v, want a FieldError for TrustedKeys[2]", err)
 	}
-	key, perr := minisign.ParsePublicKey(testKey)
+	key, perr := minisign.ParsePublicKey(testKey())
 	if perr != nil {
 		t.Fatal(perr)
 	}

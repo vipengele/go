@@ -10,6 +10,7 @@ import (
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/installscript"
+	"go.vipengele.org/update/internal/minisigntest"
 )
 
 // testConfig returns a valid Config with an explicit StateDir, so resolving it consults no
@@ -23,11 +24,22 @@ func testConfig(assetTemplate, assetExt string) update.Config {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
-		TrustedKeys:   []string{"RWTK5HNWbut4QZxWFxP/JdmOO+Hgwfa3yDDqmYaVeIr4fRJ6jFPjVXum"},
+		TrustedKeys:   []string{testKeyLine()},
 		StateDir:      "/state",
 		AssetTemplate: assetTemplate,
 		AssetExt:      assetExt,
 	}
+}
+
+// testKeyLine returns the key line of the minisign key GenerateKey draws from a fixed stream, the
+// same line on every call. The stream is longer than the key id and Ed25519 seed GenerateKey
+// reads, so it never runs dry.
+func testKeyLine() string {
+	key, err := minisigntest.GenerateKey(strings.NewReader(strings.Repeat("render test key ", 4)))
+	if err != nil {
+		panic(err)
+	}
+	return key.PublicKeyLine()
 }
 
 // render renders cfg and fails the test on an error.
