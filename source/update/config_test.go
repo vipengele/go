@@ -14,6 +14,7 @@ import (
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/filelock"
 	"go.vipengele.org/update/asset"
 	"go.vipengele.org/update/internal/minisign"
 )
@@ -1260,4 +1261,192 @@ func TestValidateAssetTemplateAndExtTogether(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveDefaultsCheckWait(t *testing.T) {
+	t.Parallel()
+	r, err := validConfig(t.TempDir()).resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if r.CheckWait != 250*time.Millisecond {
+		t.Errorf("CheckWait = %v, want %v", r.CheckWait, 250*time.Millisecond)
+	}
+}
+
+func TestResolveKeepsCheckWait(t *testing.T) {
+	t.Parallel()
+	c := validConfig(t.TempDir())
+	c.CheckWait = time.Second
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if r.CheckWait != time.Second {
+		t.Errorf("CheckWait = %v, want %v", r.CheckWait, time.Second)
+	}
+}
+
+func TestValidateChecksCheckWait(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		wait    time.Duration
+		wantErr bool
+	}{
+		{"zero", 0, false},
+		{"one nanosecond", time.Nanosecond, false},
+		{"exactly two seconds", 2 * time.Second, false},
+		{"negative", -time.Nanosecond, true},
+		{"just over two seconds", 2*time.Second + time.Nanosecond, true},
+		{"a minute", time.Minute, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.CheckWait = tc.wait
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() = %v, want error: %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				return
+			}
+			var fe *validate.FieldError
+			if !errors.Is(err, validate.ErrInvalid) || !errors.As(err, &fe) || fe.Field != "CheckWait" {
+				t.Errorf("Validate() = %v, want a FieldError for CheckWait wrapping %v", err, validate.ErrInvalid)
+			}
+			if _, rerr := c.resolve(); rerr == nil {
+				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
+type fakeLocker struct{}
+
+func (fakeLocker) Lock(context.Context) (func(), error) { return func() {}, nil }
+
+func (fakeLocker) TryLock() (func(), error) { return func() {}, nil }
+
+func TestResolveKeepsASuppliedLocker(t *testing.T) {
+	t.Parallel()
+	c := validConfig(t.TempDir())
+	c.Locker = fakeLocker{}
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if r.Locker != filelock.Locker(fakeLocker{}) {
+		t.Errorf("Locker = %v, want the supplied locker", r.Locker)
+	}
+}
+
+func TestResolveDefaultLockerCreatesTheStateDir(t *testing.T) {
+	t.Parallel()
+	stateDir := filepath.Join(t.TempDir(), "missing", "state")
+	c := validConfig("")
+	c.StateDir = stateDir
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	ctx := context.Background()
+
+	unlock, err := r.Locker.Lock(ctx)
+	if err != nil {
+		t.Fatalf("Lock() error = %v, want nil", err)
+	}
+	if info, err := os.Stat(stateDir); err != nil || !info.IsDir() {
+		t.Errorf("Stat(%q) = %v, %v, want the directory created", stateDir, info, err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "update.lock")); err != nil {
+		t.Errorf("Stat(update.lock) error = %v, want the lock file", err)
+	}
+
+	held, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if unlock2, err := r.Locker.Lock(held); err == nil {
+		unlock2()
+		t.Fatal("second Lock() while held error = nil, want the context's error")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("second Lock() error = %v, want one wrapping %v", err, context.DeadlineExceeded)
+	}
+
+	unlock()
+	unlock, err = r.Locker.Lock(ctx)
+	if err != nil {
+		t.Fatalf("Lock() after unlock error = %v, want nil", err)
+	}
+	unlock()
+}
+
+func TestDefaultLockerReportsAnUncreatableStateDir(t *testing.T) {
+	t.Parallel()
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := dirLocker{dir: filepath.Join(blocker, "state")}.Lock(context.Background())
+	if err == nil {
+		t.Fatal("Lock() error = nil, want the directory error")
+	}
+}
+
+func TestDefaultLockerTryLockReportsAnUncreatableStateDir(t *testing.T) {
+	t.Parallel()
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := dirLocker{dir: filepath.Join(blocker, "state")}.TryLock()
+	if err == nil {
+		t.Fatal("TryLock() error = nil, want the directory error")
+	}
+}
+
+func TestResolveDefaultLockerTryLock(t *testing.T) {
+	t.Parallel()
+	stateDir := filepath.Join(t.TempDir(), "missing", "state")
+	c := validConfig("")
+	c.StateDir = stateDir
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+
+	unlock, err := r.Locker.TryLock()
+	if err != nil {
+		t.Fatalf("TryLock() error = %v, want nil", err)
+	}
+	if info, err := os.Stat(stateDir); err != nil || !info.IsDir() {
+		t.Errorf("Stat(%q) = %v, %v, want the directory created", stateDir, info, err)
+	}
+
+	if unlock2, err := r.Locker.TryLock(); err == nil {
+		unlock2()
+		t.Fatal("second TryLock() while held error = nil, want filelock.ErrLocked")
+	} else if !errors.Is(err, filelock.ErrLocked) {
+		t.Errorf("second TryLock() error = %v, want one wrapping %v", err, filelock.ErrLocked)
+	}
+	unlock()
+
+	held, err := r.Locker.Lock(context.Background())
+	if err != nil {
+		t.Fatalf("Lock() after unlock error = %v, want nil", err)
+	}
+	if unlock2, err := r.Locker.TryLock(); err == nil {
+		unlock2()
+		t.Fatal("TryLock() while Lock holds error = nil, want filelock.ErrLocked")
+	} else if !errors.Is(err, filelock.ErrLocked) {
+		t.Errorf("TryLock() error = %v, want one wrapping %v", err, filelock.ErrLocked)
+	}
+	held()
+
+	unlock, err = r.Locker.TryLock()
+	if err != nil {
+		t.Fatalf("TryLock() after unlock error = %v, want nil", err)
+	}
+	unlock()
 }

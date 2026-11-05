@@ -9,7 +9,8 @@ into `cli/spec/version`, by ADR-0012, which moves config loading from `cli` to t
 project, by ADR-0016, which gives `Config.Source` a default, the GitHub release source, by
 ADR-0018, which makes the state store the project `cli/state`, by ADR-0019, which makes the
 file lock the project `filelock`, and by ADR-0021, which assigns the completion install-script
-snippet to `cli/spec/completioninstall` instead of `update`. Partially superseded by ADR-0005, which replaces the rule on where
+snippet to `cli/spec/completioninstall` instead of `update`, and by ADR-0024, which selects service
+drivers at runtime. Partially superseded by ADR-0005, which replaces the rule on where
 cobra is allowed ("The CLI framework dependency") and the rule that `update` requires no sibling
 ("Dependency direction").
 

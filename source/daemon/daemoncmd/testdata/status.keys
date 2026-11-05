@@ -1,0 +1,11 @@
+checks[].duration_ms
+checks[].error
+checks[].kinds[]
+checks[].name
+checks[].status
+live
+ready
+schema
+started_at
+status
+uptime_seconds

@@ -14,32 +14,47 @@ golangci-lint run
 
 ## Structure
 
-- `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries every
-  seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user home
-  dir, `EvalSymlinks`, `InContainer`) and the tool's own `Detectors`; a nil `Detectors` entry is
-  invalid. The signature policy is required (ADR-0024, ADR-0025): `TrustedKeys` (minisign public key
-  entries, each with or without its `untrusted comment:` line, several for a rotation) or
-  `AllowUnsigned`, exactly one. `Validate` rejects an entry that does not parse, a repeated key id,
-  neither field and both fields, so `update.Config{}` is invalid for every operation, `Check` and
-  `CheckManaged` included, because `resolve` runs `Validate`. A test `Config` sets
-  `TrustedKeys: []string{srv.PublicKey()}`. `Validate` reports problems; `resolve` returns a copy with each zero field set to its
-  production default and never mutates the receiver. `Resolved` is its exported wrapper, the one
-  place other packages read the defaults from (ADR-0023). The default state dir comes from
+- `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries
+  every seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user
+  home dir, `EvalSymlinks`, `InContainer`, `IsTerminal`, `CheckWait`, `Locker`) and the tool's own
+  `Detectors`; a nil `Detectors` entry is invalid. The signature policy is required (ADR-0024,
+  ADR-0025): `TrustedKeys` (minisign public key entries, each with or without its
+  `untrusted comment:` line, several for a rotation) or `AllowUnsigned`, exactly one. `Validate`
+  rejects an entry that does not parse, a repeated key id, neither field and both fields, so
+  `update.Config{}` is invalid for every operation, `Check` and `CheckManaged` included, because
+  `resolve` runs `Validate`. A test `Config` sets `TrustedKeys: []string{srv.PublicKey()}`.
+  `Validate` reports problems; `resolve` returns a copy with each zero field set to its production
+  default and never mutates the receiver. `Resolved` is its exported wrapper, the one place other
+  packages read the defaults from (ADR-0023). The default state dir comes from
   `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
   env lookup and user home dir seams; only the state kind is resolved, so the home directory is
   needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
   and `AssetExt` to the asset format (raw, tar.gz or zip), which `Validate` and `Extract` share;
-  `MaxExtractBytes` (default 512 MiB) bounds extraction.
+  `MaxExtractBytes` (default 512 MiB) bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s)
+  bounds how long the background check delays exit. `Locker` (`filelock.Locker`) defaults to
+  `dirLocker`, which runs `os.MkdirAll(StateDir, 0o700)` before locking `StateDir/update.lock`,
+  because filelock refuses a missing directory and nothing else creates `StateDir` before the first
+  save. `dirLocker.TryLock` does the same before its single attempt; the background check uses
+  `Lock` only.
 - `state.go` — `State` (`LastAttempt`, `LatestVersion`), the `StateStore` interface and `fileStore`,
   the default store: `update-state.json` in the state dir through `go.vipengele.org/cli/state`
   (ADR-0023). `Save` creates the directory 0700 and writes the file 0600; a missing or corrupt file
-  loads as the zero `State`, an unreadable one is an error. It takes no lock.
+  loads as the zero `State`, an unreadable one is an error. It takes no lock. `StateStore.Load` and
+  `Save` honour `ctx`: the background check's bound depends on it. `fileStore` returns `ctx.Err()`
+  at once for a done `ctx` and runs its I/O on a goroutine otherwise, abandoning it when `ctx` ends
+  (the write is atomic); the unexported `readFile` and `writeFile` fields are the test seam.
 - `check.go` — `checkInputs` and `checkInputsFrom` (everything the gates read, through the `Config`
   seams, from a resolved `Config` and the stored `State`), `eligibility` and its `checkReason`: the
   gates in order are dev build, CI, no terminal, disabled, opted out
   (`<EnvPrefix>_NO_UPDATE_CHECK`, via `optOutSuffix`), throttled. `afterAttempt` returns the `State`
   to store: a check stopped by the command ending (`ctx` done or `context.Canceled`) is not an
   attempt and changes nothing; a failed attempt records `LastAttempt` and keeps `LatestVersion`.
+- `background.go` — `Config.Start`, `Check` (`Notice`, `Finish`, the unexported `cancelNow`) and
+  `runCheck`, the goroutine's body. A nil `*Check` is valid.
+- `notice.go` — `Notice` and its one-line `String`.
+- `checkhooks.go` — `Config.UpdateCheckHooks`: the pre-run and post-run hooks a tool passes to
+  `core.WithPreRun` and `core.WithPostRun`, typed with `spec` types only. The `*Check` travels from
+  one to the other in the context, under an unexported key.
 - `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
 - `github.go` — `GitHubSource`: reads the `releases/latest` redirect without following it, falls back
@@ -266,14 +281,36 @@ golangci-lint run
   Tests run as root in CI, so injection is what covers the permission path.
 - `Install` runs no `PostUpdate` hook. The caller runs `RunPostUpdate` with `Installed.Path()`.
 
+## Background check contract
+
+- The goroutine runs on `context.WithoutCancel(ctx)` with a cancel of its own, so the command's
+  cancellation does not reach it; only `Finish` and `cancelNow` do.
+- `Finish` is the only wait. It is bounded by `CheckWait` only while `Locker`, `Source` and
+  `StateStore` honour `ctx`, because it cancels and then joins the goroutine.
+- The check takes the lock, reloads the state and re-throttles under it. When another process has
+  just checked, its `LatestVersion` is this run's result: no query and no save. A reload error
+  abandons the check.
+- A cancelled check is not an attempt and saves nothing (`afterAttempt`).
+- Nothing is printed but the notice, and it is written only when stderr is a terminal. A failed
+  lock, query or save is never reported and never fails the command.
+- The post-run hook always returns nil, so the run's error passes through. It finishes the check
+  before it reads the notice, and cancels at once when the command's context is done. It does not
+  probe the terminal: the pre-run hook's `Start` decides that gate once, from `Config.IsTerminal`
+  when set and the Env's stderr otherwise, and a run that fails it has no `*Check`.
+- A command carrying `spec.SkipUpdateCheck` starts no check; the tool's `update` command must carry
+  it.
+
 ## Conventions
 
 - Reach the outside world only through a `Config` field, never through `http.DefaultClient`,
-  `time.Now`, `runtime.GOOS`, `os.Getenv` and the like called directly. A new seam is a new
-  `Config` field with a documented zero-value default, resolved in `resolve`; the one exception is
-  `Install`'s unexported `fsSteps` (see the Install contract), which only in-package tests set.
+  `time.Now`, `runtime.GOOS`, `os.Getenv` and the like called directly. A new seam is a new `Config`
+  field with a documented zero-value default, resolved in `resolve`; there are two exceptions. One
+  is `Install`'s unexported `fsSteps` (see the Install contract), which only in-package tests set.
+  The other is the `CheckWait` bound in `Finish`, a `time.NewTimer`: it is wall-clock time, while
+  `Now` stamps state only.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `go.vipengele.org/cli/core/**` anywhere, and `github.com/spf13/cobra`
   outside an `updatecmd` package. The library depends on no command-line framework.
-- `cli/spec`, `cli/state` and `commons` are siblings reached by directory `replace`s in `go.mod`
-  (`../cli/spec`, `../cli/state`, `../commons`); see the repo-root rule on sibling replaces.
+- `cli/spec`, `cli/state`, `commons` and `filelock` are siblings reached by directory `replace`s in
+  `go.mod` (`../cli/spec`, `../cli/state`, `../commons`, `../filelock`); see the repo-root rule on
+  sibling replaces.

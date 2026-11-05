@@ -274,6 +274,16 @@ cancelled or past the bound the process waits for it, is not an attempt and does
 interval.
 _Avoid_: try, run, last check (when a cancelled check is meant)
 
+**Notice**:
+The one line on stderr, after an eligible command, naming a newer release than the running one; at
+most once per check interval.
+_Avoid_: banner, nag, alert
+
+**Check wait**:
+The bound on how long the background **Update check** may delay a command's exit. When it passes,
+the check is cancelled and is not a **Check attempt**.
+_Avoid_: timeout, grace period (the **Supervisor**'s stop bound)
+
 **Update state**:
 What `update` remembers between runs: the time of the last **Check attempt** and the latest release
 version it saw. Losing or corrupting it costs one extra **Update check**, nothing more (ADR-0023).
@@ -300,8 +310,32 @@ _Avoid_: worker, task, job, goroutine
 
 **Supervisor**:
 The `daemon` component that starts every **Runner** in turn, each once the one before is ready,
-stops them in reverse order on shutdown or when one fails, and owns the process lifecycle and health. One per process.
+stops them in reverse order on shutdown or when one fails, and owns the process lifecycle. It feeds
+the **Health check**s of a daemon with its own state; it does not own them. One per process.
 _Avoid_: manager (a **Service** manager is the operating system's), orchestrator, scheduler
+
+**Health check**:
+A named function that reports whether one thing the daemon depends on works, run when a **Health
+snapshot** is taken and never in the background. It belongs to **Liveness**, **Readiness** or both;
+without a choice it is a **Readiness** check, and it passes or fails with an error and a duration.
+_Avoid_: probe (the orchestrator's request, not the check), heartbeat, ping
+
+**Liveness**:
+Whether the process itself is working, answered by the **Health check**s of that kind alone. It
+carries only what the process knows of itself, never a downstream dependency, and a failure means
+the process should be restarted.
+_Avoid_: aliveness, health (the whole model, not this question)
+
+**Readiness**:
+Whether the daemon can take work now, answered by the **Health check**s of that kind. A failure
+means traffic should wait, not that the process should be restarted.
+_Avoid_: availability, healthy
+
+**Health snapshot**:
+The result of running every **Health check** once: each check's result, whether the daemon is live
+and ready, the overall state (`ok`, `unready` or `down`), when it started and how long it has run.
+Taking one never fails.
+_Avoid_: health report, status (the name of the route and the command that show it)
 
 **Grace period**:
 The single time budget a shutdown shares: the **Runners** are stopped one after another within it,
@@ -345,3 +379,13 @@ The directory of a tool that holds the files of its running instance, the **Inst
 **Holder record**. It is resolved by `cli/spec/paths` like the other directories and persists
 across logins (ADR-0009, ADR-0023).
 _Avoid_: XDG_RUNTIME_DIR (the system removes it at logout), tmp directory, run directory
+
+**Driver**:
+The library's adapter to one operating system's service manager, which turns a described **Service**
+into that manager's own registration and drives it.
+_Avoid_: backend, provider, plugin
+
+**Service state**:
+The condition of a **Service** as the library reports it: unknown, not installed, stopped, starting,
+running or failed. Unknown means the service manager could not say.
+_Avoid_: status (the report as a whole), health

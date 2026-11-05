@@ -33,6 +33,20 @@ type Runner interface {
 	Stop(ctx context.Context) error
 }
 
+// HealthChecker is the optional method through which a Runner reports whether it can serve. When
+// New is given a Health with WithHealth, it registers CheckHealth of every Runner that has it as a
+// Readiness check named after the Runner.
+//
+// The check calls CheckHealth only while the Runner is running: its Start has returned nil, Done
+// has not closed and shutdown has not begun. At any other time the check fails without calling
+// it, so CheckHealth never sees a Runner that is starting, has exited or is being stopped.
+// CheckHealth runs concurrently with the Runner's own work and with other calls of itself, and
+// ctx is cancelled when the check's timeout expires.
+type HealthChecker interface {
+	// CheckHealth returns nil when the Runner can serve and an error saying why otherwise.
+	CheckHealth(ctx context.Context) error
+}
+
 // orderer is the optional method that places a Runner in the start order.
 type orderer interface {
 	Order() int

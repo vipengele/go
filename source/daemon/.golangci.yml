@@ -7,11 +7,25 @@ linters:
   settings:
     depguard:
       rules:
+        # A pkg entry matches by prefix; a glob such as "/**" is taken literally and matches nothing.
         no-cli:
           files:
             - "**"
           deny:
             - pkg: github.com/spf13/cobra
               desc: daemon does not depend on cobra
-            - pkg: "go.vipengele.org/cli/core/**"
+            - pkg: go.vipengele.org/cli/core
               desc: daemon does not depend on cli/core
+        root-imports-only-the-instance-lock-siblings:
+          files:
+            - "!**/daemoncmd/**"
+          list-mode: lax
+          allow:
+            - go.vipengele.org/daemon$
+            - go.vipengele.org/daemon/service$
+            - go.vipengele.org/cli/spec$
+            - go.vipengele.org/cli/spec/paths$
+            - go.vipengele.org/filelock$
+          deny:
+            - pkg: go.vipengele.org/
+              desc: outside daemoncmd, daemon imports only cli/spec, cli/spec/paths and filelock among its siblings

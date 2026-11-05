@@ -700,9 +700,17 @@ func TestGitHubSource_Timeout(t *testing.T) {
 func TestGitHubSource_TimeoutIsPerRequest(t *testing.T) {
 	t.Parallel()
 
+	// Each request takes delay, so the pair takes at least 2*delay, which exceeds timeout: a
+	// Timeout shared by the pair would expire during the second request. A sleep never returns
+	// early, so that holds under any load; the slack a request has before its own timeout is
+	// timeout-delay.
+	const (
+		timeout = 2 * time.Second
+		delay   = 1100 * time.Millisecond
+	)
 	slow := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(delay)
 			next(w, r)
 		}
 	}
@@ -711,7 +719,7 @@ func TestGitHubSource_TimeoutIsPerRequest(t *testing.T) {
 		slow(respond(http.StatusOK, apiReleaseJSON("v1.0.0"))),
 	)
 	s := f.source()
-	s.Timeout = 500 * time.Millisecond
+	s.Timeout = timeout
 
 	got, err := s.Latest(context.Background())
 	if err != nil {

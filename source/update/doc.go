@@ -73,5 +73,27 @@
 // a file in the state directory. A check stopped because the command ended is not an attempt: it
 // neither throttles the next run nor erases the LatestVersion already known.
 //
+// # Background check
+//
+// [Config.Start] runs the check in the background and returns at once. It returns a nil *Check
+// when the check is ineligible, and a nil *Check is valid: its Notice reports nothing and its
+// Finish does nothing. [Check.Notice] never blocks; it names a release newer than the running one,
+// from this run's result once the check has finished and otherwise from the LatestVersion the
+// State already held. [Check.Finish] waits at most CheckWait, 250 milliseconds by default and at
+// most 2 seconds, then cancels the check and joins its goroutine, so a check never delays the
+// command's exit by more. A check cancelled that way is not an attempt. The bound holds while the
+// Locker, the Source and the StateStore honour their context. The check runs under the Config's
+// Locker, so two processes never query together; a nil Locker locks the file "update.lock" in the
+// StateDir.
+//
+// [Config.UpdateCheckHooks] wires this around a command without importing a framework. A tool
+// passes its pre-run hook to core.WithPreRun and its post-run hook to core.WithPostRun: the first
+// starts the check, the second finishes it and writes the [Notice] as one line to the Env's
+// Stderr, whether the command succeeded or failed. The terminal gate is decided once, when the
+// check starts, so a run whose stderr is not a terminal starts no check and writes nothing. The
+// hooks write nothing else and the post-run hook always returns nil. The tool's own update command
+// must carry the [spec.SkipUpdateCheck] annotation, or the pre-run hook starts a check in the very
+// command that installs the update.
+//
 // The package depends on no command-line framework.
 package update

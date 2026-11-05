@@ -11,5 +11,5 @@ saw:
 
 - `update.Config` embeds `spec.Identity` (`source/update/config.go`), so `source/update/go.mod` requires `go.vipengele.org/cli/spec` and `go.vipengele.org/commons`, each with a version-less directory replace (`../cli/spec`, `../commons`). ADR-0008 records that this amends ADR-0003 (update requires no sibling; a self-update-only tool takes nothing else) and settles the question ADR-0004 left open.
 - The opt-out variable is derived, not configured: `Identity.EnvVar("NO_UPDATE_CHECK")` (`optOutSuffix` in `config.go`). `Config` has no `OptOutEnv` field.
-- The boundary is lint, not a test: `source/update/.golangci.yml` enables `depguard` (denies `go.vipengele.org/cli/core/**` everywhere and `github.com/spf13/cobra` outside `**/updatecmd/**`) and `gochecknoglobals`, which also lints `_test.go` files, so tables live inside test functions.
+- The boundary is lint, not a test: `source/update/.golangci.yml` enables `depguard` (lists `go.vipengele.org/cli/core/**` as denied everywhere, but a depguard `pkg` entry matches by prefix and takes `/**` literally, so that entry blocks nothing; it denies `github.com/spf13/cobra` outside `**/updatecmd/**`) and `gochecknoglobals`, which also lints `_test.go` files, so tables live inside test functions.
 - `Identity` stays out of `commons` and a fourth identity project was rejected (ADR-0008 "Considered options").
