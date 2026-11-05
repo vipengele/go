@@ -78,8 +78,9 @@ golangci-lint run
   `SignatureMalformedError` (unwraps to the minisign parse error), `UnknownKeyError` (carries the
   signature's key id as minisign prints it), `SignatureMismatchError` (carries the key id, unwraps
   to the minisign verification error), `ManagedInstallError`, `ErrPrerelease` and
-  `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns; `classifyError` maps deadline and timeout failures to `TimeoutError` and passes
-  cancellation through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
+  `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns; `DevBuildError`,
+  the error `CheckRelease` returns. `classifyError` maps deadline and timeout failures to
+  `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
   `MultipleBinariesError`, `UnsupportedFormatError`, `ErrEmptyAsset`, `ErrNotGzip` and
   `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
   `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
@@ -97,7 +98,8 @@ golangci-lint run
 - `checksums.go` — `parseChecksum`, which finds the archive's digest in a checksums file.
 - `hook.go` — `PostUpdate`, a step that receives the installed binary's path (the old process is still
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
-  runs the hooks in order and joins their errors. A failure is non-fatal. Package `update` does not
+  runs the hooks in order and joins their errors. A failure is report-only: the caller keeps the
+  update. `Install` and `Apply` run no hook. Package `update` does not
   import `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that
   does (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
@@ -160,6 +162,23 @@ golangci-lint run
   which maps a permission failure to `*PermissionError`.
 - `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
   `backupLocked`.
+- `release.go` — `Config.CheckRelease`: refuses a development build with a `*DevBuildError`.
+- `apply.go` — `Config.Apply`: CheckManaged, CheckWritable, Download, Target, Extract into the
+  target's directory, Install. It returns the `*Installed` with the backup kept, runs no hook and
+  calls neither `Discard` nor `Rollback`. It closes the archive itself only when Target fails.
+- `updatecmd/` — `Commands(cfg, opts...) []*spec.Command`: one `update` command with `--check`,
+  `--yes`/`-y` and `--to`, carrying `spec.SkipUpdateCheck`.
+  - `ExitUpdateAvailable = 10` is the exit code of `--check` when a newer release exists; the
+    result goes to stdout, messages to stderr.
+  - A development build is refused in both modes. `CheckManaged` runs first: in `--check` a
+    `*ManagedInstallError` only adds a hint to the line; in an update it is returned before any
+    request.
+  - `--to` accepts `1.2.3` or `v1.2.3` and may downgrade; a version equal to the current one is a
+    no-op. `--to` combined with `--check`, or not a release version, is a plain error (exit 1).
+  - Without `--yes` it asks with `Confirm(Required: true)`, so a non-terminal stdin is the
+    framework's `*spec.UsageError` (exit 2).
+  - After `Apply`, a `RunPostUpdate` failure and a `Discard` failure (naming the backup path) are
+    warnings and the exit stays 0.
 - `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
   `Release` in the redirect and REST-API modes, in-memory tar.gz and zip archive (`BuildArchive`) and
   checksums (`Checksums`) builders, and the fault options `BadChecksum`, `BadSignature`,
@@ -279,7 +298,8 @@ golangci-lint run
   branch.
 - The seams are the unexported `fsSteps`, set by in-package tests; `Config` has no field for them.
   Tests run as root in CI, so injection is what covers the permission path.
-- `Install` runs no `PostUpdate` hook. The caller runs `RunPostUpdate` with `Installed.Path()`.
+- `Install` and `Apply` run no `PostUpdate` hook. The caller runs `RunPostUpdate` with
+  `Installed.Path()`; a hook failure is report-only and the caller keeps the update.
 
 ## Background check contract
 
@@ -297,8 +317,8 @@ golangci-lint run
   before it reads the notice, and cancels at once when the command's context is done. It does not
   probe the terminal: the pre-run hook's `Start` decides that gate once, from `Config.IsTerminal`
   when set and the Env's stderr otherwise, and a run that fails it has no `*Check`.
-- A command carrying `spec.SkipUpdateCheck` starts no check; the tool's `update` command must carry
-  it.
+- A command carrying `spec.SkipUpdateCheck` starts no check; `updatecmd`'s `update` command
+  carries it.
 
 ## Conventions
 
@@ -309,8 +329,10 @@ golangci-lint run
   The other is the `CheckWait` bound in `Finish`, a `time.NewTimer`: it is wall-clock time, while
   `Now` stamps state only.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
-- `depguard` forbids importing `go.vipengele.org/cli/core/**` anywhere, and `github.com/spf13/cobra`
-  outside an `updatecmd` package. The library depends on no command-line framework.
+- Commands are framework-neutral `spec.Command`s (ADR-0005). `depguard` forbids importing
+  `go.vipengele.org/cli/core/**` and cobra anywhere in the module: update depends
+  on no command-line framework. The tool joins the command in its main with
+  `app.AddCommand(updatecmd.Commands(cfg)...)`.
 - `cli/spec`, `cli/state`, `commons` and `filelock` are siblings reached by directory `replace`s in
   `go.mod` (`../cli/spec`, `../cli/state`, `../commons`, `../filelock`); see the repo-root rule on
   sibling replaces.
