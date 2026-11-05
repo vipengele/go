@@ -80,9 +80,9 @@ golangci-lint run
   to the minisign verification error), `ManagedInstallError`, `ErrPrerelease` and
   `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns; `DevBuildError`,
   the error `CheckRelease` returns. `classifyError` maps deadline and timeout failures to
-  `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
-  `MultipleBinariesError`, `UnsupportedFormatError`, `ErrEmptyAsset`, `ErrNotGzip` and
-  `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
+  `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
+  `UnsafeEntryError`, `BinaryNotFoundError`, `MultipleBinariesError`, `UnsupportedFormatError`,
+  `ErrEmptyAsset`, `ErrNotGzip` and `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
   `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
   errors `CheckWritable`, `Install` and `Installed` return.
 - `managed.go` — `Config.CheckManaged`, `Detector` and `Install`: resolves the symlinks of the
@@ -99,9 +99,9 @@ golangci-lint run
 - `hook.go` — `PostUpdate`, a step that receives the installed binary's path (the old process is still
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
   runs the hooks in order and joins their errors. A failure is report-only: the caller keeps the
-  update. `Install` and `Apply` run no hook. Package `update` does not
-  import `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that
-  does (ADR-0023).
+  update. `Install` and `Apply` run no hook. Package `update` does not import
+  `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that does
+  (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
   tool (`install.sh.in`, embedded), which downloads the release asset, verifies it against the
   checksums file (and, with `TrustedKeys`, the checksums file against its minisign signature),
