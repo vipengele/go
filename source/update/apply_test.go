@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"io/fs"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
 
@@ -205,6 +207,33 @@ func TestApplyBadChecksum(t *testing.T) {
 	var mismatch *ChecksumMismatchError
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("Apply error = %v, want a *ChecksumMismatchError", err)
+	}
+
+	f.assertUntouched(t)
+}
+
+func TestApplyRefusesAReleaseSignedByAnUntrustedKey(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	other, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	f.cfg.TrustedKeys = []string{other.PublicKey()}
+
+	installed, err := f.cfg.Apply(context.Background(), f.sel)
+	if installed != nil {
+		t.Errorf("Apply Installed = %v, want nil", installed)
+	}
+
+	var unknown *UnknownKeyError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("Apply error = %v, want a *UnknownKeyError", err)
+	}
+
+	if n := f.srv.Requests(updatetest.TargetArchive); n != 0 {
+		t.Errorf("archive requests = %d, want 0", n)
 	}
 
 	f.assertUntouched(t)

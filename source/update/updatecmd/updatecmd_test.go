@@ -26,8 +26,8 @@ const (
 )
 
 // fixture is an executable holding "old" in a directory of its own, an updatetest server
-// publishing one release of it, and a Config whose executable is that file and whose every request
-// goes to the server.
+// publishing one signed release of it, and a Config whose executable is that file, whose every
+// request goes to the server and which trusts the server's signing key.
 type fixture struct {
 	exe string
 	srv *updatetest.Server
@@ -60,6 +60,7 @@ func newFixture(t *testing.T, current, served string, opts ...updatetest.Option)
 			DirName:   "agentic-toolkit",
 		},
 		Version:     current,
+		TrustedKeys: []string{srv.PublicKey()},
 		TempDir:     t.TempDir(),
 		StateDir:    t.TempDir(),
 		HTTPClient:  srv.Client(),
@@ -84,6 +85,7 @@ func (f fixture) requests() int {
 	n := 0
 	for _, target := range []updatetest.Target{
 		updatetest.TargetLatest, updatetest.TargetLatestAPI, updatetest.TargetArchive, updatetest.TargetChecksums,
+		updatetest.TargetSignature,
 	} {
 		n += f.srv.Requests(target)
 	}
@@ -92,7 +94,8 @@ func (f fixture) requests() int {
 
 // downloads returns how many requests the server has received for the release's assets.
 func (f fixture) downloads() int {
-	return f.srv.Requests(updatetest.TargetArchive) + f.srv.Requests(updatetest.TargetChecksums)
+	return f.srv.Requests(updatetest.TargetArchive) + f.srv.Requests(updatetest.TargetChecksums) +
+		f.srv.Requests(updatetest.TargetSignature)
 }
 
 // binary returns what the executable holds.
