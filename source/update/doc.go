@@ -95,5 +95,9 @@
 // must carry the [spec.SkipUpdateCheck] annotation, or the pre-run hook starts a check in the very
 // command that installs the update.
 //
+// [Config.CheckRelease] refuses a development build: it returns a [*DevBuildError], matched with
+// [errors.As], when the Config's Version is not a release version, so an update command can stop
+// before it downloads anything.
+//
 // The package depends on no command-line framework.
 package update
