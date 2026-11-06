@@ -71,7 +71,7 @@ golangci-lint run
   - `option.go` — `Option` and the `With...` options, and `Timeouts`.
   - `middleware.go` — `Recover`, `Log`, `SecureHeaders`, `AllowHosts`, `AllowOrigins` and
     `LimitBody`.
-  - `auth.go` — `Authenticator`, `BearerToken` and `RequireAuth`, which skips the cleaned
+  - `auth.go` — `Authenticator`, `BearerToken` and `RequireAuth`, which skips the canonical
     unauthenticated paths.
   - `errors.go` — `Error`, the JSON error envelope written by `spec.WriteJSON`.
   - `decode.go` — `DecodeJSON` and `*RequestError`.

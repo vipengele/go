@@ -110,17 +110,18 @@ func TestRequireAuthUnauthenticatedPaths(t *testing.T) {
 		open bool
 	}{
 		{path: "/livez", open: true},
-		{path: "/x/../livez", open: true},
-		{path: "//livez", open: true},
-		{path: "livez", open: true},
+		{path: "/x/../livez", open: false},
+		{path: "//livez", open: false},
+		{path: "livez", open: false},
 		{path: "/livezz", open: false},
 		{path: "/livez/", open: false},
 		{path: "/livez/x", open: false},
 		{path: "/probe/", open: true},
 		{path: "/probe/x", open: true},
 		{path: "/probe/x/y", open: true},
-		{path: "/probe/x/../y", open: true},
+		{path: "/probe/x/../y", open: false},
 		{path: "/probe", open: false},
+		{path: "/probe/./x", open: false},
 		{path: "/probe/..", open: false},
 		{path: "/probe/../jobs", open: false},
 		{path: "/prober/", open: false},
@@ -130,6 +131,47 @@ func TestRequireAuthUnauthenticatedPaths(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			rec := serveAuth(t, tt.path, "")
+			want := http.StatusUnauthorized
+			if tt.open {
+				want = http.StatusOK
+			}
+			if rec.Code != want {
+				t.Errorf("status = %d, want %d", rec.Code, want)
+			}
+		})
+	}
+}
+
+func serveAuthURL(t *testing.T, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := httpserver.RequireAuth(
+		httpserver.BearerToken(func() string { return secret }),
+		"/livez", "/probe/",
+	)(ok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	return rec
+}
+
+func TestRequireAuthEncodedSlashCannotReachAnOpenPath(t *testing.T) {
+	tests := []struct {
+		target string
+		open   bool
+	}{
+		{target: "/livez", open: true},
+		{target: "/probe/x", open: true},
+		{target: "/x%2F..%2Flivez", open: false},
+		{target: "/x%2f..%2flivez", open: false},
+		{target: "/probe%2Fx", open: false},
+		{target: "/probe/x%2Fy", open: false},
+		{target: "/probe/x%2F..%2F..%2Fjobs", open: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			rec := serveAuthURL(t, tt.target)
 			want := http.StatusUnauthorized
 			if tt.open {
 				want = http.StatusOK

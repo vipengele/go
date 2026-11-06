@@ -31,8 +31,12 @@ and a slow or oversize request must not hold it. `go.vipengele.org/daemon/httpse
   a signed request); `WithAuthenticator` takes any implementation and `WithBearerTokenFunc` is the
   common case.
 - **Unauthenticated paths.** `WithUnauthenticatedPaths` lists the paths that skip authentication,
-  matched as `http.ServeMux` matches a pattern, on the cleaned path, so `/x/../livez` cannot reach
-  a protected handler as an open one. Probe authentication is the consumer's, as ADR-0025 states:
+  matched as `http.ServeMux` matches a pattern. Only a canonical request path can match: one whose
+  URL has no `RawPath`, so no escape such as `%2F` hides a slash, and whose path is already rooted
+  and clean. Every other request is authenticated, so neither `/x/../livez` nor `/x%2F..%2Flivez`
+  can reach a protected handler as an open one, whatever router `New` is given. Authentication runs
+  before the handler, so `http.ServeMux` never redirects a non-canonical path for a client without
+  credentials; a probe requests the canonical path. Probe authentication is the consumer's, as ADR-0025 states:
   these paths are how a consumer exposes `/livez` and `/readyz` to an orchestrator while the rest
   of the API stays protected.
 - **Hosts and origins.** `localhost` and every IP literal are always allowed, because DNS rebinding
@@ -77,6 +81,10 @@ and a slow or oversize request must not hold it. `go.vipengele.org/daemon/httpse
   `http.Server`, so it is the switch.
 - **CORS support.** A daemon API is called by tools, not by web pages. Origin checking refuses the
   browser; it adds no header that would let one read a response.
+- **Matching the cleaned path.** Cleaning and decoding the path before matching it lets
+  `/x%2F..%2Flivez` match `/livez`, while a router that routes on the raw path, as chi does when
+  `RawPath` is set, serves it from a protected route such as `/{id}`. The middleware cannot know
+  how the handler routes, so it opens only a path every router reads alike.
 - **The kit as its own project.** It exists to be served by the daemon's HTTP Runner and is
   versioned with it; a project of its own would add a release and a `go.mod` to keep in step for
   one consumer, where ADR-0003 lists the HTTP server kit among what `daemon` owns.

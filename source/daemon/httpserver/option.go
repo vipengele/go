@@ -117,7 +117,8 @@ func WithBearerTokenFunc(token func() string) Option {
 }
 
 // WithUnauthenticatedPaths adds paths the authenticator skips, matched as RequireAuth matches
-// them. They have no effect without WithAuthenticator or WithBearerTokenFunc, as then no path is
+// them: only a request whose path is canonical, with no escaping such as "%2F" and already
+// cleaned, matches, so "/x/../livez" needs credentials where "/livez" does not. They have no effect without WithAuthenticator or WithBearerTokenFunc, as then no path is
 // authenticated. It may be given more than once; the lists add up.
 func WithUnauthenticatedPaths(paths ...string) Option {
 	return func(c *config) error {

@@ -37,9 +37,14 @@
 //
 // RequireAuth answers 401 unauthorized with the challenge to a request the authenticator rejects.
 // The paths of WithUnauthenticatedPaths skip authentication, which is how a daemon exposes probes
-// such as /livez. They are matched as http.ServeMux matches a pattern, on the cleaned path: an
-// entry without a trailing slash matches that path exactly, one with a trailing slash matches
-// everything below it, and "/x/../livez" is cleaned to "/livez" before it is matched.
+// such as /livez. Only a request whose path is canonical can match one: its URL has no RawPath, so
+// no escape such as "%2F" hides a slash, and its path is already rooted and clean. Such a path is
+// matched as http.ServeMux matches a pattern: an entry without a trailing slash matches that path
+// exactly, one with a trailing slash matches everything below it. Every other request is
+// authenticated, so "/x/../livez" and "/x%2F..%2Flivez" need credentials whatever handler New is
+// given, including one that routes on the raw path. Authentication runs before the handler, so
+// an http.ServeMux never redirects such a path to "/livez" for a client without credentials; a
+// probe requests the canonical path.
 //
 // # Hosts and origins
 //

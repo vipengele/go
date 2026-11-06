@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 )
@@ -63,16 +64,22 @@ func (b bearerToken) Authenticate(r *http.Request) error {
 }
 
 // RequireAuth returns middleware that answers 401 unauthorized, with the header
-// "WWW-Authenticate: <a.Challenge()>", to every request a rejects. A request whose path matches
-// one of unauthenticatedPaths skips authentication. Matching follows http.ServeMux on the cleaned,
-// rooted path, a trailing slash kept: an entry without a trailing slash ("/livez") matches that
-// path exactly, and an entry with one ("/probe/") matches itself and every path below it but not
-// "/probe". A path such as "/x/../livez" is cleaned to "/livez" before it is matched.
+// "WWW-Authenticate: <a.Challenge()>", to every request a rejects. A request skips authentication
+// only when its path is canonical and matches one of unauthenticatedPaths. A path is canonical
+// when r.URL.RawPath is empty, so no escape such as "%2F" makes the raw path differ from the
+// decoded one, and the decoded path is already rooted and cleaned by path.Clean, a trailing slash
+// kept. Matching then follows http.ServeMux: an entry without a trailing slash ("/livez") matches
+// that path exactly, and an entry with one ("/probe/") matches itself and every path below it but
+// not "/probe". Every other request is authenticated, so "/x/../livez", "//livez" and
+// "/x%2F..%2Flivez" need credentials: a handler that routes on the raw path, or without cleaning
+// it, would otherwise serve a protected route to a request matched as an open one. The check
+// runs before next, so an http.ServeMux behind it never gets to redirect a non-canonical path:
+// a client that sends no credentials has to request the canonical path itself.
 func RequireAuth(a Authenticator, unauthenticatedPaths ...string) func(http.Handler) http.Handler {
 	open := append([]string(nil), unauthenticatedPaths...)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if matchesAny(cleanPath(r.URL.Path), open) {
+			if canonical(r.URL) && matchesAny(r.URL.Path, open) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -84,6 +91,12 @@ func RequireAuth(a Authenticator, unauthenticatedPaths ...string) func(http.Hand
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// canonical reports whether u's path is one every handler sees alike: no escaping that differs
+// from the default, and a decoded path that cleanPath leaves unchanged.
+func canonical(u *url.URL) bool {
+	return u.RawPath == "" && cleanPath(u.Path) == u.Path
 }
 
 // cleanPath returns p rooted and cleaned by path.Clean, keeping a trailing slash, as http.ServeMux
