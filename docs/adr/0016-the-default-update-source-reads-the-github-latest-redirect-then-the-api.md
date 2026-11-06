@@ -1,7 +1,9 @@
 # The default update source reads the GitHub latest redirect, then the API
 
 Status: amends ADR-0003, which has `Config.Source` required: a nil `Source` resolves to the GitHub
-release source, built from the tool's identity.
+release source, built from the tool's identity. Amended by ADR-0027, which reads the `prerelease`
+flag, replaces `IncludePrereleases` with a channel passed to `Latest`, and reads the release list
+page by page.
 
 `update` needs the latest release of the tool's repository. `GitHubSource` is the `Source` for a
 tool released on GitHub, and a `Config` whose `Source` is nil uses it, so a tool declares no source

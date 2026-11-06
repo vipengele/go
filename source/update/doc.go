@@ -65,17 +65,44 @@
 // [Installed.Path]; Install runs none itself.
 //
 // [Config.Apply] is the whole update of a [Selection] in one call: CheckManaged and CheckWritable,
-// both before any request, then Download, Extract into Target's directory and Install, stopping at
-// the first error. It returns the [*Installed] with the backup still on disk; the caller runs its
+// both before any request, then CheckDowngrade, Download, Extract into Target's directory and
+// Install, and last records the installed version in the State, stopping at the first error. It
+// returns the [*Installed] with the backup still on disk; the caller runs its
 // PostUpdate hooks, whose failure is reported and does not undo the update, and then settles it
 // with Discard or Rollback.
+//
+// # Channels and downgrades
+//
+// Releases come in channels that accumulate: [Stable], [Beta], then [Edge], where a follower of a
+// channel receives every release whose own channel is at or below it. The zero Channel is Stable.
+// A release's channel is the higher of its tag's and its pre-release flag's: a tag with no suffix is
+// Stable, one whose first suffix identifier is beta or rc is Beta, any other suffix is Edge, and a
+// release the Source marks as a pre-release is at least Beta. Releases are ordered by semver on
+// every channel. [Config.Channel] selects the channel, which a tool reads from its own
+// configuration through [ParseChannel], and every [Source] receives it in Latest. The
+// [GitHubSource] reads the latest-release redirect and then the API for Stable, and the release
+// list page by page for Beta and Edge. Following a lower channel never downgrades: a Stable tool
+// running a beta stays on it until a stable release sorts above it.
+//
+// The State records HighestApplied, the highest version [Config.Apply] has installed, and the
+// channel LatestVersion was learnt on. A version learnt on another channel is not announced and its
+// attempt does not throttle the check. [Config.CheckDowngrade] refuses a tag strictly below the
+// downgrade floor, the higher of HighestApplied and the running Version, with a [*DowngradeError];
+// a tag equal to the floor passes. Apply runs it unless [AllowDowngrade] is given, the only way to
+// lift it, and the check's [Notice] never names a release below HighestApplied.
+//
+// The two halves fail differently. The guard fails closed: a State that cannot be loaded refuses
+// the install, since the floor is unknown. The record fails open: after Install, a failed lock,
+// load or save of HighestApplied is ignored and Apply returns the [*Installed], because the new
+// binary's Version floors the next run. Deleting or corrupting the state file resets the watermark
+// to the running Version.
 //
 // Whether a background update check may run is decided from the Config and the stored [State]. The
 // gates are tried in order and the first that fails decides: the running Version is not a release
 // version, the CI environment variable is set, stderr is not a terminal (IsTerminal), DisableCheck
 // is set, the user set the opt-out variable of the Identity, or the last attempt is less than
-// CheckInterval old. A check attempt is recorded in State, as LastAttempt and, when it succeeded,
-// LatestVersion, through Config.StateStore, which keeps the State between runs; a nil StateStore is
+// CheckInterval old. A check attempt is recorded in State, as LastAttempt, LatestChannel and, when it
+// succeeded, LatestVersion, through Config.StateStore, which keeps the State between runs; a nil StateStore is
 // a file in the state directory. A check stopped because the command ended is not an attempt: it
 // neither throttles the next run nor erases the LatestVersion already known.
 //
