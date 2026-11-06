@@ -1,14 +1,17 @@
 package httpserver_test
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"go.vipengele.org/daemon/httpserver"
 )
@@ -437,4 +440,141 @@ func TestLimitBodyOversizeJSONIsAnswered413(t *testing.T) {
 	if !errors.As(decodeErr, &reqErr) || reqErr.Status != http.StatusRequestEntityTooLarge {
 		t.Errorf("DecodeJSON() = %v, want a 413 *RequestError", decodeErr)
 	}
+}
+
+// setDefaultLogger makes slog.Default() write to the returned buffer until the test ends.
+func setDefaultLogger(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	prev := slog.Default()
+	logger, buf := newLogger()
+	slog.SetDefault(logger)
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+func TestLogWithANilLoggerLogsToTheDefaultLogger(t *testing.T) {
+	logs := setDefaultLogger(t)
+
+	httpserver.Log(nil)(okHandler()).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if out := logs.String(); !strings.Contains(out, "http request") || !strings.Contains(out, "path=/x") {
+		t.Errorf("default log = %q, want the request line", out)
+	}
+}
+
+func TestRecoverWithANilLoggerLogsToTheDefaultLogger(t *testing.T) {
+	logs := setDefaultLogger(t)
+	boom := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") })
+
+	rec := httptest.NewRecorder()
+	httpserver.Recover(nil)(boom).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if out := logs.String(); !strings.Contains(out, "http handler panic") {
+		t.Errorf("default log = %q, want the panic line", out)
+	}
+	assertEnvelope(t, rec, http.StatusInternalServerError, "internal_error")
+}
+
+func TestMiddlewareWritersExposeTheUnderlyingWriter(t *testing.T) {
+	tests := map[string]func(http.Handler) http.Handler{
+		"Recover": httpserver.Recover(nil),
+		"Log":     httpserver.Log(slog.New(slog.DiscardHandler)),
+	}
+	for name, mw := range tests {
+		t.Run(name, func(t *testing.T) {
+			var unwrapped http.ResponseWriter
+			rec := httptest.NewRecorder()
+			h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+				if !ok {
+					t.Error("writer has no Unwrap method")
+					return
+				}
+				unwrapped = u.Unwrap()
+			}))
+
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+			if unwrapped != http.ResponseWriter(rec) {
+				t.Errorf("Unwrap() = %v, want the underlying recorder", unwrapped)
+			}
+		})
+	}
+}
+
+func TestMiddlewareWritersLetTheControllerReachTheConnection(t *testing.T) {
+	tests := map[string]func(http.Handler) http.Handler{
+		"Recover": httpserver.Recover(slog.New(slog.DiscardHandler)),
+		"Log":     httpserver.Log(slog.New(slog.DiscardHandler)),
+	}
+	for name, mw := range tests {
+		t.Run(name, func(t *testing.T) {
+			deadline := make(chan error, 1)
+			srv := httptest.NewServer(mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				deadline <- http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Minute))
+			})))
+			t.Cleanup(srv.Close)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			_ = resp.Body.Close()
+
+			if deadlineErr := <-deadline; deadlineErr != nil {
+				t.Errorf("SetWriteDeadline() = %v, want nil", deadlineErr)
+			}
+		})
+	}
+}
+
+func TestRecoverTreatsAHijackedResponseAsSent(t *testing.T) {
+	const raw = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+	logs := make(chanWriter, 1)
+	srv := httptest.NewServer(httpserver.Recover(slog.New(slog.NewTextHandler(logs, nil)))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("Hijack() = %v, want nil", err)
+			return
+		}
+		_, _ = rw.WriteString(raw)
+		_ = rw.Flush()
+		_ = conn.Close()
+		panic("after hijack")
+	})))
+	t.Cleanup(srv.Close)
+
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_, _ = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	got, _ := io.ReadAll(bufio.NewReader(conn))
+
+	if string(got) != raw {
+		t.Errorf("connection carried %q, want only the hijacked response", got)
+	}
+	select {
+	case out := <-logs:
+		if !strings.Contains(out, "after hijack") {
+			t.Errorf("log = %q, want the panic value", out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the panic was not logged")
+	}
+}
+
+// chanWriter delivers each Write to the channel, so a test can wait for a log line written by a
+// server goroutine.
+type chanWriter chan string
+
+func (w chanWriter) Write(p []byte) (int, error) {
+	w <- string(p)
+	return len(p), nil
 }

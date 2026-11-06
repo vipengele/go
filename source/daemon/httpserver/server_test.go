@@ -428,3 +428,15 @@ func TestNewWithoutAuthenticatorServesEveryPath(t *testing.T) {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
 }
+
+func TestCheckListenerWithANilLoggerWarnsOnTheDefaultLogger(t *testing.T) {
+	logs := setDefaultLogger(t)
+	l := fakeListener{addr: &net.TCPAddr{IP: net.IPv4zero, Port: 8080}}
+	srv := mustNew(t, okHandler(), httpserver.WithAddr("127.0.0.1:0"))
+
+	httpserver.CheckListener(srv, l, nil)
+
+	if out := logs.String(); !strings.Contains(out, plainHTTPWarning) {
+		t.Errorf("default log = %q lacks the plain HTTP warning", out)
+	}
+}

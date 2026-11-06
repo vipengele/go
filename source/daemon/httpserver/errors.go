@@ -26,10 +26,8 @@ type errorBody struct {
 func Error(w http.ResponseWriter, status int, code, message string) {
 	var body bytes.Buffer
 	payload := errorPayload{Error: errorBody{Code: code, Message: message}}
-	if err := spec.WriteJSON(&body, errorSchema, payload); err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
+	// WriteJSON into a bytes.Buffer of a struct of two strings at schema 1 cannot fail.
+	_ = spec.WriteJSON(&body, errorSchema, payload)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

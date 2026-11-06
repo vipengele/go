@@ -76,3 +76,11 @@ func TestDecodeJSONRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestErrorTextIsCodeAndMessage(t *testing.T) {
+	err := &httpserver.RequestError{Status: http.StatusBadRequest, Code: "bad_request", Message: "body is malformed"}
+
+	if got, want := err.Error(), "bad_request: body is malformed"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
