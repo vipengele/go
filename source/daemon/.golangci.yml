@@ -23,6 +23,7 @@ linters:
           allow:
             - go.vipengele.org/daemon$
             - go.vipengele.org/daemon/service$
+            - go.vipengele.org/daemon/httpserver$
             - go.vipengele.org/cli/spec$
             - go.vipengele.org/cli/spec/paths$
             - go.vipengele.org/filelock$

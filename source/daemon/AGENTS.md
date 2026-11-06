@@ -64,6 +64,9 @@ golangci-lint run
   the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
   `testdata/status.keys` pins its JSON keys.
 
+- `httpserver/` — package `go.vipengele.org/daemon/httpserver`: `Error`, the JSON error envelope, and
+  `DecodeJSON`, which returns a `*RequestError`.
+
 ## The `service` package
 
 `go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd, launchd,
@@ -106,7 +109,7 @@ Conventions of the package:
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
-  `daemon` and `daemon/service`, `cli/spec`, `cli/spec/paths` and `filelock`. A depguard `pkg`
+  `daemon`, `daemon/service` and `daemon/httpserver`, `cli/spec`, `cli/spec/paths` and `filelock`. A depguard `pkg`
   entry matches by prefix, so a `/**` suffix matches nothing.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
