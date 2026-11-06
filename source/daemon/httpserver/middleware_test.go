@@ -16,8 +16,11 @@ import (
 func okHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(handlerRan))
 	})
 }
+
+const handlerRan = "handler ran"
 
 func assertEnvelope(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
@@ -86,6 +89,21 @@ func TestRecoverAbortsAResponseAlreadyStarted(t *testing.T) {
 				t.Errorf("log %q lacks the panic value", logs.String())
 			}
 		})
+	}
+}
+
+func TestRecoverAbortsAfterAFinalStatusWithoutABody(t *testing.T) {
+	h := httpserver.Recover(slog.New(slog.DiscardHandler))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic("boom")
+	}))
+	rec := httptest.NewRecorder()
+
+	if got := recoverServe(h, rec, httptest.NewRequest(http.MethodGet, "/", nil)); got != http.ErrAbortHandler {
+		t.Fatalf("panic = %v, want http.ErrAbortHandler", got)
+	}
+	if strings.Contains(rec.Body.String(), "internal_error") {
+		t.Errorf("body %q carries an envelope after the response started", rec.Body.String())
 	}
 }
 
@@ -183,6 +201,32 @@ func TestLogStatusDefaultsTo200(t *testing.T) {
 	}
 }
 
+func TestLogStatusSurvivesAFlush(t *testing.T) {
+	for name, tt := range map[string]struct {
+		status int
+		want   string
+	}{
+		"flush after WriteHeader": {status: http.StatusNotFound, want: "status=404"},
+		"flush only":              {status: 0, want: "status=200"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger, logs := newLogger()
+			h := httpserver.Log(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tt.status != 0 {
+					w.WriteHeader(tt.status)
+				}
+				_ = http.NewResponseController(w).Flush()
+			}))
+
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+			if !strings.Contains(logs.String(), tt.want) {
+				t.Errorf("log %q lacks %q", logs.String(), tt.want)
+			}
+		})
+	}
+}
+
 func TestResponseControllerFlushesThroughTheWrappers(t *testing.T) {
 	for name, mw := range map[string]func(http.Handler) http.Handler{
 		"Log":     httpserver.Log(slog.New(slog.DiscardHandler)),
@@ -272,10 +316,26 @@ func TestAllowHosts(t *testing.T) {
 				if rec.Code != http.StatusOK {
 					t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
 				}
+				if rec.Body.String() != handlerRan {
+					t.Errorf("body = %q, want the handler's %q", rec.Body.String(), handlerRan)
+				}
 				return
 			}
 			assertEnvelope(t, rec, http.StatusMisdirectedRequest, "misdirected_request")
 		})
+	}
+}
+
+func TestAllowHostsRejectsEmptyHostAndEmptyEntry(t *testing.T) {
+	h := httpserver.AllowHosts("")(okHandler())
+	for _, host := range []string{"", ":80"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+
+		h.ServeHTTP(rec, req)
+
+		assertEnvelope(t, rec, http.StatusMisdirectedRequest, "misdirected_request")
 	}
 }
 
@@ -316,6 +376,9 @@ func TestAllowOrigins(t *testing.T) {
 			if tt.ok {
 				if rec.Code != http.StatusOK {
 					t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+				}
+				if rec.Body.String() != handlerRan {
+					t.Errorf("body = %q, want the handler's %q", rec.Body.String(), handlerRan)
 				}
 				return
 			}

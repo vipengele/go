@@ -92,6 +92,7 @@ func serveAuth(t *testing.T, urlPath, header string) *httptest.ResponseRecorder 
 	t.Helper()
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(handlerRan))
 	})
 	h := httpserver.RequireAuth(
 		httpserver.BearerToken(func() string { return secret }),
@@ -138,6 +139,9 @@ func TestRequireAuthUnauthenticatedPaths(t *testing.T) {
 			if rec.Code != want {
 				t.Errorf("status = %d, want %d", rec.Code, want)
 			}
+			if ran := rec.Body.String() == handlerRan; ran != tt.open {
+				t.Errorf("handler ran = %t, want %t", ran, tt.open)
+			}
 		})
 	}
 }
@@ -146,6 +150,7 @@ func serveAuthURL(t *testing.T, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(handlerRan))
 	})
 	h := httpserver.RequireAuth(
 		httpserver.BearerToken(func() string { return secret }),
@@ -179,13 +184,20 @@ func TestRequireAuthEncodedSlashCannotReachAnOpenPath(t *testing.T) {
 			if rec.Code != want {
 				t.Errorf("status = %d, want %d", rec.Code, want)
 			}
+			if ran := rec.Body.String() == handlerRan; ran != tt.open {
+				t.Errorf("handler ran = %t, want %t", ran, tt.open)
+			}
 		})
 	}
 }
 
 func TestRequireAuthPassesAnAuthenticatedRequest(t *testing.T) {
-	if rec := serveAuth(t, "/jobs", "Bearer "+secret); rec.Code != http.StatusOK {
+	rec := serveAuth(t, "/jobs", "Bearer "+secret)
+	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if rec.Body.String() != handlerRan {
+		t.Errorf("body = %q, want the handler's %q", rec.Body.String(), handlerRan)
 	}
 }
 

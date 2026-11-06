@@ -66,9 +66,7 @@ func WithTLS(cfg *tls.Config) Option {
 			return errors.New("httpserver: nil tls config")
 		}
 		clone := cfg.Clone()
-		if clone.MinVersion < tls.VersionTLS12 {
-			clone.MinVersion = tls.VersionTLS12
-		}
+		clone.MinVersion = max(clone.MinVersion, tls.VersionTLS12)
 		c.tls = clone
 		return nil
 	}

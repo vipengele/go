@@ -60,6 +60,7 @@ func TestDecodeJSONRejects(t *testing.T) {
 		{"trailing garbage", "application/json", `{"name":"x"} x`, 0, 400, "bad_request"},
 		{"malformed json", "application/json", `{"name":`, 0, 400, "bad_request"},
 		{"empty body", "application/json", ``, 0, 400, "bad_request"},
+		{"limit reached by trailing data", "application/json", `{"name":"x"}` + strings.Repeat(" ", 8) + `{}`, 16, 413, "body_too_large"},
 		{"oversize body", "application/json", `{"name":"` + strings.Repeat("a", 100) + `"}`, 16, 413, "body_too_large"},
 	}
 	for _, tt := range tests {

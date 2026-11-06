@@ -218,11 +218,11 @@ func AllowHosts(hosts ...string) func(http.Handler) http.Handler {
 func splitHost(hostport string) (host, port string, bracketed, ok bool) {
 	rest := hostport
 	if strings.HasPrefix(rest, "[") {
-		end := strings.IndexByte(rest, ']')
-		if end < 0 {
+		inner, after, found := strings.Cut(rest[1:], "]")
+		if !found {
 			return "", "", false, false
 		}
-		host, rest, bracketed = rest[1:end], rest[end+1:], true
+		host, rest, bracketed = inner, after, true
 		if rest != "" {
 			if rest[0] != ':' {
 				return "", "", false, false
