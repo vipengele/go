@@ -109,7 +109,9 @@ type Config struct {
 	// only when the state directory itself falls back to it. An explicit StateDir is used as given.
 	StateDir string
 	// Source reports the releases the tool can update to. Nil means the [GitHubSource] for the
-	// Identity's Owner and Repo, making its requests through HTTPClient and authenticating with Token.
+	// Identity's Owner and Repo, making its requests through HTTPClient, authenticating with Token
+	// and keeping its REST API responses in the file "github-cache.json" in the resolved StateDir
+	// ([NewFileResponseCache]). A supplied Source is used as given.
 	Source Source
 	// PostUpdate lists the hooks [RunPostUpdate] runs, in order, once the installed binary has
 	// replaced the old one. Empty means none.
@@ -425,7 +427,8 @@ func (c Config) Resolved() (Config, error) {
 // needs a home directory the resolver cannot find.
 // An explicit StateDir is kept without consulting the resolver. A nil InContainer is likewise
 // built over the resolved GOOS and Getenv, and a nil Token reads the environment through the
-// resolved Getenv.
+// resolved Getenv. A nil Source is built after StateDir is resolved, since its response cache
+// lives there.
 func (c Config) resolve() (Config, error) {
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -479,12 +482,6 @@ func (c Config) resolve() (Config, error) {
 	if r.Token == nil {
 		r.Token = tokenFromEnv(r.Getenv)
 	}
-	if r.Source == nil {
-		gh := NewGitHubSource(r.Identity, r.HTTPClient)
-		gh.Now = r.Now
-		gh.Token = r.Token
-		r.Source = gh
-	}
 	if r.UserHomeDir == nil {
 		r.UserHomeDir = os.UserHomeDir
 	}
@@ -498,6 +495,13 @@ func (c Config) resolve() (Config, error) {
 			return Config{}, fmt.Errorf("update: resolving StateDir: %w", err)
 		}
 		r.StateDir = dirs.State()
+	}
+	if r.Source == nil {
+		gh := NewGitHubSource(r.Identity, r.HTTPClient)
+		gh.Now = r.Now
+		gh.Token = r.Token
+		gh.Cache = NewFileResponseCache(r.StateDir)
+		r.Source = gh
 	}
 	if r.EvalSymlinks == nil {
 		r.EvalSymlinks = filepath.EvalSymlinks

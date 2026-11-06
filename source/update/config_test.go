@@ -1522,6 +1522,46 @@ func TestResolveKeepsASuppliedSourceUntouched(t *testing.T) {
 	}
 }
 
+func TestResolveWiresTheFileResponseCacheForTheDefaultSource(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "state")
+	c := validConfig(t.TempDir())
+	c.Source = nil
+	c.StateDir = stateDir
+
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	gh, ok := r.Source.(*GitHubSource)
+	if !ok {
+		t.Fatalf("Source = %T, want *GitHubSource", r.Source)
+	}
+	fc, ok := gh.Cache.(*fileCache)
+	if !ok {
+		t.Fatalf("Source.Cache = %T, want the file cache", gh.Cache)
+	}
+	if want := filepath.Join(stateDir, "github-cache.json"); fc.path() != want {
+		t.Errorf("cache file = %s, want %s", fc.path(), want)
+	}
+}
+
+func TestResolveLeavesTheCacheOfASuppliedSourceAlone(t *testing.T) {
+	t.Parallel()
+
+	gh := &GitHubSource{Owner: "o", Repo: "r"}
+	c := validConfig(t.TempDir())
+	c.Source = gh
+
+	if _, err := c.resolve(); err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if gh.Cache != nil {
+		t.Errorf("Cache = %T, want a supplied GitHubSource's Cache left nil", gh.Cache)
+	}
+}
+
 // resolvedGitHubSource resolves c, whose Source is nil, and returns the default GitHubSource
 // pointed at g's web and API servers and at the repository they serve.
 func resolvedGitHubSource(t *testing.T, c Config, g *splitGitHub) *GitHubSource {

@@ -84,6 +84,16 @@ const maxDrainBody = 64 << 10
 // only to the APIURL host; a REST API redirect to another host fails with a
 // [*CrossHostRedirectError]. The web request never carries a token, and asset downloads, made
 // through [Config.HTTPClient], never do either.
+//
+// With a Cache, a REST API request for a URL the cache holds an entry for carries
+// "If-None-Match: <etag>", and a 304 Not Modified answer is decoded from the cached body exactly as
+// a 200 body is. A 200 carrying an ETag replaces the entry, ETag and body together, once the body
+// has been read in full within the read limit. A rate-limited, 401 or other non-success response
+// returns its error, never the cached body, and a 304 for a URL with no entry is a [*StatusError].
+// A cache that fails to load or save is a miss or a skipped write, never an error of Latest, and
+// nothing is written once ctx is done. GitHub exempts a 304 from the rate limit only when the
+// request is authenticated, so without a token a conditional request saves the transfer but not
+// the quota.
 type GitHubSource struct {
 	// Owner is the GitHub user or organization that owns the repository.
 	Owner string
@@ -112,6 +122,9 @@ type GitHubSource struct {
 	// call to Latest, and only when Latest makes a REST API request; its error fails that request,
 	// wrapped. An empty token, and a nil Token, mean unauthenticated requests.
 	Token func(ctx context.Context) (string, error)
+	// Cache keeps the REST API responses Latest makes its requests conditional on. Nil means
+	// unconditional requests and nothing kept.
+	Cache ResponseCache
 }
 
 // NewGitHubSource returns a GitHubSource for the repository identity names, Owner/Repo, making
@@ -166,7 +179,7 @@ func (s *GitHubSource) latestByRedirect(ctx context.Context) (rel Release, found
 	}
 
 	answered := false
-	err = s.get(ctx, &client, pageURL, func(resp *http.Response) error {
+	err = s.get(ctx, &client, pageURL, "", func(resp *http.Response) error {
 		answered = true
 		if !isRedirect(resp.StatusCode) {
 			return nil
@@ -238,23 +251,9 @@ type gitHubAsset struct {
 func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 	apiURL := strings.TrimSuffix(s.apiURL(), "/") + "/repos/" + s.repoPath() + "/releases/latest"
 
-	client, err := s.apiClient(ctx)
-	if err != nil {
-		return Release{}, err
-	}
-
 	var rel Release
 
-	err = s.get(ctx, client, apiURL, func(resp *http.Response) error {
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			return s.apiStatusError(apiURL, resp)
-		}
-
-		body, err := readLimited(resp.Body, maxResponseBody)
-		if err != nil {
-			return fmt.Errorf("update: GET %s: %w", apiURL, err)
-		}
-
+	err := s.apiGet(ctx, apiURL, maxResponseBody, func(body []byte) error {
 		var gr gitHubRelease
 		if err := json.Unmarshal(body, &gr); err != nil {
 			return fmt.Errorf("update: GET %s: decoding release: %w", apiURL, err)
@@ -286,23 +285,9 @@ func (s *GitHubSource) highestListed(ctx context.Context) (Release, error) {
 	listURL := fmt.Sprintf("%s/repos/%s/releases?per_page=%d",
 		strings.TrimSuffix(s.apiURL(), "/"), s.repoPath(), listPageSize)
 
-	client, err := s.apiClient(ctx)
-	if err != nil {
-		return Release{}, err
-	}
-
 	var rel Release
 
-	err = s.get(ctx, client, listURL, func(resp *http.Response) error {
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			return s.apiStatusError(listURL, resp)
-		}
-
-		body, err := readLimited(resp.Body, maxListResponseBody)
-		if err != nil {
-			return fmt.Errorf("update: GET %s: %w", listURL, err)
-		}
-
+	err := s.apiGet(ctx, listURL, maxListResponseBody, func(body []byte) error {
 		var list []gitHubRelease
 		if err := json.Unmarshal(body, &list); err != nil {
 			return fmt.Errorf("update: GET %s: decoding releases: %w", listURL, err)
@@ -334,10 +319,78 @@ func (s *GitHubSource) highestListed(ctx context.Context) (Release, error) {
 	return rel, nil
 }
 
+// apiGet makes the REST API request for rawURL through [GitHubSource.apiClient] and hands decode
+// the body of a success response, read up to limit bytes, or on a 304 Not Modified the body cached
+// for rawURL. The request carries If-None-Match only when Cache holds an entry for rawURL. A
+// success response carrying an ETag replaces that entry once its body is read, whatever decode
+// returns, so a 304 answered later decodes to the same result; the write is skipped when ctx is
+// done and its failure is ignored. Any other status is the error [GitHubSource.apiStatusError]
+// returns, and a 304 with no entry is a [*StatusError].
+func (s *GitHubSource) apiGet(ctx context.Context, rawURL string, limit int64, decode func(body []byte) error) error {
+	client, err := s.apiClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	cached, hit := s.cacheGet(ctx, rawURL)
+
+	var etag string
+	if hit {
+		etag = cached.ETag
+	}
+
+	var fresh *CachedResponse
+
+	err = s.get(ctx, client, rawURL, etag, func(resp *http.Response) error {
+		var body []byte
+
+		switch {
+		case resp.StatusCode == http.StatusNotModified && hit:
+			body = cached.Body
+		case resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices:
+			return s.apiStatusError(rawURL, resp)
+		default:
+			read, err := readLimited(resp.Body, limit)
+			if err != nil {
+				return fmt.Errorf("update: GET %s: %w", rawURL, err)
+			}
+
+			if tag := resp.Header.Get("ETag"); tag != "" {
+				fresh = &CachedResponse{ETag: tag, Body: read}
+			}
+
+			body = read
+		}
+
+		return decode(body)
+	})
+
+	if fresh != nil && s.Cache != nil && ctx.Err() == nil {
+		_ = s.Cache.Put(ctx, rawURL, *fresh)
+	}
+
+	return err
+}
+
+// cacheGet returns Cache's entry for rawURL, and false when Cache is nil or holds no usable entry:
+// one without an ETag cannot make a request conditional.
+func (s *GitHubSource) cacheGet(ctx context.Context, rawURL string) (CachedResponse, bool) {
+	if s.Cache == nil {
+		return CachedResponse{}, false
+	}
+
+	r, ok := s.Cache.Get(ctx, rawURL)
+	if !ok || r.ETag == "" {
+		return CachedResponse{}, false
+	}
+
+	return r, true
+}
+
 // get makes one GET request for rawURL through client, bounded by Timeout, and hands the
-// response to read. The body is drained and closed after read returns, and every error is
-// passed through [classifyError].
-func (s *GitHubSource) get(ctx context.Context, client *http.Client, rawURL string, read func(*http.Response) error) error {
+// response to read. A non-empty etag is sent as If-None-Match. The body is drained and closed
+// after read returns, and every error is passed through [classifyError].
+func (s *GitHubSource) get(ctx context.Context, client *http.Client, rawURL, etag string, read func(*http.Response) error) error {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout())
 	defer cancel()
 
@@ -349,6 +402,10 @@ func (s *GitHubSource) get(ctx context.Context, client *http.Client, rawURL stri
 	req.Header.Set("User-Agent", gitHubUserAgent)
 	req.Header.Set("Accept", gitHubAccept)
 	req.Header.Set("X-GitHub-Api-Version", gitHubAPIVersion)
+
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
