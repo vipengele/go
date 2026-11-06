@@ -125,5 +125,8 @@ Conventions of the package:
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by
   `spec.WriteJSON` with the same schema, which `TestStatusJSONIsTheHandlerBody` in
   `daemoncmd/status_test.go` pins.
+- `httpserver` imports the standard library and `go.vipengele.org/cli/spec` (for `spec.WriteJSON`)
+  only, and its middleware order is fixed (ADR-0026): a new middleware gets a position in the chain
+  in `New`, documented under `# Middleware order` in its `doc.go`, never an option that reorders.
 - A new `Run` outcome is documented in the `Errors` section of `doc.go` and tested in
   `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`.

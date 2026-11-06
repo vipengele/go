@@ -158,7 +158,8 @@ func (r *httpRunner) Order() int { return r.order }
 
 // Start binds the listener when the Runner has none, launches Serve in a goroutine and returns
 // nil. It returns an error when the server or listener is nil, when the server's TLSConfig has no
-// certificate, when binding fails, or when the Runner was already started, and one wrapping context.Canceled when Stop came first.
+// certificate, when binding fails, or when the Runner was already started, and one wrapping
+// context.Canceled when Stop came first.
 func (r *httpRunner) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
