@@ -440,3 +440,22 @@ func (e *DevBuildError) Error() string {
 
 	return fmt.Sprintf("%s %s is a development build; install a release to update", e.Name, e.Version)
 }
+
+// DowngradeError reports a version below the downgrade floor: the higher of the highest version
+// ever applied and the running version. [Config.CheckDowngrade] returns it.
+type DowngradeError struct {
+	// Name is the tool's name.
+	Name string
+	// Version is the refused version.
+	Version string
+	// Floor is the lowest version an update may install without being asked to downgrade.
+	Floor string
+}
+
+// Error implements error.
+func (e *DowngradeError) Error() string {
+	return fmt.Sprintf(
+		"%s %s is below %s, the highest version applied or running; a downgrade must be asked for explicitly",
+		e.Name, e.Version, e.Floor,
+	)
+}

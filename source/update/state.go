@@ -15,8 +15,8 @@ const stateFileName = "update-state.json"
 
 // State is what an update check remembers between runs.
 //
-// It is stored as JSON with the keys "last_attempt", "latest_version" and "latest_channel", each
-// omitted when zero. A reader ignores unknown keys, so a field added later stays readable by this
+// It is stored as JSON with the keys "last_attempt", "latest_version", "latest_channel" and
+// "highest_applied", each omitted when zero. A reader ignores unknown keys, so a field added later stays readable by this
 // one, and a missing key reads as the field's zero value, so a file without "latest_channel" holds
 // a version learnt on Stable.
 type State struct {
@@ -29,6 +29,10 @@ type State struct {
 	// LatestChannel is the channel LatestVersion was learnt on, stored by its name ("beta",
 	// "edge") through [Channel.MarshalText]. Stable is the zero value and is omitted.
 	LatestChannel Channel `json:"latest_channel,omitzero"`
+	// HighestApplied is the highest version ever applied, such as "v1.4.0": the watermark
+	// [Config.CheckDowngrade] refuses to go below. Empty means none is recorded. A check attempt
+	// never changes it.
+	HighestApplied string `json:"highest_applied,omitzero"`
 }
 
 // lastAttemptOn returns LastAttempt when st was learnt on ch, and the zero time otherwise: an

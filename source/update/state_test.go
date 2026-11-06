@@ -13,9 +13,10 @@ func TestFileStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	want := State{
-		LastAttempt:   time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC),
-		LatestVersion: "v1.2.3-beta.1",
-		LatestChannel: Beta,
+		LastAttempt:    time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC),
+		LatestVersion:  "v1.2.3-beta.1",
+		LatestChannel:  Beta,
+		HighestApplied: "v1.2.0",
 	}
 	store := &fileStore{dir: t.TempDir()}
 
@@ -28,7 +29,7 @@ func TestFileStoreRoundTrip(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if !got.LastAttempt.Equal(want.LastAttempt) || got.LatestVersion != want.LatestVersion ||
-		got.LatestChannel != want.LatestChannel {
+		got.LatestChannel != want.LatestChannel || got.HighestApplied != want.HighestApplied {
 		t.Errorf("Load = %+v, want %+v", got, want)
 	}
 }
@@ -61,6 +62,11 @@ func TestFileStoreSaveWritesJSON(t *testing.T) {
 			name: "stable channel is omitted",
 			st:   State{LatestVersion: "v1.2.3", LatestChannel: Stable},
 			want: "{\n  \"latest_version\": \"v1.2.3\"\n}\n",
+		},
+		{
+			name: "highest applied",
+			st:   State{LatestVersion: "v1.2.3", HighestApplied: "v1.2.0"},
+			want: "{\n  \"latest_version\": \"v1.2.3\",\n  \"highest_applied\": \"v1.2.0\"\n}\n",
 		},
 		{
 			name: "version only",

@@ -21,6 +21,9 @@ type Check struct {
 	// saved is the LatestVersion the state held when the check started, or empty when it was
 	// learnt on another channel than the Config's.
 	saved string
+	// highestApplied is the State's HighestApplied when the check started: no candidate below it is
+	// announced.
+	highestApplied string
 	// wait is the longest Finish waits before cancelling the check.
 	wait time.Duration
 	// cancel stops the check's goroutine.
@@ -64,12 +67,13 @@ func (c Config) Start(ctx context.Context) (*Check, error) {
 	}
 	checkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	k := &Check{
-		name:    r.Name,
-		current: r.Version,
-		saved:   st.latestVersionOn(r.Channel),
-		wait:    r.CheckWait,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		name:           r.Name,
+		current:        r.Version,
+		saved:          st.latestVersionOn(r.Channel),
+		highestApplied: st.HighestApplied,
+		wait:           r.CheckWait,
+		cancel:         cancel,
+		done:           make(chan struct{}),
 	}
 	go func() {
 		defer close(k.done)
@@ -109,7 +113,8 @@ func runCheck(ctx context.Context, r Config) string {
 //
 // The candidate is the higher, in the order of [version.Newer], of the LatestVersion the state
 // held when the check started and, once the check has finished, the version it learnt. It is
-// reported when it is newer than the running version.
+// reported when it is newer than the running version and not below the HighestApplied the state
+// held when the check started: a release below the watermark is a downgrade, never an update.
 func (k *Check) Notice() (Notice, bool) {
 	if k == nil {
 		return Notice{}, false
@@ -122,7 +127,7 @@ func (k *Check) Notice() (Notice, bool) {
 		}
 	default:
 	}
-	if !version.Newer(k.current, latest) {
+	if !version.Newer(k.current, latest) || version.Newer(latest, k.highestApplied) {
 		return Notice{}, false
 	}
 	return Notice{Name: k.name, Current: k.current, Latest: latest}, true

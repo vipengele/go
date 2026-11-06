@@ -573,3 +573,61 @@ func TestCheckRecordsTheChannelOfASuccessfulAttempt(t *testing.T) {
 	}
 	assertNotice(t, k, "v1.3.0-beta.1")
 }
+
+func TestNoticeIsSilentForACandidateBelowTheWatermark(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		highest string
+		want    string
+	}{
+		{name: "candidate below the watermark", highest: "v1.3.0"},
+		{name: "candidate equal to the watermark", highest: "v1.2.3", want: "v1.2.3"},
+		{name: "candidate above the watermark", highest: "v1.1.0", want: "v1.2.3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &fakeStore{loads: []loadResult{{st: State{HighestApplied: tc.highest}}}}
+			k := start(t, bgConfig(t, newKitServer(t), store))
+			k.Finish()
+			if tc.want == "" {
+				assertNoNotice(t, k)
+				return
+			}
+			assertNotice(t, k, tc.want)
+		})
+	}
+}
+
+func TestCheckAttemptKeepsTheWatermark(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		source Source
+	}{
+		{name: "successful attempt", source: &fixedSource{tag: "v1.2.3"}},
+		{name: "failed attempt", source: errSource{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &fakeStore{loads: []loadResult{{st: State{
+				LastAttempt:    bgNow().Add(-48 * time.Hour),
+				LatestVersion:  "v1.1.0",
+				LatestChannel:  Beta,
+				HighestApplied: "v1.4.0",
+			}}}}
+			c := bgConfig(t, newKitServer(t), store)
+			c.Source = tc.source
+			k := start(t, c)
+			finishWithin(t, k, 10*time.Second)
+
+			saves := store.recordedSaves()
+			if len(saves) != 1 {
+				t.Fatalf("Save called %d times, want 1", len(saves))
+			}
+			if saves[0].HighestApplied != "v1.4.0" {
+				t.Errorf("saved HighestApplied %q, want v1.4.0", saves[0].HighestApplied)
+			}
+		})
+	}
+}
