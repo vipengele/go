@@ -661,7 +661,7 @@ func TestResolveDoesNotModifyItsReceiver(t *testing.T) {
 		t.Errorf("Config after resolve = %+v, want %+v", after, before)
 	}
 	if c.Now != nil || c.Executable != nil || c.EvalSymlinks != nil || c.InContainer != nil ||
-		c.IsTerminal != nil || c.StateStore != nil || c.CheckInterval != 0 {
+		c.IsTerminal != nil || c.StateStore != nil || c.CheckInterval != 0 || c.Token != nil {
 		t.Error("resolve set a func field on its receiver, want the receiver's nil func fields left nil")
 	}
 }
@@ -1516,5 +1516,126 @@ func TestResolveKeepsASuppliedSourceUntouched(t *testing.T) {
 	}
 	if gh.Now != nil {
 		t.Error("resolve set Now on a supplied GitHubSource, want it left nil")
+	}
+	if gh.Token != nil {
+		t.Error("resolve set Token on a supplied GitHubSource, want it left nil")
+	}
+}
+
+// resolvedGitHubSource resolves c, whose Source is nil, and returns the default GitHubSource
+// pointed at g's web and API servers and at the repository they serve.
+func resolvedGitHubSource(t *testing.T, c Config, g *splitGitHub) *GitHubSource {
+	t.Helper()
+
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	gh, ok := r.Source.(*GitHubSource)
+	if !ok {
+		t.Fatalf("Source = %T, want *GitHubSource", r.Source)
+	}
+	gh.Owner, gh.Repo = testOwner, testRepo
+	gh.WebURL = g.web.URL
+	gh.APIURL = g.api.URL
+
+	return gh
+}
+
+func TestResolveDefaultSourceReadsTheTokenThroughGetenv(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "GH_TOKEN wins", env: map[string]string{"GH_TOKEN": "gh-token", "GITHUB_TOKEN": "github-token"}, want: "Bearer gh-token"},
+		{name: "GITHUB_TOKEN alone", env: map[string]string{"GITHUB_TOKEN": "github-token"}, want: "Bearer github-token"},
+		{name: "neither", env: nil, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			g := newSplitGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, apiReleaseJSON("v1.4.0")))
+			c := validConfig(t.TempDir())
+			c.Source = nil
+			c.Getenv = envOf(tc.env)
+
+			if _, err := resolvedGitHubSource(t, c, g).Latest(context.Background()); err != nil {
+				t.Fatalf("Latest() error = %v", err)
+			}
+			if seen := g.apiAuth.seen(); len(seen) != 1 || seen[0] != tc.want {
+				t.Errorf("API Authorization = %q, want one %q", seen, tc.want)
+			}
+			g.webAuth.assertNoAuthorization(t, "the web host")
+		})
+	}
+}
+
+func TestResolveDefaultSourceUsesTheConfigToken(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{name: "token", token: "from-config", want: "Bearer from-config"},
+		{name: "empty token opts out", token: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			g := newSplitGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, apiReleaseJSON("v1.4.0")))
+			c := validConfig(t.TempDir())
+			c.Source = nil
+			c.Getenv = envOf(map[string]string{"GH_TOKEN": "from-env"})
+			c.Token = staticToken(tc.token)
+
+			if _, err := resolvedGitHubSource(t, c, g).Latest(context.Background()); err != nil {
+				t.Fatalf("Latest() error = %v", err)
+			}
+			if seen := g.apiAuth.seen(); len(seen) != 1 || seen[0] != tc.want {
+				t.Errorf("API Authorization = %q, want one %q", seen, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveDefaultSourceRejectedEnvTokenIsTokenRejectedError(t *testing.T) {
+	t.Parallel()
+
+	g := newSplitGitHub(t, respond(http.StatusOK, ""), respond(http.StatusUnauthorized, "bad credentials"))
+	c := validConfig(t.TempDir())
+	c.Source = nil
+	c.Getenv = envOf(map[string]string{"GITHUB_TOKEN": "revoked"})
+
+	_, err := resolvedGitHubSource(t, c, g).Latest(context.Background())
+
+	var tr *TokenRejectedError
+	if !errors.As(err, &tr) {
+		t.Fatalf("err = %v, want a *TokenRejectedError", err)
+	}
+	if tr.Status.StatusCode != http.StatusUnauthorized {
+		t.Errorf("TokenRejectedError.Status.StatusCode = %d, want 401", tr.Status.StatusCode)
+	}
+}
+
+func TestResolveDefaultsTokenToTheEnvironment(t *testing.T) {
+	t.Parallel()
+
+	c := validConfig(t.TempDir())
+	c.Getenv = envOf(map[string]string{"GH_TOKEN": "gh-token"})
+
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if r.Token == nil {
+		t.Fatal("Token = nil, want the environment reader")
+	}
+	if got, err := r.Token(context.Background()); err != nil || got != "gh-token" {
+		t.Errorf("Token() = %q, %v, want %q, nil", got, err, "gh-token")
 	}
 }

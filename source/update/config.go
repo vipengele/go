@@ -109,7 +109,7 @@ type Config struct {
 	// only when the state directory itself falls back to it. An explicit StateDir is used as given.
 	StateDir string
 	// Source reports the releases the tool can update to. Nil means the [GitHubSource] for the
-	// Identity's Owner and Repo, making its requests through HTTPClient.
+	// Identity's Owner and Repo, making its requests through HTTPClient and authenticating with Token.
 	Source Source
 	// PostUpdate lists the hooks [RunPostUpdate] runs, in order, once the installed binary has
 	// replaced the old one. Empty means none.
@@ -137,6 +137,11 @@ type Config struct {
 	// HTTPClient makes every HTTP request. Nil means a new [http.Client] of the Config's own,
 	// never [http.DefaultClient].
 	HTTPClient *http.Client
+	// Token returns the GitHub token the default Source authenticates its REST API requests with.
+	// Nil means GH_TOKEN, or GITHUB_TOKEN when GH_TOKEN is empty, both read through Getenv. A
+	// provider that returns "" opts out: the requests carry no Authorization header. An error fails
+	// the API request, wrapped. A supplied Source ignores Token, and downloads never send it.
+	Token func(ctx context.Context) (string, error)
 	// Now returns the current time. Nil means [time.Now].
 	Now func() time.Time
 	// GOOS is the target operating system. Empty means [runtime.GOOS]. It also selects the
@@ -419,7 +424,8 @@ func (c Config) Resolved() (Config, error) {
 // substituted seam decides it too; resolve fails when StateDir is empty and the state directory
 // needs a home directory the resolver cannot find.
 // An explicit StateDir is kept without consulting the resolver. A nil InContainer is likewise
-// built over the resolved GOOS and Getenv.
+// built over the resolved GOOS and Getenv, and a nil Token reads the environment through the
+// resolved Getenv.
 func (c Config) resolve() (Config, error) {
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -458,11 +464,6 @@ func (c Config) resolve() (Config, error) {
 	if r.Now == nil {
 		r.Now = time.Now
 	}
-	if r.Source == nil {
-		gh := NewGitHubSource(r.Identity, r.HTTPClient)
-		gh.Now = r.Now
-		r.Source = gh
-	}
 	if r.GOOS == "" {
 		r.GOOS = runtime.GOOS
 	}
@@ -474,6 +475,15 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.Getenv == nil {
 		r.Getenv = os.Getenv
+	}
+	if r.Token == nil {
+		r.Token = tokenFromEnv(r.Getenv)
+	}
+	if r.Source == nil {
+		gh := NewGitHubSource(r.Identity, r.HTTPClient)
+		gh.Now = r.Now
+		gh.Token = r.Token
+		r.Source = gh
 	}
 	if r.UserHomeDir == nil {
 		r.UserHomeDir = os.UserHomeDir

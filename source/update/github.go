@@ -79,6 +79,11 @@ const maxDrainBody = 64 << 10
 // reports an exhausted rate limit gives a [*RateLimitError] and a 401 to a request that carried
 // credentials a [*TokenRejectedError]; both unwrap to the [*StatusError]. An expired deadline gives a
 // [*TimeoutError], and a cancelled ctx an error matching [context.Canceled].
+//
+// REST API requests carry "Authorization: Bearer <token>" when Token returns a non-empty token, and
+// only to the APIURL host; a REST API redirect to another host fails with a
+// [*CrossHostRedirectError]. The web request never carries a token, and asset downloads, made
+// through [Config.HTTPClient], never do either.
 type GitHubSource struct {
 	// Owner is the GitHub user or organization that owns the repository.
 	Owner string
@@ -86,7 +91,8 @@ type GitHubSource struct {
 	Repo string
 	// HTTPClient makes every request. Nil means a new [http.Client] for each call to Latest,
 	// never [http.DefaultClient]. The redirect request uses a copy of it that does not follow
-	// redirects.
+	// redirects, and the REST API requests a copy that adds the token and stays on the APIURL
+	// host; HTTPClient itself is never modified.
 	HTTPClient *http.Client
 	// WebURL is the base address of GitHub's web pages. Empty means "https://github.com".
 	WebURL string
@@ -102,6 +108,10 @@ type GitHubSource struct {
 	// Now returns the current time, from which a Retry-After delay becomes a reset time in a
 	// [*RateLimitError]. Nil means [time.Now].
 	Now func() time.Time
+	// Token returns the token REST API requests authenticate with. It is called at most once per
+	// call to Latest, and only when Latest makes a REST API request; its error fails that request,
+	// wrapped. An empty token, and a nil Token, mean unauthenticated requests.
+	Token func(ctx context.Context) (string, error)
 }
 
 // NewGitHubSource returns a GitHubSource for the repository identity names, Owner/Repo, making
@@ -228,9 +238,14 @@ type gitHubAsset struct {
 func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 	apiURL := strings.TrimSuffix(s.apiURL(), "/") + "/repos/" + s.repoPath() + "/releases/latest"
 
+	client, err := s.apiClient(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+
 	var rel Release
 
-	err := s.get(ctx, s.client(), apiURL, func(resp *http.Response) error {
+	err = s.get(ctx, client, apiURL, func(resp *http.Response) error {
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			return s.apiStatusError(apiURL, resp)
 		}
@@ -271,9 +286,14 @@ func (s *GitHubSource) highestListed(ctx context.Context) (Release, error) {
 	listURL := fmt.Sprintf("%s/repos/%s/releases?per_page=%d",
 		strings.TrimSuffix(s.apiURL(), "/"), s.repoPath(), listPageSize)
 
+	client, err := s.apiClient(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+
 	var rel Release
 
-	err := s.get(ctx, s.client(), listURL, func(resp *http.Response) error {
+	err = s.get(ctx, client, listURL, func(resp *http.Response) error {
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			return s.apiStatusError(listURL, resp)
 		}
