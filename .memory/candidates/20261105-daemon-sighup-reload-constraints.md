@@ -1,6 +1,10 @@
 ---
 about: "What binds a SIGHUP reload path in daemon: no signal handling in daemon, no cli/core dependency (depguard), the loader is config.Load behind cli/core/command/config Options.Load, no _windows.go convention for daemon, and no prior reload attempt or ADR"
 saw:
+  - source/daemon/reload.go
+  - source/daemon/supervisor.go
+  - source/daemon/option.go
+  - docs/adr/0025-a-daemon-reloads-its-config-on-sighup-through-an-opt-in-option.md
   - source/daemon/doc.go
   - source/daemon/runner.go
   - source/daemon/.golangci.yml
@@ -32,10 +36,10 @@ Checked 2026-11-05 while planning vipengele/go#72 (Reload on SIGHUP).
   `config` has no sibling requires (ADR-0012-configuration Consequences), so daemon -> config makes
   no cycle (cli/core -> config, daemon -/-> cli/core). Needs `require` + `replace ../config`
   (ADR-0006), and `commons` replace already present (see 20261103-daemon-carries-its-own-commons-replace).
-- daemon owns no signals: `doc.go:125-128` "# Signals" (ADR-0014 consequence). SIGINT/SIGTERM are
-  registered only by `cli/core` `notifyInterrupts` (execute.go:~70-100, ADR-0012-signals). A SIGHUP
-  path in daemon would break that stated contract, so ADR text needs amending or the wiring must
-  live in the consumer / a new opt-in piece.
+- Signals: daemon never subscribes to SIGINT/SIGTERM; those are registered only by `cli/core`
+  `notifyInterrupts` (execute.go:~70-100, ADR-0012-signals). daemon takes SIGHUP only under the
+  opt-in `WithReload[T]` (`source/daemon/reload.go`, ADR-0025, `doc.go` "# Signals" at :183),
+  subscribing in `Run` after the instance lock (`supervisor.go:196-199`).
 - Optional-interface precedent: `orderer` (`daemon/runner.go:36-45`), `config.Validator`,
   `RemovedKeys()` (`config/schema.go:56`).
 - Windows: ADR-0023 (daemon "has none and gets no artificial one", Windows covered by injection and
@@ -43,6 +47,8 @@ Checked 2026-11-05 while planning vipengele/go#72 (Reload on SIGHUP).
   (`*_windows.go` turns on CI `GOOS=windows go vet`; build tags only for syscalls). Only
   `source/filelock` has `lock_unix.go/lock_windows.go/lock_other.go`. `syscall.SIGHUP` does not exist
   on windows (it does in the syscall package for windows in recent Go, but is never delivered).
-- No prior attempt: grep for sighup|reload|hot config in source/docs finds only `update` state
-  reload and ADR-0023 "Out of scope: sd_notify, reload, health" (line 77).
-- daemon has no logger; cli/core logging is `WithLogging` -> `slog` in ctx (`cli/core/logging.go`).
+- The reload path is `WithReload[T]` with the consumer passing a closure over `Options.Load`
+  (`doc.go` "# Reload" at :129); daemon still does not import `config` or `cli/core`.
+- daemon logs through `WithLogger(*slog.Logger)` (`source/daemon/option.go`); unset, `Run` resolves
+  `slog.Default()` when it begins (`supervisor.go:178`), so the `slog.SetDefault` cli/core's
+  `WithLogging` makes in a pre-run hook (`cli/core/logging.go`) is the logger used.
