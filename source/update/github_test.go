@@ -613,8 +613,13 @@ func TestGitHubSource_Timeout(t *testing.T) {
 		name string
 		// target is the request that stalls. A stalled redirect ends the lookup, so the API is
 		// never asked.
-		target               updatetest.Target
-		apiOnly              bool
+		target  updatetest.Target
+		apiOnly bool
+		// timeout, ctxTimeout and the client's Timeout bound every request before the stalled one
+		// as well as the stalled one itself. Where the stalled request is the first, nothing
+		// precedes it, so a short deadline can only expire on it. Where an answering request
+		// precedes it, the deadline is seconds long, as in TestGitHubSource_TimeoutIsPerRequest:
+		// a short one can expire on the answering request under load and name the wrong URL.
 		timeout              time.Duration
 		ctxTimeout           time.Duration
 		client               func(*http.Client)
@@ -632,7 +637,7 @@ func TestGitHubSource_Timeout(t *testing.T) {
 			name:                 "source timeout on the API",
 			target:               updatetest.TargetLatestAPI,
 			apiOnly:              true,
-			timeout:              50 * time.Millisecond,
+			timeout:              2 * time.Second,
 			wantPath:             apiPath,
 			wantDeadlineExceeded: true,
 		},
@@ -655,43 +660,72 @@ func TestGitHubSource_Timeout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			opts := []updatetest.Option{updatetest.Slow(tc.target, make(chan struct{}))}
-			if tc.apiOnly {
-				opts = append(opts, updatetest.APIOnly())
-			}
-			srv := newKitServer(t, opts...)
-			s := kitSource(srv)
-			s.Timeout = tc.timeout
-			if tc.client != nil {
-				c := *s.HTTPClient
-				tc.client(&c)
-				s.HTTPClient = &c
+			// The lookup runs in a subtest of its own, so the server it starts is shut down when the
+			// subtest ends. Shutting down waits for every handler that has begun, and closes every
+			// connection whose request no handler has begun, so the counts read after it are final:
+			// a request still on its way when Latest returns is either counted or never served.
+			var srv *updatetest.Server
+			t.Run("lookup", func(t *testing.T) {
+				opts := []updatetest.Option{updatetest.Slow(tc.target, make(chan struct{}))}
+				if tc.apiOnly {
+					opts = append(opts, updatetest.APIOnly())
+				}
+				srv = newKitServer(t, opts...)
+				s := kitSource(srv)
+				s.Timeout = tc.timeout
+				if tc.client != nil {
+					c := *s.HTTPClient
+					tc.client(&c)
+					s.HTTPClient = &c
+				}
+
+				ctx := context.Background()
+				if tc.ctxTimeout > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.ctxTimeout)
+					defer cancel()
+				}
+
+				_, err := s.Latest(ctx)
+
+				var timeoutErr *TimeoutError
+				if !errors.As(err, &timeoutErr) {
+					t.Fatalf("Latest() error = %v, want a *TimeoutError", err)
+				}
+				if want := srv.WebURL() + tc.wantPath; timeoutErr.URL != want {
+					t.Errorf("TimeoutError.URL = %q, want %q", timeoutErr.URL, want)
+				}
+				if tc.wantDeadlineExceeded && !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, want true")
+				}
+			})
+			if srv == nil {
+				return
 			}
 
-			ctx := context.Background()
-			if tc.ctxTimeout > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, tc.ctxTimeout)
-				defer cancel()
-			}
-
-			_, err := s.Latest(ctx)
-
-			var timeoutErr *TimeoutError
-			if !errors.As(err, &timeoutErr) {
-				t.Fatalf("Latest() error = %v, want a *TimeoutError", err)
-			}
-			if want := srv.WebURL() + tc.wantPath; timeoutErr.URL != want {
-				t.Errorf("TimeoutError.URL = %q, want %q", timeoutErr.URL, want)
-			}
-			if tc.wantDeadlineExceeded && !errors.Is(err, context.DeadlineExceeded) {
-				t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, want true")
-			}
-			if n := srv.Requests(updatetest.TargetLatest); n != 1 {
-				t.Errorf("web requests = %d, want 1", n)
-			}
-			if got, want := srv.Requests(updatetest.TargetLatestAPI), btoi(tc.target == updatetest.TargetLatestAPI); got != want {
-				t.Errorf("API requests = %d, want %d", got, want)
+			// The TimeoutError's URL shows the client sent the stalled request. Whether the server
+			// saw it is up to scheduling: the deadline can end the request before any handler reads
+			// it, so the stalled route is asserted to be tried at most once, never twice. Every
+			// route before it answered, so it was tried exactly once, and no route after it is
+			// tried at all.
+			web, api := srv.Requests(updatetest.TargetLatest), srv.Requests(updatetest.TargetLatestAPI)
+			switch tc.target {
+			case updatetest.TargetLatest:
+				if web > 1 {
+					t.Errorf("web requests = %d, want at most 1", web)
+				}
+				if api != 0 {
+					t.Errorf("API requests = %d, want 0", api)
+				}
+			case updatetest.TargetLatestAPI:
+				if web != 1 {
+					t.Errorf("web requests = %d, want 1", web)
+				}
+				if api > 1 {
+					t.Errorf("API requests = %d, want at most 1", api)
+				}
+			default:
+				t.Fatalf("target %v has no request count assertion", tc.target)
 			}
 		})
 	}

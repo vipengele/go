@@ -422,3 +422,21 @@ func (e *ManagedInstallError) Error() string {
 
 	return fmt.Sprintf("update: %s (resolves to %s) is managed by %s; %s", e.Path, e.Resolved, e.Manager, e.Instead)
 }
+
+// DevBuildError reports a running program whose version is not a release version, which an update
+// has nothing to compare against.
+type DevBuildError struct {
+	// Name is the tool's name.
+	Name string
+	// Version is the running version; empty when the build carries none.
+	Version string
+}
+
+// Error implements error.
+func (e *DevBuildError) Error() string {
+	if e.Version == "" {
+		return fmt.Sprintf("%s has no release version (a development build); install a release to update", e.Name)
+	}
+
+	return fmt.Sprintf("%s %s is a development build; install a release to update", e.Name, e.Version)
+}

@@ -64,6 +64,12 @@
 // [Config.CheckWritable] can report before anything is downloaded. A [PostUpdate] hook receives
 // [Installed.Path]; Install runs none itself.
 //
+// [Config.Apply] is the whole update of a [Selection] in one call: CheckManaged and CheckWritable,
+// both before any request, then Download, Extract into Target's directory and Install, stopping at
+// the first error. It returns the [*Installed] with the backup still on disk; the caller runs its
+// PostUpdate hooks, whose failure is reported and does not undo the update, and then settles it
+// with Discard or Rollback.
+//
 // Whether a background update check may run is decided from the Config and the stored [State]. The
 // gates are tried in order and the first that fails decides: the running Version is not a release
 // version, the CI environment variable is set, stderr is not a terminal (IsTerminal), DisableCheck
@@ -94,6 +100,10 @@
 // hooks write nothing else and the post-run hook always returns nil. The tool's own update command
 // must carry the [spec.SkipUpdateCheck] annotation, or the pre-run hook starts a check in the very
 // command that installs the update.
+//
+// [Config.CheckRelease] refuses a development build: it returns a [*DevBuildError], matched with
+// [errors.As], when the Config's Version is not a release version, so an update command can stop
+// before it downloads anything.
 //
 // The package depends on no command-line framework.
 package update

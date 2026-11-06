@@ -16,7 +16,7 @@ saw:
 Re-verified against the code on 2026-10-26.
 
 - Seams: every outside-world access is a Config field with a zero-value default resolved in Config.resolve (config.go). TempPrefix, TempDir, MaxDownloadBytes, DownloadTimeout, Executable, HTTPClient and Now are Config fields. The temp-file location and its rejected alternatives are decided in ADR-0020.
-- gochecknoglobals + depguard (source/update/.golangci.yml): no mutable package vars, no cli/core import, cobra only in updatecmd. Single public package `update` plus `asset/`; no internal/. ADR-0003 places updatecmd as a separate package.
+- gochecknoglobals + depguard (source/update/.golangci.yml): no mutable package vars, no cli/core import, no cobra anywhere (updatecmd builds spec.Commands). Public packages: `update`, `asset/`, `installscript/`, `updatecmd/`, `updatetest/`; no internal/.
 - Errors are typed in errors.go: StatusError, TimeoutError (net.Error, produced by classifyError), AssetNotFoundError, ChecksumMismatchError, ChecksumNotFoundError, ChecksumConflictError, SizeLimitError. ADR-0019: the download maps a 404 on a URL Select located (Selection.Located) to *AssetNotFoundError. GitHubSource.get (github.go) is the timeout pattern: context.WithTimeout + classifyError.
 - Deps: stdlib + golang.org/x/mod (semver, go.mod) + siblings cli/spec and commons via directory replace (ADR-0008). Development mode: docs/release-notes holds only commons/.
 - Coverage thresholds are not in the repo: .lydite/components.yml has `update` as plain go-test -race ./...; the gate is external reusable-lydite.yml@v2. Mutation exclusions: trailing `// [lydite:exclude_from_mutation][reason]`.

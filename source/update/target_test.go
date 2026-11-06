@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -247,6 +248,26 @@ func TestCheckWritable(t *testing.T) {
 
 	if got := dirEntries(t, dir); len(got) != 1 || got[0] != "atk" {
 		t.Errorf("directory holds %q after the check, want only the executable", got)
+	}
+}
+
+func TestCheckWritableProbesTheExecutablesDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := resolvedDir(t, t.TempDir())
+	exe := writeExecutable(t, dir, "atk")
+
+	if err := executableConfig(t, exe).CheckWritable(); err != nil {
+		t.Fatalf("CheckWritable: %v", err)
+	}
+
+	if got := dirEntries(t, dir); !slices.Equal(got, []string{"atk"}) {
+		t.Errorf("executable's directory holds %v, want [atk]", got)
+	}
+
+	// An executable whose directory is gone has nowhere to install an update.
+	if err := executableConfig(t, filepath.Join(dir, "gone", "atk")).CheckWritable(); err == nil {
+		t.Error("CheckWritable of an executable in a missing directory = nil, want an error")
 	}
 }
 
