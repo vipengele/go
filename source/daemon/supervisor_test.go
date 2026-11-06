@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -451,7 +452,7 @@ func launchRun(t *testing.T, opts []Option, list ...Runner) *harness {
 		sr.rec = h.rec
 		h.runners = append(h.runners, sr)
 	}
-	s, err := New(list, opts...)
+	s, err := New(list, append([]Option{WithLogger(slog.New(slog.DiscardHandler))}, opts...)...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

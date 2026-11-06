@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -28,6 +29,11 @@ type Supervisor struct {
 	grace        time.Duration
 	startTimeout time.Duration
 	policy       PanicPolicy
+
+	// logger is the logger given to WithLogger, nil when none was; log is what Run resolved from
+	// it.
+	logger *slog.Logger
+	log    *slog.Logger
 
 	// instance, when set, is the instance lock Run holds while any Runner may be running.
 	instance *instanceLock
@@ -142,6 +148,11 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 func (s *Supervisor) Run(ctx context.Context) error {
 	if !s.ran.CompareAndSwap(false, true) {
 		return ErrAlreadyRan
+	}
+
+	s.log = s.logger
+	if s.log == nil {
+		s.log = slog.Default()
 	}
 
 	if s.instance != nil {
