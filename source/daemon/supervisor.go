@@ -177,9 +177,46 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		errs = append(errs, l.isolated)
 	}
 	for _, l := range slices.Backward(runs) {
-		errs = append(errs, l.stop(stopCtx)...)
+		errs = append(errs, l.stop(stopCtx, s.log)...)
 	}
 	return errors.Join(errs...)
+}
+
+// The messages of the records Run logs through the Supervisor's logger. Every record names its
+// Runner under the attribute "runner". Each error Run returns is logged once, as it is found: at
+// Warn as msgStopTimedOut for a Stop that returns an error and for a Stop or Runner still pending
+// when the grace period ends, and otherwise at Error, as msgPanicked when it carries a *PanicError
+// and with the message of its event when not. A panic exit isolated under PanicIsolate is logged
+// when it happens. Warn and Error records carry the
+// error under the attribute "err". msgStarted and msgStopped, at Info, are logged for a Runner
+// whose Start returned nil and for one whose Done then closed in the stop phase without a problem.
+const (
+	msgStarted      = "runner started"
+	msgStopped      = "runner stopped"
+	msgStartFailed  = "runner start failed"
+	msgExited       = "runner exited"
+	msgPanicked     = "runner panicked"
+	msgStopTimedOut = "runner stop timed out"
+)
+
+// logRunner logs msg at level about the Runner called name, with err when it is not nil.
+func logRunner(ctx context.Context, log *slog.Logger, level slog.Level, msg, name string, err error) {
+	if err == nil {
+		log.LogAttrs(ctx, level, msg, slog.String("runner", name))
+		return
+	}
+	log.LogAttrs(ctx, level, msg, slog.String("runner", name), slog.Any("err", err))
+}
+
+// logProblem logs err, a problem of the Runner called name, at Error: as msgPanicked when it
+// carries a *PanicError, and with msg otherwise. It returns err.
+func logProblem(ctx context.Context, log *slog.Logger, msg, name string, err error) error {
+	var pe *PanicError
+	if errors.As(err, &pe) {
+		msg = msgPanicked
+	}
+	logRunner(ctx, log, slog.LevelError, msg, name, err)
+	return err
 }
 
 // instanceLock names the instance lock a Supervisor holds while it runs.
@@ -197,7 +234,7 @@ func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error
 	runs = make([]*launched, 0, len(s.runners))
 	for _, r := range s.runners {
 		if startCtx.Err() != nil {
-			return runs, interrupted(ctx, ""), false
+			return runs, s.interrupted(ctx, r.Name(), ""), false
 		}
 		l := &launched{runner: r, name: r.Name(), state: starting, result: make(chan outcome, 1)}
 		runs = append(runs, l)
@@ -208,15 +245,16 @@ func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error
 			switch {
 			case o.err == nil:
 				l.running()
+				logRunner(ctx, s.log, slog.LevelInfo, msgStarted, l.name, nil)
 			case !o.isPanic() && startCtx.Err() != nil && isContextErr(o.err):
 				l.state = failed
-				return runs, interrupted(ctx, l.name), false
+				return runs, s.interrupted(ctx, l.name, l.name), false
 			default:
 				l.state = failed
-				return runs, l.wrap(o), false
+				return runs, logProblem(ctx, s.log, msgStartFailed, l.name, l.wrap(o)), false
 			}
 		case <-startCtx.Done():
-			return runs, interrupted(ctx, l.name), false
+			return runs, s.interrupted(ctx, l.name, l.name), false
 		}
 	}
 	return runs, nil, true
@@ -234,6 +272,17 @@ func interrupted(ctx context.Context, name string) error {
 	default:
 		return fmt.Errorf("daemon: runner %q: %w", name, ErrStartTimeout)
 	}
+}
+
+// interrupted returns interrupted(ctx, name) and logs the start timeout it may return as a start
+// failure of the Runner called runner: the one whose Start was running or, when the phase ended
+// between two Starts, the one whose Start is not called.
+func (s *Supervisor) interrupted(ctx context.Context, runner, name string) error {
+	err := interrupted(ctx, name)
+	if err == nil {
+		return nil
+	}
+	return logProblem(ctx, s.log, msgStartFailed, runner, err)
 }
 
 // isContextErr reports whether err only reports the end of a context.
@@ -267,13 +316,13 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
 			l.exited = true
 			o := guard(l.name, l.runner.Err)
 			if s.policy == PanicIsolate && o.isPanic() {
-				l.isolated = o.err
+				l.isolated = logProblem(ctx, s.log, msgExited, l.name, o.err)
 				continue
 			}
 			if o.err == nil {
-				return fmt.Errorf("daemon: runner %q: %w", l.name, ErrRunnerExited)
+				return logProblem(ctx, s.log, msgExited, l.name, fmt.Errorf("daemon: runner %q: %w", l.name, ErrRunnerExited))
 			}
-			return l.wrap(o)
+			return logProblem(ctx, s.log, msgExited, l.name, l.wrap(o))
 		}
 	}
 }
@@ -356,27 +405,29 @@ func (l *launched) wrap(o outcome) error {
 // what went wrong, at most one problem with Stop per Runner: a Stop error as ErrStopTimeout with
 // its cause, a Stop panic as its *PanicError, or a Stop or the Runner still pending when ctx is
 // done as ErrStopTimeout; and the Runner's exit or late Start problem as itself. Once ctx is done
-// it still calls Stop, but reports a timeout without waiting.
-func (l *launched) stop(ctx context.Context) []error {
+// it still calls Stop, but reports a timeout without waiting. It logs each problem it reports, and
+// the late start and the stop of a Runner, through log.
+func (l *launched) stop(ctx context.Context, log *slog.Logger) []error {
 	stopped := make(chan outcome, 1)
 	go func() { stopped <- guard(l.name, func() error { return l.runner.Stop(ctx) }) }()
 
 	if ctx.Err() != nil {
-		return []error{l.timeout()}
+		return []error{l.timedOut(ctx, log, l.timeout())}
 	}
 	select {
 	case o := <-stopped:
 		switch {
 		case o.panicked:
-			return append([]error{o.err}, l.finish(ctx, false)...)
+			problem := logProblem(ctx, log, msgPanicked, l.name, o.err)
+			return append([]error{problem}, l.finish(ctx, log, false)...)
 		case o.err != nil:
 			problem := fmt.Errorf("daemon: runner %q: %w: %w", l.name, ErrStopTimeout, o.err)
-			return append([]error{problem}, l.finish(ctx, false)...)
+			return append([]error{l.timedOut(ctx, log, problem)}, l.finish(ctx, log, false)...)
 		default:
-			return l.finish(ctx, true)
+			return l.finish(ctx, log, true)
 		}
 	case <-ctx.Done():
-		return []error{l.timeout()}
+		return []error{l.timedOut(ctx, log, l.timeout())}
 	}
 }
 
@@ -384,8 +435,9 @@ func (l *launched) stop(ctx context.Context) []error {
 // other than the cancellation it was asked for, or a Start that returned late with an error other
 // than the end of its context or panicked. A Runner whose late Start returned nil is waited for
 // as a running one. A Runner still pending when ctx is done is reported as a timeout only when
-// reportTimeout is set.
-func (l *launched) finish(ctx context.Context, reportTimeout bool) []error {
+// reportTimeout is set. It logs what it reports, and the late start and the stop of a Runner,
+// through log.
+func (l *launched) finish(ctx context.Context, log *slog.Logger, reportTimeout bool) []error {
 	if l.state == starting {
 		select {
 		case o := <-l.result:
@@ -394,11 +446,12 @@ func (l *launched) finish(ctx context.Context, reportTimeout bool) []error {
 				if !o.isPanic() && isContextErr(o.err) {
 					return nil
 				}
-				return []error{l.wrap(o)}
+				return []error{logProblem(ctx, log, msgStartFailed, l.name, l.wrap(o))}
 			}
 			l.running()
+			logRunner(ctx, log, slog.LevelInfo, msgStarted, l.name, nil)
 		case <-ctx.Done():
-			return l.pending(reportTimeout)
+			return l.pending(ctx, log, reportTimeout)
 		}
 	}
 	if l.state != running || l.exited {
@@ -408,20 +461,28 @@ func (l *launched) finish(ctx context.Context, reportTimeout bool) []error {
 	case <-l.done:
 		o := guard(l.name, l.runner.Err)
 		if o.err == nil || (!o.isPanic() && errors.Is(o.err, context.Canceled)) {
+			logRunner(ctx, log, slog.LevelInfo, msgStopped, l.name, nil)
 			return nil
 		}
-		return []error{l.wrap(o)}
+		return []error{logProblem(ctx, log, msgExited, l.name, l.wrap(o))}
 	case <-ctx.Done():
-		return l.pending(reportTimeout)
+		return l.pending(ctx, log, reportTimeout)
 	}
 }
 
-// pending reports a Runner still pending when the grace period ended, when reportTimeout is set.
-func (l *launched) pending(reportTimeout bool) []error {
+// pending reports and logs a Runner still pending when the grace period ended, when reportTimeout
+// is set.
+func (l *launched) pending(ctx context.Context, log *slog.Logger, reportTimeout bool) []error {
 	if reportTimeout {
-		return []error{l.timeout()}
+		return []error{l.timedOut(ctx, log, l.timeout())}
 	}
 	return nil
+}
+
+// timedOut logs err, a stop problem of the Runner other than a panic, at Warn and returns it.
+func (l *launched) timedOut(ctx context.Context, log *slog.Logger, err error) error {
+	logRunner(ctx, log, slog.LevelWarn, msgStopTimedOut, l.name, err)
+	return err
 }
 
 // timeout reports that the Runner did not finish stopping within the grace period.
