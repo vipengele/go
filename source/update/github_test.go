@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1557,5 +1558,226 @@ func TestGitHubSource_AssetURL(t *testing.T) {
 				t.Errorf("AssetURL(%q, %q) = %q, want %q", tc.tag, tc.file, got, tc.want)
 			}
 		})
+	}
+}
+
+// authTransport adds an Authorization header to every request it forwards, on a clone.
+type authTransport struct{ base http.RoundTripper }
+
+func (a authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	return a.base.RoundTrip(req)
+}
+
+// withToken makes s send an Authorization header.
+func withToken(s *GitHubSource) *GitHubSource {
+	s.HTTPClient = &http.Client{Transport: authTransport{base: s.HTTPClient.Transport}}
+
+	return s
+}
+
+// withHeaders answers status with headers set.
+func withHeaders(status int, body string, kv ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		for i := 0; i+1 < len(kv); i += 2 {
+			w.Header().Set(kv[i], kv[i+1])
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+func TestGitHubSource_APIRateLimitErrors(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	reset := time.Date(2030, 1, 2, 4, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name          string
+		status        int
+		headers       []string
+		authenticated bool
+		want          RateLimitError
+		wantMsg       []string
+		notMsg        []string
+	}{
+		{
+			name:   "primary limit",
+			status: http.StatusForbidden,
+			headers: []string{
+				"X-RateLimit-Limit", "60", "X-RateLimit-Remaining", "0",
+				"X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10),
+			},
+			want:    RateLimitError{Reset: reset, Limit: 60},
+			wantMsg: []string{"2030-01-02T04:00:00Z", "unauthenticated requests are limited to 60 per hour"},
+		},
+		{
+			name:          "primary limit with a token",
+			status:        http.StatusForbidden,
+			headers:       []string{"X-RateLimit-Limit", "5000", "X-RateLimit-Remaining", "0", "X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10)},
+			authenticated: true,
+			want:          RateLimitError{Reset: reset, Limit: 5000, Authenticated: true},
+			wantMsg:       []string{"2030-01-02T04:00:00Z"},
+			notMsg:        []string{"unauthenticated"},
+		},
+		{
+			name:    "secondary limit",
+			status:  http.StatusForbidden,
+			headers: []string{"Retry-After", "90"},
+			want:    RateLimitError{Reset: now.Add(90 * time.Second)},
+			wantMsg: []string{"2030-01-02T03:05:35Z"},
+		},
+		{
+			name:    "429",
+			status:  http.StatusTooManyRequests,
+			headers: []string{"Retry-After", "30"},
+			want:    RateLimitError{Reset: now.Add(30 * time.Second)},
+		},
+		{
+			name:    "429 with an exhausted primary limit",
+			status:  http.StatusTooManyRequests,
+			headers: []string{"X-RateLimit-Remaining", "0", "X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10)},
+			want:    RateLimitError{Reset: reset},
+		},
+	} {
+		for _, endpoint := range []string{"latest", "list"} {
+			t.Run(tc.name+"/"+endpoint, func(t *testing.T) {
+				t.Parallel()
+
+				var f *fakeGitHub
+				var s *GitHubSource
+				h := withHeaders(tc.status, "rate limited", tc.headers...)
+				if endpoint == "latest" {
+					f = newFakeGitHub(t, respond(http.StatusOK, ""), h)
+					s = f.source()
+				} else {
+					f = newFakeGitHubList(t, h)
+					s = f.listSource()
+				}
+				s.Now = func() time.Time { return now }
+				if tc.authenticated {
+					withToken(s)
+				}
+
+				_, err := s.Latest(context.Background())
+
+				var rl *RateLimitError
+				if !errors.As(err, &rl) {
+					t.Fatalf("err = %v, want a *RateLimitError", err)
+				}
+				if !rl.Reset.Equal(tc.want.Reset) || rl.Limit != tc.want.Limit || rl.Authenticated != tc.want.Authenticated {
+					t.Errorf("RateLimitError = %+v, want Reset %v Limit %d Authenticated %v",
+						*rl, tc.want.Reset, tc.want.Limit, tc.want.Authenticated)
+				}
+				var se *StatusError
+				if !errors.As(err, &se) || se.StatusCode != tc.status || se.Body != "rate limited" {
+					t.Errorf("errors.As(*StatusError) = %+v, want status %d with the body", se, tc.status)
+				}
+				for _, m := range tc.wantMsg {
+					if !strings.Contains(err.Error(), m) {
+						t.Errorf("Error() = %q, want it to contain %q", err.Error(), m)
+					}
+				}
+				for _, m := range tc.notMsg {
+					if strings.Contains(err.Error(), m) {
+						t.Errorf("Error() = %q, want it not to contain %q", err.Error(), m)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestGitHubSource_PlainForbiddenStaysAStatusError(t *testing.T) {
+	t.Parallel()
+
+	for _, headers := range [][]string{nil, {"X-RateLimit-Remaining", "12", "X-RateLimit-Limit", "60"}} {
+		f := newFakeGitHub(t, respond(http.StatusOK, ""), withHeaders(http.StatusForbidden, "forbidden", headers...))
+
+		_, err := f.source().Latest(context.Background())
+
+		var se *StatusError
+		if !errors.As(err, &se) || se.StatusCode != http.StatusForbidden {
+			t.Fatalf("err = %v, want a *StatusError with status 403", err)
+		}
+		var rl *RateLimitError
+		if errors.As(err, &rl) {
+			t.Errorf("err = %v, want no *RateLimitError", err)
+		}
+	}
+}
+
+func TestGitHubSource_Unauthorized(t *testing.T) {
+	t.Parallel()
+
+	for _, endpoint := range []string{"latest", "list"} {
+		t.Run(endpoint+"/with a token", func(t *testing.T) {
+			t.Parallel()
+
+			var s *GitHubSource
+			if endpoint == "latest" {
+				s = newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusUnauthorized, "bad credentials")).source()
+			} else {
+				s = newFakeGitHubList(t, respond(http.StatusUnauthorized, "bad credentials")).listSource()
+			}
+
+			_, err := withToken(s).Latest(context.Background())
+
+			var tr *TokenRejectedError
+			if !errors.As(err, &tr) {
+				t.Fatalf("err = %v, want a *TokenRejectedError", err)
+			}
+			var se *StatusError
+			if !errors.As(err, &se) || se.StatusCode != http.StatusUnauthorized || se.Body != "bad credentials" {
+				t.Errorf("errors.As(*StatusError) = %+v, want status 401 with the body", se)
+			}
+			for _, m := range []string{"GH_TOKEN", "GITHUB_TOKEN", "Config.Token"} {
+				if !strings.Contains(err.Error(), m) {
+					t.Errorf("Error() = %q, want it to contain %q", err.Error(), m)
+				}
+			}
+		})
+
+		t.Run(endpoint+"/without a token", func(t *testing.T) {
+			t.Parallel()
+
+			var s *GitHubSource
+			if endpoint == "latest" {
+				s = newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusUnauthorized, "bad credentials")).source()
+			} else {
+				s = newFakeGitHubList(t, respond(http.StatusUnauthorized, "bad credentials")).listSource()
+			}
+
+			_, err := s.Latest(context.Background())
+
+			var se *StatusError
+			if !errors.As(err, &se) || se.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("err = %v, want a *StatusError with status 401", err)
+			}
+			var tr *TokenRejectedError
+			if errors.As(err, &tr) {
+				t.Errorf("err = %v, want no *TokenRejectedError", err)
+			}
+		})
+	}
+}
+
+func TestGitHubSource_NowDefaultsToTheWallClock(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeGitHub(t, respond(http.StatusOK, ""), withHeaders(http.StatusTooManyRequests, "", "Retry-After", "60"))
+	before := time.Now()
+
+	_, err := f.source().Latest(context.Background())
+
+	var rl *RateLimitError
+	if !errors.As(err, &rl) {
+		t.Fatalf("err = %v, want a *RateLimitError", err)
+	}
+	if rl.Reset.Before(before.Add(59*time.Second)) || rl.Reset.After(time.Now().Add(61*time.Second)) {
+		t.Errorf("Reset = %v, want about a minute after %v", rl.Reset, before)
 	}
 }

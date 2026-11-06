@@ -1461,3 +1461,60 @@ func TestResolveDefaultLockerTryLock(t *testing.T) {
 	}
 	unlock()
 }
+
+func TestResolveWiresTheSourceClockFromNow(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	c := validConfig(t.TempDir())
+	c.Source = nil
+	c.Now = func() time.Time { return at }
+
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	gh, ok := r.Source.(*GitHubSource)
+	if !ok {
+		t.Fatalf("Source = %T, want *GitHubSource", r.Source)
+	}
+	if gh.Now == nil || !gh.Now().Equal(at) {
+		t.Error("Source.Now is not the Config's clock")
+	}
+}
+
+func TestResolveDefaultSourceClockIsTheWallClock(t *testing.T) {
+	t.Parallel()
+
+	c := validConfig(t.TempDir())
+	c.Source = nil
+	c.Now = nil
+
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	gh, ok := r.Source.(*GitHubSource)
+	if !ok || gh.Now == nil {
+		t.Fatal("Source.Now = nil, want the resolved clock")
+	}
+	if d := time.Since(gh.Now()); d < 0 || d > time.Minute {
+		t.Errorf("Source.Now() is %v from the wall clock, want about 0", d)
+	}
+}
+
+func TestResolveKeepsASuppliedSourceUntouched(t *testing.T) {
+	t.Parallel()
+
+	gh := &GitHubSource{Owner: "o", Repo: "r"}
+	c := validConfig(t.TempDir())
+	c.Source = gh
+	c.Now = func() time.Time { return time.Unix(1, 0) }
+
+	if _, err := c.resolve(); err != nil {
+		t.Fatalf("resolve() error = %v, want nil", err)
+	}
+	if gh.Now != nil {
+		t.Error("resolve set Now on a supplied GitHubSource, want it left nil")
+	}
+}

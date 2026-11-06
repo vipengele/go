@@ -455,11 +455,13 @@ func (c Config) resolve() (Config, error) {
 	if r.HTTPClient == nil {
 		r.HTTPClient = &http.Client{}
 	}
-	if r.Source == nil {
-		r.Source = NewGitHubSource(r.Identity, r.HTTPClient)
-	}
 	if r.Now == nil {
 		r.Now = time.Now
+	}
+	if r.Source == nil {
+		gh := NewGitHubSource(r.Identity, r.HTTPClient)
+		gh.Now = r.Now
+		r.Source = gh
 	}
 	if r.GOOS == "" {
 		r.GOOS = runtime.GOOS
