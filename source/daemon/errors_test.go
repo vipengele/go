@@ -14,6 +14,7 @@ func TestSentinelMessages(t *testing.T) {
 	}{
 		{"runner exited", ErrRunnerExited, "daemon: runner exited before shutdown"},
 		{"start timeout", ErrStartTimeout, "daemon: runner start timed out"},
+		{"reload timeout", ErrReloadTimeout, "daemon: runner reload timed out"},
 		{"stop timeout", ErrStopTimeout, "daemon: runner stop timed out"},
 		{"already ran", ErrAlreadyRan, "daemon: supervisor already ran"},
 		{"restart required", ErrRestartRequired, "daemon: restart required"},
@@ -34,6 +35,7 @@ func TestSentinelsMatchThroughWrapping(t *testing.T) {
 	}{
 		{"runner exited", ErrRunnerExited},
 		{"start timeout", ErrStartTimeout},
+		{"reload timeout", ErrReloadTimeout},
 		{"stop timeout", ErrStopTimeout},
 		{"already ran", ErrAlreadyRan},
 	}

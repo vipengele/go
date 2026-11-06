@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/signal"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -52,6 +54,18 @@ type Supervisor struct {
 
 	// waiting is called each time Run starts waiting for shutdown while every Runner is running.
 	waiting func()
+
+	// reload, when set, is the configuration reload WithReload installed.
+	reload *reloadHook
+
+	// newReloadContext returns the context handed to one reload round and the function that
+	// releases it. It carries the values and the cancellation of parent and bounds the round by the
+	// start timeout.
+	newReloadContext func(parent context.Context) (context.Context, context.CancelFunc)
+
+	// notify and unnotify subscribe a channel to signals and cancel the subscription.
+	notify   func(c chan<- os.Signal, sig ...os.Signal)
+	unnotify func(c chan<- os.Signal)
 }
 
 // New returns a Supervisor for runners. It rejects an empty list, a nil Runner, a Runner whose
@@ -98,6 +112,8 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 	s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
 		return context.WithTimeout(parent, startTimeout)
 	}
+	s.newReloadContext = s.newStartContext
+	s.notify, s.unnotify = signal.Notify, signal.Stop
 	s.newStopContext = func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), grace)
 	}
