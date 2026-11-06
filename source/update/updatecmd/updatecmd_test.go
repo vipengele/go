@@ -831,6 +831,30 @@ func TestCheckWithALatestBelowTheWatermarkIsUpToDate(t *testing.T) {
 	}
 }
 
+// loadFailingStore is a StateStore whose Load fails with err.
+type loadFailingStore struct{ err error }
+
+func (s loadFailingStore) Load(context.Context) (update.State, error) { return update.State{}, s.err }
+
+func (loadFailingStore) Save(context.Context, update.State) error { return nil }
+
+func TestCheckReturnsAnUnreadableStoreWithoutReportingAnUpdate(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	unreadable := errors.New("state unreadable")
+	f.cfg.StateStore = loadFailingStore{err: unreadable}
+	f.cfg.Source = staticSource{rel: update.Release{Tag: "v1.1.0"}}
+	r := runCommand(t, f.cfg, map[string]any{"check": true}, "", false)
+
+	if !errors.Is(r.err, unreadable) {
+		t.Fatalf("Run error = %v, want %v", r.err, unreadable)
+	}
+	if r.stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", r.stdout.String())
+	}
+}
+
 func TestASourceThatFailsFailsTheRun(t *testing.T) {
 	t.Parallel()
 

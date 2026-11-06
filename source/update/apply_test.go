@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.vipengele.org/commons/validate"
 	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
@@ -355,6 +356,55 @@ func TestApplyReturnsTheExtractError(t *testing.T) {
 
 	if limit.Limit != 1 {
 		t.Errorf("ExtractLimitError.Limit = %d, want 1", limit.Limit)
+	}
+
+	f.assertUntouched(t)
+}
+
+func TestApplyRefusesAnInvalidConfigBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	f.cfg.TrustedKeys = nil
+
+	installed, err := f.cfg.Apply(context.Background(), f.sel)
+	if installed != nil {
+		t.Errorf("Apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, validate.ErrInvalid) {
+		t.Fatalf("Apply error = %v, want one matching validate.ErrInvalid", err)
+	}
+
+	if got := f.requests(); got != 0 {
+		t.Errorf("requests = %d, want 0", got)
+	}
+
+	f.assertUntouched(t)
+}
+
+func TestApplyReturnsTheInstallErrorAndRecordsNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := &fakeStore{loads: []loadResult{{}}}
+	f.cfg.StateStore = store
+	cause := errors.New("rename refused")
+
+	s := defaultSteps()
+	s.rename = func(string, string) error { return cause }
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, s)
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Fatalf("apply error = %v, want one matching %v", err, cause)
+	}
+
+	if saves := store.recordedSaves(); len(saves) != 0 {
+		t.Errorf("saves = %+v, want none", saves)
 	}
 
 	f.assertUntouched(t)
