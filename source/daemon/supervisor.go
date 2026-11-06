@@ -404,7 +404,7 @@ func (s *Supervisor) reloadRound(ctx context.Context, runs []*launched) error {
 			continue
 		}
 		if roundCtx.Err() != nil {
-			return s.reloadInterrupted(ctx, l.name)
+			return s.reloadInterrupted(ctx, l.name, "")
 		}
 		result := make(chan outcome, 1)
 		go func() {
@@ -420,12 +420,12 @@ func (s *Supervisor) reloadRound(ctx context.Context, runs []*launched) error {
 			case o.err == nil:
 				reloaded = append(reloaded, l.name)
 			case !o.isPanic() && roundCtx.Err() != nil && isContextErr(o.err):
-				return s.reloadInterrupted(ctx, l.name)
+				return s.reloadInterrupted(ctx, l.name, l.name)
 			default:
 				return logProblem(ctx, s.log, msgReloadFailed, l.name, l.wrap(o))
 			}
 		case <-roundCtx.Done():
-			return s.reloadInterrupted(ctx, l.name)
+			return s.reloadInterrupted(ctx, l.name, l.name)
 		}
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, msgReloadApplied, slog.Any("runners", reloaded))
@@ -466,14 +466,20 @@ func (s *Supervisor) loadConfig(ctx context.Context) (offerFunc, error) {
 	}
 }
 
-// reloadInterrupted returns what ends a reload round whose context is done while the Runner called
-// name is offered the configuration: nil when ctx, the context passed to Run, is done, and
-// otherwise ErrReloadTimeout naming the Runner, which it logs as the Runner's reload failure.
-func (s *Supervisor) reloadInterrupted(ctx context.Context, name string) error {
+// reloadInterrupted returns what ends a reload round whose context is done: nil when ctx, the
+// context passed to Run, is done, and otherwise ErrReloadTimeout, naming the Runner whose Reload
+// was running when name is not empty. It logs the timeout as a reload failure of the Runner called
+// runner: the one whose Reload was running or, when the round ended between two Reloads, the one
+// whose Reload is not called.
+func (s *Supervisor) reloadInterrupted(ctx context.Context, runner, name string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	return logProblem(ctx, s.log, msgReloadFailed, name, fmt.Errorf("daemon: runner %q: %w", name, ErrReloadTimeout))
+	err := fmt.Errorf("daemon: %w", ErrReloadTimeout)
+	if name != "" {
+		err = fmt.Errorf("daemon: runner %q: %w", name, ErrReloadTimeout)
+	}
+	return logProblem(ctx, s.log, msgReloadFailed, runner, err)
 }
 
 // outcome is what a Runner's Start, Stop or Err came to: the error it returned, or, with panicked

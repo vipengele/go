@@ -107,9 +107,10 @@
 // returns ErrAlreadyRan, even after a first that returned because the lock was held: Run marks
 // the Supervisor as run before it takes the lock, so a program that retries builds a new
 // Supervisor with New. A Reload that returns an error or panics is a failure of the Runner,
-// naming it, and one that overruns the round's deadline is ErrReloadTimeout naming it; either
-// begins shutdown and leads the joined errors as a start failure does. A rejected configuration
-// is not an error. Match with errors.Is and errors.As.
+// naming it, and one that overruns the round's deadline is ErrReloadTimeout naming it; a deadline
+// that passes between two Reloads is ErrReloadTimeout naming no Runner. Each begins shutdown and
+// leads the joined errors as a start failure does. A rejected configuration is not an error. Match
+// with errors.Is and errors.As.
 //
 // # Restart
 //
@@ -138,8 +139,10 @@
 // a Warn is logged, no Runner is called and every Runner keeps the configuration it has, and Run
 // keeps running. A Reload that returns an error, panics or is still running at the deadline is a
 // failure like a failed Start: the configuration is not rolled back, no later Runner is offered it
-// and shutdown begins. A Reload that overran is ErrReloadTimeout naming the Runner. The context
-// passed to Run ending during a round is shutdown, not a failure.
+// and shutdown begins. A Reload that overran is ErrReloadTimeout naming the Runner; a deadline
+// that passes between two Reloads is ErrReloadTimeout naming no Runner, and no later Runner is
+// offered the configuration. The context passed to Run ending during a round is shutdown, not a
+// failure.
 //
 // A Runner's Reload never runs at the same time as its Start, Stop or another Reload, except that a
 // Reload abandoned at the deadline may still be running while Stop is called, as an abandoned Start
@@ -173,7 +176,9 @@
 // A reload round ends with one record, or none when the context passed to Run ends it:
 // "reload rejected" at Warn, with the load's error under "err" and no "runner"; "reload applied"
 // at Info, with the names of the Runners whose Reload took the configuration under "runners"; or
-// the Error record of the Reload failure that begins shutdown, naming its Runner.
+// the Error record of the Reload failure that begins shutdown, naming its Runner. A deadline that
+// passes between two Reloads is logged as a reload failure of the Runner whose Reload is not
+// called, though the error Run returns names no Runner.
 //
 // # Signals
 //

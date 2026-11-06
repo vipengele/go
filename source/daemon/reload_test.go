@@ -477,6 +477,66 @@ func TestReloadOverrunEndsTheRunWithErrReloadTimeout(t *testing.T) {
 	}
 }
 
+// expiresOnInspection is a reload round context that, once armed, is cancelled the first time its
+// Err is read. Its Done stays open until then, so a Reload that arms it and returns nil is received
+// as taken, and the round sees its deadline pass before the next Reload, never during this one.
+type expiresOnInspection struct {
+	context.Context
+	cancel context.CancelFunc
+	armed  *atomic.Bool
+}
+
+func (c expiresOnInspection) Err() error {
+	if c.armed.Load() {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestReloadDeadlinePassingBetweenTwoReloadsIsAnUnnamedErrReloadTimeout(t *testing.T) {
+	var sup *Supervisor
+	capture := func(s *Supervisor) error { sup = s; return nil }
+	logs, logger := newCapture()
+	log := &reloadLog[int]{}
+	a, b, c := newReloading("a", log), newReloading("b", log), newReloading("c", log)
+	var armed atomic.Bool
+	a.onReload = func() { armed.Store(true) }
+	var loads atomic.Int32
+	h, sub := runReloading(t, counted(&loads, 1), []Option{WithLogger(logger), capture}, a, b, c)
+
+	// The round reads newReloadContext only after it receives the hangup sent below.
+	harnessContext := sup.newReloadContext
+	sup.newReloadContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := harnessContext(parent)
+		return expiresOnInspection{Context: ctx, cancel: cancel, armed: &armed}, cancel
+	}
+
+	hangup(sub)
+	err := <-h.result
+	checkJoined(t, err, []wantErr{{is: ErrReloadTimeout}})
+	for _, name := range []string{"a", "b"} {
+		if strings.Contains(err.Error(), `runner "`+name+`"`) {
+			t.Errorf("Run = %v, want it to name no runner, not %s", err, name)
+		}
+	}
+	checkCalls(t, log.all(), []reloadCall[int]{{"a", 1}})
+	got := recordsNamed(logs, msgReloadFailed)
+	if len(got) != 1 {
+		t.Fatalf("%q records = %v, want one", msgReloadFailed, got)
+	}
+	if got[0].level != slog.LevelError {
+		t.Errorf("%q level = %v, want %v", msgReloadFailed, got[0].level, slog.LevelError)
+	}
+	if r, ok := got[0].attrs["runner"]; !ok || r.String() != "b" {
+		t.Errorf("%q runner = %v (present %t), want b", msgReloadFailed, r, ok)
+	}
+	if e, _ := got[0].attrs["err"].Any().(error); !errors.Is(e, ErrReloadTimeout) {
+		t.Errorf("%q err = %v, want it to wrap ErrReloadTimeout", msgReloadFailed, e)
+	}
+	checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
+	h.finish()
+}
+
 func TestReloadInterruptedByTheRunContextIsShutdown(t *testing.T) {
 	for _, honourCtx := range []bool{false, true} {
 		name := "ignoring its context"

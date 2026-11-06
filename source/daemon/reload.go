@@ -28,7 +28,8 @@ type Reloader[T any] interface {
 // logged, every Runner stays on the configuration it has and Run keeps running. A Reload that
 // returns an error, panics (under either PanicPolicy) or is still running at the deadline is
 // fatal to the run like a failed Start: Run begins shutdown and returns the failure naming the
-// Runner, ErrReloadTimeout for a Reload that overran.
+// Runner, ErrReloadTimeout for a Reload that overran. A deadline that passes between two Reloads
+// is ErrReloadTimeout naming no Runner, logged against the Runner whose Reload is not called.
 //
 // A nil load is rejected by New. Given more than once, the last WithReload wins. On Windows, where
 // there is no SIGHUP, a reload never fires. Without WithReload, Run subscribes to no signal.
