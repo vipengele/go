@@ -10,6 +10,16 @@
 // the defaults, such as package [go.vipengele.org/update/installscript], which renders the tool's
 // Unix install script, never derives them itself.
 //
+// The default [GitHubSource] authenticates its REST API requests with a token: Config.Token, which
+// when nil reads GH_TOKEN and then GITHUB_TOKEN through Getenv, and which opts out by returning "".
+// The token goes to the API host alone: a redirect to another host fails with a
+// [*CrossHostRedirectError], and the web redirect probe and every asset download are made without
+// it. A 403 or 429 that reports an exhausted rate limit is a [*RateLimitError], naming when it lifts,
+// and a 401 to an authenticated request is a [*TokenRejectedError]; both unwrap to the
+// [*StatusError]. The source keeps each API response's ETag and body in the file "github-cache.json"
+// in the StateDir and revalidates with If-None-Match, so an unchanged answer is a 304; GitHub exempts
+// a 304 from the rate limit only for an authenticated request.
+//
 // [Config.Select] names the archive and checksums assets of a [Release] for the Config's platform.
 // Their names are the AssetTemplate and ChecksumsAsset templates rendered with the placeholders of
 // package asset and the AssetExt. A release that lists its assets must hold both, or Select fails

@@ -59,7 +59,25 @@ golangci-lint run
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
 - `github.go` — `GitHubSource`: reads the `releases/latest` redirect without following it, falls back
   to the REST API, and with `IncludePrereleases` reads the first page of the release list instead.
-  Tags must be plain release versions; `WebURL`, `APIURL` and `Timeout` are overridable for tests.
+  Tags must be plain release versions; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for
+  tests (ADR-0027). `Token` (`Config.Token`; nil reads `GH_TOKEN`, then `GITHUB_TOKEN`, through
+  `Getenv`; `""` opts out; a provider error fails the API request, wrapped) authenticates REST API
+  requests only. Each `Latest` builds its API client from the injected one in `githubauth.go`, and
+  reads the token once, only for an API request. The wrapping transport adds `Authorization: Bearer`
+  only when the request host equals the `APIURL` host (case-insensitive, port included), on a clone
+  of the request, and `CheckRedirect` refuses a cross-host redirect with a
+  `*CrossHostRedirectError`, declared in `githubauth.go`. Downloads (`Config.HTTPClient`) and the
+  web redirect probe never send the token. A 401 to an authenticated request is a
+  `*TokenRejectedError`, never an unauthenticated retry.
+- `githubcache.go` — `ResponseCache` (`Get`, `Put`), `CachedResponse` (`ETag`, `Body`) and
+  `NewFileResponseCache`, the default of the default source: `github-cache.json` in `StateDir`
+  through `go.vipengele.org/cli/state` (0700/0600, atomic), kept apart from `State` so a custom
+  `StateStore` needs no new fields. Its I/O is bounded by `ctx` in `fileStore`'s goroutine-and-select
+  shape. `GitHubSource` sends `If-None-Match` only when an entry exists, decodes a 304 through the
+  path a 200 takes, replaces the entry on a 200 with an ETag (bodies up to the read caps, 8 MiB for
+  latest and 32 MiB for the list), treats a failed load as a miss and a failed save as a skipped
+  write, writes nothing once `ctx` is done, and never returns the cached body for an error response.
+  An unauthenticated 304 is not exempt from the rate limit: it saves transfer, not quota.
 - `select.go` — `Config.Select` names the archive and checksums assets of a `Release`: the
   `AssetTemplate` and `ChecksumsAsset` rendered with `AssetExt`. A non-nil `Assets` is matched by
   exact name; nil `Assets` (the redirect path, ADR-0019) is located through the `Source`'s optional
@@ -73,16 +91,21 @@ golangci-lint run
   `{ext}`. With `{ext}` in the template, `Config.AssetExt` is `tar.gz`, `tgz` or `zip` (`Validate`
   rejects any other), and GoReleaser's archive `format` must produce that extension, or the published
   name and the one `Select` looks for differ. A raw-binary tool leaves `{ext}` out of its template.
-- `errors.go` — `StatusError`, `TimeoutError` (a `net.Error`), `TagError`, `AssetNotFoundError`,
-  `ChecksumMismatchError`, `ChecksumNotFoundError`, `ChecksumConflictError`, `SizeLimitError`,
-  `SignatureMalformedError` (unwraps to the minisign parse error), `UnknownKeyError` (carries the
-  signature's key id as minisign prints it), `SignatureMismatchError` (carries the key id, unwraps
-  to the minisign verification error), `ManagedInstallError`, `ErrPrerelease` and
-  `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns; `DevBuildError`,
-  the error `CheckRelease` returns. `classifyError` maps deadline and timeout failures to
-  `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
-  `UnsafeEntryError`, `BinaryNotFoundError`, `MultipleBinariesError`, `UnsupportedFormatError`,
-  `ErrEmptyAsset`, `ErrNotGzip` and `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
+- `errors.go` — `StatusError`, `RateLimitError` (a 403 or 429 from the REST API with
+  `X-RateLimit-Remaining: 0` or a `Retry-After`; carries `Reset`, `Limit`, `Remaining`,
+  `Authenticated`, `Status`; its text names the reset in RFC 3339 UTC and reads no clock),
+  `TokenRejectedError` (a 401 to an authenticated request; both unwrap to the `*StatusError`, and
+  neither is produced by a download), `TimeoutError` (a `net.Error`), `TagError`,
+  `AssetNotFoundError`, `ChecksumMismatchError`, `ChecksumNotFoundError`, `ChecksumConflictError`,
+  `SizeLimitError`, `SignatureMalformedError` (unwraps to the minisign parse error),
+  `UnknownKeyError` (carries the signature's key id as minisign prints it),
+  `SignatureMismatchError` (carries the key id, unwraps to the minisign verification error),
+  `ManagedInstallError`, `ErrPrerelease` and `ErrAssetsNotListed`, the typed errors a source,
+  `Select` or `Download` returns; `DevBuildError`, the error `CheckRelease` returns.
+  `classifyError` maps deadline and timeout failures to `TimeoutError` and passes cancellation
+  through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
+  `MultipleBinariesError`, `UnsupportedFormatError`, `ErrEmptyAsset`, `ErrNotGzip` and
+  `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
   `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
   errors `CheckWritable`, `Install` and `Installed` return.
 - `managed.go` — `Config.CheckManaged`, `Detector` and `Install`: resolves the symlinks of the
