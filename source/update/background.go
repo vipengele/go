@@ -85,6 +85,12 @@ func (c Config) Start(ctx context.Context) (*Check, error) {
 // runCheck runs one check of r under ctx and returns the newest release version it learnt on
 // r.Channel, or empty when it learnt none. The reloaded state is read on r.Channel as Start reads
 // it: an attempt or a version learnt on another channel neither throttles nor is returned.
+//
+// The Locker is held from the reload to the save, across the Source query, so that two processes
+// never query the source for the same check and neither saves over the other's attempt. On Beta and
+// Edge the query reads the release list page by page, so the lock can be held for several requests,
+// each bounded by the Source's own timeout; the check's ctx, cancelled at most CheckWait after the
+// command finishes, bounds the whole hold.
 func runCheck(ctx context.Context, r Config) string {
 	unlock, err := r.Locker.Lock(ctx)
 	if err != nil {

@@ -99,8 +99,8 @@ func channelOf(tag string, prerelease bool) Channel {
 			c = Edge
 		}
 	}
-	if prerelease && c < Beta {
-		c = Beta
+	if prerelease {
+		c = max(c, Beta)
 	}
 	return c
 }

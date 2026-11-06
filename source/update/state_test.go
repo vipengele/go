@@ -357,3 +357,25 @@ func TestFileStoreReturnsWhenContextIsCancelledDuringIO(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestStateReadsOnlyItsOwnChannel(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	st := State{LastAttempt: at, LatestVersion: "v1.3.0-beta.1", LatestChannel: Beta}
+
+	if got := st.latestVersionOn(Beta); got != "v1.3.0-beta.1" {
+		t.Errorf("latestVersionOn(Beta) = %q, want v1.3.0-beta.1", got)
+	}
+	if got := st.lastAttemptOn(Beta); !got.Equal(at) {
+		t.Errorf("lastAttemptOn(Beta) = %v, want %v", got, at)
+	}
+	for _, ch := range []Channel{Stable, Edge} {
+		if got := st.latestVersionOn(ch); got != "" {
+			t.Errorf("latestVersionOn(%v) = %q, want empty", ch, got)
+		}
+		if got := st.lastAttemptOn(ch); !got.IsZero() {
+			t.Errorf("lastAttemptOn(%v) = %v, want the zero time", ch, got)
+		}
+	}
+}
