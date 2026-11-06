@@ -37,11 +37,13 @@ golangci-lint run
   `WithHTTPName` and `DefaultHTTPOrder`.
 - `restart.go` — `RestartRequested`, true only when every leaf of an error is `ErrRestartRequired`
   and none is a `*PanicError`.
+- `reload.go` — `Reloader[T]`, the optional Runner interface for applying a new configuration, and
+  `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithPanicPolicy` (`PanicFail`, the default, or
-  `PanicIsolate`) and `WithInstanceLock`, which `New` rejects for an identity that fails
-  `Validate`.
+  `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that fails `Validate`,
+  and `WithLogger`.
 - `errors.go` — `PanicError` and the sentinel errors (`ErrRunnerExited`, `ErrStartTimeout`,
-  `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`) and
+  `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`) and
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`; `ErrNilFunc` is in `func.go`,
   `ErrNilServer` and `ErrNilListener` in `http.go`.
 
@@ -82,11 +84,14 @@ Conventions of the package:
 - The grace period's context is made from `context.Background()`, never from the cancelled run context.
 - Work that outlives `Start` is never bound to the start context, which is cancelled when the start
   phase ends: `Func` and the HTTP Runner derive theirs with `context.WithoutCancel`.
-- No signal handling: the context passed to `Run` drives shutdown; `cli/core` owns the signals.
+- The package handles only SIGHUP, and only under `WithReload`: the context passed to `Run` drives
+  shutdown, and SIGINT and SIGTERM stay with the caller (`cli/core` owns them).
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core/**`;
   `cli/spec` is allowed.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - A new `Run` outcome is documented in the `Errors` section of `doc.go` and tested in
-  `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`.
+  `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`, and, for reload,
+  `reload_test.go` (the real SIGHUP in `reload_signal_test.go`). Log records are tested in
+  `logging_test.go`.
