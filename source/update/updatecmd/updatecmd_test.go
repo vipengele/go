@@ -205,7 +205,7 @@ func TestCommandsDeclaresTheUpdateCommand(t *testing.T) {
 	for _, f := range cmd.Flags {
 		flags[f.Name()] = f.Shorthand()
 	}
-	want := map[string]string{"check": "", "yes": "y", "to": ""}
+	want := map[string]string{"check": "", "yes": "y", "to": "", "allow-downgrade": ""}
 	for name, short := range want {
 		got, ok := flags[name]
 		if !ok {
@@ -560,7 +560,7 @@ func TestToAnOlderReleaseDowngrades(t *testing.T) {
 	t.Parallel()
 
 	f := newFixture(t, "v2.0.0", "v1.0.0")
-	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0"}, "", false)
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0", "allow-downgrade": true}, "", false)
 
 	if r.err != nil {
 		t.Fatalf("Run error = %v, want nil", r.err)
@@ -570,6 +570,27 @@ func TestToAnOlderReleaseDowngrades(t *testing.T) {
 	}
 	if n := f.srv.Requests(updatetest.TargetLatest) + f.srv.Requests(updatetest.TargetLatestAPI); n != 0 {
 		t.Errorf("--to asked for the latest release %d times, want 0", n)
+	}
+}
+
+func TestToAnOlderReleaseWithoutAllowDowngradeIsRefused(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v2.0.0", "v1.0.0")
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0"}, "", false)
+
+	var down *update.DowngradeError
+	if !errors.As(r.err, &down) {
+		t.Fatalf("Run error = %v, want a *update.DowngradeError", r.err)
+	}
+	if want := (update.DowngradeError{Name: testName, Version: "v1.0.0", Floor: "v2.0.0"}); *down != want {
+		t.Errorf("DowngradeError = %+v, want %+v", *down, want)
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+	if f.requests() != 0 {
+		t.Errorf("server received %d requests, want 0", f.requests())
 	}
 }
 

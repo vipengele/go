@@ -33,17 +33,18 @@ func Commands(cfg update.Config, opts ...Option) []*spec.Command {
 	}
 
 	c := &command{
-		cfg:   cfg,
-		check: spec.BoolFlag("check", "report whether a newer release exists, without installing it"),
-		yes:   spec.BoolFlag("yes", "update without asking for confirmation", spec.Shorthand("y")),
-		to:    spec.StringFlag("to", "install this release version, such as v1.2.3, instead of the latest"),
+		cfg:            cfg,
+		check:          spec.BoolFlag("check", "report whether a newer release exists, without installing it"),
+		yes:            spec.BoolFlag("yes", "update without asking for confirmation", spec.Shorthand("y")),
+		to:             spec.StringFlag("to", "install this release version, such as v1.2.3, instead of the latest"),
+		allowDowngrade: spec.BoolFlag("allow-downgrade", "install a release below the highest version applied or running"),
 	}
 
 	return []*spec.Command{{
 		Name:        "update",
 		Summary:     "Update " + cfg.Name + " to the latest release",
 		Description: description(cfg.Name),
-		Flags:       []spec.Flag{c.check, c.yes, c.to},
+		Flags:       []spec.Flag{c.check, c.yes, c.to, c.allowDowngrade},
 		Run:         c.run,
 		Annotations: map[string]string{spec.SkipUpdateCheck: ""},
 	}}
@@ -54,9 +55,9 @@ func description(name string) string {
 	return fmt.Sprintf(`Update %[1]s by replacing the running executable with a release.
 
 Without flags, %[1]s is updated to its latest release after a confirmation, which --yes
-answers in advance. --to installs the named release instead, which may be older than the
-running one. A development build and an install an external manager owns, such as Homebrew
-or Nix, are not updated.
+answers in advance. --to installs the named release instead. A release below the highest
+version applied or running is refused unless --allow-downgrade is given. A development build
+and an install an external manager owns, such as Homebrew or Nix, are not updated.
 
 With --check, nothing is installed: the result is printed on the standard output, and the
 exit code is %[2]d when a newer release exists and 0 when %[1]s is up to date.`, name, ExitUpdateAvailable)
@@ -64,10 +65,11 @@ exit code is %[2]d when a newer release exists and 0 when %[1]s is up to date.`,
 
 // command is the `update` command of one Config: the Config and the handles of its flags.
 type command struct {
-	cfg   update.Config
-	check *spec.FlagOf[bool]
-	yes   *spec.FlagOf[bool]
-	to    *spec.FlagOf[string]
+	cfg            update.Config
+	check          *spec.FlagOf[bool]
+	yes            *spec.FlagOf[bool]
+	to             *spec.FlagOf[string]
+	allowDowngrade *spec.FlagOf[bool]
 }
 
 // run is the `update` command's run function.
@@ -201,7 +203,12 @@ func (c *command) update(ctx context.Context, inv *spec.Invocation, r update.Con
 		return err
 	}
 
-	installed, err := r.Apply(ctx, sel)
+	var opts []update.ApplyOption
+	if c.allowDowngrade.Get(inv) {
+		opts = append(opts, update.AllowDowngrade())
+	}
+
+	installed, err := r.Apply(ctx, sel, opts...)
 	if err != nil {
 		return err
 	}
