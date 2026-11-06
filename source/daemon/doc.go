@@ -74,7 +74,8 @@
 // over TLS with the certificate it carries, one without it over plain HTTP. A TLSConfig that sets
 // none of Certificates, GetCertificate and GetConfigForClient makes Start return ErrNoCertificate,
 // a start failure. A nil server makes Start return ErrNilServer, and a nil listener
-// ErrNilListener.
+// ErrNilListener. A server hardened for the Runner, with the middleware, authentication and TLS
+// configuration a daemon needs, is built by New in go.vipengele.org/daemon/httpserver.
 //
 // # Single instance
 //

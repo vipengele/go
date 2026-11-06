@@ -63,9 +63,18 @@ golangci-lint run
   snapshot as tables through `cli/spec/table`, or as the same JSON through `spec.WriteJSON` when
   the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
   `testdata/status.keys` pins its JSON keys.
-
-- `httpserver/` — package `go.vipengele.org/daemon/httpserver`: `Error`, the JSON error envelope, and
-  `DecodeJSON`, which returns a `*RequestError`.
+- `httpserver/` — package `go.vipengele.org/daemon/httpserver`, the hardened `*http.Server` the
+  HTTP Runner serves; read its `doc.go` and
+  `docs/adr/0026-the-http-server-kit-has-a-fixed-middleware-order-and-pluggable-auth.md`.
+  - `server.go` — `New`, which wraps the handler in the fixed middleware chain and sets the
+    timeouts and limits, `CheckListener` and the plain-HTTP exposure warning.
+  - `option.go` — `Option` and the `With...` options, and `Timeouts`.
+  - `middleware.go` — `Recover`, `Log`, `SecureHeaders`, `AllowHosts`, `AllowOrigins` and
+    `LimitBody`.
+  - `auth.go` — `Authenticator`, `BearerToken` and `RequireAuth`, which skips the cleaned
+    unauthenticated paths.
+  - `errors.go` — `Error`, the JSON error envelope written by `spec.WriteJSON`.
+  - `decode.go` — `DecodeJSON` and `*RequestError`.
 
 ## The `service` package
 
@@ -109,8 +118,8 @@ Conventions of the package:
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
-  `daemon`, `daemon/service` and `daemon/httpserver`, `cli/spec`, `cli/spec/paths` and `filelock`. A depguard `pkg`
-  entry matches by prefix, so a `/**` suffix matches nothing.
+  `daemon`, `daemon/service` and `daemon/httpserver`, `cli/spec`, `cli/spec/paths` and
+  `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by
