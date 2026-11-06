@@ -37,19 +37,25 @@ func WithReload[T any](load func(context.Context) (T, error)) Option {
 		if load == nil {
 			return fmt.Errorf("daemon: reload load function must not be nil")
 		}
-		s.reload = &reloadHook{load: func(ctx context.Context) (offerFunc, error) {
-			cfg, err := load(ctx)
-			if err != nil {
-				return nil, err
-			}
-			return func(ctx context.Context, r Runner) (bool, error) {
-				rl, ok := r.(Reloader[T])
-				if !ok {
-					return false, nil
+		s.reload = &reloadHook{
+			accepts: func(r Runner) bool {
+				_, ok := r.(Reloader[T])
+				return ok
+			},
+			load: func(ctx context.Context) (offerFunc, error) {
+				cfg, err := load(ctx)
+				if err != nil {
+					return nil, err
 				}
-				return true, rl.Reload(ctx, cfg)
-			}, nil
-		}}
+				return func(ctx context.Context, r Runner) (bool, error) {
+					rl, ok := r.(Reloader[T])
+					if !ok {
+						return false, nil
+					}
+					return true, rl.Reload(ctx, cfg)
+				}, nil
+			},
+		}
 		return nil
 	}
 }
@@ -60,8 +66,9 @@ func WithReload[T any](load func(context.Context) (T, error)) Option {
 type offerFunc func(ctx context.Context, r Runner) (offered bool, err error)
 
 // reloadHook is WithReload with its configuration type erased, so a Supervisor needs no type
-// parameter. load loads the configuration once and returns the function that offers it to each
-// Runner.
+// parameter. accepts reports whether a Runner implements Reloader for the configuration's type.
+// load loads the configuration once and returns the function that offers it to each Runner.
 type reloadHook struct {
-	load func(ctx context.Context) (offerFunc, error)
+	accepts func(r Runner) bool
+	load    func(ctx context.Context) (offerFunc, error)
 }

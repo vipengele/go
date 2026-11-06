@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.vipengele.org/cli/spec"
@@ -159,6 +160,14 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 // lock that cannot be taken is returned as AcquireInstance reports it, an *AlreadyRunningError
 // while another instance holds it, and no Runner is started.
 //
+// With WithReload, Run subscribes to SIGHUP once the instance lock, if any, is held and before the
+// first Start, and cancels the subscription as it returns, after the stop phase, so a SIGHUP during
+// start or shutdown never ends the process. Each SIGHUP Run receives while waiting begins one
+// reload round; one received during the start phase begins a round once Run starts waiting, one
+// received during shutdown is dropped, and any number received during a round begin one more. A
+// round's failure, a Reload that returns an error, panics or overruns the round's deadline, is the
+// failure that begins shutdown, as a start failure is; see WithReload.
+//
 // Run may be called once; a second call returns ErrAlreadyRan, even when the first returned
 // without starting a Runner.
 func (s *Supervisor) Run(ctx context.Context) error {
@@ -180,9 +189,19 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		defer in.Release()
 	}
 
+	// hangup stays nil without WithReload, so its case in wait never fires. Its capacity of one
+	// coalesces the SIGHUPs that arrive while a round runs into one more round.
+	var hangup chan os.Signal
+	if s.reload != nil {
+		hangup = make(chan os.Signal, 1)
+		s.notify(hangup, syscall.SIGHUP)
+		// Deferred, so the subscription is cancelled only after the stop phase below has ended.
+		defer s.unnotify(hangup)
+	}
+
 	runs, failure, complete := s.start(ctx)
 	if complete {
-		failure = s.wait(ctx, runs)
+		failure = s.wait(ctx, runs, hangup)
 	}
 
 	stopCtx, cancel := s.newStopContext()
@@ -198,21 +217,31 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// The messages of the records Run logs through the Supervisor's logger. Every record names its
-// Runner under the attribute "runner". Each error Run returns is logged once, as it is found: at
+// The messages of the records Run logs through the Supervisor's logger. Every record about a Runner
+// names it under the attribute "runner"; the two records that end a reload round are about the
+// round, not one Runner. Each error Run returns is logged once, as it is found: at
 // Warn as msgStopTimedOut for a Stop that returns an error and for a Stop or Runner still pending
 // when the grace period ends, and otherwise at Error, as msgPanicked when it carries a *PanicError
 // and with the message of its event when not. A panic exit isolated under PanicIsolate is logged
 // when it happens. Warn and Error records carry the
 // error under the attribute "err". msgStarted and msgStopped, at Info, are logged for a Runner
 // whose Start returned nil and for one whose Done then closed in the stop phase without a problem.
+//
+// A reload round ends with one record, or none when Run's context ends it: msgReloadRejected at
+// Warn, with no "runner" and the load's error under "err", for a configuration the load failed to
+// produce; msgReloadApplied at Info, with the names of the Runners whose Reload took it under
+// "runners", once every Runner offered it has taken it; or the Error record of the Reload failure
+// that begins shutdown, msgReloadFailed or msgPanicked, naming its Runner.
 const (
-	msgStarted      = "runner started"
-	msgStopped      = "runner stopped"
-	msgStartFailed  = "runner start failed"
-	msgExited       = "runner exited"
-	msgPanicked     = "runner panicked"
-	msgStopTimedOut = "runner stop timed out"
+	msgStarted        = "runner started"
+	msgStopped        = "runner stopped"
+	msgStartFailed    = "runner start failed"
+	msgExited         = "runner exited"
+	msgPanicked       = "runner panicked"
+	msgStopTimedOut   = "runner stop timed out"
+	msgReloadFailed   = "runner reload failed"
+	msgReloadRejected = "reload rejected"
+	msgReloadApplied  = "reload applied"
 )
 
 // logRunner logs msg at level about the Runner called name, with err when it is not nil.
@@ -306,10 +335,11 @@ func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// wait blocks until shutdown begins: ctx is done, or a running Runner exits in a way that fails
-// it. It returns that failure, or nil when ctx began it. A panic exit under PanicIsolate is
-// recorded on its Runner and does not end the wait.
-func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
+// wait blocks until shutdown begins: ctx is done, a running Runner exits in a way that fails it,
+// or a reload round fails. It returns that failure, or nil when ctx began it. A panic exit under
+// PanicIsolate is recorded on its Runner and does not end the wait. Each value received on hangup
+// runs one reload round; a nil hangup never does.
+func (s *Supervisor) wait(ctx context.Context, runs []*launched, hangup <-chan os.Signal) error {
 	quit := make(chan struct{})
 	defer close(quit)
 	exited := make(chan *launched, len(runs))
@@ -328,6 +358,10 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-hangup:
+			if err := s.reloadRound(ctx, runs); err != nil || ctx.Err() != nil {
+				return err
+			}
 		case l := <-exited:
 			l.exited = true
 			o := guard(l.name, l.runner.Err)
@@ -341,6 +375,105 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
 			return logProblem(ctx, s.log, msgExited, l.name, l.wrap(o))
 		}
 	}
+}
+
+// reloadRound loads the configuration once and offers it, in start order, to each Runner in runs
+// that is still running and implements the configuration's Reloader. The load and every Reload
+// share one context from newReloadContext, and each runs in its own goroutine that Run abandons
+// when that context ends first. A load that fails, panics or is abandoned rejects the
+// configuration and calls no Runner. reloadRound returns the failure of the first Reload that
+// returns an error, panics or is abandoned, and offers it to no Runner after that one; it returns
+// nil when every Runner offered the configuration took it and when ctx, the context passed to Run,
+// ended the round. A Runner whose Reload is abandoned keeps its running state, so the stop phase
+// stops it as any running Runner, and its Stop may run alongside the abandoned Reload.
+func (s *Supervisor) reloadRound(ctx context.Context, runs []*launched) error {
+	roundCtx, cancel := s.newReloadContext(ctx)
+	defer cancel()
+
+	offer, err := s.loadConfig(roundCtx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.LogAttrs(ctx, slog.LevelWarn, msgReloadRejected, slog.Any("err", err))
+		}
+		return nil
+	}
+
+	reloaded := make([]string, 0, len(runs))
+	for _, l := range runs {
+		if !l.reloadable() || !s.reload.accepts(l.runner) {
+			continue
+		}
+		if roundCtx.Err() != nil {
+			return s.reloadInterrupted(ctx, l.name)
+		}
+		result := make(chan outcome, 1)
+		go func() {
+			result <- guard(l.name, func() error {
+				_, err := offer(roundCtx, l.runner)
+				return err
+			})
+		}()
+
+		select {
+		case o := <-result:
+			switch {
+			case o.err == nil:
+				reloaded = append(reloaded, l.name)
+			case !o.isPanic() && roundCtx.Err() != nil && isContextErr(o.err):
+				return s.reloadInterrupted(ctx, l.name)
+			default:
+				return logProblem(ctx, s.log, msgReloadFailed, l.name, l.wrap(o))
+			}
+		case <-roundCtx.Done():
+			return s.reloadInterrupted(ctx, l.name)
+		}
+	}
+	s.log.LogAttrs(ctx, slog.LevelInfo, msgReloadApplied, slog.Any("runners", reloaded))
+	return nil
+}
+
+// loadConfig calls the reload's load in its own goroutine and waits for it under ctx. A load that
+// panics is reported as an error carrying the panic value; one still running when ctx is done is
+// abandoned and reported with the context's error.
+func (s *Supervisor) loadConfig(ctx context.Context) (offerFunc, error) {
+	type loaded struct {
+		offer offerFunc
+		err   error
+	}
+	result := make(chan loaded, 1)
+	go func() {
+		defer func() {
+			if v := recover(); v != nil {
+				if cause, ok := v.(error); ok {
+					result <- loaded{err: fmt.Errorf("daemon: reload load panicked: %w", cause)}
+					return
+				}
+				result <- loaded{err: fmt.Errorf("daemon: reload load panicked: %v", v)}
+			}
+		}()
+		offer, err := s.reload.load(ctx)
+		if err != nil {
+			err = fmt.Errorf("daemon: reload load: %w", err)
+		}
+		result <- loaded{offer: offer, err: err}
+	}()
+
+	select {
+	case r := <-result:
+		return r.offer, r.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("daemon: reload load: %w", ctx.Err())
+	}
+}
+
+// reloadInterrupted returns what ends a reload round whose context is done while the Runner called
+// name is offered the configuration: nil when ctx, the context passed to Run, is done, and
+// otherwise ErrReloadTimeout naming the Runner, which it logs as the Runner's reload failure.
+func (s *Supervisor) reloadInterrupted(ctx context.Context, name string) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return logProblem(ctx, s.log, msgReloadFailed, name, fmt.Errorf("daemon: runner %q: %w", name, ErrReloadTimeout))
 }
 
 // outcome is what a Runner's Start, Stop or Err came to: the error it returned, or, with panicked
@@ -405,6 +538,21 @@ type launched struct {
 func (l *launched) running() {
 	l.state = running
 	l.done = l.runner.Done()
+}
+
+// reloadable reports whether the Runner is running and has not exited, so it may be offered a
+// reloaded configuration. A Runner whose Done has closed is not offered it even before wait has
+// dealt with the exit.
+func (l *launched) reloadable() bool {
+	if l.state != running || l.exited {
+		return false
+	}
+	select {
+	case <-l.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // wrap names the Runner in an error outcome. A panic, which already names the Runner, is returned
