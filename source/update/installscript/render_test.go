@@ -10,6 +10,7 @@ import (
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/installscript"
+	"go.vipengele.org/update/internal/minisigntest"
 )
 
 // testConfig returns a valid Config with an explicit StateDir, so resolving it consults no
@@ -23,10 +24,22 @@ func testConfig(assetTemplate, assetExt string) update.Config {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
+		TrustedKeys:   []string{testKeyLine()},
 		StateDir:      "/state",
 		AssetTemplate: assetTemplate,
 		AssetExt:      assetExt,
 	}
+}
+
+// testKeyLine returns the key line of the minisign key GenerateKey draws from a fixed stream, the
+// same line on every call. The stream is longer than the key id and Ed25519 seed GenerateKey
+// reads, so it never runs dry.
+func testKeyLine() string {
+	key, err := minisigntest.GenerateKey(strings.NewReader(strings.Repeat("render test key ", 4)))
+	if err != nil {
+		panic(err)
+	}
+	return key.PublicKeyLine()
 }
 
 // render renders cfg and fails the test on an error.
@@ -249,5 +262,110 @@ func TestRenderLeavesTokenInValueLiteral(t *testing.T) {
 	want := `asset='@@SNIPPET@@-@@NAME@@-atk'`
 	if got := scriptLine(t, out, "asset="); got != want {
 		t.Errorf("asset= line = %q, want %q", got, want)
+	}
+}
+
+// unsignedConfig returns testConfig(assetTemplate, assetExt) for a tool whose releases are
+// unsigned.
+func unsignedConfig(assetTemplate, assetExt string) update.Config {
+	cfg := testConfig(assetTemplate, assetExt)
+	cfg.TrustedKeys, cfg.AllowUnsigned = nil, true
+	return cfg
+}
+
+func TestRenderRequiresASignaturePolicy(t *testing.T) {
+	t.Parallel()
+	neither := testConfig("", "")
+	neither.TrustedKeys = nil
+	both := testConfig("", "")
+	both.AllowUnsigned = true
+	for name, cfg := range map[string]update.Config{"neither": neither, "both": both} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			out, err := installscript.Render(cfg)
+			if err == nil {
+				t.Fatal("Render succeeded")
+			}
+			if out != nil {
+				t.Fatalf("Render returned a script alongside the error: %q", out)
+			}
+		})
+	}
+}
+
+func TestRenderEmbedsEachTrustedKeyAsItsKeyLine(t *testing.T) {
+	t.Parallel()
+	sh := shPath(t)
+	other := generateKey(t)
+	cfg := testConfig("", "")
+	cfg.TrustedKeys = []string{
+		" " + cfg.TrustedKeys[0] + "\n",
+		"untrusted comment: minisign public key\r\n" + other.PublicKeyLine() + "\n",
+	}
+	out := render(t, cfg)
+
+	want := "\tfor key in '" + strings.TrimSpace(testConfig("", "").TrustedKeys[0]) + "' '" + other.PublicKeyLine() + "'; do"
+	if got := scriptLine(t, out, "\tfor key in "); got != want {
+		t.Errorf("key loop = %q, want %q", got, want)
+	}
+	if strings.Contains(out, "untrusted comment") {
+		t.Error("the script carries an entry's comment line")
+	}
+	allow, err := cfg.EnvVar("ALLOW_UNSIGNED")
+	if err != nil {
+		t.Fatalf("EnvVar: %v", err)
+	}
+	if !strings.Contains(out, "${"+allow+":-}") {
+		t.Errorf("the script does not read %s", allow)
+	}
+	syntax := exec.Command(sh, "-n")
+	syntax.Stdin = strings.NewReader(out)
+	if msg, err := syntax.CombinedOutput(); err != nil {
+		t.Fatalf("sh -n rejects the script: %v\n%s", err, msg)
+	}
+}
+
+func TestRenderUnsignedOmitsTheSignatureCheck(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, tmpl, ext string
+	}{
+		{"default", "", ""},
+		{"archive", "{name}_{os}_{arch}.{ext}", "tgz"},
+		{"raw", "{name}_{os}_{arch}", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := unsignedConfig(tt.tmpl, tt.ext)
+			unsigned := render(t, cfg)
+			signed := render(t, testConfig(tt.tmpl, tt.ext))
+
+			allow, err := cfg.EnvVar("ALLOW_UNSIGNED")
+			if err != nil {
+				t.Fatalf("EnvVar: %v", err)
+			}
+			for _, absent := range []string{"minisig", allow, "@@"} {
+				if strings.Contains(unsigned, absent) {
+					t.Errorf("the unsigned script mentions %q", absent)
+				}
+			}
+			// The signature check only adds lines: dropping them from the signed script leaves
+			// the unsigned one, line for line.
+			rest := strings.SplitAfter(unsigned, "\n")
+			added := 0
+			for _, line := range strings.SplitAfter(signed, "\n") {
+				if len(rest) > 0 && line == rest[0] {
+					rest = rest[1:]
+					continue
+				}
+				added++
+			}
+			if len(rest) != 0 {
+				t.Errorf("the signed script lacks the unsigned script's line %q and %d after it", rest[0], len(rest)-1)
+			}
+			if added == 0 {
+				t.Error("the signed script adds no line to the unsigned one")
+			}
+		})
 	}
 }

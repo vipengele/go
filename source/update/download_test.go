@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
 
@@ -110,12 +112,14 @@ func (f *fakeAssets) selection() Selection {
 	}
 }
 
-// config is a valid Config whose temporary files go to dir and whose requests go through the
-// server's client.
+// config is a valid Config for unsigned releases, as the server publishes no signature, whose
+// temporary files go to dir and whose requests go through the server's client.
 func (f *fakeAssets) config(t *testing.T, dir string) Config {
 	t.Helper()
 
 	c := validConfig(t.TempDir())
+	c.TrustedKeys = nil
+	c.AllowUnsigned = true
 	c.TempDir = dir
 	c.HTTPClient = f.server.Client()
 
@@ -1009,6 +1013,7 @@ func newKitRelease(t *testing.T, dir string, opts ...updatetest.Option) kitRelea
 	cfg := validConfig(t.TempDir())
 	rel := updatetest.NewRelease(t, testOwner, testRepo, dlTag, cfg.Name)
 	srv := updatetest.NewServer(t, rel, opts...)
+	cfg.TrustedKeys = []string{srv.PublicKey()}
 	cfg.TempDir = dir
 	cfg.HTTPClient = srv.Client()
 	cfg.Source = kitSource(srv)
@@ -1289,5 +1294,409 @@ func TestDownloadCancellationWaitingForHeaders(t *testing.T) {
 			assertDirEmpty(t, dir)
 			k.assertRequests(t, 1, tc.wantArchive)
 		})
+	}
+}
+
+// installAll runs the whole update a consumer runs: it finds the latest release, selects and
+// downloads its assets, extracts the binary beside the Config's executable and installs it. It
+// returns the error of the first step that fails, having released whatever that step left.
+func (k kitRelease) installAll(ctx context.Context) error {
+	_, a, err := k.update(ctx)
+	if err != nil {
+		return err
+	}
+	target, err := k.cfg.Target()
+	if err != nil {
+		_ = a.Close()
+		return err
+	}
+	staged, err := k.cfg.Extract(ctx, a, filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	installed, err := k.cfg.Install(staged)
+	if err != nil {
+		return err
+	}
+	return installed.Discard()
+}
+
+// assertSignatureRequests fails when the server's signature has not received n requests.
+func (k kitRelease) assertSignatureRequests(t *testing.T, n int) {
+	t.Helper()
+
+	if got := k.srv.Requests(updatetest.TargetSignature); got != n {
+		t.Errorf("signature requests = %d, want %d", got, n)
+	}
+}
+
+// listDir returns the names of the entries of dir.
+func listDir(t *testing.T, dir string) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// withExecutable points k's Config at a new executable holding body in a directory of its own and
+// returns its path.
+func (k *kitRelease) withExecutable(t *testing.T, body string) string {
+	t.Helper()
+
+	exe := filepath.Join(t.TempDir(), k.cfg.Name)
+	if err := os.WriteFile(exe, []byte(body), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	k.cfg.Executable = func() (string, error) { return exe, nil }
+	return exe
+}
+
+func TestUpdateRefusesAnUnauthenticatedRelease(t *testing.T) {
+	t.Parallel()
+
+	sigName := updatetest.DefaultChecksumsName + signatureSuffix
+
+	tests := []struct {
+		name  string
+		fault updatetest.Option
+		check func(t *testing.T, err error)
+		// missing reports that the signature asset is absent, so a listed release fails at Select
+		// and requests neither the checksums file nor the signature.
+		missing bool
+	}{
+		{
+			name:  "tampered",
+			fault: updatetest.Tampered(),
+			check: func(t *testing.T, err error) {
+				var mismatch *SignatureMismatchError
+				if !errors.As(err, &mismatch) || mismatch.Name != sigName || mismatch.KeyID == "" {
+					t.Errorf("err = %v, want a *SignatureMismatchError for %q naming the key", err, sigName)
+				}
+			},
+		},
+		{
+			name:  "bad signature",
+			fault: updatetest.BadSignature(),
+			check: func(t *testing.T, err error) {
+				var mismatch *SignatureMismatchError
+				if !errors.As(err, &mismatch) || mismatch.Name != sigName || mismatch.KeyID == "" {
+					t.Errorf("err = %v, want a *SignatureMismatchError for %q naming the key", err, sigName)
+				}
+			},
+		},
+		{
+			name:  "unknown key",
+			fault: updatetest.UnknownKey(),
+			check: func(t *testing.T, err error) {
+				var unknown *UnknownKeyError
+				if !errors.As(err, &unknown) || unknown.Name != sigName || len(unknown.KeyID) != 16 {
+					t.Errorf("err = %v, want an *UnknownKeyError for %q with a 16-digit key id", err, sigName)
+				}
+			},
+		},
+		{
+			name:    "missing signature",
+			fault:   updatetest.MissingAsset(sigName),
+			missing: true,
+			check: func(t *testing.T, err error) {
+				var nf *AssetNotFoundError
+				if !errors.As(err, &nf) || *nf != (AssetNotFoundError{Tag: dlTag, Name: sigName}) {
+					t.Errorf("err = %v, want a *AssetNotFoundError for %q", err, sigName)
+				}
+			},
+		},
+	}
+
+	for _, m := range kitModes() {
+		for _, tc := range tests {
+			t.Run(m.name+" "+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				tmp := t.TempDir()
+				k := newKitRelease(t, tmp, append([]updatetest.Option{tc.fault}, m.opts...)...)
+				const oldBody = "#!/bin/sh\necho v1.0.0\n"
+				exe := k.withExecutable(t, oldBody)
+				before := listDir(t, filepath.Dir(exe))
+
+				err := k.installAll(context.Background())
+				if err == nil {
+					t.Fatal("update error = nil, want the release refused")
+				}
+				tc.check(t, err)
+
+				if got, err := os.ReadFile(exe); err != nil || string(got) != oldBody {
+					t.Errorf("executable = %q, %v; want it unchanged", got, err)
+				}
+				if _, err := os.Lstat(exe + ".old"); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("Lstat(%s.old) error = %v, want no backup", exe, err)
+				}
+				if after := listDir(t, filepath.Dir(exe)); strings.Join(after, "\n") != strings.Join(before, "\n") {
+					t.Errorf("executable directory holds %q, want %q", after, before)
+				}
+				assertDirEmpty(t, tmp)
+
+				switch {
+				case tc.missing && m.listed:
+					k.assertRequests(t, 0, 0)
+					k.assertSignatureRequests(t, 0)
+				default:
+					k.assertRequests(t, 1, 0)
+					k.assertSignatureRequests(t, 1)
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateInstallsASignedRelease(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range kitModes() {
+		t.Run(m.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmp := t.TempDir()
+			k := newKitRelease(t, tmp, m.opts...)
+			exe := k.withExecutable(t, "#!/bin/sh\necho v1.0.0\n")
+
+			if err := k.installAll(context.Background()); err != nil {
+				t.Fatalf("update error = %v", err)
+			}
+			if got, err := os.ReadFile(exe); err != nil || string(got) != "#!/bin/sh\necho "+dlTag+"\n" {
+				t.Errorf("executable = %q, %v; want the release's binary", got, err)
+			}
+			assertDirEmpty(t, tmp)
+			k.assertRequests(t, 1, 1)
+			k.assertSignatureRequests(t, 1)
+		})
+	}
+}
+
+func TestDownloadAllowUnsignedFetchesNoSignature(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range kitModes() {
+		t.Run(m.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			// The signature the server serves does not verify, so a request for it that was
+			// checked would fail the download.
+			k := newKitRelease(t, dir, append([]updatetest.Option{updatetest.BadSignature()}, m.opts...)...)
+			k.cfg.TrustedKeys = nil
+			k.cfg.AllowUnsigned = true
+
+			sel, a, err := k.update(context.Background())
+			if err != nil {
+				t.Fatalf("update error = %v", err)
+			}
+			if sel.Signature != (Asset{}) {
+				t.Errorf("Selection.Signature = %+v, want the zero Asset", sel.Signature)
+			}
+			if err := a.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			assertDirEmpty(t, dir)
+			k.assertRequests(t, 1, 1)
+			k.assertSignatureRequests(t, 0)
+		})
+	}
+}
+
+const dlSignaturePath = dlChecksumsPath + signatureSuffix
+
+// newSignedFakeRelease starts a fakeAssets serving the archive, the checksums file and, at
+// dlSignaturePath, sig, and returns it with a Config trusting key. A nil sig serves key's
+// signature over the checksums file.
+func newSignedFakeRelease(t *testing.T, key *minisigntest.Key, sig http.HandlerFunc) (*fakeAssets, Config, string) {
+	t.Helper()
+
+	if sig == nil {
+		sig = serveBody(string(key.Sign([]byte(dlChecksums()), "file:"+dlChecksumsName)))
+	}
+	f := newFakeAssets(t, map[string]http.HandlerFunc{
+		dlChecksumsPath: serveBody(dlChecksums()),
+		dlArchivePath:   serveBody(dlContent),
+		dlSignaturePath: sig,
+	})
+	dir := t.TempDir()
+	cfg := validConfig(t.TempDir())
+	cfg.TrustedKeys = []string{key.PublicKey()}
+	cfg.TempDir = dir
+	cfg.HTTPClient = f.server.Client()
+	return f, cfg, dir
+}
+
+// signedSelection is f's Selection with the signature at dlSignaturePath.
+func signedSelection(f *fakeAssets) Selection {
+	sel := f.selection()
+	sel.Signature = Asset{Name: dlChecksumsName + signatureSuffix, URL: f.url(dlSignaturePath)}
+	return sel
+}
+
+func TestDownloadVerifiesTheSignature(t *testing.T) {
+	t.Parallel()
+
+	key, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	f, cfg, dir := newSignedFakeRelease(t, key, nil)
+
+	a, err := cfg.Download(context.Background(), signedSelection(f))
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	assertVerifiedArchive(t, a, dir)
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for _, p := range []string{dlChecksumsPath, dlSignaturePath, dlArchivePath} {
+		if got := f.count(p); got != 1 {
+			t.Errorf("requests to %s = %d, want 1", p, got)
+		}
+	}
+}
+
+func TestDownloadSignatureFails(t *testing.T) {
+	t.Parallel()
+
+	sigName := dlChecksumsName + signatureSuffix
+
+	tests := []struct {
+		name string
+		sig  http.HandlerFunc
+		sel  func(*Selection)
+		// wantChecksumsCalls and wantSignatureCalls are the requests expected; the archive is
+		// never requested.
+		wantChecksumsCalls int
+		wantSignatureCalls int
+		check              func(t *testing.T, f *fakeAssets, err error)
+	}{
+		{
+			name: "no signature in the selection",
+			sel:  func(s *Selection) { s.Signature = Asset{} },
+			check: func(t *testing.T, _ *fakeAssets, err error) {
+				if !errors.Is(err, errNoURL) || !strings.Contains(err.Error(), strconv.Quote(sigName)) {
+					t.Errorf("err = %v, want errNoURL naming %q", err, sigName)
+				}
+			},
+		},
+		{
+			name:               "malformed",
+			sig:                serveBody("untrusted comment: x\nnot a signature\n"),
+			wantChecksumsCalls: 1,
+			wantSignatureCalls: 1,
+			check: func(t *testing.T, _ *fakeAssets, err error) {
+				var malformed *SignatureMalformedError
+				if !errors.As(err, &malformed) || malformed.Name != sigName {
+					t.Fatalf("err = %v, want a *SignatureMalformedError for %q", err, sigName)
+				}
+				if malformed.Err == nil || !strings.Contains(err.Error(), "2 lines, want 4") {
+					t.Errorf("err = %v, want it to say what does not parse", err)
+				}
+			},
+		},
+		{
+			name:               "unlocated 404",
+			sig:                respond(http.StatusNotFound, "Not Found"),
+			wantChecksumsCalls: 1,
+			wantSignatureCalls: 1,
+			check:              wantStatus(dlSignaturePath, http.StatusNotFound, "Not Found"),
+		},
+		{
+			name:               "located 404",
+			sig:                respond(http.StatusNotFound, "Not Found"),
+			sel:                func(s *Selection) { s.Located = true },
+			wantChecksumsCalls: 1,
+			wantSignatureCalls: 1,
+			check: func(t *testing.T, _ *fakeAssets, err error) {
+				var nf *AssetNotFoundError
+				if !errors.As(err, &nf) || *nf != (AssetNotFoundError{Tag: dlTag, Name: sigName}) {
+					t.Errorf("err = %v, want a *AssetNotFoundError for %q", err, sigName)
+				}
+			},
+		},
+		{
+			name:               "content length over the cap",
+			sig:                serveBody(strings.Repeat("x", maxSignatureBytes+1)),
+			wantChecksumsCalls: 1,
+			wantSignatureCalls: 1,
+			check:              wantSizeLimit(dlSignaturePath, maxSignatureBytes),
+		},
+		{
+			name:               "over the cap while reading",
+			sig:                serveChunked(strings.Repeat("x", maxSignatureBytes), "x"),
+			wantChecksumsCalls: 1,
+			wantSignatureCalls: 1,
+			check:              wantSizeLimit(dlSignaturePath, maxSignatureBytes),
+		},
+		{
+			name:               "body cut short",
+			sig:                serveTruncated(1000, "untrusted comment: x\n"),
+			wantChecksumsCalls: 1,
+			wantSignatureCalls: 1,
+			check: func(t *testing.T, f *fakeAssets, err error) {
+				if !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Errorf("err = %v, want io.ErrUnexpectedEOF", err)
+				}
+				if want := "update: GET " + f.url(dlSignaturePath) + ": reading signature: "; !strings.HasPrefix(err.Error(), want) {
+					t.Errorf("err = %q, want the prefix %q", err, want)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			key, err := minisigntest.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatalf("GenerateKey: %v", err)
+			}
+			f, cfg, dir := newSignedFakeRelease(t, key, tc.sig)
+			sel := signedSelection(f)
+			if tc.sel != nil {
+				tc.sel(&sel)
+			}
+
+			a, err := cfg.Download(context.Background(), sel)
+			if a != nil {
+				_ = a.Close()
+				t.Fatalf("Download() Archive = %v, want nil", a)
+			}
+			tc.check(t, f, err)
+			assertDirEmpty(t, dir)
+			if got := f.count(dlChecksumsPath); got != tc.wantChecksumsCalls {
+				t.Errorf("checksums requests = %d, want %d", got, tc.wantChecksumsCalls)
+			}
+			if got := f.count(dlSignaturePath); got != tc.wantSignatureCalls {
+				t.Errorf("signature requests = %d, want %d", got, tc.wantSignatureCalls)
+			}
+			if got := f.count(dlArchivePath); got != 0 {
+				t.Errorf("archive requests = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestSignatureError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("odd")
+	err := signatureError("checksums.txt.minisig", cause)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), `"checksums.txt.minisig"`) {
+		t.Errorf("signatureError() = %v, want the cause wrapped with the asset's name", err)
+	}
+	if err := signatureError("checksums.txt.minisig", nil); err != nil {
+		t.Errorf("signatureError(nil) = %v, want nil", err)
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.vipengele.org/cli/spec"
@@ -177,4 +179,115 @@ func ExampleWithReload() {
 	if err := sup.Run(ctx); err != nil {
 		fmt.Println("run:", err)
 	}
+}
+
+// probe requests path on base and returns the status code and the body without its newline.
+func probe(ctx context.Context, base, path string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	body, err := io.ReadAll(resp.Body)
+	if closeErr := resp.Body.Close(); err == nil {
+		err = closeErr
+	}
+	return resp.StatusCode, strings.TrimSpace(string(body)), err
+}
+
+// serveHealth runs a daemon whose HTTP server mounts the Health handler, probes it, and stops the
+// daemon. The supervisor.ready check passes once every Runner has started, so the probe retries
+// until /readyz answers 200.
+func serveHealth(ctx context.Context) error {
+	var lc net.ListenConfig
+	l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	base := "http://" + l.Addr().String()
+
+	var dbUp atomic.Bool
+	dbUp.Store(true)
+
+	health := daemon.NewHealth()
+	err = health.Add("database", func(context.Context) error {
+		if !dbUp.Load() {
+			return errors.New("connection refused")
+		}
+		return nil
+	}, daemon.Readiness)
+	if err != nil {
+		return err
+	}
+
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: health.Handler()}
+	sup, err := daemon.New([]daemon.Runner{daemon.NewHTTPServerListener(srv, l)}, daemon.WithHealth(health))
+	if err != nil {
+		return err
+	}
+
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	runErr := make(chan error, 1)
+	go func() { runErr <- sup.Run(runCtx) }()
+
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	show := func(path string) error {
+		code, body, err := probe(probeCtx, base, path)
+		if err != nil {
+			return err
+		}
+		fmt.Println(path, code, body)
+		return nil
+	}
+
+	for {
+		code, _, err := probe(probeCtx, base, "/readyz")
+		if err == nil && code == http.StatusOK {
+			break
+		}
+		select {
+		case <-probeCtx.Done():
+			stop()
+			<-runErr
+			return probeCtx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	paths := []string{"/livez", "/readyz"}
+	for _, path := range paths {
+		if err := show(path); err != nil {
+			stop()
+			<-runErr
+			return err
+		}
+	}
+
+	// A failing readiness check takes the daemon out of traffic without failing liveness.
+	dbUp.Store(false)
+	for _, path := range paths {
+		if err := show(path); err != nil {
+			stop()
+			<-runErr
+			return err
+		}
+	}
+
+	stop()
+	return <-runErr
+}
+
+func ExampleHealth() {
+	fmt.Println("serveHealth:", serveHealth(context.Background()))
+	// Output:
+	// /livez 200 ok
+	// /readyz 200 ok
+	// /livez 200 ok
+	// /readyz 503 unready
+	// serveHealth: <nil>
 }

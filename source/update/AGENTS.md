@@ -17,19 +17,25 @@ golangci-lint run
 - `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries
   every seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user
   home dir, `EvalSymlinks`, `InContainer`, `IsTerminal`, `CheckWait`, `Locker`) and the tool's own
-  `Detectors`; a nil `Detectors` entry is invalid. `Validate` reports problems; `resolve` returns a
-  copy with each zero field set to its production default and never mutates the receiver. `Resolved`
-  is its exported wrapper, the one place other packages read the defaults from (ADR-0023). The
-  default state dir comes from `paths.Resolve(..., paths.State)` in
-  `go.vipengele.org/cli/spec/paths`, resolved through the GOOS, env lookup and user home dir seams;
-  only the state kind is resolved, so the home directory is needed only when the state directory
-  itself falls back to it. `deriveFormat` maps `AssetTemplate` and `AssetExt` to the asset format
-  (raw, tar.gz or zip), which `Validate` and `Extract` share; `MaxExtractBytes` (default 512 MiB)
-  bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s) bounds how long the background check
-  delays exit. `Locker` (`filelock.Locker`) defaults to `dirLocker`, which runs
-  `os.MkdirAll(StateDir, 0o700)` before locking `StateDir/update.lock`, because filelock refuses a
-  missing directory and nothing else creates `StateDir` before the first save. `dirLocker.TryLock`
-  does the same before its single attempt; the background check uses `Lock` only.
+  `Detectors`; a nil `Detectors` entry is invalid. The signature policy is required (ADR-0024,
+  ADR-0026): `TrustedKeys` (minisign public key entries, each with or without its
+  `untrusted comment:` line, several for a rotation) or `AllowUnsigned`, exactly one. `Validate`
+  rejects an entry that does not parse, a repeated key id, neither field and both fields, so
+  `update.Config{}` is invalid for every operation, `Check` and `CheckManaged` included, because
+  `resolve` runs `Validate`. A test `Config` sets `TrustedKeys: []string{srv.PublicKey()}`.
+  `Validate` reports problems; `resolve` returns a copy with each zero field set to its production
+  default and never mutates the receiver. `Resolved` is its exported wrapper, the one place other
+  packages read the defaults from (ADR-0023). The default state dir comes from
+  `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
+  env lookup and user home dir seams; only the state kind is resolved, so the home directory is
+  needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
+  and `AssetExt` to the asset format (raw, tar.gz or zip), which `Validate` and `Extract` share;
+  `MaxExtractBytes` (default 512 MiB) bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s)
+  bounds how long the background check delays exit. `Locker` (`filelock.Locker`) defaults to
+  `dirLocker`, which runs `os.MkdirAll(StateDir, 0o700)` before locking `StateDir/update.lock`,
+  because filelock refuses a missing directory and nothing else creates `StateDir` before the first
+  save. `dirLocker.TryLock` does the same before its single attempt; the background check uses
+  `Lock` only.
 - `state.go` — `State` (`LastAttempt`, `LatestVersion`), the `StateStore` interface and `fileStore`,
   the default store: `update-state.json` in the state dir through `go.vipengele.org/cli/state`
   (ADR-0023). `Save` creates the directory 0700 and writes the file 0600; a missing or corrupt file
@@ -57,7 +63,10 @@ golangci-lint run
 - `select.go` — `Config.Select` names the archive and checksums assets of a `Release`: the
   `AssetTemplate` and `ChecksumsAsset` rendered with `AssetExt`. A non-nil `Assets` is matched by
   exact name; nil `Assets` (the redirect path, ADR-0019) is located through the `Source`'s optional
-  `AssetLocator`, which `GitHubSource.AssetURL` implements.
+  `AssetLocator`, which `GitHubSource.AssetURL` implements. `Selection.Signature` is the checksums
+  asset's name plus `.minisig`, or the zero `Asset` under `AllowUnsigned`; a `Selection` lists
+  exactly what `Download` reads, and a listed release without the signature asset is an
+  `*AssetNotFoundError`.
 - `asset/` — the template language (`{name}`, `{version}`, `{tag}`, `{os}`, `{arch}`, `{ext}`) with
   `Validate`, `ValidateChecksums` and `Render`, and `GoReleaserArchive` / `GoReleaserChecksum`, which
   translate a template into a GoReleaser `name_template`; `UsesExt` reports whether a template holds
@@ -66,11 +75,14 @@ golangci-lint run
   name and the one `Select` looks for differ. A raw-binary tool leaves `{ext}` out of its template.
 - `errors.go` — `StatusError`, `TimeoutError` (a `net.Error`), `TagError`, `AssetNotFoundError`,
   `ChecksumMismatchError`, `ChecksumNotFoundError`, `ChecksumConflictError`, `SizeLimitError`,
-  `ManagedInstallError`, `ErrPrerelease` and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download`
-  returns; `classifyError` maps deadline and timeout failures to `TimeoutError` and passes
-  cancellation through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
-  `MultipleBinariesError`, `UnsupportedFormatError`, `ErrEmptyAsset`, `ErrNotGzip` and
-  `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
+  `SignatureMalformedError` (unwraps to the minisign parse error), `UnknownKeyError` (carries the
+  signature's key id as minisign prints it), `SignatureMismatchError` (carries the key id, unwraps
+  to the minisign verification error), `ManagedInstallError`, `ErrPrerelease` and
+  `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns; `DevBuildError`,
+  the error `CheckRelease` returns. `classifyError` maps deadline and timeout failures to
+  `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
+  `UnsafeEntryError`, `BinaryNotFoundError`, `MultipleBinariesError`, `UnsupportedFormatError`,
+  `ErrEmptyAsset`, `ErrNotGzip` and `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
   `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
   errors `CheckWritable`, `Install` and `Installed` return.
 - `managed.go` — `Config.CheckManaged`, `Detector` and `Install`: resolves the symlinks of the
@@ -78,18 +90,22 @@ golangci-lint run
   the first match among the built-in Nix, Homebrew and container detectors, then `Config.Detectors`.
   Prefixes match on a directory boundary, case-sensitively, with "/" separators, so a Windows
   executable never matches; only the default Nix and Homebrew prefixes are known.
-- `download.go` — `Config.Download`, `DownloadOption` and `WithProgress`: the checksums request,
-  the archive request, and the bounded, hashed copy to the temp file.
+- `download.go` — `Config.Download`, `DownloadOption` and `WithProgress`: the buffered checksums
+  and signature requests (`fetchBounded`), the signature check (`verifySignature`, which maps the
+  `internal/minisign` errors to the public ones in `signatureError`), the archive request, and the
+  bounded, hashed copy to the temp file.
 - `archive.go` — `Archive`, the verified temp file `Download` returns, and its lifecycle.
 - `checksums.go` — `parseChecksum`, which finds the archive's digest in a checksums file.
 - `hook.go` — `PostUpdate`, a step that receives the installed binary's path (the old process is still
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
-  runs the hooks in order and joins their errors. A failure is non-fatal. Package `update` does not
-  import `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that
-  does (ADR-0023).
+  runs the hooks in order and joins their errors. A failure is report-only: the caller keeps the
+  update. `Install` and `Apply` run no hook. Package `update` does not import
+  `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that does
+  (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
   tool (`install.sh.in`, embedded), which downloads the release asset, verifies it against the
-  checksums file, places the binary with one rename and installs the shell completion.
+  checksums file (and, with `TrustedKeys`, the checksums file against its minisign signature),
+  places the binary with one rename and installs the shell completion.
   - Input: `Render` calls `Config.Resolved` and never re-derives a default. A template holding
     `{ext}` with `AssetExt` `tar.gz` or `tgz` renders the archive path (extract exactly one regular
     file named `BinaryName`); a template without `{ext}` renders the raw-binary path (no `tar`).
@@ -98,7 +114,19 @@ golangci-lint run
     Every value reaches the script as a single-quoted shell literal.
   - Overrides, each named by `Identity.EnvVar`, so no prefix is spelled out: `<P>_VERSION` (`v1.2.3`
     or `1.2.3`; the latest release when unset), `<P>_INSTALL_DIR` (`$HOME/.local/bin`),
-    `<P>_BASE_URL` (`https://github.com`) and `<P>_NO_COMPLETION` (`1` skips the completion).
+    `<P>_BASE_URL` (`https://github.com`), `<P>_NO_COMPLETION` (`1` skips the completion) and, in a
+    script rendered with `TrustedKeys`, `<P>_ALLOW_UNSIGNED` (`1` installs on the checksum alone
+    when `minisign` is not on `PATH`; no effect when it is).
+  - Signature (ADR-0026): `Render` fails on a `Config` that `Validate` rejects. Under
+    `AllowUnsigned` the script is the one with no signature check at all: the lines between
+    `@@SIGNED_BEGIN@@` and `@@SIGNED_END@@` in `install.sh.in` are dropped, markers included, before
+    the tokens are filled. With keys they are kept: after the checksums file the script fetches
+    `<checksums>.minisig` (a 404 fails), then runs `minisign -V -q -P <key>` once per key and fails
+    unless one verifies. Each key reaches the script as `minisign.ParsePublicKey(entry).Line`,
+    single-quoted, never the raw entry. Without `minisign` it warns, then proceeds only on
+    `<P>_ALLOW_UNSIGNED=1` or a `y`/`yes` (any case) read from `/dev/tty`; it treats `/dev/tty` as
+    usable only when `(: </dev/tty)` succeeds, and with no terminal it fails naming both remedies.
+    Every refusal happens before the install directory is touched.
   - The script source carries `@@NAME@@`-style tokens that one `strings.Replacer` pass fills, so a
     value holding a token stays literal; `@@INSTALL_STEP@@` takes `extract-archive.sh.in` or
     `install-raw.sh.in`. Render inserts `completioninstall.Snippet(BinaryName)` verbatim and never
@@ -110,6 +138,18 @@ golangci-lint run
     `GOARCH` overrides and the size limits are ignored.
   - Tests run the rendered script under `sh` against `updatetest.NewServer`, with a `PATH` of
     symlinked tools so a test can leave one out; a test skips when a tool the host lacks is needed.
+    `minisign` is never the host's: `TestMain` builds a stand-in from `testdata/fakeminisign` and
+    the harness links it onto `PATH` unless `NoMinisign`, so no test needs minisign installed. The
+    `TTY` option gives the script a pty as controlling terminal and stderr (linux only; elsewhere
+    the test skips), with input from `TTYInput`/`TTYEOF` and output in `runResult.TTY`; without it
+    the script runs with no controlling terminal, so opening `/dev/tty` fails. The harness renders
+    the script before the server's key exists, so a test of a keyed script re-renders it with
+    `Server.PublicKey()` (`newSignedHarness`).
+- `internal/minisign/` — the minisign verifier: `ParsePublicKey` (with or without the `untrusted
+  comment:` line; `.Line` is the bare key line), `ParseSignature` and `Verify`, accepting both the
+  hashed `ED` and the legacy `Ed` signature forms. Its `testdata/` holds an interop vector (a key and
+  signatures from an independent implementation; see its `README.md`). `internal/minisigntest` is the signer for tests only
+  (`GenerateKey`, `Sign`, `SignLegacy`); production code never imports it.
 - `extract.go` — `Config.Extract`, `Staged`, the extractor dispatch by format, the raw extractor, the
   bounded copy (`copyBounded`), the context-aware reader and the entry-name check
   (`unsafeEntryName`).
@@ -122,10 +162,29 @@ golangci-lint run
   which maps a permission failure to `*PermissionError`.
 - `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
   `backupLocked`.
+- `release.go` — `Config.CheckRelease`: refuses a development build with a `*DevBuildError`.
+- `apply.go` — `Config.Apply`: CheckManaged, CheckWritable, Download, Target, Extract into the
+  target's directory, Install. It returns the `*Installed` with the backup kept, runs no hook and
+  calls neither `Discard` nor `Rollback`. It closes the archive itself only when Target fails.
+- `updatecmd/` — `Commands(cfg, opts...) []*spec.Command`: one `update` command with `--check`,
+  `--yes`/`-y` and `--to`, carrying `spec.SkipUpdateCheck`.
+  - `ExitUpdateAvailable = 10` is the exit code of `--check` when a newer release exists; the
+    result goes to stdout, messages to stderr.
+  - A development build is refused in both modes. `CheckManaged` runs first: in `--check` a
+    `*ManagedInstallError` only adds a hint to the line; in an update it is returned before any
+    request.
+  - `--to` accepts `1.2.3` or `v1.2.3` and may downgrade; a version equal to the current one is a
+    no-op. `--to` combined with `--check`, or not a release version, is a plain error (exit 1).
+  - Without `--yes` it asks with `Confirm(Required: true)`, so a non-terminal stdin is the
+    framework's `*spec.UsageError` (exit 2).
+  - After `Apply`, a `RunPostUpdate` failure and a `Discard` failure (naming the backup path) are
+    warnings and the exit stays 0.
 - `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
   `Release` in the redirect and REST-API modes, in-memory tar.gz and zip archive (`BuildArchive`) and
-  checksums (`Checksums`) builders, and the fault options `BadChecksum`, `MissingAsset`, `Slow` and
-  `APIOnly`. It imports neither package `update` (the update tests are `package update`, so that
+  checksums (`Checksums`) builders, and the fault options `BadChecksum`, `BadSignature`,
+  `UnknownKey`, `Tampered`, `MissingAsset`, `Slow` and `APIOnly`. The server signs the checksums
+  file with a key generated per server (`internal/minisigntest`), serves it as
+  `<ChecksumsName>.minisig` (`TargetSignature`) and returns the trusted entry from `PublicKey`. It imports neither package `update` (the update tests are `package update`, so that
   would be an import cycle) nor `go.vipengele.org/cli/core`; a test builds its own `GitHubSource`
   from the server's `WebURL`, `APIURL` and `Client`.
 
@@ -135,20 +194,27 @@ golangci-lint run
 - The download step maps a 404 on a URL `Select` located to a `*AssetNotFoundError`, not a
   `*StatusError`: a missing asset on the redirect path surfaces there (ADR-0019). `Selection.Located`
   marks such a selection and `Selection.Tag` names the release; any other non-200 is a `*StatusError`.
-- `Download` order (ADR-0020): `resolve` the `Config`; reject an empty URL on either asset (an
-  unexported sentinel wrapping "update: asset has no URL", not matchable with `errors.Is`); fetch and
-  parse the checksums file; stream the archive through a SHA-256 hash into the temp file; compare
-  the decoded digests; rewind and return. A missing or conflicting entry fails before the archive
-  is requested. The caller never holds the file before it is verified.
+- `Download` order (ADR-0020, ADR-0024, ADR-0026): `resolve` the `Config`; reject an empty URL on
+  the archive, the checksums file and, unless `AllowUnsigned`, the signature (an unexported sentinel
+  wrapping "update: asset has no URL", not matchable with `errors.Is`; a zero `Signature` is named
+  `<checksums>.minisig`); read the checksums file into memory; unless `AllowUnsigned`, fetch the
+  signature and verify it over those bytes with the parsed `TrustedKeys`; parse the digest; stream
+  the archive through a SHA-256 hash into the temp file; compare the decoded digests; rewind and
+  return. Trust is established before the checksums file is parsed and before the archive is
+  requested: a malformed signature (`*SignatureMalformedError`), an unknown key id
+  (`*UnknownKeyError`), a failed verification (`*SignatureMismatchError`), a missing signature, and a
+  missing or conflicting entry each fail with no archive request and nothing staged. Under
+  `AllowUnsigned` no signature is requested, whatever `Selection.Signature` holds. The caller never
+  holds the file before it is verified.
 - `Archive` exposes `Read`, `ReadAt`, `Seek`, `Size`, `Name` and `Close` only. `Close` closes the
   file before removing it (Windows cannot remove an open file), joins both errors and is idempotent:
   a second call returns nil. Every failure path removes the temp file; a failed removal is joined
   onto the returned error.
 - The temp file is `os.CreateTemp(TempDir, TempPrefix+"*")`, mode 0600. A missing `TempDir` is an
   error; nothing creates it.
-- Caps: the archive `MaxDownloadBytes` (default 256 MiB), the checksums file 1 MiB, fixed. Both
-  give a `*SizeLimitError`, up front from `Content-Length` or a non-zero `Asset.Size`, else while
-  streaming. `DownloadTimeout` (default 5 min) is one deadline per request, headers and body; a
+- Caps: the archive `MaxDownloadBytes` (default 256 MiB), the checksums file 1 MiB and the signature
+  4 KiB (`maxSignatureBytes`), the last two fixed. Each gives a `*SizeLimitError`, up front from
+  `Content-Length` or a non-zero `Asset.Size`, else while streaming. `DownloadTimeout` (default 5 min) is one deadline per request, headers and body; a
   shorter deadline on the context wins and surfaces as a `*TimeoutError`. Cancellation passes
   through unchanged.
 - `Size` and `Content-Length` are hints: a body of another length is not an error. The digest
@@ -160,8 +226,9 @@ golangci-lint run
 - `WithProgress` runs synchronously on the caller's goroutine, archive only. `total` is
   `Content-Length`, else a non-zero `Asset.Size`, else -1. The last call, after verification, is
   `(written, written)`; none follows a failure.
-- HTTPS is not enforced. Requests use the resolved `HTTPClient` and follow redirects (release
-  assets redirect to a CDN), not the redirect-refusing client `GitHubSource` builds for itself.
+- HTTPS is not enforced: with keys the signature authenticates the checksums file and the digest
+  carries that to the archive; under `AllowUnsigned` the checksums file is trusted as it arrives.
+  Requests use the resolved `HTTPClient` and follow redirects (release assets redirect to a CDN), not the redirect-refusing client `GitHubSource` builds for itself.
 
 ## Extract contract
 
@@ -231,7 +298,8 @@ golangci-lint run
   branch.
 - The seams are the unexported `fsSteps`, set by in-package tests; `Config` has no field for them.
   Tests run as root in CI, so injection is what covers the permission path.
-- `Install` runs no `PostUpdate` hook. The caller runs `RunPostUpdate` with `Installed.Path()`.
+- `Install` and `Apply` run no `PostUpdate` hook. The caller runs `RunPostUpdate` with
+  `Installed.Path()`; a hook failure is report-only and the caller keeps the update.
 
 ## Background check contract
 
@@ -249,8 +317,8 @@ golangci-lint run
   before it reads the notice, and cancels at once when the command's context is done. It does not
   probe the terminal: the pre-run hook's `Start` decides that gate once, from `Config.IsTerminal`
   when set and the Env's stderr otherwise, and a run that fails it has no `*Check`.
-- A command carrying `spec.SkipUpdateCheck` starts no check; the tool's `update` command must carry
-  it.
+- A command carrying `spec.SkipUpdateCheck` starts no check; `updatecmd`'s `update` command
+  carries it.
 
 ## Conventions
 
@@ -261,8 +329,11 @@ golangci-lint run
   The other is the `CheckWait` bound in `Finish`, a `time.NewTimer`: it is wall-clock time, while
   `Now` stamps state only.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
-- `depguard` forbids importing `go.vipengele.org/cli/core/**` anywhere, and `github.com/spf13/cobra`
-  outside an `updatecmd` package. The library depends on no command-line framework.
+- Commands are framework-neutral `spec.Command`s (ADR-0005). `depguard` forbids importing
+  `go.vipengele.org/cli/core` and cobra anywhere in the module: update depends on no
+  command-line framework. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches
+  nothing. The tool joins the command in its main by passing each command
+  `updatecmd.Commands(cfg)` returns to `app.Add` (ADR-0009).
 - `cli/spec`, `cli/state`, `commons` and `filelock` are siblings reached by directory `replace`s in
   `go.mod` (`../cli/spec`, `../cli/state`, `../commons`, `../filelock`); see the repo-root rule on
   sibling replaces.

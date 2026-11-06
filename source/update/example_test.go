@@ -2,20 +2,34 @@ package update_test
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/filelock"
 	"go.vipengele.org/update"
+	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
+
+// exampleKey stands for the contents of the tool's minisign.pub, which a real tool embeds. It is
+// drawn from a fixed stream, longer than the key id and Ed25519 seed GenerateKey reads, so every
+// call returns the same key.
+func exampleKey() string {
+	key, err := minisigntest.GenerateKey(strings.NewReader(strings.Repeat("example key ", 8)))
+	if err != nil {
+		panic(err)
+	}
+	return key.PublicKey()
+}
 
 // A tool refreshes its shell completion after an update by registering [completioninstall.Install]
 // as a post-update hook. The hook receives the installed binary's path, and the tool's
@@ -37,7 +51,8 @@ func Example_completionHook() {
 	}
 
 	cfg := update.Config{
-		Identity: id,
+		Identity:    id,
+		TrustedKeys: []string{exampleKey()},
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				res, err := completioninstall.Install(completioninstall.Options{
@@ -61,10 +76,11 @@ func Example_completionHook() {
 	// Output: skipped=true reason=disabled
 }
 
-// A tool updates itself in four steps: Download verifies the release archive, Extract stages the
-// binary beside the running executable, Install swaps it in keeping the previous binary as a
-// backup, and Discard drops the backup once the new binary is accepted. A post-update hook receives
-// the installed path.
+// A tool updates itself with Apply, which refuses a managed install, checks that the executable's
+// directory is writable, downloads and verifies the release archive, stages the binary beside the
+// running executable and swaps it in, keeping the previous binary as a backup. The tool then runs
+// its post-update hooks on the installed path, reporting a failure without undoing the update, and
+// Discard drops the backup.
 func Example_install() {
 	dir, err := os.MkdirTemp("", "update-example-")
 	if err != nil {
@@ -89,9 +105,22 @@ func Example_install() {
 	const archiveName = "atk_linux_amd64.tar.gz"
 	sums := updatetest.Checksums(map[string][]byte{archiveName: archive})
 
+	// The release's signing key, which a real tool's release pipeline holds and whose public half
+	// the tool compiles in.
+	key, err := minisigntest.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sig := key.Sign(sums, "file:checksums.txt")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/checksums.txt" {
+		switch r.URL.Path {
+		case "/checksums.txt":
 			_, _ = w.Write(sums)
+			return
+		case "/checksums.txt.minisig":
+			_, _ = w.Write(sig)
 			return
 		}
 		_, _ = w.Write(archive)
@@ -106,11 +135,14 @@ func Example_install() {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
-		GOOS:       "linux",
-		GOARCH:     "amd64",
-		TempDir:    dir,
-		StateDir:   dir,
-		Executable: func() (string, error) { return exe, nil },
+		TrustedKeys: []string{key.PublicKey()},
+		GOOS:        "linux",
+		GOARCH:      "amd64",
+		TempDir:     dir,
+		StateDir:    dir,
+		Executable:  func() (string, error) { return exe, nil },
+		// The example's executable is never a container's, wherever it runs.
+		InContainer: func() bool { return false },
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
 				body, err := os.ReadFile(installedPath)
@@ -124,48 +156,18 @@ func Example_install() {
 		Tag:       "v2",
 		Archive:   update.Asset{Name: archiveName, URL: srv.URL + "/" + archiveName},
 		Checksums: update.Asset{Name: "checksums.txt", URL: srv.URL + "/checksums.txt"},
+		Signature: update.Asset{Name: "checksums.txt.minisig", URL: srv.URL + "/checksums.txt.minisig"},
 	}
 
-	ctx := context.Background()
-
-	// A best-effort check before the download; Install is the authority.
-	if err := cfg.CheckWritable(); err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	arc, err := cfg.Download(ctx, sel)
+	installed, err := cfg.Apply(context.Background(), sel)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	// The staged file goes in the executable's directory, so that the rename stays on one
-	// filesystem.
-	target, err := cfg.Target()
-	if err != nil {
-		_ = arc.Close()
-		fmt.Println(err)
-		return
-	}
-
-	staged, err := cfg.Extract(ctx, arc, filepath.Dir(target))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	installed, err := cfg.Install(staged)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
+	// The update has been applied: a hook that fails is reported, and the new binary stays.
 	if err := update.RunPostUpdate(cfg.PostUpdate, installed.Path()); err != nil {
-		// The new binary is unusable: put the previous one back.
-		_ = installed.Rollback()
-		fmt.Println(err)
-		return
+		fmt.Println("post-update:", err)
 	}
 
 	// A locked backup (*update.BackupLockedError) is not a failed update and may be ignored.
@@ -207,13 +209,14 @@ func ExampleConfig_Start() {
 			EnvPrefix: "ATK",
 			DirName:   "agentic-toolkit",
 		},
-		Version:    "v1.2.0",
-		Source:     newerSource{},
-		StateStore: &memStore{},
-		Locker:     filelock.NewNoop(),
-		Now:        func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
-		Getenv:     func(string) string { return "" },
-		IsTerminal: func() bool { return true },
+		Version:     "v1.2.0",
+		TrustedKeys: []string{exampleKey()},
+		Source:      newerSource{},
+		StateStore:  &memStore{},
+		Locker:      filelock.NewNoop(),
+		Now:         func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Getenv:      func(string) string { return "" },
+		IsTerminal:  func() bool { return true },
 	}
 
 	check, err := cfg.Start(context.Background())

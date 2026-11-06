@@ -1,6 +1,6 @@
 // Package updatetest builds a fake release for tests of [go.vipengele.org/update]: the archive a
-// release publishes for a platform, the checksums file that lists its digest, and an HTTP server
-// that serves them as GitHub does.
+// release publishes for a platform, the checksums file that lists its digest, the signature of that
+// file, and an HTTP server that serves them as GitHub does.
 //
 // [BuildArchive] writes a set of [Entry] values as a gzip-compressed tar archive or a zip archive,
 // chosen by the same extension the updater is configured with, Config.AssetExt: [ExtTarGz] or
@@ -24,8 +24,11 @@
 // [NewRelease] builds a [Release] for the running platform, and [NewServer] starts a [Server] that
 // publishes it, closed when the test ends. The server answers the latest-release redirect and the
 // REST API from one address, so a source reads the release by the redirect unless [APIOnly] makes
-// that page answer 404. [BadChecksum] lists a wrong digest, [MissingAsset] removes an asset, and
-// [Slow] holds every request to a [Target] until a gate channel closes. [Server.Requests] counts the
+// that page answer 404. The server also signs the checksums file with a key it generates and
+// serves the minisign signature as the checksums file's name and ".minisig"; [Server.PublicKey]
+// returns the key to trust. [BadChecksum] lists a wrong digest, [BadSignature] serves a signature
+// that does not verify, [UnknownKey] one made by another key, [Tampered] an archive and checksums
+// the signature does not cover, [MissingAsset] removes an asset, and [Slow] holds every request to a [Target] until a gate channel closes. [Server.Requests] counts the
 // requests a Target received.
 //
 // A test points its source at the server; a GitHubSource, for example, is built from its addresses:

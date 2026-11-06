@@ -9,6 +9,7 @@ import (
 	"go.vipengele.org/cli/spec/completioninstall"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/asset"
+	"go.vipengele.org/update/internal/minisign"
 )
 
 // Suffixes of the environment variables the script reads, each joined to the EnvPrefix by
@@ -17,6 +18,17 @@ const (
 	versionEnvSuffix    = "VERSION"
 	installDirEnvSuffix = "INSTALL_DIR"
 	baseURLEnvSuffix    = "BASE_URL"
+	// allowUnsignedEnvSuffix names the variable that, set to 1, lets a script rendered with
+	// trusted keys install on the checksum alone when minisign is not installed.
+	allowUnsignedEnvSuffix = "ALLOW_UNSIGNED"
+)
+
+// The lines from signedBegin to signedEnd, both marker lines included, are the signature check:
+// Render keeps what lies between them for a Config with TrustedKeys and drops it all under
+// AllowUnsigned, so a script for unsigned releases holds no trace of the check.
+const (
+	signedBegin = "@@SIGNED_BEGIN@@\n"
+	signedEnd   = "@@SIGNED_END@@\n"
 )
 
 // scriptSource is the install script with a token, an upper-case name between "@@" pairs, in
@@ -54,7 +66,9 @@ func expandsAtRuntime(placeholder string) bool {
 // with the error of [completioninstall.Snippet] when BinaryName is not a slug.
 //
 // Every value of cfg reaches the script as a single-quoted shell literal, so no character of an
-// asset template, a binary name or a repository name is ever expanded by the shell.
+// asset template, a binary name or a repository name is ever expanded by the shell. Each trusted
+// key reaches it as its 56-character key line alone, never as the TrustedKeys entry: no comment
+// line and no whitespace of an entry is ever part of the script.
 func Render(cfg update.Config) ([]byte, error) {
 	r, err := cfg.Resolved()
 	if err != nil {
@@ -73,6 +87,14 @@ func Render(cfg update.Config) ([]byte, error) {
 	if archive {
 		step = extractArchive
 	}
+	keys := make([]string, 0, len(r.TrustedKeys))
+	for _, entry := range r.TrustedKeys {
+		// Resolved has validated every entry, so none fails to parse here; one that did would only
+		// leave its key out of the script.
+		if key, err := minisign.ParsePublicKey(entry); err == nil {
+			keys = append(keys, shellQuote(key.Line))
+		}
+	}
 	pairs := []string{
 		"@@NAME@@", shellQuote(r.BinaryName),
 		"@@OWNER@@", shellQuote(url.PathEscape(r.Owner)),
@@ -83,15 +105,17 @@ func Render(cfg update.Config) ([]byte, error) {
 		"@@CHECKSUMS_URL@@", shellWord(r.ChecksumsAsset, r.BinaryName, "", url.PathEscape),
 		"@@INSTALL_STEP@@", strings.TrimSuffix(step, "\n"),
 		"@@SNIPPET@@", snippet,
+		"@@TRUSTED_KEYS@@", strings.Join(keys, " "),
 	}
 	for _, v := range []struct{ token, suffix string }{
 		{"@@VERSION_ENV@@", versionEnvSuffix},
 		{"@@INSTALL_DIR_ENV@@", installDirEnvSuffix},
 		{"@@BASE_URL_ENV@@", baseURLEnvSuffix},
 		{"@@NO_COMPLETION_ENV@@", completioninstall.NoCompletionEnvSuffix},
+		{"@@ALLOW_UNSIGNED_ENV@@", allowUnsignedEnvSuffix},
 	} {
 		// EnvVar cannot fail once Resolved passes: the prefix is a valid identifier of at most
-		// spec.MaxEnvPrefixLen (32) bytes, every suffix is a valid identifier of at most 13, and the
+		// spec.MaxEnvPrefixLen (32) bytes, every suffix is a valid identifier of at most 14, and the
 		// joined name stays within the 64 bytes validate.MaxEnvVarLen allows.
 		name, _ := r.EnvVar(v.suffix)
 		pairs = append(pairs, v.token, name)
@@ -99,7 +123,27 @@ func Render(cfg update.Config) ([]byte, error) {
 
 	// One pass of a Replacer never scans the text it inserts, so a token inside a value, such as
 	// an asset template holding "@@NAME@@", stays literal.
-	return []byte(strings.NewReplacer(pairs...).Replace(scriptSource)), nil
+	return []byte(strings.NewReplacer(pairs...).Replace(signedRegions(scriptSource, !r.AllowUnsigned))), nil
+}
+
+// signedRegions returns src with each region from a signedBegin line to the next signedEnd line
+// reduced to the lines between the two markers when keep is true, and removed whole when it is
+// false. A marker is the whole of its line, so removing a region leaves src exactly as it would be
+// had the region never been written.
+func signedRegions(src string, keep bool) string {
+	var out strings.Builder
+	for {
+		before, rest, found := strings.Cut(src, signedBegin)
+		out.WriteString(before)
+		if !found {
+			return out.String()
+		}
+		region, after, _ := strings.Cut(rest, signedEnd)
+		if keep {
+			out.WriteString(region)
+		}
+		src = after
+	}
 }
 
 // identity returns s unchanged.

@@ -233,7 +233,7 @@ func recordsNamed(c *capturedLog, msg string) []logged {
 	return out
 }
 
-func checkCalls[T comparable](t *testing.T, got, want []reloadCall[T]) {
+func checkReloadCalls[T comparable](t *testing.T, got, want []reloadCall[T]) {
 	t.Helper()
 	if !slices.Equal(got, want) {
 		t.Errorf("Reload calls = %v, want %v", got, want)
@@ -287,7 +287,7 @@ func TestReloadOfAConfigTheLoadFailsToProduceCallsNoRunnerAndKeepsRunning(t *tes
 			}
 			<-h.waiting
 			checkStillRunning(t, h)
-			checkCalls(t, log.all(), nil)
+			checkReloadCalls(t, log.all(), nil)
 
 			got := roundRecords(capture)
 			if len(got) != 1 {
@@ -328,7 +328,7 @@ func TestReloadOffersAnAcceptedConfigInStartOrder(t *testing.T) {
 
 	hangup(sub)
 	<-h.waiting
-	checkCalls(t, log.all(), []reloadCall[int]{{"a", 7}, {"b", 7}, {"c", 7}})
+	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 7}, {"b", 7}, {"c", 7}})
 	ctx, _ := loadCtx.Load().(context.Context)
 	if got := ctx.Value(ctxKey{}); got != "run" {
 		t.Errorf("load context carries %v, want the run context's value", got)
@@ -340,7 +340,7 @@ func TestReloadOffersAnAcceptedConfigInStartOrder(t *testing.T) {
 	cfg.Store(8)
 	hangup(sub)
 	<-h.waiting
-	checkCalls(t, log.all(), []reloadCall[int]{{"a", 7}, {"b", 7}, {"c", 7}, {"a", 8}, {"b", 8}, {"c", 8}})
+	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 7}, {"b", 7}, {"c", 7}, {"a", 8}, {"b", 8}, {"c", 8}})
 	checkStillRunning(t, h)
 
 	got := roundRecords(capture)
@@ -379,8 +379,8 @@ func TestReloadIsNotOfferedToARunnerOfAnotherTypeOrOneThatExited(t *testing.T) {
 
 	hangup(sub)
 	err := <-h.result
-	checkCalls(t, ints.all(), []reloadCall[int]{{"w", 5}})
-	checkCalls(t, strs.all(), nil)
+	checkReloadCalls(t, ints.all(), []reloadCall[int]{{"w", 5}})
+	checkReloadCalls(t, strs.all(), nil)
 	checkJoined(t, err, []wantErr{{is: ErrRunnerExited}, {panicked: "isolated"}})
 	if !strings.Contains(err.Error(), `runner "exiting"`) {
 		t.Errorf("Run = %v, want it to name the exited Runner", err)
@@ -404,7 +404,7 @@ func TestReloadErrorEndsTheRunAndStopsEveryRunnerInReverse(t *testing.T) {
 	if !strings.Contains(err.Error(), `runner "b"`) {
 		t.Errorf("Run = %v, want it to name runner b", err)
 	}
-	checkCalls(t, log.all(), []reloadCall[int]{{"a", 3}, {"b", 3}})
+	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 3}, {"b", 3}})
 	checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 
 	failed := recordsNamed(capture, msgReloadFailed)
@@ -439,7 +439,7 @@ func TestReloadPanicEndsTheRunUnderEitherPolicy(t *testing.T) {
 					t.Errorf("PanicError.Stack does not contain Reload:\n%s", pe.Stack)
 				}
 			}
-			checkCalls(t, log.all(), []reloadCall[int]{{"a", 1}, {"b", 1}})
+			checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 1}, {"b", 1}})
 			checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 			if got := recordsNamed(capture, msgPanicked); len(got) != 1 || got[0].attrs["runner"].String() != "b" {
 				t.Errorf("panic records = %v, want one naming b", got)
@@ -470,7 +470,7 @@ func TestReloadOverrunEndsTheRunWithErrReloadTimeout(t *testing.T) {
 			if !strings.Contains(err.Error(), `runner "b"`) {
 				t.Errorf("Run = %v, want it to name runner b", err)
 			}
-			checkCalls(t, log.all(), []reloadCall[int]{{"a", 1}, {"b", 1}})
+			checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 1}, {"b", 1}})
 			checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
 			h.finish()
 		})
@@ -519,7 +519,7 @@ func TestReloadDeadlinePassingBetweenTwoReloadsIsAnUnnamedErrReloadTimeout(t *te
 			t.Errorf("Run = %v, want it to name no runner, not %s", err, name)
 		}
 	}
-	checkCalls(t, log.all(), []reloadCall[int]{{"a", 1}})
+	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 1}})
 	got := recordsNamed(logs, msgReloadFailed)
 	if len(got) != 1 {
 		t.Fatalf("%q records = %v, want one", msgReloadFailed, got)
@@ -593,7 +593,7 @@ func TestReloadTriggeredDuringStartIsAppliedOnceAfterStart(t *testing.T) {
 	if n := loads.Load(); n != 1 {
 		t.Errorf("load called %d times, want 1", n)
 	}
-	checkCalls(t, log.all(), []reloadCall[int]{{"a", 4}, {"b", 4}})
+	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 4}, {"b", 4}})
 	h.finish()
 }
 
@@ -621,7 +621,7 @@ func TestReloadTriggersDuringARoundCoalesceIntoOneMoreRound(t *testing.T) {
 	if n := loads.Load(); n != 2 {
 		t.Errorf("load called %d times, want 2", n)
 	}
-	checkCalls(t, log.all(), []reloadCall[int]{{"a", 2}, {"a", 2}})
+	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 2}, {"a", 2}})
 	h.finish()
 }
 
@@ -639,7 +639,7 @@ func TestReloadTriggeredDuringShutdownIsDropped(t *testing.T) {
 	if n := loads.Load(); n != 0 {
 		t.Errorf("load called %d times, want none", n)
 	}
-	checkCalls(t, log.all(), nil)
+	checkReloadCalls(t, log.all(), nil)
 	if un := <-h.unnotified; un.ch != sub.ch {
 		t.Error("unsubscribed another channel than the one subscribed")
 	}

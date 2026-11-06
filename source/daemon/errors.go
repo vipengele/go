@@ -26,6 +26,21 @@ var ErrAlreadyRan = errors.New("daemon: supervisor already ran")
 // RestartRequested, which also looks through joined errors.
 var ErrRestartRequired = errors.New("daemon: restart required")
 
+// ErrBlankCheckName reports a health check added with a name that is empty or only whitespace.
+var ErrBlankCheckName = errors.New("daemon: health check name is blank")
+
+// ErrDuplicateCheck reports a health check added under a name a Health already holds.
+var ErrDuplicateCheck = errors.New("daemon: duplicate health check")
+
+// ErrNilCheck reports a health check added with a nil Check.
+var ErrNilCheck = errors.New("daemon: health check is nil")
+
+// ErrUnknownKind reports a health check added with a Kind that is neither Liveness nor Readiness.
+var ErrUnknownKind = errors.New("daemon: unknown health check kind")
+
+// ErrCheckTimeout is the failure of a health check still running when its timeout expires.
+var ErrCheckTimeout = errors.New("daemon: health check timed out")
+
 // PanicError reports a panic recovered from a Runner. Value is what was passed to panic and Stack
 // is the stack of the panicking goroutine.
 type PanicError struct {

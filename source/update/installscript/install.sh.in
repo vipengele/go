@@ -6,8 +6,14 @@
 #   @@INSTALL_DIR_ENV@@    the directory the binary is placed in; $HOME/.local/bin when unset
 #   @@BASE_URL_ENV@@       the server releases are downloaded from; https://github.com when unset
 #   @@NO_COMPLETION_ENV@@  1 skips installing the shell completion
+@@SIGNED_BEGIN@@
+#   @@ALLOW_UNSIGNED_ENV@@ 1 installs on the checksum alone when minisign is not installed
+@@SIGNED_END@@
 #
 # The asset is verified against the release's checksums file before it is extracted or installed.
+@@SIGNED_BEGIN@@
+# The checksums file is verified first, against its minisign signature and the trusted keys.
+@@SIGNED_END@@
 set -eu
 
 name=@@NAME@@
@@ -203,6 +209,49 @@ case $status in
 *) fail "downloading $checksums_url answered HTTP $status" ;;
 esac
 
+@@SIGNED_BEGIN@@
+signature=$checksums.minisig
+signature_url=$checksums_url.minisig
+status=$(fetch "$signature_url" "$tmp/checksums.minisig") || fail "downloading $signature_url failed"
+case $status in
+200) ;;
+404) fail "release $tag has no signature $signature" ;;
+*) fail "downloading $signature_url answered HTTP $status" ;;
+esac
+
+# The checksums file is believed only once its signature verifies under one of the trusted keys.
+# Without minisign the signature cannot be checked, and the checksum alone is enough only when the
+# user says so, through @@ALLOW_UNSIGNED_ENV@@=1 or a "y" or "yes" typed at the terminal; with
+# neither, the install stops. The prompt reads /dev/tty because under `curl | sh` standard input
+# is the script itself, and /dev/tty is usable only when opening it succeeds: a process with no
+# controlling terminal fails to open it even though it exists.
+if command -v minisign >/dev/null 2>&1; then
+	verified=
+	for key in @@TRUSTED_KEYS@@; do
+		if minisign -V -q -P "$key" -m "$tmp/checksums" -x "$tmp/checksums.minisig" >/dev/null 2>&1; then
+			verified=1
+			break
+		fi
+	done
+	[ -n "$verified" ] || fail "the signature $signature does not verify $checksums under any trusted key; nothing was installed"
+else
+	warn "minisign is not installed, so the signature of $checksums cannot be checked"
+	if [ "${@@ALLOW_UNSIGNED_ENV@@:-}" = 1 ]; then
+		warn "@@ALLOW_UNSIGNED_ENV@@=1: installing on the checksum alone"
+	elif (: </dev/tty) 2>/dev/null; then
+		printf '%s: install %s verified by its checksum alone? [y/N] ' "$name" "$tag" >/dev/tty
+		answer=
+		read -r answer </dev/tty || answer=
+		case $answer in
+		[yY] | [yY][eE][sS]) ;;
+		*) fail "the install was declined; nothing was installed. Install minisign to check the signature, or set @@ALLOW_UNSIGNED_ENV@@=1 to install on the checksum alone" ;;
+		esac
+	else
+		fail "the signature cannot be checked and there is no terminal to ask; nothing was installed. Install minisign to check the signature, or set @@ALLOW_UNSIGNED_ENV@@=1 to install on the checksum alone"
+	fi
+fi
+
+@@SIGNED_END@@
 expected=$(listed_sha256 "$tmp/checksums" "$asset")
 case $expected in
 '') fail "$checksums lists no checksum for $asset" ;;

@@ -1,15 +1,23 @@
 package updatetest
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
+
+	"go.vipengele.org/update/internal/minisign"
 )
 
 // cleanupTB passes every call to the test it embeds except Cleanup, whose functions it keeps for
@@ -33,6 +41,82 @@ func (c *cleanupTB) cleanup() func() {
 	})
 	c.TB.Cleanup(run)
 	return run
+}
+
+// helperCountingTB passes every call to the test it embeds and counts the calls to Helper.
+type helperCountingTB struct {
+	testing.TB
+	helpers atomic.Int64
+}
+
+func (h *helperCountingTB) Helper() {
+	h.helpers.Add(1)
+	h.TB.Helper()
+}
+
+func TestSigningStepsAreTestHelpers(t *testing.T) {
+	t.Parallel()
+	s := NewServer(t, NewRelease(t, "vipengele", "tool", "v1.2.3", "tool"))
+
+	// Each step marks itself a helper, so a failure in it names the test's own call: generateKey
+	// once, and signChecksums once for itself and once for the one key it generates.
+	for _, tc := range []struct {
+		name string
+		call func(tb testing.TB)
+		want int64
+	}{
+		{"generateKey", func(tb testing.TB) { generateKey(tb, rand.Reader) }, 1},
+		{"signChecksums", func(tb testing.TB) { s.signChecksums(tb, rand.Reader) }, 2},
+	} {
+		h := &helperCountingTB{TB: t}
+		tc.call(h)
+		if got := h.helpers.Load(); got != tc.want {
+			t.Errorf("%s called Helper %d times, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestUnknownKeySignsUnderAnotherIDWhenTheKeysCollide(t *testing.T) {
+	t.Parallel()
+	s := NewServer(t, NewRelease(t, "vipengele", "tool", "v1.2.3", "tool"), UnknownKey())
+
+	// A stream of one repeated byte draws the same key id and key pair for both keys.
+	s.signChecksums(t, bytes.NewReader(bytes.Repeat([]byte{1}, 128)))
+
+	sig, err := minisign.ParseSignature(s.sig)
+	if err != nil {
+		t.Fatalf("ParseSignature: %v", err)
+	}
+	if sig.KeyID == s.key.ID {
+		t.Errorf("the UnknownKey signature carries the server's key id %s, want another", sig.KeyID)
+	}
+}
+
+// fatalTB records a Fatalf and its message, ending its goroutine as testing.T does, instead of
+// failing the test it embeds.
+type fatalTB struct {
+	testing.TB
+	message string
+}
+
+func (f *fatalTB) Fatalf(format string, args ...any) {
+	f.message = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+func TestGenerateKeyFailsTheTestWhenItsRandomnessFails(t *testing.T) {
+	t.Parallel()
+	f := &fatalTB{TB: t}
+	cause := errors.New("no entropy")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		generateKey(f, iotest.ErrReader(cause))
+	}()
+	<-done
+	if want := "updatetest: generating the signing key: minisigntest: key id: no entropy"; f.message != want {
+		t.Errorf("Fatalf message = %q, want %q", f.message, want)
+	}
 }
 
 // deadlockTimeout bounds a call that returns at once unless it deadlocks; it only ever fails a

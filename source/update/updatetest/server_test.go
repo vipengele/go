@@ -185,6 +185,7 @@ func TestServerListsEveryAssetInTheAPI(t *testing.T) {
 	want := map[string]int64{
 		rel.ArchiveName:   int64(len(rel.Archive)),
 		rel.ChecksumsName: int64(len(s.ChecksumsFile())),
+		sigName(rel):      int64(len(mustGet(t, s, s.AssetURL(sigName(rel))).body)),
 	}
 	if len(got.Assets) != len(want) {
 		t.Fatalf("assets = %+v, want %d", got.Assets, len(want))

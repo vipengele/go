@@ -18,7 +18,7 @@ Explored 2026-10-26 for issue vipengele/go#57 (sub-issue of #8 "Self-update core
 
 - No ADR or CONTEXT.md entry covers test kits, test-only code in a published module, or a "testkit" name
   (`grep -rin "testkit\|test kit\|fake" CONTEXT.md docs/adr` -> only an unrelated hit in ADR-0012). ADR-0003
-  lists update's contents without a test kit and puts cobra only in `updatecmd`.
+  lists update's contents without a test kit and puts cobra only in `updatecmd` (ADR-0003; superseded by ADR-0005, and depguard denies cobra across the module).
 - Precedent: `source/cli/core/logging/logtest` is a public subpackage of a project, documented in
   source/cli/core/AGENTS.md:151 and logging/doc.go:33. Subpackage `asset/` also exists in update.
   update has no internal/; its public subpackages are `asset/` and `updatetest/` (source/update/AGENTS.md

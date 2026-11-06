@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -54,6 +55,20 @@ func WithStartTimeout(timeout time.Duration) Option {
 			return fmt.Errorf("daemon: start timeout must be positive, got %v", timeout)
 		}
 		s.startTimeout = timeout
+		return nil
+	}
+}
+
+// WithHealth has New register the Supervisor's health checks in h: supervisor.live, a Liveness
+// check, supervisor.ready, a Readiness check, and a Readiness check named after each Runner that
+// is a HealthChecker. New registers them as its last step, all or none, so a New that fails leaves
+// h as it was. A nil h is rejected by New.
+func WithHealth(h *Health) Option {
+	return func(s *Supervisor) error {
+		if h == nil {
+			return errors.New("daemon: nil health")
+		}
+		s.health = h
 		return nil
 	}
 }

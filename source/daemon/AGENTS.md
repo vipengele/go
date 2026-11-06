@@ -19,18 +19,30 @@ golangci-lint run
 ## Structure
 
 - `runner.go` — the `Runner` interface: `Name`, `Start` that returns once the Runner is ready,
-  `Done` and `Err` that report its exit, and `Stop`; the optional `Order() int` method.
+  `Done` and `Err` that report its exit, and `Stop`; the optional `Order() int` method; the
+  optional `HealthChecker` interface, whose `CheckHealth` becomes a Readiness check named after
+  the Runner.
 - `supervisor.go` — `New` validates the Runners (non-empty, no nil, unique non-blank names) and
   sorts them stably by Order. `Run` starts them in turn within the start timeout, waits until the
   run context is done or a Runner exits, then calls `Stop` once on every Runner whose `Start` was
   called, in reverse start order within one grace period, and waits for its `Done`. `guard`
-  recovers panics into `*PanicError`; `launched` tracks one Runner whose `Start` was called. With
-  `WithInstanceLock`, `Run` takes the instance lock before the first `Start` and releases it in a
-  `defer`, after the stop phase, on every return path.
+  recovers panics into `*PanicError`; `launched` tracks one Runner whose `Start` was called and
+  is touched only by Run's goroutine. The health feed is separate, mutex-guarded state Run
+  publishes at each transition (`feed`, `runPhase`, `runnerPhase`); `New` registers
+  `supervisor.live`, `supervisor.ready` and each `HealthChecker` in the `WithHealth` registry as
+  its last step, all or none. With `WithInstanceLock`, `Run` takes the instance lock before the
+  first `Start` and releases it in a `defer`, after the stop phase, on every return path.
 - `instance.go` — `AcquireInstance`, the instance lock (`instance.lock`, through
   `go.vipengele.org/filelock`) in the tool's runtime directory from `cli/spec/paths`, and the
   best-effort holder record (`instance.holder`); `Instance` with `Path` and an idempotent
   `Release`.
+- `health.go` — `Health`, built with `NewHealth` and `WithCheckTimeout`: `Add` registers a `Check`
+  of `Kind` `Liveness` and/or `Readiness`; `Snapshot` runs every check concurrently under its
+  timeout and returns a `Snapshot` (`ok`, `unready` or `down`, plus `Live`, `Ready`, uptime and a
+  `CheckResult` per check) whose JSON keys are the wire contract of
+  `docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
+- `health_http.go` — `(*Health).Handler`, serving `/livez`, `/readyz` and `/status`;
+  the `/status` body is written by `spec.WriteJSON` at schema 1.
 - `func.go` — `Func`, the Runner adapter for a function run in its own goroutine, and `WithOrder`
   (`OrderOption`, shared with the HTTP Runner).
 - `http.go` — `NewHTTPServer` and `NewHTTPServerListener`, the `*http.Server` Runner, with
@@ -39,13 +51,18 @@ golangci-lint run
   and none is a `*PanicError`.
 - `reload.go` — `Reloader[T]`, the optional Runner interface for applying a new configuration, and
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
-- `option.go` — `WithGrace`, `WithStartTimeout`, `WithPanicPolicy` (`PanicFail`, the default, or
-  `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that fails `Validate`,
-  and `WithLogger`.
+- `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
+  the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
+  fails `Validate`, and `WithLogger`.
 - `errors.go` — `PanicError` and the sentinel errors (`ErrRunnerExited`, `ErrStartTimeout`,
-  `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`) and
-  `AlreadyRunningError`, which matches `ErrAlreadyRunning`; `ErrNilFunc` is in `func.go`,
-  `ErrNilServer` and `ErrNilListener` in `http.go`.
+  `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
+  `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels
+  (`ErrBlankCheckName`, `ErrDuplicateCheck`, `ErrNilCheck`, `ErrUnknownKind`, `ErrCheckTimeout`);
+  `ErrNilFunc` is in `func.go`, `ErrNilServer` and `ErrNilListener` in `http.go`.
+- `daemoncmd/` — `NewStatus`, the `status` command: an HTTP client of `/status` that prints the
+  snapshot as tables through `cli/spec/table`, or as the same JSON through `spec.WriteJSON` when
+  the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
+  `testdata/status.keys` pins its JSON keys.
 
 ## The `service` package
 
@@ -80,17 +97,23 @@ Conventions of the package:
 
 - The root `daemon` package is not stdlib-only: it requires `go.vipengele.org/filelock` and
   `go.vipengele.org/cli/spec` (for `spec.Identity` and `cli/spec/paths`), which bring in
-  `go.vipengele.org/commons` and `golang.org/x/sys` indirectly.
+  `go.vipengele.org/commons` and `golang.org/x/sys` indirectly. Only `daemoncmd` imports any
+  other `cli/spec` package.
 - The grace period's context is made from `context.Background()`, never from the cancelled run context.
 - Work that outlives `Start` is never bound to the start context, which is cancelled when the start
   phase ends: `Func` and the HTTP Runner derive theirs with `context.WithoutCancel`.
 - The package handles only SIGHUP, and only under `WithReload`: the context passed to `Run` drives
   shutdown, and SIGINT and SIGTERM stay with the caller (`cli/core` owns them).
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
-- `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core/**`;
-  `cli/spec` is allowed.
+- `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
+  and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
+  `daemon` and `daemon/service`, `cli/spec`, `cli/spec/paths` and `filelock`. A depguard `pkg`
+  entry matches by prefix, so a `/**` suffix matches nothing.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
+- The `/status` body and the `status` command's JSON are byte-identical: both are written by
+  `spec.WriteJSON` with the same schema, which `TestStatusJSONIsTheHandlerBody` in
+  `daemoncmd/status_test.go` pins.
 - A new `Run` outcome is documented in the `Errors` section of `doc.go` and tested in
   `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`, and, for reload,
   `reload_test.go` (the real SIGHUP in `reload_signal_test.go`). Log records are tested in

@@ -19,10 +19,16 @@
 //
 // [Config.Download] fetches the archive a [Selection] names to a temporary file in TempDir and
 // returns it as an [*Archive] only once its SHA-256 digest matches the one the release's checksums
-// file lists for it. The download is bounded: the archive may carry at most MaxDownloadBytes, the
-// checksums file at most 1 MiB, and each request has a DownloadTimeout deadline. The temporary file
-// is removed on every failure and by [Archive.Close]. [WithProgress] reports the archive's progress.
-// HTTPS is not enforced; the digest check is the integrity guarantee.
+// file lists for it. With TrustedKeys, the checksums file is trusted only once its minisign
+// signature, the checksums asset's name followed by ".minisig", verifies with the trusted key its
+// key id names; that check precedes parsing the checksums file and requesting the archive, so a
+// [*SignatureMalformedError], an [*UnknownKeyError], a [*SignatureMismatchError] or a missing
+// signature refuses the release with no archive fetched. The signed checksums file vouches for the
+// archive through its digest. Under AllowUnsigned no signature is fetched and the digest check
+// proves integrity only. The download is bounded: the archive may carry at most MaxDownloadBytes,
+// the checksums file at most 1 MiB, the signature at most 4 KiB, and each request has a
+// DownloadTimeout deadline. The temporary file is removed on every failure and by [Archive.Close].
+// [WithProgress] reports the archive's progress. HTTPS is not enforced.
 //
 // [Config.Extract] turns the verified [*Archive] into a [*Staged] binary: a new file, mode 0700 and
 // synced, in a directory the caller supplies, so that a rename into place stays on one filesystem.
@@ -58,6 +64,12 @@
 // [Config.CheckWritable] can report before anything is downloaded. A [PostUpdate] hook receives
 // [Installed.Path]; Install runs none itself.
 //
+// [Config.Apply] is the whole update of a [Selection] in one call: CheckManaged and CheckWritable,
+// both before any request, then Download, Extract into Target's directory and Install, stopping at
+// the first error. It returns the [*Installed] with the backup still on disk; the caller runs its
+// PostUpdate hooks, whose failure is reported and does not undo the update, and then settles it
+// with Discard or Rollback.
+//
 // Whether a background update check may run is decided from the Config and the stored [State]. The
 // gates are tried in order and the first that fails decides: the running Version is not a release
 // version, the CI environment variable is set, stderr is not a terminal (IsTerminal), DisableCheck
@@ -88,6 +100,10 @@
 // hooks write nothing else and the post-run hook always returns nil. The tool's own update command
 // must carry the [spec.SkipUpdateCheck] annotation, or the pre-run hook starts a check in the very
 // command that installs the update.
+//
+// [Config.CheckRelease] refuses a development build: it returns a [*DevBuildError], matched with
+// [errors.As], when the Config's Version is not a release version, so an update command can stop
+// before it downloads anything.
 //
 // The package depends on no command-line framework.
 package update

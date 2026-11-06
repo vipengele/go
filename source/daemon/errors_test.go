@@ -18,6 +18,11 @@ func TestSentinelMessages(t *testing.T) {
 		{"stop timeout", ErrStopTimeout, "daemon: runner stop timed out"},
 		{"already ran", ErrAlreadyRan, "daemon: supervisor already ran"},
 		{"restart required", ErrRestartRequired, "daemon: restart required"},
+		{"blank check name", ErrBlankCheckName, "daemon: health check name is blank"},
+		{"duplicate check", ErrDuplicateCheck, "daemon: duplicate health check"},
+		{"nil check", ErrNilCheck, "daemon: health check is nil"},
+		{"unknown kind", ErrUnknownKind, "daemon: unknown health check kind"},
+		{"check timeout", ErrCheckTimeout, "daemon: health check timed out"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -38,6 +43,11 @@ func TestSentinelsMatchThroughWrapping(t *testing.T) {
 		{"reload timeout", ErrReloadTimeout},
 		{"stop timeout", ErrStopTimeout},
 		{"already ran", ErrAlreadyRan},
+		{"blank check name", ErrBlankCheckName},
+		{"duplicate check", ErrDuplicateCheck},
+		{"nil check", ErrNilCheck},
+		{"unknown kind", ErrUnknownKind},
+		{"check timeout", ErrCheckTimeout},
 	}
 	for _, tt := range sentinels {
 		wrappers := []struct {
