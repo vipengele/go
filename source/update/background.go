@@ -91,7 +91,7 @@ func runCheck(ctx context.Context, r Config) string {
 	if !throttleElapsed(st.LastAttempt, r.Now(), r.CheckInterval) {
 		return st.LatestVersion
 	}
-	rel, err := r.Source.Latest(ctx)
+	rel, err := r.Source.Latest(ctx, r.Channel)
 	next, save := afterAttempt(ctx, st, r.Now(), rel.Tag, err)
 	if save {
 		_ = r.StateStore.Save(ctx, next) // a failed save never fails the command

@@ -24,7 +24,7 @@ import (
 // stubSource is a Source that reports no release.
 type stubSource struct{}
 
-func (*stubSource) Latest(context.Context) (Release, error) {
+func (*stubSource) Latest(context.Context, Channel) (Release, error) {
 	return Release{}, errors.New("stubSource: no release")
 }
 

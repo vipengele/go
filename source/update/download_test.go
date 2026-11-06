@@ -1024,7 +1024,7 @@ func newKitRelease(t *testing.T, dir string, opts ...updatetest.Option) kitRelea
 // update finds the latest release, selects its assets and downloads them, and returns the
 // Selection, the Archive and the error of the first step that fails.
 func (k kitRelease) update(ctx context.Context, opts ...DownloadOption) (Selection, *Archive, error) {
-	rel, err := k.cfg.Source.Latest(ctx)
+	rel, err := k.cfg.Source.Latest(ctx, Stable)
 	if err != nil {
 		return Selection{}, nil, err
 	}

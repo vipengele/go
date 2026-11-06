@@ -132,7 +132,7 @@ func releaseVersion(v string) (string, error) {
 // line written says all there is to say. managed, when not nil, adds what to run instead of an
 // in-place update.
 func (c *command) report(ctx context.Context, inv *spec.Invocation, r update.Config, managed *update.ManagedInstallError) error {
-	latest, err := r.Source.Latest(ctx)
+	latest, err := r.Source.Latest(ctx, r.Channel)
 	if err != nil {
 		return err
 	}
@@ -164,7 +164,7 @@ func (c *command) update(ctx context.Context, inv *spec.Invocation, r update.Con
 			return nil
 		}
 	} else {
-		latest, err := r.Source.Latest(ctx)
+		latest, err := r.Source.Latest(ctx, r.Channel)
 		if err != nil {
 			return err
 		}

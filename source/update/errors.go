@@ -12,8 +12,8 @@ import (
 // maxErrorBody is the most response-body bytes a [StatusError] keeps.
 const maxErrorBody = 1 << 10
 
-// ErrPrerelease reports that the latest release is a pre-release and the source was not asked to
-// include pre-releases.
+// ErrPrerelease reports that the release a source marks as its latest is a pre-release, asked for
+// on the [Stable] channel, which receives no pre-release.
 var ErrPrerelease = errors.New("update: latest release is a pre-release")
 
 // ErrAssetsNotListed reports a release whose assets the source did not list, from a [Source] that

@@ -86,7 +86,7 @@ func (heldLocker) TryLock() (func(), error) {
 // errSource is a Source whose every lookup fails.
 type errSource struct{}
 
-func (errSource) Latest(context.Context) (Release, error) {
+func (errSource) Latest(context.Context, Channel) (Release, error) {
 	return Release{}, errors.New("errSource: unreachable")
 }
 

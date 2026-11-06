@@ -680,7 +680,7 @@ type staticSource struct {
 	err error
 }
 
-func (s staticSource) Latest(context.Context) (update.Release, error) {
+func (s staticSource) Latest(context.Context, update.Channel) (update.Release, error) {
 	return s.rel, s.err
 }
 

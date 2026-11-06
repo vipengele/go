@@ -184,7 +184,7 @@ func Example_install() {
 // newerSource is a Source whose latest release is always v1.3.0.
 type newerSource struct{}
 
-func (newerSource) Latest(context.Context) (update.Release, error) {
+func (newerSource) Latest(context.Context, update.Channel) (update.Release, error) {
 	return update.Release{Tag: "v1.3.0"}, nil
 }
 
