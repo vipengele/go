@@ -461,3 +461,115 @@ func TestCancelNowCutsAWaitingFinishShort(t *testing.T) {
 		t.Errorf("Finish() took %v, want cancelNow to end its wait before the CheckWait %v", elapsed, maxCheckWait)
 	}
 }
+
+// fixedSource is a Source that answers every lookup with tag and records the channels it was
+// asked for.
+type fixedSource struct {
+	tag      string
+	mu       sync.Mutex
+	channels []Channel
+}
+
+func (s *fixedSource) Latest(_ context.Context, ch Channel) (Release, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.channels = append(s.channels, ch)
+	return Release{Tag: s.tag}, nil
+}
+
+// queried returns a copy of every channel looked up so far.
+func (s *fixedSource) queried() []Channel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Channel(nil), s.channels...)
+}
+
+func TestNoticeIgnoresAVersionLearntOnAnotherChannel(t *testing.T) {
+	t.Parallel()
+	store := &fakeStore{loads: []loadResult{{st: State{
+		LastAttempt:   bgNow().Add(-time.Hour),
+		LatestVersion: "v2.0.0-beta.1",
+		LatestChannel: Beta,
+	}}}}
+	c := bgConfig(t, newKitServer(t), store)
+	c.Source = errSource{}
+	k := start(t, c)
+	if k == nil {
+		t.Fatal("Start() = nil, want a check of the stable channel")
+	}
+
+	assertNoNotice(t, k)
+	finishWithin(t, k, 10*time.Second)
+	assertNoNotice(t, k)
+
+	saves := store.recordedSaves()
+	if len(saves) != 1 {
+		t.Fatalf("Save called %d times, want 1", len(saves))
+	}
+	if saves[0].LatestVersion != "" || saves[0].LatestChannel != Stable {
+		t.Errorf("saved %+v, want no LatestVersion on the Stable channel", saves[0])
+	}
+}
+
+func TestChannelChangeMakesAThrottledRunCheck(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	store := &fakeStore{loads: []loadResult{{st: State{
+		LastAttempt:   bgNow().Add(-time.Hour),
+		LatestVersion: "v1.1.0",
+		LatestChannel: Beta,
+	}}}}
+	k := start(t, bgConfig(t, srv, store))
+	finishWithin(t, k, 10*time.Second)
+
+	if latestRequests(srv) == 0 {
+		t.Error("server received no request, want the stable channel checked")
+	}
+	saves := store.recordedSaves()
+	if len(saves) != 1 {
+		t.Fatalf("Save called %d times, want 1", len(saves))
+	}
+	if saves[0].LatestVersion != "v1.2.3" || saves[0].LatestChannel != Stable || !saves[0].LastAttempt.Equal(bgNow()) {
+		t.Errorf("saved %+v, want v1.2.3 on Stable at %v", saves[0], bgNow())
+	}
+	assertNotice(t, k, "v1.2.3")
+}
+
+func TestCheckRethrottlesOnlyOnItsOwnChannel(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	store := &fakeStore{loads: []loadResult{
+		{},
+		{st: State{LastAttempt: bgNow(), LatestVersion: "v1.5.0", LatestChannel: Edge}},
+	}}
+	k := start(t, bgConfig(t, srv, store))
+	finishWithin(t, k, 10*time.Second)
+
+	if latestRequests(srv) == 0 {
+		t.Error("server received no request, want an attempt on another channel not to throttle")
+	}
+	assertNotice(t, k, "v1.2.3")
+}
+
+func TestCheckRecordsTheChannelOfASuccessfulAttempt(t *testing.T) {
+	t.Parallel()
+	src := &fixedSource{tag: "v1.3.0-beta.1"}
+	store := &fakeStore{loads: []loadResult{{st: State{LatestVersion: "v1.1.0"}}}}
+	c := bgConfig(t, newKitServer(t), store)
+	c.Source = src
+	c.Channel = Beta
+	k := start(t, c)
+	finishWithin(t, k, 10*time.Second)
+
+	if got := src.queried(); len(got) != 1 || got[0] != Beta {
+		t.Errorf("Source queried for %v, want [beta]", got)
+	}
+	saves := store.recordedSaves()
+	if len(saves) != 1 {
+		t.Fatalf("Save called %d times, want 1", len(saves))
+	}
+	if saves[0].LatestVersion != "v1.3.0-beta.1" || saves[0].LatestChannel != Beta {
+		t.Errorf("saved %+v, want v1.3.0-beta.1 on Beta", saves[0])
+	}
+	assertNotice(t, k, "v1.3.0-beta.1")
+}

@@ -15,8 +15,10 @@ const stateFileName = "update-state.json"
 
 // State is what an update check remembers between runs.
 //
-// It is stored as JSON with the keys "last_attempt" and "latest_version", each omitted when zero.
-// A reader ignores unknown keys, so a field added later stays readable by this one.
+// It is stored as JSON with the keys "last_attempt", "latest_version" and "latest_channel", each
+// omitted when zero. A reader ignores unknown keys, so a field added later stays readable by this
+// one, and a missing key reads as the field's zero value, so a file without "latest_channel" holds
+// a version learnt on Stable.
 type State struct {
 	// LastAttempt is when the last check was made, whether or not it succeeded. The zero time
 	// means no check has been made.
@@ -24,6 +26,27 @@ type State struct {
 	// LatestVersion is the newest release version the last successful check found, such as
 	// "v1.2.3". Empty means none is known.
 	LatestVersion string `json:"latest_version,omitzero"`
+	// LatestChannel is the channel LatestVersion was learnt on, stored by its name ("beta",
+	// "edge") through [Channel.MarshalText]. Stable is the zero value and is omitted.
+	LatestChannel Channel `json:"latest_channel,omitzero"`
+}
+
+// lastAttemptOn returns LastAttempt when st was learnt on ch, and the zero time otherwise: an
+// attempt on another channel says nothing about ch, so it never throttles a check of ch.
+func (st State) lastAttemptOn(ch Channel) time.Time {
+	if st.LatestChannel != ch {
+		return time.Time{}
+	}
+	return st.LastAttempt
+}
+
+// latestVersionOn returns LatestVersion when it was learnt on ch, and empty otherwise: a version
+// learnt on another channel is unknown to a follower of ch and is never announced to it.
+func (st State) latestVersionOn(ch Channel) string {
+	if st.LatestChannel != ch {
+		return ""
+	}
+	return st.LatestVersion
 }
 
 // StateStore keeps a [State] between runs.

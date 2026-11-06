@@ -18,7 +18,8 @@ type Check struct {
 	name string
 	// current is the running program's version.
 	current string
-	// saved is the LatestVersion the state held when the check started.
+	// saved is the LatestVersion the state held when the check started, or empty when it was
+	// learnt on another channel than the Config's.
 	saved string
 	// wait is the longest Finish waits before cancelling the check.
 	wait time.Duration
@@ -37,7 +38,8 @@ type Check struct {
 // when c is invalid, as [Config.Resolved] reports it.
 //
 // Start loads the Update state through the StateStore under ctx; a Load error counts as the zero
-// State. When the check is ineligible (a dev build, in CI, stderr not a terminal, disabled, opted
+// State. A LatestVersion learnt on a channel other than Config.Channel is unknown: it is never
+// announced, and its LastAttempt does not throttle the check. When the check is ineligible (a dev build, in CI, stderr not a terminal, disabled, opted
 // out, or within CheckInterval of the last attempt) it returns a nil *Check and starts nothing,
 // so no notice is shown in that run.
 //
@@ -64,7 +66,7 @@ func (c Config) Start(ctx context.Context) (*Check, error) {
 	k := &Check{
 		name:    r.Name,
 		current: r.Version,
-		saved:   st.LatestVersion,
+		saved:   st.latestVersionOn(r.Channel),
 		wait:    r.CheckWait,
 		cancel:  cancel,
 		done:    make(chan struct{}),
@@ -76,8 +78,9 @@ func (c Config) Start(ctx context.Context) (*Check, error) {
 	return k, nil
 }
 
-// runCheck runs one check of r under ctx and returns the newest release version it learnt, or
-// empty when it learnt none.
+// runCheck runs one check of r under ctx and returns the newest release version it learnt on
+// r.Channel, or empty when it learnt none. The reloaded state is read on r.Channel as Start reads
+// it: an attempt or a version learnt on another channel neither throttles nor is returned.
 func runCheck(ctx context.Context, r Config) string {
 	unlock, err := r.Locker.Lock(ctx)
 	if err != nil {
@@ -88,11 +91,11 @@ func runCheck(ctx context.Context, r Config) string {
 	if err != nil {
 		return ""
 	}
-	if !throttleElapsed(st.LastAttempt, r.Now(), r.CheckInterval) {
-		return st.LatestVersion
+	if !throttleElapsed(st.lastAttemptOn(r.Channel), r.Now(), r.CheckInterval) {
+		return st.latestVersionOn(r.Channel)
 	}
 	rel, err := r.Source.Latest(ctx, r.Channel)
-	next, save := afterAttempt(ctx, st, r.Now(), rel.Tag, err)
+	next, save := afterAttempt(ctx, st, r.Now(), r.Channel, rel.Tag, err)
 	if save {
 		_ = r.StateStore.Save(ctx, next) // a failed save never fails the command
 	}
