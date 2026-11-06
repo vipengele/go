@@ -247,7 +247,9 @@ func TestReloadOfAConfigTheLoadFailsToProduceCallsNoRunnerAndKeepsRunning(t *tes
 		// load is the load of the test; expire, when set, ends the round once load has been called.
 		load   func(called chan<- struct{}, held <-chan struct{}) func(context.Context) (int, error)
 		expire bool
-		is     error
+		// is is the error the rejection wraps; text, when set, is the whole rejection error.
+		is   error
+		text string
 	}{
 		{
 			name: "error",
@@ -270,6 +272,13 @@ func TestReloadOfAConfigTheLoadFailsToProduceCallsNoRunnerAndKeepsRunning(t *tes
 				return func(context.Context) (int, error) { called <- struct{}{}; panic(cause) }
 			},
 			is: cause,
+		},
+		{
+			name: "panic with a value that is not an error",
+			load: func(called chan<- struct{}, _ <-chan struct{}) func(context.Context) (int, error) {
+				return func(context.Context) (int, error) { called <- struct{}{}; panic("bad value") }
+			},
+			text: "daemon: reload load panicked: bad value",
 		},
 	}
 	for _, tt := range tests {
@@ -299,8 +308,12 @@ func TestReloadOfAConfigTheLoadFailsToProduceCallsNoRunnerAndKeepsRunning(t *tes
 			if r, ok := got[0].attrs["runner"]; ok {
 				t.Errorf("rejection record names runner %v, want none", r)
 			}
-			if err, _ := got[0].attrs["err"].Any().(error); !errors.Is(err, tt.is) {
+			err, _ := got[0].attrs["err"].Any().(error)
+			if tt.is != nil && !errors.Is(err, tt.is) {
 				t.Errorf("rejection err = %v, want it to wrap %v", err, tt.is)
+			}
+			if tt.text != "" && (err == nil || err.Error() != tt.text) {
+				t.Errorf("rejection err = %v, want %q", err, tt.text)
 			}
 
 			h.cancelRun()
@@ -520,6 +533,52 @@ func TestReloadDeadlinePassingBetweenTwoReloadsIsAnUnnamedErrReloadTimeout(t *te
 		}
 	}
 	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 1}})
+	got := recordsNamed(logs, msgReloadFailed)
+	if len(got) != 1 {
+		t.Fatalf("%q records = %v, want one", msgReloadFailed, got)
+	}
+	if got[0].level != slog.LevelError {
+		t.Errorf("%q level = %v, want %v", msgReloadFailed, got[0].level, slog.LevelError)
+	}
+	if r, ok := got[0].attrs["runner"]; !ok || r.String() != "b" {
+		t.Errorf("%q runner = %v (present %t), want b", msgReloadFailed, r, ok)
+	}
+	if e, _ := got[0].attrs["err"].Any().(error); !errors.Is(e, ErrReloadTimeout) {
+		t.Errorf("%q err = %v, want it to wrap ErrReloadTimeout", msgReloadFailed, e)
+	}
+	checkOrder(t, "stop", h.rec.stopOrder(), []string{"c", "b", "a"})
+	h.finish()
+}
+
+func TestReloadReturningAContextErrorAfterTheDeadlineIsANamedErrReloadTimeout(t *testing.T) {
+	var sup *Supervisor
+	capture := func(s *Supervisor) error { sup = s; return nil }
+	logs, logger := newCapture()
+	log := &reloadLog[int]{}
+	a, b, c := newReloading("a", log), newReloading("b", log), newReloading("c", log)
+	// b's Reload arms the round context and returns DeadlineExceeded without reading it, so its
+	// result reaches the round while the round context's Done is still open, and the round's read
+	// of Err after receiving it is what ends the round context.
+	var armed atomic.Bool
+	b.onReload = func() { armed.Store(true) }
+	b.err = context.DeadlineExceeded
+	var loads atomic.Int32
+	h, sub := runReloading(t, counted(&loads, 1), []Option{WithLogger(logger), capture}, a, b, c)
+
+	// The round reads newReloadContext only after it receives the hangup sent below.
+	harnessContext := sup.newReloadContext
+	sup.newReloadContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := harnessContext(parent)
+		return expiresOnInspection{Context: ctx, cancel: cancel, armed: &armed}, cancel
+	}
+
+	hangup(sub)
+	err := <-h.result
+	checkJoined(t, err, []wantErr{{is: ErrReloadTimeout}})
+	if !strings.Contains(err.Error(), `runner "b"`) {
+		t.Errorf("Run = %v, want it to name runner b", err)
+	}
+	checkReloadCalls(t, log.all(), []reloadCall[int]{{"a", 1}, {"b", 1}})
 	got := recordsNamed(logs, msgReloadFailed)
 	if len(got) != 1 {
 		t.Fatalf("%q records = %v, want one", msgReloadFailed, got)
