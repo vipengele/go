@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -305,6 +306,75 @@ func TestRunLogsAStopProblemAtWarn(t *testing.T) {
 			}
 			checkRecords(t, logs.all(), tt.want)
 			h.finish()
+		})
+	}
+}
+
+func TestRunLogsAStartThatReturnsNilAfterTheStartPhaseAsAStartAndAStop(t *testing.T) {
+	timedOut := wantRecord{level: slog.LevelError, msg: "runner start failed", runner: "late", err: ErrStartTimeout}
+	tests := []struct {
+		name string
+		// cancelRun ends the start phase by cancelling the run context; otherwise the phase times out.
+		cancelRun bool
+		want      []wantRecord
+	}{
+		{
+			name: "start timeout",
+			want: []wantRecord{started("a"), timedOut, started("late"), stopped("late"), stopped("a")},
+		},
+		{
+			name:      "run cancelled during start",
+			cancelRun: true,
+			want:      []wantRecord{started("a"), started("late"), stopped("late"), stopped("a")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			logs, logger := newCapture()
+			a := newScripted("a")
+			a.rec = &recorder{}
+			late := newHeldStart("late")
+			late.exit(nil)
+			s, err := New([]Runner{a, late}, WithLogger(logger))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			expire, expireStart := context.WithCancel(context.Background())
+			defer expireStart()
+			s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(parent)
+				stop := context.AfterFunc(expire, cancel)
+				return ctx, func() { stop(); cancel() }
+			}
+			s.newStopContext = func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			}
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			defer cancelRun()
+			result := make(chan error, 1)
+			go func() { result <- s.Run(runCtx) }()
+
+			<-a.started
+			<-late.entered
+			if tt.cancelRun {
+				cancelRun()
+			} else {
+				expireStart()
+			}
+			<-late.stopped
+			late.start <- func() error { return nil }
+			err = <-result
+
+			if tt.cancelRun {
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			} else if !errors.Is(err, ErrStartTimeout) {
+				t.Errorf("Run = %v, want ErrStartTimeout", err)
+			}
+			checkRecords(t, logs.all(), tt.want)
+			settle(t, baseline)
 		})
 	}
 }
