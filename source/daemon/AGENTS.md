@@ -46,7 +46,9 @@ golangci-lint run
 - `func.go` — `Func`, the Runner adapter for a function run in its own goroutine, and `WithOrder`
   (`OrderOption`, shared with the HTTP Runner).
 - `http.go` — `NewHTTPServer` and `NewHTTPServerListener`, the `*http.Server` Runner, with
-  `WithHTTPName` and `DefaultHTTPOrder`.
+  `WithHTTPName` and `DefaultHTTPOrder`; it serves TLS with `ServeTLS` when the server's
+  `TLSConfig` is non-nil, and `Start` fails with `ErrNoCertificate` when that config carries no
+  certificate (`Certificates`, `GetCertificate` or `GetConfigForClient`).
 - `restart.go` — `RestartRequested`, true only when every leaf of an error is `ErrRestartRequired`
   and none is a `*PanicError`.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
@@ -56,11 +58,23 @@ golangci-lint run
   `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels
   (`ErrBlankCheckName`, `ErrDuplicateCheck`, `ErrNilCheck`, `ErrUnknownKind`, `ErrCheckTimeout`);
-  `ErrNilFunc` is in `func.go`, `ErrNilServer` and `ErrNilListener` in `http.go`.
+  `ErrNilFunc` is in `func.go`, `ErrNilServer`, `ErrNilListener` and `ErrNoCertificate` in `http.go`.
 - `daemoncmd/` — `NewStatus`, the `status` command: an HTTP client of `/status` that prints the
   snapshot as tables through `cli/spec/table`, or as the same JSON through `spec.WriteJSON` when
   the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
   `testdata/status.keys` pins its JSON keys.
+- `httpserver/` — package `go.vipengele.org/daemon/httpserver`, the hardened `*http.Server` the
+  HTTP Runner serves; read its `doc.go` and
+  `docs/adr/0026-the-http-server-kit-has-a-fixed-middleware-order-and-pluggable-auth.md`.
+  - `server.go` — `New`, which wraps the handler in the fixed middleware chain and sets the
+    timeouts and limits, `CheckListener` and the plain-HTTP exposure warning.
+  - `option.go` — `Option` and the `With...` options, and `Timeouts`.
+  - `middleware.go` — `Recover`, `Log`, `SecureHeaders`, `AllowHosts`, `AllowOrigins` and
+    `LimitBody`.
+  - `auth.go` — `Authenticator`, `BearerToken` and `RequireAuth`, which skips the canonical
+    unauthenticated paths.
+  - `errors.go` — `Error`, the JSON error envelope written by `spec.WriteJSON`.
+  - `decode.go` — `DecodeJSON` and `*RequestError`.
 
 ## The `service` package
 
@@ -104,12 +118,15 @@ Conventions of the package:
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
-  `daemon` and `daemon/service`, `cli/spec`, `cli/spec/paths` and `filelock`. A depguard `pkg`
-  entry matches by prefix, so a `/**` suffix matches nothing.
+  `daemon`, `daemon/service` and `daemon/httpserver`, `cli/spec`, `cli/spec/paths` and
+  `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by
   `spec.WriteJSON` with the same schema, which `TestStatusJSONIsTheHandlerBody` in
   `daemoncmd/status_test.go` pins.
+- `httpserver` imports the standard library and `go.vipengele.org/cli/spec` (for `spec.WriteJSON`)
+  only, and its middleware order is fixed (ADR-0026): a new middleware gets a position in the chain
+  in `New`, documented under `# Middleware order` in its `doc.go`, never an option that reorders.
 - A new `Run` outcome is documented in the `Errors` section of `doc.go` and tested in
   `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`.
