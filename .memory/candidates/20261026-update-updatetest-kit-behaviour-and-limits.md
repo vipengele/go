@@ -24,7 +24,7 @@ Found while building the kit and moving the updater's own tests onto it (issue v
 - The kit always sets `Content-Length`, so after a failed checksum the last streaming progress call
   already reads (n, n); a test cannot look for a final done == total call and checks for a repeated
   count instead (download_test.go `TestDownloadBadChecksum`).
-- The kit cannot express: the release-list route used with `IncludePrereleases`, a chosen status or
+- The kit cannot express: the release-list route the Beta and Edge channels read (`GitHubSource.highestListed`), a chosen status or
   error body (an unlocated 404), a mid-body stall, request-header inspection, or a timed delay. Tests
   of those keep their own handlers in github_test.go and download_test.go.
 - A request path is matched on `r.URL.EscapedPath()`, so a tag containing `/` (`source/x/v1.2.3`)
