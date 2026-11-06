@@ -70,7 +70,10 @@
 // a context free of the start context's cancellation, cancelled only once the drain ends. Stop
 // shuts the server down: requests in flight have the rest of the grace period to finish rather
 // than having their contexts cancelled when shutdown begins, and the server is closed when the
-// grace period ends first. A nil server makes Start return ErrNilServer, and a nil listener
+// grace period ends first. The server's TLSConfig is the TLS switch: a server with one is served
+// over TLS with the certificate it carries, one without it over plain HTTP. A TLSConfig that sets
+// none of Certificates, GetCertificate and GetConfigForClient makes Start return ErrNoCertificate,
+// a start failure. A nil server makes Start return ErrNilServer, and a nil listener
 // ErrNilListener.
 //
 // # Single instance

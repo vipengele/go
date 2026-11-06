@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -20,6 +21,10 @@ const defaultHTTPName = "http"
 
 // ErrNilServer is what Start returns on an HTTP Runner built with a nil *http.Server.
 var ErrNilServer = errors.New("daemon: nil http server")
+
+// ErrNoCertificate is what Start returns on an HTTP Runner whose server has a TLSConfig with no
+// Certificates, GetCertificate or GetConfigForClient: such a server has no certificate to present.
+var ErrNoCertificate = errors.New("daemon: tls config has no certificate")
 
 // ErrNilListener is what Start returns on a Runner built by NewHTTPServerListener with a nil
 // listener.
@@ -71,6 +76,11 @@ func NewHTTPServer(srv *http.Server, opts ...HTTPOption) Runner {
 // closes every connection, cancels the base context so handlers that watch their request context
 // return, and returns the context's error, which the Supervisor reports as ErrStopTimeout. Done
 // closes once Serve has returned and the drain has ended, cut short or not.
+//
+// A server with a non-nil TLSConfig is served over TLS with srv.ServeTLS, and one with a nil
+// TLSConfig over plain HTTP with srv.Serve; both are called Serve below. The TLSConfig carries the
+// certificate: Start returns ErrNoCertificate, before binding, when it sets none of Certificates,
+// GetCertificate and GetConfigForClient.
 //
 // After Stop has begun, Serve returning http.ErrServerClosed is a clean exit and Err reports nil.
 // Any other return from Serve, http.ErrServerClosed included when something other than Stop shut
@@ -147,8 +157,8 @@ func (r *httpRunner) Name() string { return r.name }
 func (r *httpRunner) Order() int { return r.order }
 
 // Start binds the listener when the Runner has none, launches Serve in a goroutine and returns
-// nil. It returns an error when the server or listener is nil, when binding fails, or when the
-// Runner was already started, and one wrapping context.Canceled when Stop came first.
+// nil. It returns an error when the server or listener is nil, when the server's TLSConfig has no
+// certificate, when binding fails, or when the Runner was already started, and one wrapping context.Canceled when Stop came first.
 func (r *httpRunner) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -166,6 +176,10 @@ func (r *httpRunner) Start(ctx context.Context) error {
 	if r.useListener && r.listener == nil {
 		return fmt.Errorf("daemon: runner %q: %w", r.name, ErrNilListener)
 	}
+	tlsConfig := r.srv.TLSConfig
+	if tlsConfig != nil && !hasCertificate(tlsConfig) {
+		return fmt.Errorf("daemon: runner %q: %w", r.name, ErrNoCertificate)
+	}
 	if !r.useListener {
 		var lc net.ListenConfig
 		l, err := lc.Listen(ctx, "tcp", listenAddress(r.srv.Addr))
@@ -181,8 +195,12 @@ func (r *httpRunner) Start(ctx context.Context) error {
 	r.started = true
 
 	srv, l := r.srv, r.listener
+	serve := func() error { return srv.Serve(l) }
+	if tlsConfig != nil {
+		serve = func() error { return srv.ServeTLS(l, "", "") }
+	}
 	go func() {
-		o := guard(r.name, func() error { return srv.Serve(l) })
+		o := guard(r.name, serve)
 		r.mu.Lock()
 		stopping := r.stopping
 		r.mu.Unlock()
@@ -197,6 +215,11 @@ func (r *httpRunner) Start(ctx context.Context) error {
 		close(r.done)
 	}()
 	return nil
+}
+
+// hasCertificate reports whether c gives a TLS server a certificate to present.
+func hasCertificate(c *tls.Config) bool {
+	return len(c.Certificates) > 0 || c.GetCertificate != nil || c.GetConfigForClient != nil
 }
 
 // listenAddress returns the address Start binds for srv.Addr addr: ":http" when addr is empty.

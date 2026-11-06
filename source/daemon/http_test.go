@@ -2,14 +2,22 @@ package daemon
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // httpRun runs a Supervisor over runners in the background, with a stop context the test cancels
@@ -520,5 +528,166 @@ func TestHTTPListenAddressDefaultsAnEmptyAddressToTheHTTPPort(t *testing.T) {
 		if got := listenAddress(addr); got != want {
 			t.Errorf("listenAddress(%q) = %q, want %q", addr, got, want)
 		}
+	}
+}
+
+// selfSigned returns a TLS certificate for 127.0.0.1 signed by its own key, and a pool that
+// trusts it.
+func selfSigned(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "daemon test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, pool
+}
+
+func TestHTTPServerWithATLSConfigServesTLS(t *testing.T) {
+	cert, pool := selfSigned(t)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.TLS == nil {
+				_, _ = io.WriteString(w, "plain")
+				return
+			}
+			_, _ = io.WriteString(w, "tls")
+		}),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+	}
+	l := listen(t)
+	r := NewHTTPServerListener(srv, l)
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	client := &http.Client{Transport: &http.Transport{
+		DisableKeepAlives: true,
+		TLSClientConfig:   &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}}
+	resp, err := client.Get("https://" + l.Addr().String() + "/")
+	if err != nil {
+		t.Fatalf("GET over TLS: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || string(body) != "tls" {
+		t.Errorf("response = %q, %v, want \"tls\"", body, err)
+	}
+	if got := <-get(t, l.Addr().String()); got.err == nil && got.body == "plain" {
+		t.Error("plain HTTP request served by a Runner whose server has a TLSConfig")
+	}
+
+	if err := r.Stop(context.Background()); err != nil {
+		t.Errorf("Stop = %v, want nil", err)
+	}
+	<-r.Done()
+	if err := r.Err(); err != nil {
+		t.Errorf("Err = %v, want nil after Stop", err)
+	}
+}
+
+func TestHTTPServerWithoutATLSConfigServesPlainHTTP(t *testing.T) {
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.TLS != nil {
+				_, _ = io.WriteString(w, "tls")
+				return
+			}
+			_, _ = io.WriteString(w, "plain")
+		}),
+	}
+	l := listen(t)
+	r := NewHTTPServerListener(srv, l)
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := <-get(t, l.Addr().String()); got.err != nil || got.body != "plain" {
+		t.Errorf("response = %q, %v, want \"plain\"", got.body, got.err)
+	}
+	if err := r.Stop(context.Background()); err != nil {
+		t.Errorf("Stop = %v, want nil", err)
+	}
+}
+
+func TestHTTPTLSConfigWithoutACertificateIsAStartFailure(t *testing.T) {
+	cert, _ := selfSigned(t)
+	getCertificate := func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }
+	getConfig := func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
+	}
+	for name, tc := range map[string]struct {
+		config *tls.Config
+		ok     bool
+	}{
+		"none":               {config: &tls.Config{MinVersion: tls.VersionTLS12}},
+		"Certificates":       {config: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, ok: true},
+		"GetCertificate":     {config: &tls.Config{GetCertificate: getCertificate, MinVersion: tls.VersionTLS12}, ok: true},
+		"GetConfigForClient": {config: &tls.Config{GetConfigForClient: getConfig, MinVersion: tls.VersionTLS12}, ok: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := listen(t)
+			r := NewHTTPServerListener(&http.Server{Handler: http.NotFoundHandler(), TLSConfig: tc.config}, l)
+			err := r.Start(context.Background())
+			if !tc.ok {
+				if !errors.Is(err, ErrNoCertificate) {
+					t.Errorf("Start = %v, want ErrNoCertificate", err)
+				}
+				if isClosed(r.Done()) {
+					t.Error("Done closed on a Runner that failed to start")
+				}
+				if err := l.Close(); err != nil {
+					t.Errorf("closing the listener a failed Start never served = %v, want nil", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Start = %v, want nil", err)
+			}
+			if err := r.Stop(context.Background()); err != nil {
+				t.Errorf("Stop = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestHTTPTLSConfigWithoutACertificateFailsRun(t *testing.T) {
+	srv := &http.Server{
+		Addr:      "127.0.0.1:0",
+		Handler:   http.NotFoundHandler(),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	r := NewHTTPServer(srv)
+	run := startHTTPRun(t, Func("worker", untilStopped), r)
+
+	err := <-run.result
+	if !errors.Is(err, ErrNoCertificate) || !strings.Contains(err.Error(), `"http"`) {
+		t.Errorf("Run = %v, want ErrNoCertificate naming http", err)
+	}
+	if errors.Is(err, ErrStopTimeout) {
+		t.Errorf("Run = %v, want no stop problem", err)
+	}
+	if l := r.(*httpRunner).listener; l != nil {
+		t.Errorf("listener = %v, want none bound by a Start without a certificate", l.Addr())
 	}
 }

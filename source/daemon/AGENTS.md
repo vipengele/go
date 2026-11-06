@@ -46,7 +46,9 @@ golangci-lint run
 - `func.go` — `Func`, the Runner adapter for a function run in its own goroutine, and `WithOrder`
   (`OrderOption`, shared with the HTTP Runner).
 - `http.go` — `NewHTTPServer` and `NewHTTPServerListener`, the `*http.Server` Runner, with
-  `WithHTTPName` and `DefaultHTTPOrder`.
+  `WithHTTPName` and `DefaultHTTPOrder`; it serves TLS with `ServeTLS` when the server's
+  `TLSConfig` is non-nil, and `Start` fails with `ErrNoCertificate` when that config carries no
+  certificate (`Certificates`, `GetCertificate` or `GetConfigForClient`).
 - `restart.go` — `RestartRequested`, true only when every leaf of an error is `ErrRestartRequired`
   and none is a `*PanicError`.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
@@ -56,7 +58,7 @@ golangci-lint run
   `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels
   (`ErrBlankCheckName`, `ErrDuplicateCheck`, `ErrNilCheck`, `ErrUnknownKind`, `ErrCheckTimeout`);
-  `ErrNilFunc` is in `func.go`, `ErrNilServer` and `ErrNilListener` in `http.go`.
+  `ErrNilFunc` is in `func.go`, `ErrNilServer`, `ErrNilListener` and `ErrNoCertificate` in `http.go`.
 - `daemoncmd/` — `NewStatus`, the `status` command: an HTTP client of `/status` that prints the
   snapshot as tables through `cli/spec/table`, or as the same JSON through `spec.WriteJSON` when
   the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
