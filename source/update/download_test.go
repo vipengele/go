@@ -1700,3 +1700,24 @@ func TestSignatureError(t *testing.T) {
 		t.Errorf("signatureError(nil) = %v, want nil", err)
 	}
 }
+
+func TestDownloadRateLimitedStatusStaysAStatusError(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeRelease(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}, nil)
+	dir := t.TempDir()
+
+	_, err := f.config(t, dir).Download(context.Background(), f.selection())
+
+	var se *StatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("err = %v, want a *StatusError with status 429", err)
+	}
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
+		t.Errorf("err = %v, want no *RateLimitError", err)
+	}
+}

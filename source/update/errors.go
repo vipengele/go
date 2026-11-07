@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"time"
 	"unicode/utf8"
 )
 
@@ -53,6 +54,57 @@ func (e *StatusError) Error() string {
 
 	return fmt.Sprintf("update: GET %s: unexpected status %d: %s", e.URL, e.StatusCode, e.Body)
 }
+
+// RateLimitError reports a GitHub API response that refused the request because a rate limit is
+// exhausted: a 403 or 429 with X-RateLimit-Remaining of 0, or with a Retry-After.
+type RateLimitError struct {
+	// Reset is when the limit lifts; the zero time when the response did not say.
+	Reset time.Time
+	// Limit is the requests allowed per window, from X-RateLimit-Limit; 0 when absent.
+	Limit int
+	// Remaining is the requests left in the window, from X-RateLimit-Remaining; 0 when the limit
+	// is exhausted or the header is absent.
+	Remaining int
+	// Authenticated is whether the request carried an Authorization header.
+	Authenticated bool
+	// Status is the response as a [*StatusError].
+	Status *StatusError
+}
+
+// Error implements error.
+func (e *RateLimitError) Error() string {
+	msg := fmt.Sprintf("update: GET %s: GitHub API rate limit exceeded", e.Status.URL)
+	if !e.Reset.IsZero() {
+		msg += "; resets at " + e.Reset.UTC().Format(time.RFC3339)
+	}
+
+	if !e.Authenticated {
+		msg += "; unauthenticated requests are limited to 60 per hour"
+	}
+
+	return msg
+}
+
+// Unwrap returns the response, so errors.As reaches the [*StatusError].
+func (e *RateLimitError) Unwrap() error { return e.Status }
+
+// TokenRejectedError reports a GitHub API 401 to a request that carried an Authorization header:
+// the token is invalid, expired or revoked. The request is not retried without it.
+type TokenRejectedError struct {
+	// Status is the response as a [*StatusError].
+	Status *StatusError
+}
+
+// Error implements error.
+func (e *TokenRejectedError) Error() string {
+	return fmt.Sprintf(
+		"update: GET %s: GitHub rejected the token (status %d); check GH_TOKEN, GITHUB_TOKEN or Config.Token",
+		e.Status.URL, e.Status.StatusCode,
+	)
+}
+
+// Unwrap returns the response, so errors.As reaches the [*StatusError].
+func (e *TokenRejectedError) Unwrap() error { return e.Status }
 
 // TimeoutError reports a request whose deadline expired: the source's own timeout, a shorter
 // deadline on the caller's context, or the HTTP client's timeout.

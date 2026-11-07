@@ -16,7 +16,7 @@ golangci-lint run
 
 - `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries
   every seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user
-  home dir, `EvalSymlinks`, `InContainer`, `IsTerminal`, `CheckWait`, `Locker`) and the tool's own
+  home dir, `EvalSymlinks`, `InContainer`, `IsTerminal`, `CheckWait`, `Locker`, `Token`) and the tool's own
   `Detectors`; a nil `Detectors` entry is invalid. The signature policy is required (ADR-0024,
   ADR-0026): `TrustedKeys` (minisign public key entries, each with or without its
   `untrusted comment:` line, several for a rotation) or `AllowUnsigned`, exactly one. `Validate`
@@ -84,7 +84,28 @@ golangci-lint run
   (100 a page, newest-created first) until a page holds a release the channel receives, a page is
   short or empty, or 10 pages are read, and returns the highest receivable release across the pages
   read; drafts and non-release tags are skipped, and none within the bound is an error. Stable tags
-  must be plain release versions; `WebURL`, `APIURL` and `Timeout` are overridable for tests.
+  must be plain release versions; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for tests.
+  `Token` (`Config.Token`; nil reads `GH_TOKEN`, then `GITHUB_TOKEN`, through `Getenv`; `""` opts
+  out; a provider error fails the API request, wrapped) authenticates REST API requests only
+  (ADR-0028). `latestByAPI` and `highestListed` each build the API client once from the injected one
+  with `apiClient` (`githubauth.go`), which reads the token, and pass it to `apiGet` for every
+  request, every list page included, so a `Latest` reads the token at most once and only for an API
+  request. The wrapping transport adds `Authorization: Bearer` only when the request host equals the
+  `APIURL` host (case-insensitive, port included), on a clone of the request, and `CheckRedirect`
+  refuses a cross-host redirect with a `*CrossHostRedirectError`, declared in `githubauth.go`.
+  Downloads (`Config.HTTPClient`) and the web redirect probe never send the token. Every REST API
+  response goes through `apiStatusError`; a 401 to an authenticated request is a
+  `*TokenRejectedError`, never an unauthenticated retry.
+- `githubcache.go` — `ResponseCache` (`Get`, `Put`), `CachedResponse` (`ETag`, `Body`) and
+  `NewFileResponseCache`, the default of the default source: `github-cache.json` in `StateDir`
+  through `go.vipengele.org/cli/state` (0700/0600, atomic), kept apart from `State` so a custom
+  `StateStore` needs no new fields. Its I/O is bounded by `ctx` in `fileStore`'s goroutine-and-select
+  shape. Entries are keyed by URL, so each list page has its own. `GitHubSource` sends
+  `If-None-Match` only when an entry exists, decodes a 304 through the path a 200 takes, replaces the
+  entry on a 200 with an ETag (bodies up to the read caps, 8 MiB for latest and 32 MiB for a list
+  page), treats a failed load as a miss and a failed save as a skipped write, writes nothing once
+  `ctx` is done, and never returns the cached body for an error response. An unauthenticated 304 is
+  not exempt from the rate limit: it saves transfer, not quota.
 - `select.go` — `Config.Select` names the archive and checksums assets of a `Release`: the
   `AssetTemplate` and `ChecksumsAsset` rendered with `AssetExt`. A non-nil `Assets` is matched by
   exact name; nil `Assets` (the redirect path, ADR-0019) is located through the `Source`'s optional
@@ -98,14 +119,19 @@ golangci-lint run
   `{ext}`. With `{ext}` in the template, `Config.AssetExt` is `tar.gz`, `tgz` or `zip` (`Validate`
   rejects any other), and GoReleaser's archive `format` must produce that extension, or the published
   name and the one `Select` looks for differ. A raw-binary tool leaves `{ext}` out of its template.
-- `errors.go` — `StatusError`, `TimeoutError` (a `net.Error`), `TagError`, `AssetNotFoundError`,
-  `ChecksumMismatchError`, `ChecksumNotFoundError`, `ChecksumConflictError`, `SizeLimitError`,
-  `SignatureMalformedError` (unwraps to the minisign parse error), `UnknownKeyError` (carries the
-  signature's key id as minisign prints it), `SignatureMismatchError` (carries the key id, unwraps
-  to the minisign verification error), `ManagedInstallError`, `ErrPrerelease` (the `Stable` channel's latest release is a
-  pre-release) and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns; `DevBuildError`,
-  the error `CheckRelease` returns; `DowngradeError` (`Name`, `Version`, `Floor`), the error
-  `CheckDowngrade` returns. `classifyError` maps deadline and timeout failures to
+- `errors.go` — `StatusError`, `RateLimitError` (a 403 or 429 from the REST API with
+  `X-RateLimit-Remaining: 0` or a `Retry-After`; carries `Reset`, `Limit`, `Remaining`,
+  `Authenticated`, `Status`; its text names the reset in RFC 3339 UTC and reads no clock),
+  `TokenRejectedError` (a 401 to an authenticated request; both unwrap to the `*StatusError`, and
+  neither is produced by a download), `TimeoutError` (a `net.Error`), `TagError`,
+  `AssetNotFoundError`, `ChecksumMismatchError`, `ChecksumNotFoundError`, `ChecksumConflictError`,
+  `SizeLimitError`, `SignatureMalformedError` (unwraps to the minisign parse error),
+  `UnknownKeyError` (carries the signature's key id as minisign prints it),
+  `SignatureMismatchError` (carries the key id, unwraps to the minisign verification error),
+  `ManagedInstallError`, `ErrPrerelease` (the `Stable` channel's latest release is a pre-release)
+  and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns;
+  `DevBuildError`, the error `CheckRelease` returns; `DowngradeError` (`Name`, `Version`, `Floor`),
+  the error `CheckDowngrade` returns. `classifyError` maps deadline and timeout failures to
   `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
   `UnsafeEntryError`, `BinaryNotFoundError`, `MultipleBinariesError`, `UnsupportedFormatError`,
   `ErrEmptyAsset`, `ErrNotGzip` and `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to

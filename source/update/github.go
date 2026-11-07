@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,8 +79,25 @@ const maxDrainBody = 64 << 10
 // No eligible release within those pages is an error.
 //
 // A channel other than Stable, Beta and Edge is an error, with no request made. A response with a
-// non-success status gives a [*StatusError], an expired deadline a [*TimeoutError], and a
-// cancelled ctx an error matching [context.Canceled].
+// non-success status gives a [*StatusError]. From the REST API, a 403 or 429 that reports an
+// exhausted rate limit gives a [*RateLimitError] and a 401 to a request that carried credentials a
+// [*TokenRejectedError]; both unwrap to the [*StatusError]. An expired deadline gives a
+// [*TimeoutError], and a cancelled ctx an error matching [context.Canceled].
+//
+// REST API requests, every page of the release list included, carry "Authorization: Bearer
+// <token>" when Token returns a non-empty token, and only to the APIURL host; a REST API redirect to
+// another host fails with a [*CrossHostRedirectError]. The web request never carries a token, and
+// asset downloads, made through [Config.HTTPClient], never do either.
+//
+// With a Cache, a REST API request for a URL the cache holds an entry for carries
+// "If-None-Match: <etag>", and a 304 Not Modified answer is decoded from the cached body exactly as
+// a 200 body is. Each page of the release list is a URL of its own, with an entry of its own. A 200
+// carrying an ETag replaces the entry, ETag and body together, once the body has been read in full
+// within the read limit. A rate-limited, 401 or other non-success response returns its error, never
+// the cached body, and a 304 for a URL with no entry is a [*StatusError]. A cache that fails to load
+// or save is a miss or a skipped write, never an error of Latest, and nothing is written once ctx is
+// done. GitHub exempts a 304 from the rate limit only when the request is authenticated, so without
+// a token a conditional request saves the transfer but not the quota.
 type GitHubSource struct {
 	// Owner is the GitHub user or organization that owns the repository.
 	Owner string
@@ -87,7 +105,8 @@ type GitHubSource struct {
 	Repo string
 	// HTTPClient makes every request. Nil means a new [http.Client] for each call to Latest,
 	// never [http.DefaultClient]. The redirect request uses a copy of it that does not follow
-	// redirects.
+	// redirects, and the REST API requests a copy that adds the token and stays on the APIURL
+	// host; HTTPClient itself is never modified.
 	HTTPClient *http.Client
 	// WebURL is the base address of GitHub's web pages. Empty means "https://github.com".
 	WebURL string
@@ -96,6 +115,16 @@ type GitHubSource struct {
 	// Timeout bounds each request Latest makes, through its context; a shorter deadline on the
 	// caller's context wins. Zero or negative means 10 seconds.
 	Timeout time.Duration
+	// Now returns the current time, from which a Retry-After delay becomes a reset time in a
+	// [*RateLimitError]. Nil means [time.Now].
+	Now func() time.Time
+	// Token returns the token REST API requests authenticate with. It is called at most once per
+	// call to Latest, and only when Latest makes a REST API request; its error fails that request,
+	// wrapped. An empty token, and a nil Token, mean unauthenticated requests.
+	Token func(ctx context.Context) (string, error)
+	// Cache keeps the REST API responses Latest makes its requests conditional on. Nil means
+	// unconditional requests and nothing kept.
+	Cache ResponseCache
 }
 
 // NewGitHubSource returns a GitHubSource for the repository identity names, Owner/Repo, making
@@ -153,7 +182,7 @@ func (s *GitHubSource) latestByRedirect(ctx context.Context) (rel Release, found
 	}
 
 	answered := false
-	err = s.get(ctx, &client, pageURL, func(resp *http.Response) error {
+	err = s.get(ctx, &client, pageURL, "", func(resp *http.Response) error {
 		answered = true
 		if !isRedirect(resp.StatusCode) {
 			return nil
@@ -226,18 +255,14 @@ type gitHubAsset struct {
 func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 	apiURL := strings.TrimSuffix(s.apiURL(), "/") + "/repos/" + s.repoPath() + "/releases/latest"
 
+	client, err := s.apiClient(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+
 	var rel Release
 
-	err := s.get(ctx, s.client(), apiURL, func(resp *http.Response) error {
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			return statusError(apiURL, resp)
-		}
-
-		body, err := readLimited(resp.Body, maxResponseBody)
-		if err != nil {
-			return fmt.Errorf("update: GET %s: %w", apiURL, err)
-		}
-
+	err = s.apiGet(ctx, client, apiURL, maxResponseBody, func(body []byte) error {
 		var gr gitHubRelease
 		if err := json.Unmarshal(body, &gr); err != nil {
 			return fmt.Errorf("update: GET %s: decoding release: %w", apiURL, err)
@@ -282,10 +307,15 @@ func (s *GitHubSource) highestListed(ctx context.Context, ch Channel) (Release, 
 		pages int
 	)
 
+	client, err := s.apiClient(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+
 	for pages < maxListPages {
 		pages++
 
-		list, err := s.listPage(ctx, fmt.Sprintf("%s&page=%d", base, pages))
+		list, err := s.listPage(ctx, client, fmt.Sprintf("%s&page=%d", base, pages))
 		if err != nil {
 			return Release{}, err
 		}
@@ -312,20 +342,12 @@ func (s *GitHubSource) highestListed(ctx context.Context, ch Channel) (Release, 
 	return best.release(), nil
 }
 
-// listPage reads one page of the REST API's release list from pageURL.
-func (s *GitHubSource) listPage(ctx context.Context, pageURL string) ([]gitHubRelease, error) {
+// listPage reads one page of the REST API's release list from pageURL through client, the
+// [GitHubSource.apiClient] of the lookup.
+func (s *GitHubSource) listPage(ctx context.Context, client *http.Client, pageURL string) ([]gitHubRelease, error) {
 	var list []gitHubRelease
 
-	err := s.get(ctx, s.client(), pageURL, func(resp *http.Response) error {
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			return statusError(pageURL, resp)
-		}
-
-		body, err := readLimited(resp.Body, maxListResponseBody)
-		if err != nil {
-			return fmt.Errorf("update: GET %s: %w", pageURL, err)
-		}
-
+	err := s.apiGet(ctx, client, pageURL, maxListResponseBody, func(body []byte) error {
 		if err := json.Unmarshal(body, &list); err != nil {
 			return fmt.Errorf("update: GET %s: decoding releases: %w", pageURL, err)
 		}
@@ -339,10 +361,73 @@ func (s *GitHubSource) listPage(ctx context.Context, pageURL string) ([]gitHubRe
 	return list, nil
 }
 
+// apiGet makes the REST API request for rawURL through client, the [GitHubSource.apiClient] of the
+// lookup, and hands decode the body of a success response, read up to limit bytes, or on a 304 Not
+// Modified the body cached for rawURL. The request carries If-None-Match only when Cache holds an entry for rawURL. A
+// success response carrying an ETag replaces that entry once its body is read, whatever decode
+// returns, so a 304 answered later decodes to the same result; the write is skipped when ctx is
+// done and its failure is ignored. Any other status is the error [GitHubSource.apiStatusError]
+// returns, and a 304 with no entry is a [*StatusError].
+func (s *GitHubSource) apiGet(ctx context.Context, client *http.Client, rawURL string, limit int64, decode func(body []byte) error) error {
+	cached, hit := s.cacheGet(ctx, rawURL)
+
+	var etag string
+	if hit {
+		etag = cached.ETag
+	}
+
+	var fresh *CachedResponse
+
+	err := s.get(ctx, client, rawURL, etag, func(resp *http.Response) error {
+		var body []byte
+
+		switch {
+		case resp.StatusCode == http.StatusNotModified && hit:
+			body = cached.Body
+		case resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices:
+			return s.apiStatusError(rawURL, resp)
+		default:
+			read, err := readLimited(resp.Body, limit)
+			if err != nil {
+				return fmt.Errorf("update: GET %s: %w", rawURL, err)
+			}
+
+			if tag := resp.Header.Get("ETag"); tag != "" {
+				fresh = &CachedResponse{ETag: tag, Body: read}
+			}
+
+			body = read
+		}
+
+		return decode(body)
+	})
+
+	if fresh != nil && s.Cache != nil && ctx.Err() == nil {
+		_ = s.Cache.Put(ctx, rawURL, *fresh)
+	}
+
+	return err
+}
+
+// cacheGet returns Cache's entry for rawURL, and false when Cache is nil or holds no usable entry:
+// one without an ETag cannot make a request conditional.
+func (s *GitHubSource) cacheGet(ctx context.Context, rawURL string) (CachedResponse, bool) {
+	if s.Cache == nil {
+		return CachedResponse{}, false
+	}
+
+	r, ok := s.Cache.Get(ctx, rawURL)
+	if !ok || r.ETag == "" {
+		return CachedResponse{}, false
+	}
+
+	return r, true
+}
+
 // get makes one GET request for rawURL through client, bounded by Timeout, and hands the
-// response to read. The body is drained and closed after read returns, and every error is
-// passed through [classifyError].
-func (s *GitHubSource) get(ctx context.Context, client *http.Client, rawURL string, read func(*http.Response) error) error {
+// response to read. A non-empty etag is sent as If-None-Match. The body is drained and closed
+// after read returns, and every error is passed through [classifyError].
+func (s *GitHubSource) get(ctx context.Context, client *http.Client, rawURL, etag string, read func(*http.Response) error) error {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout())
 	defer cancel()
 
@@ -355,6 +440,10 @@ func (s *GitHubSource) get(ctx context.Context, client *http.Client, rawURL stri
 	req.Header.Set("Accept", gitHubAccept)
 	req.Header.Set("X-GitHub-Api-Version", gitHubAPIVersion)
 
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return classifyError(rawURL, err)
@@ -362,6 +451,15 @@ func (s *GitHubSource) get(ctx context.Context, client *http.Client, rawURL stri
 	defer drainAndClose(resp.Body)
 
 	return classifyError(rawURL, read(resp))
+}
+
+// now returns the current time from Now, or from [time.Now] when Now is nil.
+func (s *GitHubSource) now() time.Time {
+	if s.Now == nil {
+		return time.Now()
+	}
+
+	return s.Now()
 }
 
 // client returns HTTPClient, or a new client when it is nil.
@@ -451,9 +549,71 @@ func checkStableTag(tag string) error {
 // statusError returns the [*StatusError] for resp, a response to rawURL, keeping the start of
 // its body. One byte past the kept length is read so that the cut lands on a character boundary.
 func statusError(rawURL string, resp *http.Response) error {
+	return readStatusError(rawURL, resp)
+}
+
+// readStatusError is statusError with the concrete type.
+func readStatusError(rawURL string, resp *http.Response) *StatusError {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
 
 	return newStatusError(rawURL, resp.StatusCode, string(body))
+}
+
+// apiStatusError returns the error for resp, a non-success response from the REST API at rawURL:
+// a [*RateLimitError] for a 403 or 429 that reports an exhausted limit, a [*TokenRejectedError] for
+// a 401 to a request that carried an Authorization header, and the plain [*StatusError] otherwise.
+// Only API call sites use it; a download's 429 is an ordinary [*StatusError].
+func (s *GitHubSource) apiStatusError(rawURL string, resp *http.Response) error {
+	status := readStatusError(rawURL, resp)
+	authenticated := resp.Request != nil && resp.Request.Header.Get("Authorization") != ""
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		if authenticated {
+			return &TokenRejectedError{Status: status}
+		}
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		if rl := s.rateLimitError(resp.Header, authenticated, status); rl != nil {
+			return rl
+		}
+	}
+
+	return status
+}
+
+// rateLimitError returns the [*RateLimitError] the headers of a 403 or 429 describe, or nil when
+// they report no exhausted limit: neither X-RateLimit-Remaining of 0 nor a Retry-After.
+func (s *GitHubSource) rateLimitError(h http.Header, authenticated bool, status *StatusError) *RateLimitError {
+	limit, _ := strconv.Atoi(h.Get("X-RateLimit-Limit"))
+	remaining, remainingErr := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
+	rl := &RateLimitError{Limit: limit, Remaining: remaining, Authenticated: authenticated, Status: status}
+
+	switch {
+	case remainingErr == nil && remaining == 0:
+		if unix, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			rl.Reset = time.Unix(unix, 0).UTC()
+		}
+	case h.Get("Retry-After") != "":
+		rl.Reset = s.retryAfter(h.Get("Retry-After"))
+	default:
+		return nil
+	}
+
+	return rl
+}
+
+// retryAfter returns the time a Retry-After value, delay seconds or an HTTP date, names, or the
+// zero time when it is neither.
+func (s *GitHubSource) retryAfter(value string) time.Time {
+	if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs >= 0 {
+		return s.now().Add(time.Duration(secs) * time.Second).UTC()
+	}
+
+	if t, err := http.ParseTime(value); err == nil {
+		return t.UTC()
+	}
+
+	return time.Time{}
 }
 
 // readLimited reads r to its end, failing when it holds more than limit bytes.
