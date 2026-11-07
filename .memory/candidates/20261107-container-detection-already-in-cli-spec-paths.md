@@ -1,22 +1,24 @@
 ---
-about: "container detection already exists as cli/spec/paths.InContainer and update's CheckManaged already refuses in-place update in a container; daemon/service has no container gate and no override env var exists"
+about: "container detection lives in cli/spec/paths: InContainer is the raw Linux heuristic and InContainerFor adds the <PREFIX>_CONTAINER tri-state override that update and daemon/service both use"
 saw:
   - source/cli/spec/paths/container.go
-  - source/update/managed.go
   - source/update/config.go
-  - source/update/check.go
+  - source/update/managed.go
   - source/daemon/service/manager.go
-  - source/daemon/go.mod
+  - source/daemon/service/option.go
 ---
 
-Found while planning issue #81 (container awareness).
-
-- `paths.InContainer(Probes)` (container.go:51) probes /.dockerenv, /run/.containerenv, `container` and
-  KUBERNETES_SERVICE_HOST env, /proc/1/cgroup; Probes{GOOS,LookupEnv,Exists,ReadFile} are the test seams; non-linux is false.
-- `update.Config.InContainer` (config.go:179, default config.go:530-532) feeds a built-in detector in
-  `CheckManaged` (managed.go:50-51) -> `*ManagedInstallError` "pull a newer image of the container". Cannot be turned off.
-- Env opt-outs: update's `<PREFIX>_NO_UPDATE_CHECK` is any non-empty value ("0" included) (check.go:54-60);
-  completioninstall's `_NO_COMPLETION` is exactly "1" (completioninstall/install.go:118); config binder uses strconv.ParseBool
-  (config/bind.go:121). No precedent of a force-on/force-off tri-state.
-- daemon requires cli/spec, filelock (and commons indirect), not update (daemon/go.mod); `daemon/service` is a package of daemon,
-  with `ErrUnsupported` only for an unknown GOOS (service/manager.go:46-52). No container gate there.
+- `paths.InContainer(Probes)` (container.go:54) probes /.dockerenv, /run/.containerenv, the `container`
+  and KUBERNETES_SERVICE_HOST variables and /proc/1/cgroup; it is false on every GOOS but linux.
+  Probes{GOOS,LookupEnv,Exists,ReadFile} are the seams; a nil field reads the real system.
+- `paths.InContainerFor(id, Probes)` (container.go:105) reads `id.EnvVar("CONTAINER")`: unset or empty
+  defers to the heuristic, a strconv.ParseBool value decides, any other non-empty value ("yes") is true.
+  It applies on any GOOS. An invalid EnvPrefix falls back to the heuristic. This is unlike update's
+  `<PREFIX>_NO_UPDATE_CHECK` (any non-empty value, "0" included, opts out; check.go:58).
+- `update.Config.InContainer` defaults to `paths.InContainerFor(r.Identity, probes)` (config.go:533) and
+  feeds the built-in container detector in `CheckManaged` -> `*ManagedInstallError` "pull a newer image
+  of the container".
+- `daemon/service.New` (manager.go:44) validates an optional `WithIdentity` first, then refuses with
+  `*ContainerError` (matches `ErrContainer`) before Config validation and the GOOS switch (manager.go:58).
+  `WithContainer(func() bool)` replaces detection outright; tests must pass it (or a forced env through
+  the test-only `WithLookupEnv`) so no result depends on the host. See ADR-0029.
