@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
 	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.vipengele.org/cli/spec"
@@ -29,6 +33,11 @@ type Supervisor struct {
 	grace        time.Duration
 	startTimeout time.Duration
 	policy       PanicPolicy
+
+	// logger is the logger given to WithLogger, nil when none was; log is what Run resolved from
+	// it.
+	logger *slog.Logger
+	log    *slog.Logger
 
 	// instance, when set, is the instance lock Run holds while any Runner may be running.
 	instance *instanceLock
@@ -53,6 +62,18 @@ type Supervisor struct {
 
 	// waiting is called each time Run starts waiting for shutdown while every Runner is running.
 	waiting func()
+
+	// reload, when set, is the configuration reload WithReload installed.
+	reload *reloadHook
+
+	// newReloadContext returns the context handed to one reload round and the function that
+	// releases it. It carries the values and the cancellation of parent and bounds the round by the
+	// start timeout.
+	newReloadContext func(parent context.Context) (context.Context, context.CancelFunc)
+
+	// notify and unnotify subscribe a channel to signals and cancel the subscription.
+	notify   func(c chan<- os.Signal, sig ...os.Signal)
+	unnotify func(c chan<- os.Signal)
 }
 
 // New returns a Supervisor for runners. It rejects an empty list, a nil Runner, a Runner whose
@@ -99,6 +120,8 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 	s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
 		return context.WithTimeout(parent, startTimeout)
 	}
+	s.newReloadContext = s.newStartContext
+	s.notify, s.unnotify = signal.Notify, signal.Stop
 	s.newStopContext = func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), grace)
 	}
@@ -177,6 +200,14 @@ func (s *Supervisor) checks() []namedCheck {
 // lock that cannot be taken is returned as AcquireInstance reports it, an *AlreadyRunningError
 // while another instance holds it, and no Runner is started.
 //
+// With WithReload, Run subscribes to SIGHUP once the instance lock, if any, is held and before the
+// first Start, and cancels the subscription as it returns, after the stop phase, so a SIGHUP during
+// start or shutdown never ends the process. Each SIGHUP Run receives while waiting begins one
+// reload round; one received during the start phase begins a round once Run starts waiting, one
+// received during shutdown is dropped, and any number received during a round begin one more. A
+// round's failure, a Reload that returns an error, panics or overruns the round's deadline, is the
+// failure that begins shutdown, as a start failure is; see WithReload.
+//
 // Run may be called once; a second call returns ErrAlreadyRan, even when the first returned
 // without starting a Runner.
 func (s *Supervisor) Run(ctx context.Context) error {
@@ -184,6 +215,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		return ErrAlreadyRan
 	}
 	defer s.feed.setPhase(phaseStopped)
+
+	s.log = s.logger
+	if s.log == nil {
+		s.log = slog.Default()
+	}
 
 	if s.instance != nil {
 		in, err := AcquireInstance(s.instance.id, s.instance.opts)
@@ -194,10 +230,20 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		defer in.Release()
 	}
 
+	// hangup stays nil without WithReload, so its case in wait never fires. Its capacity of one
+	// coalesces the SIGHUPs that arrive while a round runs into one more round.
+	var hangup chan os.Signal
+	if s.reload != nil {
+		hangup = make(chan os.Signal, 1)
+		s.notify(hangup, syscall.SIGHUP)
+		// Deferred, so the subscription is cancelled only after the stop phase below has ended.
+		defer s.unnotify(hangup)
+	}
+
 	runs, failure, complete := s.start(ctx)
 	if complete {
 		s.feed.setPhase(phaseRunning)
-		failure = s.wait(ctx, runs)
+		failure = s.wait(ctx, runs, hangup)
 	}
 	s.feed.setPhase(phaseStopping)
 
@@ -209,9 +255,56 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		errs = append(errs, l.isolated)
 	}
 	for _, l := range slices.Backward(runs) {
-		errs = append(errs, l.stop(stopCtx)...)
+		errs = append(errs, l.stop(stopCtx, s.log)...)
 	}
 	return errors.Join(errs...)
+}
+
+// The messages of the records Run logs through the Supervisor's logger. Every record about a Runner
+// names it under the attribute "runner"; the two records that end a reload round are about the
+// round, not one Runner. Each error Run returns is logged once, as it is found: at
+// Warn as msgStopTimedOut for a Stop that returns an error and for a Stop or Runner still pending
+// when the grace period ends, and otherwise at Error, as msgPanicked when it carries a *PanicError
+// and with the message of its event when not. A panic exit isolated under PanicIsolate is logged
+// when it happens. Warn and Error records carry the
+// error under the attribute "err". msgStarted and msgStopped, at Info, are logged for a Runner
+// whose Start returned nil and for one whose Done then closed in the stop phase without a problem.
+//
+// A reload round ends with one record, or none when Run's context ends it: msgReloadRejected at
+// Warn, with no "runner" and the load's error under "err", for a configuration the load failed to
+// produce; msgReloadApplied at Info, with the names of the Runners whose Reload took it under
+// "runners", once every Runner offered it has taken it; or the Error record of the Reload failure
+// that begins shutdown, msgReloadFailed or msgPanicked, naming its Runner.
+const (
+	msgStarted        = "runner started"
+	msgStopped        = "runner stopped"
+	msgStartFailed    = "runner start failed"
+	msgExited         = "runner exited"
+	msgPanicked       = "runner panicked"
+	msgStopTimedOut   = "runner stop timed out"
+	msgReloadFailed   = "runner reload failed"
+	msgReloadRejected = "reload rejected"
+	msgReloadApplied  = "reload applied"
+)
+
+// logRunner logs msg at level about the Runner called name, with err when it is not nil.
+func logRunner(ctx context.Context, log *slog.Logger, level slog.Level, msg, name string, err error) {
+	if err == nil {
+		log.LogAttrs(ctx, level, msg, slog.String("runner", name))
+		return
+	}
+	log.LogAttrs(ctx, level, msg, slog.String("runner", name), slog.Any("err", err))
+}
+
+// logProblem logs err, a problem of the Runner called name, at Error: as msgPanicked when it
+// carries a *PanicError, and with msg otherwise. It returns err.
+func logProblem(ctx context.Context, log *slog.Logger, msg, name string, err error) error {
+	var pe *PanicError
+	if errors.As(err, &pe) {
+		msg = msgPanicked
+	}
+	logRunner(ctx, log, slog.LevelError, msg, name, err)
+	return err
 }
 
 // instanceLock names the instance lock a Supervisor holds while it runs.
@@ -230,7 +323,7 @@ func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error
 	runs = make([]*launched, 0, len(s.runners))
 	for _, r := range s.runners {
 		if startCtx.Err() != nil {
-			return runs, interrupted(ctx, ""), false
+			return runs, s.interrupted(ctx, r.Name(), ""), false
 		}
 		l := &launched{runner: r, name: r.Name(), state: starting, result: make(chan outcome, 1)}
 		runs = append(runs, l)
@@ -243,15 +336,16 @@ func (s *Supervisor) start(ctx context.Context) (runs []*launched, failure error
 			case o.err == nil:
 				l.running()
 				s.feed.setRunner(l.name, runnerRunning, l.done)
+				logRunner(ctx, s.log, slog.LevelInfo, msgStarted, l.name, nil)
 			case !o.isPanic() && startCtx.Err() != nil && isContextErr(o.err):
 				l.state = failed
-				return runs, interrupted(ctx, l.name), false
+				return runs, s.interrupted(ctx, l.name, l.name), false
 			default:
 				l.state = failed
-				return runs, l.wrap(o), false
+				return runs, logProblem(ctx, s.log, msgStartFailed, l.name, l.wrap(o)), false
 			}
 		case <-startCtx.Done():
-			return runs, interrupted(ctx, l.name), false
+			return runs, s.interrupted(ctx, l.name, l.name), false
 		}
 	}
 	return runs, nil, true
@@ -271,15 +365,27 @@ func interrupted(ctx context.Context, name string) error {
 	}
 }
 
+// interrupted returns interrupted(ctx, name) and logs the start timeout it may return as a start
+// failure of the Runner called runner: the one whose Start was running or, when the phase ended
+// between two Starts, the one whose Start is not called.
+func (s *Supervisor) interrupted(ctx context.Context, runner, name string) error {
+	err := interrupted(ctx, name)
+	if err == nil {
+		return nil
+	}
+	return logProblem(ctx, s.log, msgStartFailed, runner, err)
+}
+
 // isContextErr reports whether err only reports the end of a context.
 func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// wait blocks until shutdown begins: ctx is done, or a running Runner exits in a way that fails
-// it. It returns that failure, or nil when ctx began it. A panic exit under PanicIsolate is
-// recorded on its Runner and does not end the wait.
-func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
+// wait blocks until shutdown begins: ctx is done, a running Runner exits in a way that fails it,
+// or a reload round fails. It returns that failure, or nil when ctx began it. A panic exit under
+// PanicIsolate is recorded on its Runner and does not end the wait. Each value received on hangup
+// runs one reload round; a nil hangup never does.
+func (s *Supervisor) wait(ctx context.Context, runs []*launched, hangup <-chan os.Signal) error {
 	quit := make(chan struct{})
 	defer close(quit)
 	exited := make(chan *launched, len(runs))
@@ -298,20 +404,129 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-hangup:
+			if err := s.reloadRound(ctx, runs); err != nil || ctx.Err() != nil {
+				return err
+			}
 		case l := <-exited:
 			l.exited = true
 			o := guard(l.name, l.runner.Err)
 			if s.policy == PanicIsolate && o.isPanic() {
-				l.isolated = o.err
+				l.isolated = logProblem(ctx, s.log, msgExited, l.name, o.err)
 				s.feed.setRunner(l.name, runnerIsolated, nil)
 				continue
 			}
 			if o.err == nil {
-				return fmt.Errorf("daemon: runner %q: %w", l.name, ErrRunnerExited)
+				return logProblem(ctx, s.log, msgExited, l.name, fmt.Errorf("daemon: runner %q: %w", l.name, ErrRunnerExited))
 			}
-			return l.wrap(o)
+			return logProblem(ctx, s.log, msgExited, l.name, l.wrap(o))
 		}
 	}
+}
+
+// reloadRound loads the configuration once and offers it, in start order, to each Runner in runs
+// that is still running and implements the configuration's Reloader. The load and every Reload
+// share one context from newReloadContext, and each runs in its own goroutine that Run abandons
+// when that context ends first. A load that fails, panics or is abandoned rejects the
+// configuration and calls no Runner. reloadRound returns the failure of the first Reload that
+// returns an error, panics or is abandoned, and offers it to no Runner after that one; it returns
+// nil when every Runner offered the configuration took it and when ctx, the context passed to Run,
+// ended the round. A Runner whose Reload is abandoned keeps its running state, so the stop phase
+// stops it as any running Runner, and its Stop may run alongside the abandoned Reload.
+func (s *Supervisor) reloadRound(ctx context.Context, runs []*launched) error {
+	roundCtx, cancel := s.newReloadContext(ctx)
+	defer cancel()
+
+	offer, err := s.loadConfig(roundCtx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.LogAttrs(ctx, slog.LevelWarn, msgReloadRejected, slog.Any("err", err))
+		}
+		return nil
+	}
+
+	reloaded := make([]string, 0, len(runs))
+	for _, l := range runs {
+		if !l.reloadable() || !s.reload.accepts(l.runner) {
+			continue
+		}
+		if roundCtx.Err() != nil {
+			return s.reloadInterrupted(ctx, l.name, "")
+		}
+		result := make(chan outcome, 1)
+		go func() {
+			result <- guard(l.name, func() error {
+				_, err := offer(roundCtx, l.runner)
+				return err
+			})
+		}()
+
+		select {
+		case o := <-result:
+			switch {
+			case o.err == nil:
+				reloaded = append(reloaded, l.name)
+			case !o.isPanic() && roundCtx.Err() != nil && isContextErr(o.err):
+				return s.reloadInterrupted(ctx, l.name, l.name)
+			default:
+				return logProblem(ctx, s.log, msgReloadFailed, l.name, l.wrap(o))
+			}
+		case <-roundCtx.Done():
+			return s.reloadInterrupted(ctx, l.name, l.name)
+		}
+	}
+	s.log.LogAttrs(ctx, slog.LevelInfo, msgReloadApplied, slog.Any("runners", reloaded))
+	return nil
+}
+
+// loadConfig calls the reload's load in its own goroutine and waits for it under ctx. A load that
+// panics is reported as an error carrying the panic value; one still running when ctx is done is
+// abandoned and reported with the context's error.
+func (s *Supervisor) loadConfig(ctx context.Context) (offerFunc, error) {
+	type loaded struct {
+		offer offerFunc
+		err   error
+	}
+	result := make(chan loaded, 1)
+	go func() {
+		defer func() {
+			if v := recover(); v != nil {
+				if cause, ok := v.(error); ok {
+					result <- loaded{err: fmt.Errorf("daemon: reload load panicked: %w", cause)}
+					return
+				}
+				result <- loaded{err: fmt.Errorf("daemon: reload load panicked: %v", v)}
+			}
+		}()
+		offer, err := s.reload.load(ctx)
+		if err != nil {
+			err = fmt.Errorf("daemon: reload load: %w", err)
+		}
+		result <- loaded{offer: offer, err: err}
+	}()
+
+	select {
+	case r := <-result:
+		return r.offer, r.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("daemon: reload load: %w", ctx.Err())
+	}
+}
+
+// reloadInterrupted returns what ends a reload round whose context is done: nil when ctx, the
+// context passed to Run, is done, and otherwise ErrReloadTimeout, naming the Runner whose Reload
+// was running when name is not empty. It logs the timeout as a reload failure of the Runner called
+// runner: the one whose Reload was running or, when the round ended between two Reloads, the one
+// whose Reload is not called.
+func (s *Supervisor) reloadInterrupted(ctx context.Context, runner, name string) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	err := fmt.Errorf("daemon: %w", ErrReloadTimeout)
+	if name != "" {
+		err = fmt.Errorf("daemon: runner %q: %w", name, ErrReloadTimeout)
+	}
+	return logProblem(ctx, s.log, msgReloadFailed, runner, err)
 }
 
 // outcome is what a Runner's Start, Stop or Err came to: the error it returned, or, with panicked
@@ -378,6 +593,21 @@ func (l *launched) running() {
 	l.done = l.runner.Done()
 }
 
+// reloadable reports whether the Runner is running and has not exited, so it may be offered a
+// reloaded configuration. A Runner whose Done has closed is not offered it even before wait has
+// dealt with the exit.
+func (l *launched) reloadable() bool {
+	if l.state != running || l.exited {
+		return false
+	}
+	select {
+	case <-l.done:
+		return false
+	default:
+		return true
+	}
+}
+
 // wrap names the Runner in an error outcome. A panic, which already names the Runner, is returned
 // as it is.
 func (l *launched) wrap(o outcome) error {
@@ -392,27 +622,29 @@ func (l *launched) wrap(o outcome) error {
 // what went wrong, at most one problem with Stop per Runner: a Stop error as ErrStopTimeout with
 // its cause, a Stop panic as its *PanicError, or a Stop or the Runner still pending when ctx is
 // done as ErrStopTimeout; and the Runner's exit or late Start problem as itself. Once ctx is done
-// it still calls Stop, but reports a timeout without waiting.
-func (l *launched) stop(ctx context.Context) []error {
+// it still calls Stop, but reports a timeout without waiting. It logs each problem it reports, and
+// the late start and the stop of a Runner, through log.
+func (l *launched) stop(ctx context.Context, log *slog.Logger) []error {
 	stopped := make(chan outcome, 1)
 	go func() { stopped <- guard(l.name, func() error { return l.runner.Stop(ctx) }) }()
 
 	if ctx.Err() != nil {
-		return []error{l.timeout()}
+		return []error{l.timedOut(ctx, log, l.timeout())}
 	}
 	select {
 	case o := <-stopped:
 		switch {
 		case o.panicked:
-			return append([]error{o.err}, l.finish(ctx, false)...)
+			problem := logProblem(ctx, log, msgPanicked, l.name, o.err)
+			return append([]error{problem}, l.finish(ctx, log, false)...)
 		case o.err != nil:
 			problem := fmt.Errorf("daemon: runner %q: %w: %w", l.name, ErrStopTimeout, o.err)
-			return append([]error{problem}, l.finish(ctx, false)...)
+			return append([]error{l.timedOut(ctx, log, problem)}, l.finish(ctx, log, false)...)
 		default:
-			return l.finish(ctx, true)
+			return l.finish(ctx, log, true)
 		}
 	case <-ctx.Done():
-		return []error{l.timeout()}
+		return []error{l.timedOut(ctx, log, l.timeout())}
 	}
 }
 
@@ -420,8 +652,9 @@ func (l *launched) stop(ctx context.Context) []error {
 // other than the cancellation it was asked for, or a Start that returned late with an error other
 // than the end of its context or panicked. A Runner whose late Start returned nil is waited for
 // as a running one. A Runner still pending when ctx is done is reported as a timeout only when
-// reportTimeout is set.
-func (l *launched) finish(ctx context.Context, reportTimeout bool) []error {
+// reportTimeout is set. It logs what it reports, and the late start and the stop of a Runner,
+// through log.
+func (l *launched) finish(ctx context.Context, log *slog.Logger, reportTimeout bool) []error {
 	if l.state == starting {
 		select {
 		case o := <-l.result:
@@ -430,11 +663,12 @@ func (l *launched) finish(ctx context.Context, reportTimeout bool) []error {
 				if !o.isPanic() && isContextErr(o.err) {
 					return nil
 				}
-				return []error{l.wrap(o)}
+				return []error{logProblem(ctx, log, msgStartFailed, l.name, l.wrap(o))}
 			}
 			l.running()
+			logRunner(ctx, log, slog.LevelInfo, msgStarted, l.name, nil)
 		case <-ctx.Done():
-			return l.pending(reportTimeout)
+			return l.pending(ctx, log, reportTimeout)
 		}
 	}
 	if l.state != running || l.exited {
@@ -444,20 +678,28 @@ func (l *launched) finish(ctx context.Context, reportTimeout bool) []error {
 	case <-l.done:
 		o := guard(l.name, l.runner.Err)
 		if o.err == nil || (!o.isPanic() && errors.Is(o.err, context.Canceled)) {
+			logRunner(ctx, log, slog.LevelInfo, msgStopped, l.name, nil)
 			return nil
 		}
-		return []error{l.wrap(o)}
+		return []error{logProblem(ctx, log, msgExited, l.name, l.wrap(o))}
 	case <-ctx.Done():
-		return l.pending(reportTimeout)
+		return l.pending(ctx, log, reportTimeout)
 	}
 }
 
-// pending reports a Runner still pending when the grace period ended, when reportTimeout is set.
-func (l *launched) pending(reportTimeout bool) []error {
+// pending reports and logs a Runner still pending when the grace period ended, when reportTimeout
+// is set.
+func (l *launched) pending(ctx context.Context, log *slog.Logger, reportTimeout bool) []error {
 	if reportTimeout {
-		return []error{l.timeout()}
+		return []error{l.timedOut(ctx, log, l.timeout())}
 	}
 	return nil
+}
+
+// timedOut logs err, a stop problem of the Runner other than a panic, at Warn and returns it.
+func (l *launched) timedOut(ctx context.Context, log *slog.Logger, err error) error {
+	logRunner(ctx, log, slog.LevelWarn, msgStopTimedOut, l.name, err)
+	return err
 }
 
 // timeout reports that the Runner did not finish stopping within the grace period.

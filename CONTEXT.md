@@ -355,6 +355,13 @@ The single time budget a shutdown shares: the **Runners** are stopped one after 
 and a **Runner** that has not stopped when it ends is reported as timed out.
 _Avoid_: timeout, deadline, shutdown timeout
 
+**Reload**:
+A daemon reading its configuration again while it runs, on SIGHUP, and offering the new
+configuration to each **Runner** that accepts one. A configuration that fails validation is
+refused and every **Runner** keeps the one it holds; a **Runner** that cannot take an accepted one
+ends the run as a failed start does. Not available on Windows (ADR-0025).
+_Avoid_: hot reload, refresh, restart (a restart replaces the process)
+
 **Service**:
 A daemon registered with the operating system's service manager (systemd, launchd, the Windows
 service control manager), started, stopped and restarted by it. Installing, removing and querying

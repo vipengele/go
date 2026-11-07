@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -325,6 +327,9 @@ func newScripted(name string) *scriptedRunner {
 
 func (r *scriptedRunner) Name() string { return r.name }
 
+// script returns the scripted Runner, also through a type that embeds it.
+func (r *scriptedRunner) script() *scriptedRunner { return r }
+
 func (r *scriptedRunner) Start(ctx context.Context) error {
 	r.rec.started(r.name)
 	r.started <- ctx
@@ -416,42 +421,55 @@ func (r orderedRunner) Order() int { return r.order }
 // ctxKey keys the value the run context carries, to check that the Start context inherits it.
 type ctxKey struct{}
 
-// harness runs a Supervisor over scripted Runners. Its start and stop contexts have no deadline:
-// the test ends the start phase by calling expireStart and the grace period by calling cancelStop.
+// harness runs a Supervisor over scripted Runners. Its start, reload and stop contexts have no
+// deadline: the test ends the start phase by calling expireStart, every reload round from then on
+// by calling expireReload, and the grace period by calling cancelStop. Its signal subscription is
+// fake: no signal of the process reaches the Supervisor, and the test sends one on the channel
+// notified delivers.
 type harness struct {
-	t           *testing.T
-	baseline    int
-	rec         *recorder
-	runners     []*scriptedRunner
-	startCtx    []context.Context
-	cancelRun   context.CancelFunc
-	expireStart context.CancelFunc
-	cancelStop  context.CancelFunc
-	result      chan error
+	t            *testing.T
+	baseline     int
+	rec          *recorder
+	runners      []*scriptedRunner
+	startCtx     []context.Context
+	cancelRun    context.CancelFunc
+	expireStart  context.CancelFunc
+	expireReload context.CancelFunc
+	cancelStop   context.CancelFunc
+	result       chan error
 
 	// waiting receives a value each time Run starts waiting for shutdown with every Runner running.
 	waiting chan struct{}
+
+	// notified receives each signal subscription Run makes, and unnotified each cancellation.
+	notified   chan subscription
+	unnotified chan subscription
 }
 
-// launchRun starts Run over list, whose Runners are scripted or ordered scripted ones, and returns
-// at once.
+// subscription is one signal subscription Run made or cancelled: its channel, the signals it was
+// made for, and the Runners whose Start and whose Stop had been called, in order, at the time.
+type subscription struct {
+	ch      chan<- os.Signal
+	signals []os.Signal
+	starts  []string
+	stops   []string
+}
+
+// launchRun starts Run over list, whose Runners are scripted ones or types embedding one, and
+// returns at once.
 func launchRun(t *testing.T, opts []Option, list ...Runner) *harness {
 	t.Helper()
 	h := &harness{t: t, baseline: runtime.NumGoroutine(), rec: &recorder{}}
 	for _, r := range list {
-		var sr *scriptedRunner
-		switch r := r.(type) {
-		case *scriptedRunner:
-			sr = r
-		case orderedRunner:
-			sr = r.scriptedRunner
-		default:
+		sc, ok := r.(interface{ script() *scriptedRunner })
+		if !ok {
 			t.Fatalf("launchRun: unexpected runner %T", r)
 		}
+		sr := sc.script()
 		sr.rec = h.rec
 		h.runners = append(h.runners, sr)
 	}
-	s, err := New(list, opts...)
+	s, err := New(list, append([]Option{WithLogger(slog.New(slog.DiscardHandler))}, opts...)...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -461,6 +479,20 @@ func launchRun(t *testing.T, opts []Option, list ...Runner) *harness {
 		ctx, cancel := context.WithCancel(parent)
 		stop := context.AfterFunc(expire, cancel)
 		return ctx, func() { stop(); cancel() }
+	}
+	expireRound, expireReload := context.WithCancel(context.Background())
+	s.newReloadContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		stop := context.AfterFunc(expireRound, cancel)
+		return ctx, func() { stop(); cancel() }
+	}
+	h.notified = make(chan subscription, 1)
+	h.unnotified = make(chan subscription, 1)
+	s.notify = func(c chan<- os.Signal, sig ...os.Signal) {
+		h.notified <- subscription{ch: c, signals: sig, starts: h.rec.startOrder(), stops: h.rec.stopOrder()}
+	}
+	s.unnotify = func(c chan<- os.Signal) {
+		h.unnotified <- subscription{ch: c, starts: h.rec.startOrder(), stops: h.rec.stopOrder()}
 	}
 	stopCtx, cancelStop := context.WithCancel(context.Background())
 	s.newStopContext = func() (context.Context, context.CancelFunc) { return stopCtx, cancelStop }
@@ -472,7 +504,7 @@ func launchRun(t *testing.T, opts []Option, list ...Runner) *harness {
 		}
 	}
 	runCtx, cancelRun := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "run"))
-	h.cancelRun, h.expireStart, h.cancelStop = cancelRun, expireStart, cancelStop
+	h.cancelRun, h.expireStart, h.expireReload, h.cancelStop = cancelRun, expireStart, expireReload, cancelStop
 
 	h.result = make(chan error, 1)
 	go func() { h.result <- s.Run(runCtx) }()
@@ -509,6 +541,7 @@ func (h *harness) finish() {
 	}
 	h.cancelRun()
 	h.expireStart()
+	h.expireReload()
 	h.cancelStop()
 	settle(h.t, h.baseline)
 }

@@ -145,6 +145,42 @@ func ExampleWithInstanceLock() {
 	}
 }
 
+// reloadable is a Runner that applies a new configuration without restarting.
+type reloadable struct {
+	daemon.Runner
+}
+
+func (reloadable) Reload(_ context.Context, cfg string) error {
+	fmt.Println("reloaded:", cfg)
+	return nil
+}
+
+// A program reloads its configuration on SIGHUP: Run calls the load function and offers the result
+// to every running Runner that implements Reloader for its type. A program on cli/core passes a
+// closure over its loader; load stands in for it here.
+func ExampleWithReload() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	load := func(context.Context) (string, error) { return "config", nil }
+
+	worker := reloadable{daemon.Func("worker", func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})}
+
+	sup, err := daemon.New([]daemon.Runner{worker},
+		daemon.WithReload(func(ctx context.Context) (string, error) { return load(ctx) }))
+	if err != nil {
+		fmt.Println("new:", err)
+		return
+	}
+
+	if err := sup.Run(ctx); err != nil {
+		fmt.Println("run:", err)
+	}
+}
+
 // probe requests path on base and returns the status code and the body without its newline.
 func probe(ctx context.Context, base, path string) (int, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)

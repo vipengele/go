@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.vipengele.org/cli/spec"
@@ -95,6 +96,19 @@ func WithInstanceLock(id spec.Identity, opts paths.Options) Option {
 			return fmt.Errorf("daemon: instance lock: %w", err)
 		}
 		s.instance = &instanceLock{id: id, opts: opts}
+		return nil
+	}
+}
+
+// WithLogger sets the logger the Supervisor reports through. Without it Run uses slog.Default(),
+// read when Run begins, so a default installed after New is the one used. A nil logger is rejected
+// by New.
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *Supervisor) error {
+		if logger == nil {
+			return fmt.Errorf("daemon: logger must not be nil")
+		}
+		s.logger = logger
 		return nil
 	}
 }

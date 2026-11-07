@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -47,50 +46,11 @@ func (r *checkingRunner) Err() error {
 	return r.scriptedRunner.Err()
 }
 
-// launchHealthRun starts Run as launchRun does, over scripted and checking Runners, with h given
-// to New through WithHealth, and returns at once.
+// launchHealthRun starts Run through launchRun, with h given to New through WithHealth, and
+// returns at once.
 func launchHealthRun(t *testing.T, h *Health, opts []Option, list ...Runner) *harness {
 	t.Helper()
-	hr := &harness{t: t, baseline: runtime.NumGoroutine(), rec: &recorder{}}
-	for _, r := range list {
-		var sr *scriptedRunner
-		switch r := r.(type) {
-		case *scriptedRunner:
-			sr = r
-		case *checkingRunner:
-			sr = r.scriptedRunner
-		default:
-			t.Fatalf("launchHealthRun: unexpected runner %T", r)
-		}
-		sr.rec = hr.rec
-		hr.runners = append(hr.runners, sr)
-	}
-	s, err := New(list, append(slices.Clone(opts), WithHealth(h))...)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	expire, expireStart := context.WithCancel(context.Background())
-	s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
-		ctx, cancel := context.WithCancel(parent)
-		stop := context.AfterFunc(expire, cancel)
-		return ctx, func() { stop(); cancel() }
-	}
-	stopCtx, cancelStop := context.WithCancel(context.Background())
-	s.newStopContext = func() (context.Context, context.CancelFunc) { return stopCtx, cancelStop }
-	hr.waiting = make(chan struct{}, 16)
-	s.waiting = func() {
-		select {
-		case hr.waiting <- struct{}{}:
-		default:
-		}
-	}
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	hr.cancelRun, hr.expireStart, hr.cancelStop = cancelRun, expireStart, cancelStop
-
-	hr.result = make(chan error, 1)
-	go func() { hr.result <- s.Run(runCtx) }()
-	return hr
+	return launchRun(t, append(slices.Clone(opts), WithHealth(h)), list...)
 }
 
 // wantHealth is the expected state of a snapshot: its overall status, and the error text each
@@ -190,6 +150,38 @@ func TestHealthFollowsTheRunFromStartToReturn(t *testing.T) {
 	}})
 	checkCalls(t, "returned", b, 1)
 	hr.finish()
+}
+
+func TestHealthStaysReadyThroughAReloadRoundAndAReloadFailureEndsTheRun(t *testing.T) {
+	health := NewHealth()
+	log := &reloadLog[int]{}
+	a, b := newReloading("a", log), newChecking("b")
+	a.hang = true
+	cause := errors.New("cannot apply")
+	var loads atomic.Int32
+	h, sub := runReloading(t, counted(&loads, 1), []Option{WithHealth(health)}, a, b)
+
+	hangup(sub)
+	<-a.reloading
+	checkHealth(t, "reloading", health, wantHealth{status: StateOK, checks: map[string]string{
+		"supervisor.live": "", "supervisor.ready": "", "b": "",
+	}})
+	checkCalls(t, "reloading", b, 1)
+	a.free()
+	<-h.waiting
+	checkStillRunning(t, h)
+
+	a.hang, a.err = false, cause
+	hangup(sub)
+	if err := <-h.result; !errors.Is(err, cause) {
+		t.Errorf("Run = %v, want %v", err, cause)
+	}
+	checkHealth(t, "returned", health, wantHealth{status: StateDown, checks: map[string]string{
+		"supervisor.live":  "supervisor has stopped",
+		"supervisor.ready": "supervisor has stopped",
+		"b":                `runner "b" is not running: supervisor has stopped`,
+	}})
+	h.finish()
 }
 
 func TestHealthIsDownBeforeRun(t *testing.T) {

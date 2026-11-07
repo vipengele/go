@@ -51,11 +51,13 @@ golangci-lint run
   certificate (`Certificates`, `GetCertificate` or `GetConfigForClient`).
 - `restart.go` — `RestartRequested`, true only when every leaf of an error is `ErrRestartRequired`
   and none is a `*PanicError`.
+- `reload.go` — `Reloader[T]`, the optional Runner interface for applying a new configuration, and
+  `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
-  the default, or `PanicIsolate`) and `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`.
+  the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
+  fails `Validate`, and `WithLogger`.
 - `errors.go` — `PanicError` and the sentinel errors (`ErrRunnerExited`, `ErrStartTimeout`,
-  `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
+  `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels
   (`ErrBlankCheckName`, `ErrDuplicateCheck`, `ErrNilCheck`, `ErrUnknownKind`, `ErrCheckTimeout`);
   `ErrNilFunc` is in `func.go`, `ErrNilServer`, `ErrNilListener` and `ErrNoCertificate` in `http.go`.
@@ -114,7 +116,8 @@ Conventions of the package:
 - The grace period's context is made from `context.Background()`, never from the cancelled run context.
 - Work that outlives `Start` is never bound to the start context, which is cancelled when the start
   phase ends: `Func` and the HTTP Runner derive theirs with `context.WithoutCancel`.
-- No signal handling: the context passed to `Run` drives shutdown; `cli/core` owns the signals.
+- The package handles only SIGHUP, and only under `WithReload`: the context passed to `Run` drives
+  shutdown, and SIGINT and SIGTERM stay with the caller (`cli/core` owns them).
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
@@ -129,4 +132,6 @@ Conventions of the package:
   only, and its middleware order is fixed (ADR-0026): a new middleware gets a position in the chain
   in `New`, documented under `# Middleware order` in its `doc.go`, never an option that reorders.
 - A new `Run` outcome is documented in the `Errors` section of `doc.go` and tested in
-  `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`.
+  `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`, and, for reload,
+  `reload_test.go` (the real SIGHUP in `reload_signal_test.go`). Log records are tested in
+  `logging_test.go`.

@@ -121,7 +121,9 @@
 //     and shutdown has not begun. At any other time it fails without calling CheckHealth.
 //
 // A run is therefore down before Run and after it returns, unready while starting, while stopping
-// and once a Runner's panic has been isolated, and ok in between. A Runner name already held by
+// and once a Runner's panic has been isolated, and ok in between. A reload round under WithReload
+// changes none of the checks: the run stays ready while its Runners reload, and a Reload failure
+// begins shutdown, which makes it unready as any failure does. A Runner name already held by
 // the Health, including supervisor.live and supervisor.ready, makes New fail with
 // ErrDuplicateCheck.
 //
@@ -146,7 +148,11 @@
 // *AlreadyRunningError while another instance holds it, and no Runner is started. A second Run
 // returns ErrAlreadyRan, even after a first that returned because the lock was held: Run marks
 // the Supervisor as run before it takes the lock, so a program that retries builds a new
-// Supervisor with New. Match with errors.Is and errors.As.
+// Supervisor with New. A Reload that returns an error or panics is a failure of the Runner,
+// naming it, and one that overruns the round's deadline is ErrReloadTimeout naming it; a deadline
+// that passes between two Reloads is ErrReloadTimeout naming no Runner. Each begins shutdown and
+// leads the joined errors as a start failure does. A rejected configuration is not an error. Match
+// with errors.Is and errors.As.
 //
 // # Restart
 //
@@ -162,8 +168,65 @@
 //	}
 //	return err
 //
+// # Reload
+//
+// WithReload[T] makes Run reload its configuration when the process receives SIGHUP. A round loads
+// the configuration once, with the function given to WithReload, even when no Runner implements
+// Reloader[T]. It then offers the result, in start order and one at a time, to each running Runner
+// that implements Reloader[T]; a Runner that has exited, one isolated under PanicIsolate and one
+// that implements Reloader for another type are skipped. The load and every Reload of the round
+// share one deadline: the start timeout, or the end of the context passed to Run.
+//
+// A configuration the load fails to produce, by an error, a panic or the deadline, is rejected:
+// a Warn is logged, no Runner is called and every Runner keeps the configuration it has, and Run
+// keeps running. A Reload that returns an error, panics or is still running at the deadline is a
+// failure like a failed Start: the configuration is not rolled back, no later Runner is offered it
+// and shutdown begins. A Reload that overran is ErrReloadTimeout naming the Runner; a deadline
+// that passes between two Reloads is ErrReloadTimeout naming no Runner, and no later Runner is
+// offered the configuration. The context passed to Run ending during a round is shutdown, not a
+// failure.
+//
+// A Runner's Reload never runs at the same time as its Start, Stop or another Reload, except that a
+// Reload abandoned at the deadline may still be running while Stop is called, as an abandoned Start
+// can.
+//
+// SIGHUPs coalesce. One received during the start phase begins a round once Run starts waiting,
+// any number received during a round begin one more round, and one received during shutdown is
+// dropped.
+//
+// A program built on go.vipengele.org/cli/core, which this package does not import, passes a
+// closure over its loader:
+//
+//	daemon.WithReload(func(ctx context.Context) (T, error) {
+//		r, err := opts.Load(inv)
+//		return r.Value(), err
+//	})
+//
+// # Logging
+//
+// WithLogger sets the logger Run reports through. Without it Run uses slog.Default(), read when
+// Run begins. Every record about a Runner names it under the attribute "runner", and each error Run
+// returns is logged once, as it is found, under the attribute "err".
+//
+// At Info, "runner started" is logged for a Runner whose Start returned nil and "runner stopped"
+// for one whose Done closed in the stop phase without a problem. At Warn, "runner stop timed out"
+// is logged for a Stop that returns an error and for a Stop or Runner still pending when the grace
+// period ends. At Error, "runner panicked" is logged for a problem that carries a *PanicError, and
+// otherwise "runner start failed", "runner exited" or "runner reload failed" for the event it
+// belongs to. A panic exit isolated under PanicIsolate is logged when it happens.
+//
+// A reload round ends with one record, or none when the context passed to Run ends it:
+// "reload rejected" at Warn, with the load's error under "err" and no "runner"; "reload applied"
+// at Info, with the names of the Runners whose Reload took the configuration under "runners"; or
+// the Error record of the Reload failure that begins shutdown, naming its Runner. A deadline that
+// passes between two Reloads is logged as a reload failure of the Runner whose Reload is not
+// called, though the error Run returns names no Runner.
+//
 // # Signals
 //
-// The package does not handle signals. The context passed to Run drives shutdown; a program that
-// stops on SIGINT or SIGTERM cancels that context from its own signal handler.
+// The package never subscribes to SIGINT or SIGTERM: a program that stops on them cancels the
+// context passed to Run from its own signal handler. With WithReload, and only then, Run takes
+// SIGHUP, from once the instance lock is held until Run returns after the stop phase, so a SIGHUP
+// during start or shutdown never ends the process. On Windows the option is accepted and a reload
+// never fires.
 package daemon

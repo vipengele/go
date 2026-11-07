@@ -11,6 +11,10 @@ var ErrRunnerExited = errors.New("daemon: runner exited before shutdown")
 // ErrStartTimeout reports that the Runners did not all start within the start timeout.
 var ErrStartTimeout = errors.New("daemon: runner start timed out")
 
+// ErrReloadTimeout reports that a reload round's deadline passed before every Runner offered the
+// configuration had taken it: while a Runner's Reload was running, or between two Reloads.
+var ErrReloadTimeout = errors.New("daemon: runner reload timed out")
+
 // ErrStopTimeout reports that a Runner did not finish stopping within the grace period, or that
 // its Stop returned an error.
 var ErrStopTimeout = errors.New("daemon: runner stop timed out")
