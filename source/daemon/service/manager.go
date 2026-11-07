@@ -41,6 +41,11 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 	if err := cfg.validate(goos); err != nil {
 		return nil, err
 	}
+	if o.hardening != nil {
+		if err := o.hardening.validate(); err != nil {
+			return nil, err
+		}
+	}
 	switch goos {
 	case "linux":
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
