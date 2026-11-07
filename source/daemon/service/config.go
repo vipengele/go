@@ -50,7 +50,8 @@ type Config struct {
 	// When empty the service manager's default applies.
 	WorkingDir string
 	// User is the account the service runs as. When empty the service
-	// manager's default for Scope applies. On Windows it is an account name
+	// manager's default for Scope applies. It must be empty with ScopeUser
+	// on every GOOS but Windows. On Windows it is an account name
 	// with an optional "DOMAIN\" prefix ("." for the local machine); on
 	// every other GOOS it is a POSIX user name.
 	User string
@@ -146,6 +147,10 @@ func (c Config) validate(goos string) error {
 		case !windows && !validPOSIXAccount(c.User):
 			fail("User: %q is not a POSIX user name", c.User)
 		}
+	}
+
+	if !windows && c.Scope == ScopeUser && c.User != "" {
+		fail("User: %q cannot be set with ScopeUser, a user service runs as the user who installs it", c.User)
 	}
 
 	if c.Scope != ScopeSystem && c.Scope != ScopeUser {

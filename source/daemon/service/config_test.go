@@ -32,7 +32,7 @@ func validConfig(goos string) Config {
 		Env:         map[string]string{"LOG_LEVEL": "debug", "_X": "100%"},
 		WorkingDir:  "/var/lib/svc",
 		User:        "svc",
-		Scope:       ScopeUser,
+		Scope:       ScopeSystem,
 	}
 }
 
@@ -391,4 +391,21 @@ func errString(err error) string {
 		return "<nil>"
 	}
 	return err.Error()
+}
+
+func TestValidateRejectsAUserWithScopeUserOnPOSIXRules(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "plan9"} {
+		t.Run(goos, func(t *testing.T) {
+			c := validConfig(goos)
+			c.Scope = ScopeUser
+			errs := violations(t, c.validate(goos))
+			if len(errs) != 1 || !strings.Contains(errs[0].Error(), "User: ") {
+				t.Fatalf("violations %v, want one User violation", errors.Join(errs...))
+			}
+			c.User = ""
+			if err := c.validate(goos); err != nil {
+				t.Fatalf("empty User: %v, want nil", err)
+			}
+		})
+	}
 }

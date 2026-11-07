@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 )
 
@@ -48,7 +49,18 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 	}
 	switch goos {
 	case "linux":
-		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
+		h := DefaultHardening(cfg.Scope)
+		if o.hardening != nil {
+			h = *o.hardening
+		}
+		return &systemd{
+			cfg:       cfg,
+			hardening: h,
+			run:       execRunner,
+			euid:      os.Geteuid(),
+			lookupEnv: os.LookupEnv,
+			lingerDir: "/var/lib/systemd/linger",
+		}, nil
 	case "darwin":
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
 	case "windows":

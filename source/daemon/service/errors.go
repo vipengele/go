@@ -17,4 +17,8 @@ var (
 	// ErrPrivilegesRequired is returned when an operation needs privileges the
 	// caller lacks.
 	ErrPrivilegesRequired = errors.New("service: privileges required")
+
+	// ErrManagerUnreachable is returned when the service manager could not be
+	// reached, such as a user manager with no session bus.
+	ErrManagerUnreachable = errors.New("service: service manager unreachable")
 )
