@@ -190,6 +190,17 @@ func TestSystemdStatusPassesOtherErrorsThrough(t *testing.T) {
 	}
 }
 
+func TestSystemdStatusHasNoDetailWhenLingeringIsOn(t *testing.T) {
+	s, _ := newStatusSystemd(t, ScopeUser, show("loaded", "active", "success", "0", "enabled"), nil, true)
+	st, err := s.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Detail != "" {
+		t.Fatalf("Detail = %q, want it empty", st.Detail)
+	}
+}
+
 func TestSystemdStatusLinger(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -393,6 +393,14 @@ func errString(err error) string {
 	return err.Error()
 }
 
+func TestValidateAcceptsAUserWithScopeUserOnWindows(t *testing.T) {
+	c := validConfig("windows")
+	c.Scope = ScopeUser
+	if err := c.validate("windows"); err != nil {
+		t.Fatalf("validate = %v, want nil", err)
+	}
+}
+
 func TestValidateRejectsAUserWithScopeUserOnPOSIXRules(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "plan9"} {
 		t.Run(goos, func(t *testing.T) {

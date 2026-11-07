@@ -186,7 +186,7 @@ func (s *systemd) writeUnit() (err error) {
 	return nil
 }
 
-// Prepare creates the unit directory with mode 0755. It needs root for a
+// Prepare creates the unit directory with mode 0750. It needs root for a
 // system unit.
 func (s *systemd) Prepare(context.Context) error {
 	if err := s.requirePrivileges("Prepare"); err != nil {
@@ -196,7 +196,7 @@ func (s *systemd) Prepare(context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("service: create unit directory: %w", err)
 	}
 	return nil

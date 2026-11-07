@@ -283,3 +283,45 @@ func TestSystemdUninstall(t *testing.T) {
 		})
 	}
 }
+
+func TestSystemdUnitPathIsEmptyWhenTheUserUnitDirIsUnknown(t *testing.T) {
+	s, _, _ := newTestSystemd(t, ScopeUser, 1000)
+	s.lookupEnv = func(string) (string, bool) { return "", false }
+	if dir, err := s.unitDir(); err == nil || dir != "" {
+		t.Fatalf("unitDir = %q, %v, want \"\" and an error", dir, err)
+	}
+	if path, err := s.unitPath(); err == nil || path != "" {
+		t.Fatalf("unitPath = %q, %v, want \"\" and an error", path, err)
+	}
+}
+
+func TestSystemdInstalledUnitPathIsEmptyWhenNotInstalled(t *testing.T) {
+	s, _, _ := newTestSystemd(t, ScopeUser, 1000)
+	path, err := s.installedUnitPath()
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("installedUnitPath error = %v, want ErrNotInstalled", err)
+	}
+	if path != "" {
+		t.Fatalf("installedUnitPath = %q, want \"\"", path)
+	}
+}
+
+func TestSystemdWriteUnitRemovesItsTemporaryFileWhenTheRenameFails(t *testing.T) {
+	s, _, dir := newTestSystemd(t, ScopeUser, 1000)
+	blocker := filepath.Join(dir, "demo.service")
+	if err := os.MkdirAll(filepath.Join(blocker, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeUnit(); err == nil {
+		t.Fatal("writeUnit = nil, want an error")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "demo.service" {
+			t.Errorf("leftover file %q in the unit directory", e.Name())
+		}
+	}
+}

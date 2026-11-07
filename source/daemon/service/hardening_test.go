@@ -51,6 +51,10 @@ func TestHardeningValidate(t *testing.T) {
 		{"newline path", Hardening{ReadWritePaths: []string{"/a\nb"}}, []string{"ReadWritePaths[0]"}},
 		{"nul path", Hardening{ReadWritePaths: []string{"/a\x00b"}}, []string{"ReadWritePaths[0]"}},
 		{"del path", Hardening{ReadWritePaths: []string{"/a\x7fb"}}, []string{"ReadWritePaths[0]"}},
+		{"space in path", Hardening{ReadWritePaths: []string{"/a b"}}, nil},
+		{"C1 control U+0080 in path", Hardening{ReadWritePaths: []string{"/a\u0080b"}}, []string{"ReadWritePaths[0]"}},
+		{"C1 control U+009F in path", Hardening{ReadWritePaths: []string{"/a\u009fb"}}, []string{"ReadWritePaths[0]"}},
+		{"no-break space U+00A0 in path", Hardening{ReadWritePaths: []string{"/a\u00a0b"}}, nil},
 		{"join order", Hardening{
 			ProtectSystem: "x", ProtectHome: "y", ReadWritePaths: []string{"/ok", "rel", "/t\tab"},
 		}, []string{"ProtectSystem", "ProtectHome", "ReadWritePaths[1]", "ReadWritePaths[2]"}},
