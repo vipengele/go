@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -33,6 +34,10 @@ type Check struct {
 	// result is the newest release version this run learnt, or empty when it learnt none. It is
 	// read only after done is closed.
 	result string
+	// instead is the Instead of the notice of the release this run announces, from the managed
+	// install check, or empty when the install is not managed, the check failed or there is no
+	// release to announce. It is read only after done is closed.
+	instead string
 	// once makes the wait and the join of Finish and cancelNow happen once.
 	once sync.Once
 }
@@ -53,6 +58,11 @@ type Check struct {
 // it asks the Source for the latest release and saves the state when the query counts as an
 // attempt. A failed lock or reload abandons the check without a query or a save. No failure is
 // returned or printed.
+//
+// When the check leaves a release to announce, the goroutine then runs [Config.CheckManaged], so
+// that the [Notice] of a managed install says how to update it; Start itself never locates or
+// inspects the executable. Only a [*ManagedInstallError] changes the notice: any other error from
+// CheckManaged leaves its default text.
 func (c Config) Start(ctx context.Context) (*Check, error) {
 	r, err := c.resolve()
 	if err != nil {
@@ -78,6 +88,9 @@ func (c Config) Start(ctx context.Context) (*Check, error) {
 	go func() {
 		defer close(k.done)
 		k.result = runCheck(checkCtx, r)
+		if k.announces(higher(k.saved, k.result)) {
+			k.instead = managedInstead(r)
+		}
 	}()
 	return k, nil
 }
@@ -121,22 +134,46 @@ func runCheck(ctx context.Context, r Config) string {
 // held when the check started and, once the check has finished, the version it learnt. It is
 // reported when it is newer than the running version and not below the HighestApplied the state
 // held when the check started: a release below the watermark is a downgrade, never an update.
+// The Notice's Instead is set only once the check has finished, from its managed install check.
 func (k *Check) Notice() (Notice, bool) {
 	if k == nil {
 		return Notice{}, false
 	}
-	latest := k.saved
+	latest, instead := k.saved, ""
 	select {
 	case <-k.done:
-		if version.Newer(latest, k.result) {
-			latest = k.result
-		}
+		latest = higher(latest, k.result)
+		instead = k.instead
 	default:
 	}
-	if !version.Newer(k.current, latest) || version.Newer(latest, k.highestApplied) {
+	if !k.announces(latest) {
 		return Notice{}, false
 	}
-	return Notice{Name: k.name, Current: k.current, Latest: latest}, true
+	return Notice{Name: k.name, Current: k.current, Latest: latest, Instead: instead}, true
+}
+
+// announces reports whether latest is a release to announce: newer than the running version and
+// not below the HighestApplied the state held when the check started.
+func (k *Check) announces(latest string) bool {
+	return version.Newer(k.current, latest) && !version.Newer(latest, k.highestApplied)
+}
+
+// higher returns the higher of a and b in the order of [version.Newer], and a when neither is.
+func higher(a, b string) string {
+	if version.Newer(a, b) {
+		return b
+	}
+	return a
+}
+
+// managedInstead returns the Instead of the [*ManagedInstallError] r's executable gets, and empty
+// when it gets none or another error: a check that cannot tell keeps the default notice.
+func managedInstead(r Config) string {
+	var managed *ManagedInstallError
+	if errors.As(r.CheckManaged(), &managed) {
+		return managed.Instead
+	}
+	return ""
 }
 
 // Finish waits up to CheckWait for the check to finish, then cancels it and waits for its

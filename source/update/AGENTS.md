@@ -73,8 +73,12 @@ golangci-lint run
   after a switch). `HighestApplied` is never touched.
 - `background.go` — `Config.Start`, `Check` (`Notice`, `Finish`, the unexported `cancelNow`) and
   `runCheck`, the goroutine's body. A nil `*Check` is valid. `Notice` never names a release below the
-  `HighestApplied` the state held at `Start`.
-- `notice.go` — `Notice` and its one-line `String`.
+  `HighestApplied` the state held at `Start`. When the check leaves a release to announce, the
+  goroutine runs `CheckManaged` after `runCheck`; `Start` itself does no executable or container I/O.
+  A `*ManagedInstallError` sets the notice's `Instead`, any other error is ignored, and `Instead` is
+  read only once the goroutine has finished.
+- `notice.go` — `Notice` and its one-line `String`: the update command, or, with `Instead` set, the
+  managed install's instruction in its place.
 - `checkhooks.go` — `Config.UpdateCheckHooks`: the pre-run and post-run hooks a tool passes to
   `core.WithPreRun` and `core.WithPostRun`, typed with `spec` types only. The `*Check` travels from
   one to the other in the context, under an unexported key.
