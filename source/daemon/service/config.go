@@ -87,19 +87,7 @@ func (c Config) validate(goos string) error {
 		errs = append(errs, fmt.Errorf("%w: "+format, append([]any{ErrInvalidConfig}, args...)...))
 	}
 
-	switch {
-	case c.Name == "":
-		fail("Name: is required")
-	case textProblem(c.Name) != "":
-		fail("Name: %s", textProblem(c.Name))
-	default:
-		if !validName(c.Name) {
-			fail("Name: %q must start with an ASCII letter or digit and hold only ASCII letters, digits, '.', '_' or '-'", c.Name)
-		}
-		if len(c.Name) > maxNameLen {
-			fail("Name: is %d bytes long, longer than %d", len(c.Name), maxNameLen)
-		}
-	}
+	c.validateName(fail)
 
 	if p := textProblem(c.Description); p != "" {
 		fail("Description: %s", p)
@@ -144,6 +132,35 @@ func (c Config) validate(goos string) error {
 		}
 	}
 
+	c.validateUser(windows, fail)
+
+	if c.Scope != ScopeSystem && c.Scope != ScopeUser {
+		fail("Scope: %d is neither ScopeSystem nor ScopeUser", int(c.Scope))
+	}
+
+	return errors.Join(errs...)
+}
+
+// validateName reports through fail every rule Name breaks.
+func (c Config) validateName(fail func(format string, args ...any)) {
+	switch {
+	case c.Name == "":
+		fail("Name: is required")
+	case textProblem(c.Name) != "":
+		fail("Name: %s", textProblem(c.Name))
+	default:
+		if !validName(c.Name) {
+			fail("Name: %q must start with an ASCII letter or digit and hold only ASCII letters, digits, '.', '_' or '-'", c.Name)
+		}
+		if len(c.Name) > maxNameLen {
+			fail("Name: is %d bytes long, longer than %d", len(c.Name), maxNameLen)
+		}
+	}
+}
+
+// validateUser reports through fail every rule User breaks on a Windows or a
+// POSIX target, including that a POSIX user service takes no User.
+func (c Config) validateUser(windows bool, fail func(format string, args ...any)) {
 	if c.User != "" {
 		switch {
 		case textProblem(c.User) != "":
@@ -158,12 +175,6 @@ func (c Config) validate(goos string) error {
 	if !windows && c.Scope == ScopeUser && c.User != "" {
 		fail("User: %q cannot be set with ScopeUser, a user service runs as the user who installs it", c.User)
 	}
-
-	if c.Scope != ScopeSystem && c.Scope != ScopeUser {
-		fail("Scope: %d is neither ScopeSystem nor ScopeUser", int(c.Scope))
-	}
-
-	return errors.Join(errs...)
 }
 
 // textProblem describes why s cannot be passed to a service manager, or

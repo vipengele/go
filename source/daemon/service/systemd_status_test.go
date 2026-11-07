@@ -297,3 +297,45 @@ func TestSystemdStatusNeedsNoRoot(t *testing.T) {
 		t.Fatalf("Status as a non-root user: %v", err)
 	}
 }
+
+func TestSystemdStatusUnreachableSystemManager(t *testing.T) {
+	busErr := errors.New("systemctl show: exit status 1: Failed to connect to bus: No such file or directory")
+	s, _ := newStatusSystemd(t, ScopeSystem, "", busErr, false)
+	st, err := s.Status(context.Background())
+	if !errors.Is(err, ErrManagerUnreachable) {
+		t.Fatalf("Status error = %v, want ErrManagerUnreachable", err)
+	}
+	want := Status{State: StateUnknown, Detail: "the system service manager is unreachable"}
+	if st != want {
+		t.Fatalf("Status = %+v, want %+v", st, want)
+	}
+}
+
+func TestSystemdStatusUnreadableMainPID(t *testing.T) {
+	out := "LoadState=loaded\nActiveState=active\nResult=success\nMainPID=forty-two\nNRestarts=0\nUnitFileState=enabled\n"
+	s, _ := newStatusSystemd(t, ScopeSystem, out, nil, false)
+	st, err := s.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != StateUnknown || st.PID != 0 || !st.Enabled {
+		t.Fatalf("Status = %+v, want unknown, enabled, with no PID", st)
+	}
+	if want := `systemd reports an unreadable MainPID="forty-two" for demo.service`; st.Detail != want {
+		t.Fatalf("Detail = %q, want %q", st.Detail, want)
+	}
+}
+
+func TestJoinDetail(t *testing.T) {
+	tests := []struct{ a, b, want string }{
+		{"", "", ""},
+		{"", "b", "b"},
+		{"a", "", "a"},
+		{"a", "b", "a; b"},
+	}
+	for _, tc := range tests {
+		if got := joinDetail(tc.a, tc.b); got != tc.want {
+			t.Errorf("joinDetail(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

@@ -325,3 +325,271 @@ func TestSystemdWriteUnitRemovesItsTemporaryFileWhenTheRenameFails(t *testing.T)
 		}
 	}
 }
+
+// blockUserUnitDir replaces XDG_CONFIG_HOME of the user unit s with a regular
+// file, so every path under the unit directory fails with ENOTDIR.
+func blockUserUnitDir(t *testing.T, s *systemd) {
+	t.Helper()
+	blocker := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.lookupEnv = func(k string) (string, bool) {
+		if k == "XDG_CONFIG_HOME" {
+			return blocker, true
+		}
+		return "", false
+	}
+}
+
+// fillUnitPath makes the unit path a non-empty directory, which a stat
+// accepts and neither a remove nor a rename over it can replace.
+func fillUnitPath(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "demo.service")
+	if err := os.MkdirAll(filepath.Join(path, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestSystemdUnknownUserUnitDirFailsEveryMethod(t *testing.T) {
+	methods := map[string]func(*systemd, context.Context) error{
+		"Prepare":   (*systemd).Prepare,
+		"Install":   (*systemd).Install,
+		"Uninstall": (*systemd).Uninstall,
+		"Start":     (*systemd).Start,
+		"Stop":      (*systemd).Stop,
+	}
+	for name, method := range methods {
+		t.Run(name, func(t *testing.T) {
+			s, f, _ := newTestSystemd(t, ScopeUser, 1000)
+			s.lookupEnv = func(string) (string, bool) { return "", false }
+			err := method(s, context.Background())
+			if err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") {
+				t.Fatalf("err = %v, want the unknown unit directory", err)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("commands = %q, want none", f.calls)
+			}
+		})
+	}
+	s, _, _ := newTestSystemd(t, ScopeUser, 1000)
+	s.lookupEnv = func(string) (string, bool) { return "", false }
+	if err := s.writeUnit(); err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") {
+		t.Fatalf("writeUnit err = %v, want the unknown unit directory", err)
+	}
+}
+
+func TestSystemdUnreadableUnitDirIsNotNotInstalled(t *testing.T) {
+	methods := map[string]func(*systemd, context.Context) error{
+		"Uninstall": (*systemd).Uninstall,
+		"Start":     (*systemd).Start,
+		"Stop":      (*systemd).Stop,
+		"Status": func(s *systemd, ctx context.Context) error {
+			st, err := s.Status(ctx)
+			if st != (Status{State: StateUnknown}) {
+				return fmt.Errorf("status = %+v, want only StateUnknown: %w", st, err)
+			}
+			return err
+		},
+	}
+	for name, method := range methods {
+		t.Run(name, func(t *testing.T) {
+			s, f, _ := newTestSystemd(t, ScopeUser, 1000)
+			blockUserUnitDir(t, s)
+			err := method(s, context.Background())
+			if err == nil || errors.Is(err, ErrNotInstalled) || !strings.Contains(err.Error(), "stat unit file") {
+				t.Fatalf("err = %v, want a stat failure other than ErrNotInstalled", err)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("commands = %q, want none", f.calls)
+			}
+		})
+	}
+}
+
+func TestSystemdPrepareFailsWhenTheUnitDirCannotBeCreated(t *testing.T) {
+	s, _, _ := newTestSystemd(t, ScopeUser, 1000)
+	blockUserUnitDir(t, s)
+	err := s.Prepare(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "create unit directory") {
+		t.Fatalf("err = %v, want the unit directory creation to fail", err)
+	}
+}
+
+func TestSystemdInstallStopsWhenPrepareFails(t *testing.T) {
+	s, f, _ := newTestSystemd(t, ScopeUser, 1000)
+	blockUserUnitDir(t, s)
+	if err := s.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "create unit directory") {
+		t.Fatalf("err = %v, want the unit directory creation to fail", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("commands = %q, want none", f.calls)
+	}
+}
+
+func TestSystemdInstallStopsWhenTheUnitFileCannotBeWritten(t *testing.T) {
+	s, f, dir := newTestSystemd(t, ScopeSystem, 0)
+	fillUnitPath(t, dir)
+	if err := s.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "rename unit file") {
+		t.Fatalf("err = %v, want the unit file rename to fail", err)
+	}
+	if want := [][]string{{"id", "-u", "--", "demo"}}; !slices.EqualFunc(f.calls, want, slices.Equal[[]string]) {
+		t.Fatalf("commands = %q, want only %q", f.calls, want)
+	}
+}
+
+func TestSystemdInstallStopsAtTheFirstFailingSystemctl(t *testing.T) {
+	steps := []string{"systemctl daemon-reload", "systemctl enable demo.service", "systemctl restart demo.service"}
+	for i, step := range steps {
+		t.Run(step, func(t *testing.T) {
+			s, f, _ := newTestSystemd(t, ScopeSystem, 0)
+			boom := errors.New("exit status 1")
+			f.fail[step] = boom
+			err := s.Install(context.Background())
+			if !errors.Is(err, boom) || !strings.Contains(err.Error(), "install demo.service") {
+				t.Fatalf("err = %v, want the %s failure", err, step)
+			}
+			// The account check runs first, then every systemctl up to the failing one.
+			if len(f.calls) != i+2 || strings.Join(f.calls[len(f.calls)-1], " ") != step {
+				t.Fatalf("commands = %q, want to stop after %s", f.calls, step)
+			}
+		})
+	}
+}
+
+func TestSystemdControlPassesSystemctlErrorsThrough(t *testing.T) {
+	methods := map[string]func(*systemd, context.Context) error{
+		"start": (*systemd).Start,
+		"stop":  (*systemd).Stop,
+	}
+	for verb, method := range methods {
+		t.Run(verb, func(t *testing.T) {
+			s, f, dir := newTestSystemd(t, ScopeSystem, 0)
+			writeUnitFile(t, dir)
+			boom := errors.New("exit status 5")
+			f.fail["systemctl "+verb+" demo.service"] = boom
+			err := method(s, context.Background())
+			if !errors.Is(err, boom) || !strings.Contains(err.Error(), verb+" demo.service") {
+				t.Fatalf("err = %v, want the %s failure", err, verb)
+			}
+		})
+	}
+}
+
+func TestSystemdUninstallKeepsGoingWhenTheUnitFileCannotBeRemoved(t *testing.T) {
+	for _, failDisable := range []bool{false, true} {
+		t.Run(fmt.Sprint("disable fails=", failDisable), func(t *testing.T) {
+			s, f, dir := newTestSystemd(t, ScopeSystem, 0)
+			path := fillUnitPath(t, dir)
+			disableErr := errors.New("disable: exit status 1")
+			if failDisable {
+				f.fail["systemctl disable --now demo.service"] = disableErr
+			}
+			err := s.Uninstall(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "remove unit file") {
+				t.Fatalf("err = %v, want the unit file removal to fail", err)
+			}
+			if errors.Is(err, disableErr) != failDisable {
+				t.Fatalf("err = %v, want it to carry the disable failure exactly when disable fails", err)
+			}
+			if want := [][]string{{"systemctl", "disable", "--now", "demo.service"}}; !slices.EqualFunc(f.calls, want, slices.Equal[[]string]) {
+				t.Fatalf("commands = %q, want only %q", f.calls, want)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("unit path stat err = %v, want it kept", err)
+			}
+		})
+	}
+}
+
+func TestSystemdUninstallReportsAFailedReload(t *testing.T) {
+	for _, failDisable := range []bool{false, true} {
+		t.Run(fmt.Sprint("disable fails=", failDisable), func(t *testing.T) {
+			s, f, dir := newTestSystemd(t, ScopeSystem, 0)
+			path := writeUnitFile(t, dir)
+			reloadErr := errors.New("reload: exit status 1")
+			disableErr := errors.New("disable: exit status 1")
+			f.fail["systemctl daemon-reload"] = reloadErr
+			if failDisable {
+				f.fail["systemctl disable --now demo.service"] = disableErr
+			}
+			err := s.Uninstall(context.Background())
+			if !errors.Is(err, reloadErr) || !strings.Contains(err.Error(), "uninstall demo.service") {
+				t.Fatalf("err = %v, want the daemon-reload failure", err)
+			}
+			if errors.Is(err, disableErr) != failDisable {
+				t.Fatalf("err = %v, want it to carry the disable failure exactly when disable fails", err)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unit file stat err = %v, want it removed", err)
+			}
+		})
+	}
+}
+
+func TestSystemdWriteUnitFailsWhenTheUnitDirIsMissing(t *testing.T) {
+	s, _, dir := newTestSystemd(t, ScopeUser, 1000)
+	err := s.writeUnit()
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "create unit file") {
+		t.Fatalf("err = %v, want the temporary file creation to fail", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unit directory stat err = %v, want it still absent", err)
+	}
+}
+
+func TestCommitUnitFileJoinsEveryWriteFailureAndKeepsTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.CreateTemp(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "demo.service")
+	err = commitUnitFile(f, []byte("[Unit]\n"), target)
+	if !errors.Is(err, os.ErrClosed) || !strings.Contains(err.Error(), "write unit file") {
+		t.Fatalf("err = %v, want a write failure wrapping os.ErrClosed", err)
+	}
+	j, ok := errors.Unwrap(err).(interface{ Unwrap() []error })
+	if !ok || len(j.Unwrap()) != 3 {
+		t.Fatalf("err = %v, want the write, chmod and close failures joined", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target stat err = %v, want no unit file", err)
+	}
+	if data, err := os.ReadFile(f.Name()); err != nil || len(data) != 0 {
+		t.Fatalf("temporary file = %q, %v, want it kept and empty", data, err)
+	}
+}
+
+func TestCommitUnitFileWritesWithMode0644AndRenames(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.CreateTemp(dir, "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "demo.service")
+	if err := commitUnitFile(f, []byte("[Unit]\n"), target); err != nil {
+		t.Fatalf("commitUnitFile: %v", err)
+	}
+	if err := f.Close(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("second close err = %v, want os.ErrClosed, the file already closed", err)
+	}
+	if _, err := os.Stat(f.Name()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file stat err = %v, want it renamed away", err)
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Fatalf("mode = %v, want 0644", fi.Mode().Perm())
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "[Unit]\n" {
+		t.Fatalf("unit file = %q, %v, want the data", data, err)
+	}
+}

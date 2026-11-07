@@ -17,10 +17,21 @@ const systemUnitDir = "/etc/systemd/system"
 // that carries the command's stderr and wraps the underlying error.
 type runner func(ctx context.Context, argv []string) ([]byte, error)
 
-// execRunner is the runner that starts argv as a process.
+// execRunner is the runner that starts argv as a process. It starts only the
+// two programs the driver runs, systemctl and id, each named by a constant, so
+// no input chooses the program; any other argv[0] fails with an error
+// wrapping exec.ErrNotFound and starts nothing.
 func execRunner(ctx context.Context, argv []string) ([]byte, error) {
+	var cmd *exec.Cmd
+	switch argv[0] {
+	case "systemctl":
+		cmd = exec.CommandContext(ctx, "systemctl", argv[1:]...) // #nosec G204 -- the program is the constant systemctl; its arguments are the driver's fixed verbs and flags plus the validated unit or account name, passed without a shell
+	case "id":
+		cmd = exec.CommandContext(ctx, "id", argv[1:]...) // #nosec G204 -- the program is the constant id; its arguments are the driver's fixed verbs and flags plus the validated unit or account name, passed without a shell
+	default:
+		return nil, fmt.Errorf("%s: %w: the driver runs only systemctl and id", argv[0], exec.ErrNotFound)
+	}
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -155,7 +166,7 @@ func (s *systemd) installedUnitPath() (string, error) {
 // directory, sets its mode to 0644 whatever the umask, and renames it over
 // the unit file, so a reader never sees a partial unit. The temporary file is
 // removed on any failure.
-func (s *systemd) writeUnit() (err error) {
+func (s *systemd) writeUnit() error {
 	path, err := s.unitPath()
 	if err != nil {
 		return err
@@ -164,23 +175,23 @@ func (s *systemd) writeUnit() (err error) {
 	if err != nil {
 		return fmt.Errorf("service: create unit file: %w", err)
 	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmp)
-		}
-	}()
-	if _, err := f.Write(renderUnit(s.cfg, s.hardening)); err != nil {
+	if err := commitUnitFile(f, renderUnit(s.cfg, s.hardening), path); err != nil {
+		_ = os.Remove(f.Name())
+		return err
+	}
+	return nil
+}
+
+// commitUnitFile writes data to the temporary file f, sets its mode to 0644,
+// closes it and renames it to path. It always closes f, and attempts the
+// write, the chmod and the close even after one fails, so the returned error
+// joins every failure among them. It never removes f.
+func commitUnitFile(f *os.File, data []byte, path string) error {
+	_, writeErr := f.Write(data)
+	if err := errors.Join(writeErr, f.Chmod(0o644), f.Close()); err != nil {
 		return fmt.Errorf("service: write unit file: %w", err)
 	}
-	if err := f.Chmod(0o644); err != nil {
-		return fmt.Errorf("service: chmod unit file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("service: close unit file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(f.Name(), path); err != nil {
 		return fmt.Errorf("service: rename unit file: %w", err)
 	}
 	return nil
