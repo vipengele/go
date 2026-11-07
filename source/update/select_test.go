@@ -198,7 +198,7 @@ func TestSelect_ReleaseFromGitHubSource(t *testing.T) {
 			t.Parallel()
 
 			k := newKitRelease(t, t.TempDir(), m.opts...)
-			rel, err := k.cfg.Source.Latest(context.Background())
+			rel, err := k.cfg.Source.Latest(context.Background(), Stable)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}

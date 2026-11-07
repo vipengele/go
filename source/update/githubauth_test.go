@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -112,24 +113,18 @@ func listReleaseJSON() http.HandlerFunc {
 func TestGitHubSource_TokenReachesTheAPIHostOnly(t *testing.T) {
 	t.Parallel()
 
-	for _, prereleases := range []bool{false, true} {
-		name := "latest"
-		if prereleases {
-			name = "list"
-		}
-
-		t.Run(name, func(t *testing.T) {
+	for _, ch := range []Channel{Stable, Edge} {
+		t.Run(ch.String(), func(t *testing.T) {
 			t.Parallel()
 
 			api := respond(http.StatusOK, apiReleaseJSON("v1.4.0"))
-			if prereleases {
+			if ch != Stable {
 				api = listReleaseJSON()
 			}
 			g := newSplitGitHub(t, respond(http.StatusOK, ""), api)
 			s := g.source(staticToken(testToken))
-			s.IncludePrereleases = prereleases
 
-			got, err := s.Latest(context.Background())
+			got, err := s.Latest(context.Background(), ch)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -154,7 +149,7 @@ func TestGitHubSource_RedirectHitNeedsNoToken(t *testing.T) {
 		return "", errors.New("the token provider is not to be called")
 	})
 
-	got, err := s.Latest(context.Background())
+	got, err := s.Latest(context.Background(), Stable)
 	if err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
@@ -178,12 +173,47 @@ func TestGitHubSource_TokenIsReadOncePerLatest(t *testing.T) {
 	})
 
 	for range 2 {
-		if _, err := s.Latest(context.Background()); err != nil {
+		if _, err := s.Latest(context.Background(), Stable); err != nil {
 			t.Fatalf("Latest() error = %v", err)
 		}
 	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("Token calls over two Latest calls = %d, want 2", n)
+	}
+}
+
+func TestGitHubSource_TokenIsReadOnceAcrossListPages(t *testing.T) {
+	t.Parallel()
+
+	drafts := make([]listedRelease, listPageSize)
+	for i := range drafts {
+		drafts[i] = listedRelease{tag: fmt.Sprintf("v1.0.%d", i), draft: true}
+	}
+	g := newSplitGitHub(t, respond(http.StatusOK, ""), func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			respond(http.StatusOK, apiListJSON(drafts...))(w, r)
+			return
+		}
+		respond(http.StatusOK, apiListJSON(listedRelease{tag: "v0.9.0-beta.1"}))(w, r)
+	})
+	var calls atomic.Int32
+	s := g.source(func(context.Context) (string, error) {
+		calls.Add(1)
+		return testToken, nil
+	})
+
+	got, err := s.Latest(context.Background(), Beta)
+	if err != nil {
+		t.Fatalf("Latest() error = %v", err)
+	}
+	if got.Tag != "v0.9.0-beta.1" {
+		t.Errorf("Latest().Tag = %q, want %q", got.Tag, "v0.9.0-beta.1")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("Token calls over two pages = %d, want 1", n)
+	}
+	if seen := g.apiAuth.seen(); len(seen) != 2 || seen[0] != "Bearer "+testToken || seen[1] != "Bearer "+testToken {
+		t.Errorf("API Authorization = %q, want two %q", seen, "Bearer "+testToken)
 	}
 }
 
@@ -199,7 +229,7 @@ func TestGitHubSource_EmptyTokenSendsNoHeader(t *testing.T) {
 
 			g := newSplitGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, apiReleaseJSON("v1.4.0")))
 
-			if _, err := g.source(token).Latest(context.Background()); err != nil {
+			if _, err := g.source(token).Latest(context.Background(), Stable); err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
 			if n := g.apiCalls.Load(); n != 1 {
@@ -216,20 +246,19 @@ func TestGitHubSource_TokenProviderErrorFailsTheAPIRequest(t *testing.T) {
 
 	errProvider := errors.New("keychain locked")
 
-	for _, prereleases := range []bool{false, true} {
+	for _, ch := range []Channel{Stable, Edge} {
 		g := newSplitGitHub(t, respond(http.StatusOK, ""), unexpected(t, "API"))
 		s := g.source(func(context.Context) (string, error) { return "", errProvider })
-		s.IncludePrereleases = prereleases
 
-		_, err := s.Latest(context.Background())
+		_, err := s.Latest(context.Background(), ch)
 		if !errors.Is(err, errProvider) {
-			t.Fatalf("IncludePrereleases %v: err = %v, want it to wrap the provider's error", prereleases, err)
+			t.Fatalf("channel %s: err = %v, want it to wrap the provider's error", ch, err)
 		}
 		if !strings.HasPrefix(err.Error(), "update: ") {
 			t.Errorf("Error() = %q, want the \"update: \" prefix", err.Error())
 		}
 		if n := g.apiCalls.Load(); n != 0 {
-			t.Errorf("IncludePrereleases %v: API requests = %d, want 0", prereleases, n)
+			t.Errorf("channel %s: API requests = %d, want 0", ch, n)
 		}
 	}
 }
@@ -245,7 +274,7 @@ func TestGitHubSource_TokenProviderReceivesTheContext(t *testing.T) {
 		return "", nil
 	})
 
-	if _, err := s.Latest(context.WithValue(context.Background(), key{}, "marker")); err != nil {
+	if _, err := s.Latest(context.WithValue(context.Background(), key{}, "marker"), Stable); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
 	if got != "marker" {
@@ -268,7 +297,7 @@ func TestGitHubSource_CrossHostAPIRedirectIsRefused(t *testing.T) {
 	g := newSplitGitHub(t, respond(http.StatusOK, ""), redirectTo(http.StatusFound, target))
 
 	for name, token := range map[string]string{"with a token": testToken, "without a token": ""} {
-		_, err := g.source(staticToken(token)).Latest(context.Background())
+		_, err := g.source(staticToken(token)).Latest(context.Background(), Stable)
 
 		var ch *CrossHostRedirectError
 		if !errors.As(err, &ch) {
@@ -294,7 +323,7 @@ func TestGitHubSource_SameHostAPIRedirectKeepsTheToken(t *testing.T) {
 	g := newSplitGitHub(t, respond(http.StatusOK, ""), redirectTo(http.StatusMovedPermanently, movedPath))
 	g.apiRoutes.HandleFunc(movedPath, g.apiAuth.wrap(respond(http.StatusOK, apiReleaseJSON("v1.4.0"))))
 
-	got, err := g.source(staticToken(testToken)).Latest(context.Background())
+	got, err := g.source(staticToken(testToken)).Latest(context.Background(), Stable)
 	if err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
@@ -322,7 +351,7 @@ func TestGitHubSource_SameHostAPIRedirectConsultsTheCallersCheckRedirect(t *test
 		return errStop
 	}
 
-	_, err := s.Latest(context.Background())
+	_, err := s.Latest(context.Background(), Stable)
 	if !errors.Is(err, errStop) {
 		t.Fatalf("err = %v, want the caller's CheckRedirect error", err)
 	}
@@ -337,7 +366,7 @@ func TestGitHubSource_SameHostAPIRedirectsStopAfterTen(t *testing.T) {
 
 	g := newSplitGitHub(t, respond(http.StatusOK, ""), redirectTo(http.StatusFound, apiPath))
 
-	_, err := g.source(nil).Latest(context.Background())
+	_, err := g.source(nil).Latest(context.Background(), Stable)
 	if !errors.Is(err, errTooManyAPIRedirects) {
 		t.Fatalf("err = %v, want it to stop after 10 redirects", err)
 	}
@@ -370,7 +399,7 @@ func TestGitHubSource_DoesNotModifyTheCallersClient(t *testing.T) {
 	s := g.source(staticToken(testToken))
 	s.HTTPClient = client
 
-	if _, err := s.Latest(context.Background()); err != nil {
+	if _, err := s.Latest(context.Background(), Stable); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
 	if client.Transport != transport {

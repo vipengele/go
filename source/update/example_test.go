@@ -77,10 +77,11 @@ func Example_completionHook() {
 }
 
 // A tool updates itself with Apply, which refuses a managed install, checks that the executable's
-// directory is writable, downloads and verifies the release archive, stages the binary beside the
-// running executable and swaps it in, keeping the previous binary as a backup. The tool then runs
-// its post-update hooks on the installed path, reporting a failure without undoing the update, and
-// Discard drops the backup.
+// directory is writable, refuses a release below the highest version applied or running, downloads
+// and verifies the release archive, stages the binary beside the running executable and swaps it
+// in, keeping the previous binary as a backup, and records the release as the highest applied. The
+// tool then runs its post-update hooks on the installed path, reporting a failure without undoing
+// the update, and Discard drops the backup.
 func Example_install() {
 	dir, err := os.MkdirTemp("", "update-example-")
 	if err != nil {
@@ -184,7 +185,7 @@ func Example_install() {
 // newerSource is a Source whose latest release is always v1.3.0.
 type newerSource struct{}
 
-func (newerSource) Latest(context.Context) (update.Release, error) {
+func (newerSource) Latest(context.Context, update.Channel) (update.Release, error) {
 	return update.Release{Tag: "v1.3.0"}, nil
 }
 

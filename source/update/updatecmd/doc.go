@@ -13,6 +13,16 @@
 // included. --check reports whether a newer release exists without installing anything, and exits
 // [ExitUpdateAvailable] when one does, so a script can tell the two answers apart.
 //
+// A release below the highest version the tool has applied or is running is a downgrade, and the
+// command refuses it before it asks anything, whether it is the latest release or one named by --to;
+// only --allow-downgrade lifts that, --to alone does not. --check treats such a latest release as
+// up to date.
+//
+// Releases come in channels that accumulate: stable, then beta, then edge, where a follower of one
+// receives the releases of the ones before it. --channel follows another channel for one run in
+// place of the Config's. Switching to a lower channel never downgrades: a stable tool running
+// v1.3.0-beta.2 stays there until a stable release sorts above it.
+//
 // A development build is refused in every mode with the [*go.vipengele.org/update.DevBuildError]
 // of [go.vipengele.org/update.Config.CheckRelease]. An install an external manager owns is refused
 // with the [*go.vipengele.org/update.ManagedInstallError] of

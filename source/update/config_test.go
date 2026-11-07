@@ -24,7 +24,7 @@ import (
 // stubSource is a Source that reports no release.
 type stubSource struct{}
 
-func (*stubSource) Latest(context.Context) (Release, error) {
+func (*stubSource) Latest(context.Context, Channel) (Release, error) {
 	return Release{}, errors.New("stubSource: no release")
 }
 
@@ -1335,6 +1335,44 @@ func TestValidateChecksCheckWait(t *testing.T) {
 	}
 }
 
+func TestValidateChecksChannel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		channel Channel
+		wantErr bool
+	}{
+		{"zero is stable", 0, false},
+		{"stable", Stable, false},
+		{"beta", Beta, false},
+		{"edge", Edge, false},
+		{"one past edge", Edge + 1, true},
+		{"seven", Channel(7), true},
+		{"negative", Channel(-1), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.Channel = tc.channel
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() = %v, want error: %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				return
+			}
+			var fe *validate.FieldError
+			if !errors.Is(err, validate.ErrInvalid) || !errors.As(err, &fe) || fe.Field != "Channel" {
+				t.Errorf("Validate() = %v, want a FieldError for Channel wrapping %v", err, validate.ErrInvalid)
+			}
+			if _, rerr := c.resolve(); rerr == nil {
+				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
 type fakeLocker struct{}
 
 func (fakeLocker) Lock(context.Context) (func(), error) { return func() {}, nil }
@@ -1602,7 +1640,7 @@ func TestResolveDefaultSourceReadsTheTokenThroughGetenv(t *testing.T) {
 			c.Source = nil
 			c.Getenv = envOf(tc.env)
 
-			if _, err := resolvedGitHubSource(t, c, g).Latest(context.Background()); err != nil {
+			if _, err := resolvedGitHubSource(t, c, g).Latest(context.Background(), Stable); err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
 			if seen := g.apiAuth.seen(); len(seen) != 1 || seen[0] != tc.want {
@@ -1633,7 +1671,7 @@ func TestResolveDefaultSourceUsesTheConfigToken(t *testing.T) {
 			c.Getenv = envOf(map[string]string{"GH_TOKEN": "from-env"})
 			c.Token = staticToken(tc.token)
 
-			if _, err := resolvedGitHubSource(t, c, g).Latest(context.Background()); err != nil {
+			if _, err := resolvedGitHubSource(t, c, g).Latest(context.Background(), Stable); err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
 			if seen := g.apiAuth.seen(); len(seen) != 1 || seen[0] != tc.want {
@@ -1651,7 +1689,7 @@ func TestResolveDefaultSourceRejectedEnvTokenIsTokenRejectedError(t *testing.T) 
 	c.Source = nil
 	c.Getenv = envOf(map[string]string{"GITHUB_TOKEN": "revoked"})
 
-	_, err := resolvedGitHubSource(t, c, g).Latest(context.Background())
+	_, err := resolvedGitHubSource(t, c, g).Latest(context.Background(), Stable)
 
 	var tr *TokenRejectedError
 	if !errors.As(err, &tr) {

@@ -1,12 +1,13 @@
 # GitHub API requests carry a token kept to the API host, and revalidate with ETags
 
 Status: extends ADR-0016, which it does not supersede: the web redirect is still read first and the
-REST API is still the fallback. Realises the `Token func(ctx) (string, error)` that ADR-0003 sketches
+REST API is still the fallback. Applies to every page of the release list that ADR-0027 reads on
+the Beta and Edge channels. Realises the `Token func(ctx) (string, error)` that ADR-0003 sketches
 for the source. Keeps its cache beside the check state of ADR-0023.
 
 An unauthenticated address is limited to sixty REST API requests an hour, shared by everyone behind
-it (ADR-0016). `GitHubSource` reaches the API when the redirect does not answer and always for
-`IncludePrereleases`, so a tool needs a credential to spend its own quota, and a way to ask again
+it (ADR-0016). `GitHubSource` reaches the API when the redirect does not answer on the Stable channel and always on
+Beta and Edge, whose release list may take several pages (ADR-0027), so a tool needs a credential to spend its own quota, and a way to ask again
 without paying for an unchanged answer.
 
 ## The rules
@@ -15,8 +16,8 @@ without paying for an unchanged answer.
   `Config.Token` reads `GH_TOKEN`, then `GITHUB_TOKEN` when that is empty, through `Config.Getenv`.
   A token of `""` means unauthenticated, which is the opt-out. A provider error fails the API
   request, wrapped. A supplied `Source` ignores `Config.Token`.
-- **A separate, derived API client.** Each `Latest` call reads the token once, and only when it makes
-  a REST API request. It builds a shallow copy of the injected `http.Client` whose transport adds
+- **A separate, derived API client.** Each `Latest` call reads the token once, however many pages of
+  the release list it reads, and only when it makes a REST API request. It builds a shallow copy of the injected `http.Client` whose transport adds
   `Authorization: Bearer <token>` only when the request host equals the `APIURL` host (compared
   case-insensitively, port included), on a clone of the request rather than the request itself, and
   whose `CheckRedirect` refuses a redirect to another host with a `*CrossHostRedirectError`.
@@ -42,8 +43,9 @@ without paying for an unchanged answer.
   - A request carries `If-None-Match` only when an entry exists for its URL. A 304 is decoded
     through the path a 200 is. A 200 with an ETag replaces the entry once its body has been read
     within the read cap.
-  - Bodies are cached up to the existing read caps, 8 MiB for the latest release and 32 MiB for the
-    list, so the list path, which always reaches the API, is cacheable.
+  - Bodies are cached up to the existing read caps, 8 MiB for the latest release and 32 MiB for a
+    page of the list, so the list path, which always reaches the API, is cacheable. Each page is a
+    URL of its own, with an entry of its own.
   - A cache that fails to load is a miss and one that fails to save is a skipped write. Nothing is
     written once the `ctx` is done. An error response never returns the cached body.
   - GitHub exempts a 304 from the rate limit only when the request is authenticated. Without a token

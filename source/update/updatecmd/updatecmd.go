@@ -33,17 +33,19 @@ func Commands(cfg update.Config, opts ...Option) []*spec.Command {
 	}
 
 	c := &command{
-		cfg:   cfg,
-		check: spec.BoolFlag("check", "report whether a newer release exists, without installing it"),
-		yes:   spec.BoolFlag("yes", "update without asking for confirmation", spec.Shorthand("y")),
-		to:    spec.StringFlag("to", "install this release version, such as v1.2.3, instead of the latest"),
+		cfg:            cfg,
+		check:          spec.BoolFlag("check", "report whether a newer release exists, without installing it"),
+		yes:            spec.BoolFlag("yes", "update without asking for confirmation", spec.Shorthand("y")),
+		to:             spec.StringFlag("to", "install this release version, such as v1.2.3, instead of the latest"),
+		allowDowngrade: spec.BoolFlag("allow-downgrade", "install a release below the highest version applied or running"),
+		channel:        spec.StringFlag("channel", "follow this release channel for this run: stable, beta or edge"),
 	}
 
 	return []*spec.Command{{
 		Name:        "update",
 		Summary:     "Update " + cfg.Name + " to the latest release",
 		Description: description(cfg.Name),
-		Flags:       []spec.Flag{c.check, c.yes, c.to},
+		Flags:       []spec.Flag{c.check, c.yes, c.to, c.allowDowngrade, c.channel},
 		Run:         c.run,
 		Annotations: map[string]string{spec.SkipUpdateCheck: ""},
 	}}
@@ -54,20 +56,29 @@ func description(name string) string {
 	return fmt.Sprintf(`Update %[1]s by replacing the running executable with a release.
 
 Without flags, %[1]s is updated to its latest release after a confirmation, which --yes
-answers in advance. --to installs the named release instead, which may be older than the
-running one. A development build and an install an external manager owns, such as Homebrew
-or Nix, are not updated.
+answers in advance. --to installs the named release instead. A release below the highest
+version applied or running is refused unless --allow-downgrade is given; --to alone does not
+lift that. A development build and an install an external manager owns, such as Homebrew or
+Nix, are not updated.
+
+Releases come in three channels, each receiving everything the ones before it do: stable, then
+beta, then edge. --channel follows one of them for this run instead of the configured channel.
+Switching to a lower channel never downgrades: a stable tool running v1.3.0-beta.2 stays there
+until a stable release sorts above it.
 
 With --check, nothing is installed: the result is printed on the standard output, and the
-exit code is %[2]d when a newer release exists and 0 when %[1]s is up to date.`, name, ExitUpdateAvailable)
+exit code is %[2]d when a newer release exists and 0 when %[1]s is up to date. A latest release
+below the highest version applied or running counts as up to date.`, name, ExitUpdateAvailable)
 }
 
 // command is the `update` command of one Config: the Config and the handles of its flags.
 type command struct {
-	cfg   update.Config
-	check *spec.FlagOf[bool]
-	yes   *spec.FlagOf[bool]
-	to    *spec.FlagOf[string]
+	cfg            update.Config
+	check          *spec.FlagOf[bool]
+	yes            *spec.FlagOf[bool]
+	to             *spec.FlagOf[string]
+	allowDowngrade *spec.FlagOf[bool]
+	channel        *spec.FlagOf[string]
 }
 
 // run is the `update` command's run function.
@@ -75,6 +86,15 @@ func (c *command) run(ctx context.Context, inv *spec.Invocation) error {
 	check := c.check.Get(inv)
 	to := c.to.Get(inv)
 	pinned := c.to.IsSet(inv) || to != ""
+
+	cfg := c.cfg
+	if name := c.channel.Get(inv); c.channel.IsSet(inv) || name != "" {
+		ch, err := update.ParseChannel(name)
+		if err != nil {
+			return fmt.Errorf("--channel: %w", err)
+		}
+		cfg.Channel = ch
+	}
 
 	if pinned {
 		if check {
@@ -88,7 +108,7 @@ func (c *command) run(ctx context.Context, inv *spec.Invocation) error {
 		to = normalized
 	}
 
-	r, err := c.cfg.Resolved()
+	r, err := cfg.Resolved()
 	if err != nil {
 		return err
 	}
@@ -132,13 +152,22 @@ func releaseVersion(v string) (string, error) {
 // line written says all there is to say. managed, when not nil, adds what to run instead of an
 // in-place update.
 func (c *command) report(ctx context.Context, inv *spec.Invocation, r update.Config, managed *update.ManagedInstallError) error {
-	latest, err := r.Source.Latest(ctx)
+	latest, err := r.Source.Latest(ctx, r.Channel)
 	if err != nil {
 		return err
 	}
 
 	if !version.Newer(r.Version, latest.Tag) {
 		return inv.Data("%s %s is up to date\n", r.Name, r.Version)
+	}
+
+	// A latest below the downgrade floor is not an update the command would install.
+	if err := r.CheckDowngrade(ctx, latest.Tag); err != nil {
+		var down *update.DowngradeError
+		if errors.As(err, &down) {
+			return inv.Data("%s %s is up to date\n", r.Name, r.Version)
+		}
+		return err
 	}
 
 	line := fmt.Sprintf("%s %s is available (current %s)", r.Name, latest.Tag, r.Version)
@@ -164,7 +193,7 @@ func (c *command) update(ctx context.Context, inv *spec.Invocation, r update.Con
 			return nil
 		}
 	} else {
-		latest, err := r.Source.Latest(ctx)
+		latest, err := r.Source.Latest(ctx, r.Channel)
 		if err != nil {
 			return err
 		}
@@ -174,6 +203,14 @@ func (c *command) update(ctx context.Context, inv *spec.Invocation, r update.Con
 			return nil
 		}
 		rel = latest
+	}
+
+	// The guard runs before the question, so a refused downgrade never prompts.
+	allowDowngrade := c.allowDowngrade.Get(inv)
+	if !allowDowngrade {
+		if err := r.CheckDowngrade(ctx, rel.Tag); err != nil {
+			return err
+		}
 	}
 
 	if !c.yes.Get(inv) {
@@ -201,7 +238,12 @@ func (c *command) update(ctx context.Context, inv *spec.Invocation, r update.Con
 		return err
 	}
 
-	installed, err := r.Apply(ctx, sel)
+	var opts []update.ApplyOption
+	if allowDowngrade {
+		opts = append(opts, update.AllowDowngrade())
+	}
+
+	installed, err := r.Apply(ctx, sel, opts...)
 	if err != nil {
 		return err
 	}

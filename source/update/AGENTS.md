@@ -31,12 +31,28 @@ golangci-lint run
   needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
   and `AssetExt` to the asset format (raw, tar.gz or zip), which `Validate` and `Extract` share;
   `MaxExtractBytes` (default 512 MiB) bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s)
-  bounds how long the background check delays exit. `Locker` (`filelock.Locker`) defaults to
+  bounds how long the background check delays exit. `Channel` (default `Stable`, valid when one of
+  `Stable`, `Beta` and `Edge`) is the release channel the update follows; a tool maps its own config
+  key onto it through `ParseChannel`. `Locker` (`filelock.Locker`) defaults to
   `dirLocker`, which runs `os.MkdirAll(StateDir, 0o700)` before locking `StateDir/update.lock`,
   because filelock refuses a missing directory and nothing else creates `StateDir` before the first
   save. `dirLocker.TryLock` does the same before its single attempt; the background check uses
   `Lock` only.
-- `state.go` — `State` (`LastAttempt`, `LatestVersion`), the `StateStore` interface and `fileStore`,
+- `channel.go` — `Channel` (`Stable < Beta < Edge`, cumulative, zero is `Stable`) with `String`,
+  `Receives`, `MarshalText`/`UnmarshalText`, and `ParseChannel` (exactly `stable`, `beta`, `edge`).
+  `channelOf(tag, prerelease)` is the higher of the tag's channel (no suffix: `Stable`; first suffix
+  identifier `beta` or `rc`: `Beta`; any other suffix: `Edge`) and the flag's (`prerelease: true` is
+  at least `Beta`); it assumes a release version. Ordering is semver (`version.Newer`) on every
+  channel (ADR-0027).
+- `downgrade.go` — `Config.CheckDowngrade(ctx, tag)` and `downgradeFloor`. The floor is the higher of
+  `State.HighestApplied` and the running `Version`, each ignored when not a release version. A tag
+  strictly below it is a `*DowngradeError`; equal passes; a tag that is not a release version is
+  below every floor. It fails closed: an invalid `Config` or a `StateStore.Load` error is returned
+  as it is, never guessed around.
+- `state.go` — `State` (four keys, each omitted when zero: `last_attempt`, `latest_version`,
+  `latest_channel`, `highest_applied`; a reader ignores unknown keys, so an older build rewriting the
+  file drops `highest_applied`), `lastAttemptOn`/`latestVersionOn` (a value learnt on another
+  channel reads as empty), the `StateStore` interface and `fileStore`,
   the default store: `update-state.json` in the state dir through `go.vipengele.org/cli/state`
   (ADR-0023). `Save` creates the directory 0700 and writes the file 0600; a missing or corrupt file
   loads as the zero `State`, an unreadable one is an error. It takes no lock. `StateStore.Load` and
@@ -46,38 +62,50 @@ golangci-lint run
 - `check.go` — `checkInputs` and `checkInputsFrom` (everything the gates read, through the `Config`
   seams, from a resolved `Config` and the stored `State`), `eligibility` and its `checkReason`: the
   gates in order are dev build, CI, no terminal, disabled, opted out
-  (`<EnvPrefix>_NO_UPDATE_CHECK`, via `optOutSuffix`), throttled. `afterAttempt` returns the `State`
-  to store: a check stopped by the command ending (`ctx` done or `context.Canceled`) is not an
-  attempt and changes nothing; a failed attempt records `LastAttempt` and keeps `LatestVersion`.
+  (`<EnvPrefix>_NO_UPDATE_CHECK`, via `optOutSuffix`), throttled; `LastAttempt` is read per channel,
+  so a state learnt on another channel never throttles. `afterAttempt` returns the `State` to store:
+  a check stopped by the command ending (`ctx` done or `context.Canceled`) is not an attempt and
+  changes nothing; any other attempt records `LastAttempt` and `LatestChannel`; success sets
+  `LatestVersion`; a failure keeps `LatestVersion` when the state was learnt on the same channel and
+  clears it when it was learnt on another (otherwise an unreachable source is queried on every run
+  after a switch). `HighestApplied` is never touched.
 - `background.go` — `Config.Start`, `Check` (`Notice`, `Finish`, the unexported `cancelNow`) and
-  `runCheck`, the goroutine's body. A nil `*Check` is valid.
+  `runCheck`, the goroutine's body. A nil `*Check` is valid. `Notice` never names a release below the
+  `HighestApplied` the state held at `Start`.
 - `notice.go` — `Notice` and its one-line `String`.
 - `checkhooks.go` — `Config.UpdateCheckHooks`: the pre-run and post-run hooks a tool passes to
   `core.WithPreRun` and `core.WithPostRun`, typed with `spec` types only. The `*Check` travels from
   one to the other in the context, under an unexported key.
 - `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
-- `github.go` — `GitHubSource`: reads the `releases/latest` redirect without following it, falls back
-  to the REST API, and with `IncludePrereleases` reads the first page of the release list instead.
-  Tags must be plain release versions; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for
-  tests (ADR-0027). `Token` (`Config.Token`; nil reads `GH_TOKEN`, then `GITHUB_TOKEN`, through
-  `Getenv`; `""` opts out; a provider error fails the API request, wrapped) authenticates REST API
-  requests only. Each `Latest` builds its API client from the injected one in `githubauth.go`, and
-  reads the token once, only for an API request. The wrapping transport adds `Authorization: Bearer`
-  only when the request host equals the `APIURL` host (case-insensitive, port included), on a clone
-  of the request, and `CheckRedirect` refuses a cross-host redirect with a
-  `*CrossHostRedirectError`, declared in `githubauth.go`. Downloads (`Config.HTTPClient`) and the
-  web redirect probe never send the token. A 401 to an authenticated request is a
+  `Source.Latest(ctx, ch)` takes the channel; `Release` carries none.
+- `github.go` — `GitHubSource`: on `Stable` it reads the `releases/latest` redirect without following
+  it and falls back to the REST API. On `Beta` and `Edge` it reads the release list page by page
+  (100 a page, newest-created first) until a page holds a release the channel receives, a page is
+  short or empty, or 10 pages are read, and returns the highest receivable release across the pages
+  read; drafts and non-release tags are skipped, and none within the bound is an error. Stable tags
+  must be plain release versions; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for tests.
+  `Token` (`Config.Token`; nil reads `GH_TOKEN`, then `GITHUB_TOKEN`, through `Getenv`; `""` opts
+  out; a provider error fails the API request, wrapped) authenticates REST API requests only
+  (ADR-0028). `latestByAPI` and `highestListed` each build the API client once from the injected one
+  with `apiClient` (`githubauth.go`), which reads the token, and pass it to `apiGet` for every
+  request, every list page included, so a `Latest` reads the token at most once and only for an API
+  request. The wrapping transport adds `Authorization: Bearer` only when the request host equals the
+  `APIURL` host (case-insensitive, port included), on a clone of the request, and `CheckRedirect`
+  refuses a cross-host redirect with a `*CrossHostRedirectError`, declared in `githubauth.go`.
+  Downloads (`Config.HTTPClient`) and the web redirect probe never send the token. Every REST API
+  response goes through `apiStatusError`; a 401 to an authenticated request is a
   `*TokenRejectedError`, never an unauthenticated retry.
 - `githubcache.go` — `ResponseCache` (`Get`, `Put`), `CachedResponse` (`ETag`, `Body`) and
   `NewFileResponseCache`, the default of the default source: `github-cache.json` in `StateDir`
   through `go.vipengele.org/cli/state` (0700/0600, atomic), kept apart from `State` so a custom
   `StateStore` needs no new fields. Its I/O is bounded by `ctx` in `fileStore`'s goroutine-and-select
-  shape. `GitHubSource` sends `If-None-Match` only when an entry exists, decodes a 304 through the
-  path a 200 takes, replaces the entry on a 200 with an ETag (bodies up to the read caps, 8 MiB for
-  latest and 32 MiB for the list), treats a failed load as a miss and a failed save as a skipped
-  write, writes nothing once `ctx` is done, and never returns the cached body for an error response.
-  An unauthenticated 304 is not exempt from the rate limit: it saves transfer, not quota.
+  shape. Entries are keyed by URL, so each list page has its own. `GitHubSource` sends
+  `If-None-Match` only when an entry exists, decodes a 304 through the path a 200 takes, replaces the
+  entry on a 200 with an ETag (bodies up to the read caps, 8 MiB for latest and 32 MiB for a list
+  page), treats a failed load as a miss and a failed save as a skipped write, writes nothing once
+  `ctx` is done, and never returns the cached body for an error response. An unauthenticated 304 is
+  not exempt from the rate limit: it saves transfer, not quota.
 - `select.go` — `Config.Select` names the archive and checksums assets of a `Release`: the
   `AssetTemplate` and `ChecksumsAsset` rendered with `AssetExt`. A non-nil `Assets` is matched by
   exact name; nil `Assets` (the redirect path, ADR-0019) is located through the `Source`'s optional
@@ -100,12 +128,13 @@ golangci-lint run
   `SizeLimitError`, `SignatureMalformedError` (unwraps to the minisign parse error),
   `UnknownKeyError` (carries the signature's key id as minisign prints it),
   `SignatureMismatchError` (carries the key id, unwraps to the minisign verification error),
-  `ManagedInstallError`, `ErrPrerelease` and `ErrAssetsNotListed`, the typed errors a source,
-  `Select` or `Download` returns; `DevBuildError`, the error `CheckRelease` returns.
-  `classifyError` maps deadline and timeout failures to `TimeoutError` and passes cancellation
-  through unchanged. `ExtractLimitError`, `UnsafeEntryError`, `BinaryNotFoundError`,
-  `MultipleBinariesError`, `UnsupportedFormatError`, `ErrEmptyAsset`, `ErrNotGzip` and
-  `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
+  `ManagedInstallError`, `ErrPrerelease` (the `Stable` channel's latest release is a pre-release)
+  and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns;
+  `DevBuildError`, the error `CheckRelease` returns; `DowngradeError` (`Name`, `Version`, `Floor`),
+  the error `CheckDowngrade` returns. `classifyError` maps deadline and timeout failures to
+  `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
+  `UnsafeEntryError`, `BinaryNotFoundError`, `MultipleBinariesError`, `UnsupportedFormatError`,
+  `ErrEmptyAsset`, `ErrNotGzip` and `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
   `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
   errors `CheckWritable`, `Install` and `Installed` return.
 - `managed.go` — `Config.CheckManaged`, `Detector` and `Install`: resolves the symlinks of the
@@ -186,18 +215,30 @@ golangci-lint run
 - `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
   `backupLocked`.
 - `release.go` — `Config.CheckRelease`: refuses a development build with a `*DevBuildError`.
-- `apply.go` — `Config.Apply`: CheckManaged, CheckWritable, Download, Target, Extract into the
-  target's directory, Install. It returns the `*Installed` with the backup kept, runs no hook and
-  calls neither `Discard` nor `Rollback`. It closes the archive itself only when Target fails.
+- `apply.go` — `Config.Apply(ctx, sel, opts...)`, eight steps stopping at the first error: 1
+  CheckManaged, 2 CheckWritable, 3 CheckDowngrade of `sel.Tag` (skipped, with its State read, by
+  `AllowDowngrade()`), 4 Download, 5 Target, 6 Extract into the target's directory, 7 Install, 8 the
+  record (`recordApplied`): under the Locker, load the State, raise `HighestApplied` to the tag when
+  newer, save the whole State. The guard fails closed (an unreadable State refuses the install); the
+  record fails open (a failed lock, load or save is ignored, since the new binary's `Version` floors
+  the next run). Steps 1 to 3 make no request. It returns the `*Installed` with the backup kept, runs
+  no hook and calls neither `Discard` nor `Rollback`. It closes the archive itself only when Target
+  fails. `WithDownloadOptions` passes options to Download.
 - `updatecmd/` — `Commands(cfg, opts...) []*spec.Command`: one `update` command with `--check`,
-  `--yes`/`-y` and `--to`, carrying `spec.SkipUpdateCheck`.
+  `--yes`/`-y`, `--to`, `--allow-downgrade` and `--channel`, carrying `spec.SkipUpdateCheck`.
   - `ExitUpdateAvailable = 10` is the exit code of `--check` when a newer release exists; the
     result goes to stdout, messages to stderr.
   - A development build is refused in both modes. `CheckManaged` runs first: in `--check` a
     `*ManagedInstallError` only adds a hint to the line; in an update it is returned before any
     request.
-  - `--to` accepts `1.2.3` or `v1.2.3` and may downgrade; a version equal to the current one is a
-    no-op. `--to` combined with `--check`, or not a release version, is a plain error (exit 1).
+  - `--to` accepts `1.2.3` or `v1.2.3`; a version equal to the current one is a no-op. `--to`
+    combined with `--check`, or not a release version, is a plain error (exit 1). `--to` alone does
+    not lift the downgrade guard: a tag below the floor is a `*DowngradeError` unless
+    `--allow-downgrade` is given (which passes `update.AllowDowngrade()` to `Apply`).
+  - `--channel stable|beta|edge` replaces `Config.Channel` for one run through `ParseChannel`; any
+    other value is a plain error.
+  - The floor decides whether there is an update: the guard runs before the confirmation on the
+    latest path and the `--to` path, and `--check` reports up to date for a latest below the floor.
   - Without `--yes` it asks with `Confirm(Required: true)`, so a non-terminal stdin is the
     framework's `*spec.UsageError` (exit 2).
   - After `Apply`, a `RunPostUpdate` failure and a `Discard` failure (naming the backup path) are
@@ -331,9 +372,12 @@ golangci-lint run
 - `Finish` is the only wait. It is bounded by `CheckWait` only while `Locker`, `Source` and
   `StateStore` honour `ctx`, because it cancels and then joins the goroutine.
 - The check takes the lock, reloads the state and re-throttles under it. When another process has
-  just checked, its `LatestVersion` is this run's result: no query and no save. A reload error
+  just checked on this channel, its `LatestVersion` is this run's result: no query and no save. A reload error
   abandons the check.
 - A cancelled check is not an attempt and saves nothing (`afterAttempt`).
+- The throttle is per channel: `Start` and the reload under the lock read `LastAttempt` and
+  `LatestVersion` through `lastAttemptOn` and `latestVersionOn` for `Config.Channel`, so a state
+  learnt on another channel counts the throttle as elapsed and announces nothing.
 - Nothing is printed but the notice, and it is written only when stderr is a terminal. A failed
   lock, query or save is never reported and never fails the command.
 - The post-run hook always returns nil, so the run's error passes through. It finishes the check

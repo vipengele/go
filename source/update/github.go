@@ -56,44 +56,48 @@ const listPageSize = 100
 // in full.
 const maxDrainBody = 64 << 10
 
-// GitHubSource is a [Source] that reads the latest release of a GitHub repository. Its zero
-// value, given Owner and Repo, talks to github.com.
+// GitHubSource is a [Source] that reads the releases of a GitHub repository. Its zero value, given
+// Owner and Repo, talks to github.com.
 //
-// Latest first requests the web page WebURL/<Owner>/<Repo>/releases/latest without following
-// its redirect: a redirect status (301, 302, 303, 307 or 308) whose Location ends in
-// /<Owner>/<Repo>/releases/tag/<tag> names the latest release, and Latest returns its tag and
-// page with nil Assets, meaning the assets are not listed. Any other response, and a failed
+// On the [Stable] channel, Latest first requests the web page WebURL/<Owner>/<Repo>/releases/latest
+// without following its redirect: a redirect status (301, 302, 303, 307 or 308) whose Location
+// ends in /<Owner>/<Repo>/releases/tag/<tag> names the latest release, and Latest returns its tag
+// and page with nil Assets, meaning the assets are not listed. Any other response, and a failed
 // request, falls back to the REST API, APIURL/repos/<Owner>/<Repo>/releases/latest, whose answer
 // carries every asset. A timeout or a cancellation of the redirect request does not fall back.
-//
 // The tag must be a release version as [version.IsRelease] defines it, or Latest returns a
 // [*TagError]; a prefixed tag such as "source/update/v1.2.3" is one. A tag with a pre-release
 // suffix, such as "v1.2.3-rc.1", gives [ErrPrerelease] on either path.
 //
-// With IncludePrereleases set, Latest makes neither of those requests. It reads the first page of
-// APIURL/repos/<Owner>/<Repo>/releases, up to 100 releases, drops drafts and releases whose tag is
-// not a release version, and returns the highest remaining tag in version order, pre-releases
-// included, with every asset. A page with no such release is an error.
+// On the [Beta] and [Edge] channels, Latest makes neither of those requests. It reads the release
+// list, APIURL/repos/<Owner>/<Repo>/releases, page by page, 100 releases to a page, newest-created
+// first as GitHub orders it. Drafts and releases whose tag is not a release version are never
+// eligible; any other release is eligible when the channel receives it, judged by its tag's
+// pre-release suffix and GitHub's pre-release flag. Latest stops after the first page holding an
+// eligible release, after a page shorter than 100 releases, or after 10 pages, and returns the
+// eligible release with the highest tag in version order among the pages read, with every asset.
+// No eligible release within those pages is an error.
 //
-// A response with a non-success status gives a [*StatusError]. From the REST API, a 403 or 429 that
-// reports an exhausted rate limit gives a [*RateLimitError] and a 401 to a request that carried
-// credentials a [*TokenRejectedError]; both unwrap to the [*StatusError]. An expired deadline gives a
+// A channel other than Stable, Beta and Edge is an error, with no request made. A response with a
+// non-success status gives a [*StatusError]. From the REST API, a 403 or 429 that reports an
+// exhausted rate limit gives a [*RateLimitError] and a 401 to a request that carried credentials a
+// [*TokenRejectedError]; both unwrap to the [*StatusError]. An expired deadline gives a
 // [*TimeoutError], and a cancelled ctx an error matching [context.Canceled].
 //
-// REST API requests carry "Authorization: Bearer <token>" when Token returns a non-empty token, and
-// only to the APIURL host; a REST API redirect to another host fails with a
-// [*CrossHostRedirectError]. The web request never carries a token, and asset downloads, made
-// through [Config.HTTPClient], never do either.
+// REST API requests, every page of the release list included, carry "Authorization: Bearer
+// <token>" when Token returns a non-empty token, and only to the APIURL host; a REST API redirect to
+// another host fails with a [*CrossHostRedirectError]. The web request never carries a token, and
+// asset downloads, made through [Config.HTTPClient], never do either.
 //
 // With a Cache, a REST API request for a URL the cache holds an entry for carries
 // "If-None-Match: <etag>", and a 304 Not Modified answer is decoded from the cached body exactly as
-// a 200 body is. A 200 carrying an ETag replaces the entry, ETag and body together, once the body
-// has been read in full within the read limit. A rate-limited, 401 or other non-success response
-// returns its error, never the cached body, and a 304 for a URL with no entry is a [*StatusError].
-// A cache that fails to load or save is a miss or a skipped write, never an error of Latest, and
-// nothing is written once ctx is done. GitHub exempts a 304 from the rate limit only when the
-// request is authenticated, so without a token a conditional request saves the transfer but not
-// the quota.
+// a 200 body is. Each page of the release list is a URL of its own, with an entry of its own. A 200
+// carrying an ETag replaces the entry, ETag and body together, once the body has been read in full
+// within the read limit. A rate-limited, 401 or other non-success response returns its error, never
+// the cached body, and a 304 for a URL with no entry is a [*StatusError]. A cache that fails to load
+// or save is a miss or a skipped write, never an error of Latest, and nothing is written once ctx is
+// done. GitHub exempts a 304 from the rate limit only when the request is authenticated, so without
+// a token a conditional request saves the transfer but not the quota.
 type GitHubSource struct {
 	// Owner is the GitHub user or organization that owns the repository.
 	Owner string
@@ -108,10 +112,6 @@ type GitHubSource struct {
 	WebURL string
 	// APIURL is the base address of GitHub's REST API. Empty means "https://api.github.com".
 	APIURL string
-	// IncludePrereleases makes pre-releases eligible: Latest returns the highest release on the
-	// first page of the REST API's release list, pre-release or not, instead of the release
-	// GitHub marks as latest. False means a pre-release tag gives [ErrPrerelease].
-	IncludePrereleases bool
 	// Timeout bounds each request Latest makes, through its context; a shorter deadline on the
 	// caller's context wins. Zero or negative means 10 seconds.
 	Timeout time.Duration
@@ -137,14 +137,17 @@ func NewGitHubSource(identity spec.Identity, httpClient *http.Client) *GitHubSou
 	}
 }
 
-// Latest returns the repository's latest release. ctx bounds the whole lookup and each request is
-// further bounded by Timeout.
-func (s *GitHubSource) Latest(ctx context.Context) (Release, error) {
-	if s.IncludePrereleases {
-		return s.highestListed(ctx)
+// Latest returns the repository's highest release ch receives. ctx bounds the whole lookup and
+// each request is further bounded by Timeout.
+func (s *GitHubSource) Latest(ctx context.Context, ch Channel) (Release, error) {
+	switch ch {
+	case Stable:
+		return s.latestStable(ctx)
+	case Beta, Edge:
+		return s.highestListed(ctx, ch)
+	default:
+		return Release{}, fmt.Errorf("update: unknown channel %s", ch)
 	}
-
-	return s.latestStable(ctx)
 }
 
 // AssetURL returns the address GitHub serves the asset name of the release tagged tag from,
@@ -222,10 +225,11 @@ func isTimeoutOrCanceled(err error) bool {
 
 // gitHubRelease is the part of a REST API release object a GitHubSource reads.
 type gitHubRelease struct {
-	TagName string        `json:"tag_name"`
-	HTMLURL string        `json:"html_url"`
-	Draft   bool          `json:"draft"`
-	Assets  []gitHubAsset `json:"assets"`
+	TagName    string        `json:"tag_name"`
+	HTMLURL    string        `json:"html_url"`
+	Draft      bool          `json:"draft"`
+	Prerelease bool          `json:"prerelease"`
+	Assets     []gitHubAsset `json:"assets"`
 }
 
 // release returns the Release gr describes. Its Assets are never nil: an empty slice is a release
@@ -251,9 +255,14 @@ type gitHubAsset struct {
 func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 	apiURL := strings.TrimSuffix(s.apiURL(), "/") + "/repos/" + s.repoPath() + "/releases/latest"
 
+	client, err := s.apiClient(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+
 	var rel Release
 
-	err := s.apiGet(ctx, apiURL, maxResponseBody, func(body []byte) error {
+	err = s.apiGet(ctx, client, apiURL, maxResponseBody, func(body []byte) error {
 		var gr gitHubRelease
 		if err := json.Unmarshal(body, &gr); err != nil {
 			return fmt.Errorf("update: GET %s: decoding release: %w", apiURL, err)
@@ -274,29 +283,46 @@ func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 	return rel, nil
 }
 
-// errNoListedRelease reports a release list with no release Latest may return: every entry is a
-// draft or has a tag that is not a release version, or the list is empty.
-var errNoListedRelease = errors.New("no release with a release-version tag")
+// maxListPages is the most pages of the release list a GitHubSource reads for one lookup. A
+// repository publishing that many releases the channel does not receive, newer than every one it
+// does, has its older releases left unread.
+const maxListPages = 10
 
-// highestListed reads the first page of the REST API's release list and returns the release with
-// the highest tag in version order, pre-releases included. Drafts and releases whose tag is not a
-// release version are skipped; list order does not matter.
-func (s *GitHubSource) highestListed(ctx context.Context) (Release, error) {
-	listURL := fmt.Sprintf("%s/repos/%s/releases?per_page=%d",
+// errNoListedRelease reports a release list with no release Latest may return within the pages
+// read: every entry is a draft, has a tag that is not a release version or is on a channel the
+// lookup does not receive, or the list is empty.
+var errNoListedRelease = errors.New("no release the channel receives")
+
+// highestListed reads the REST API's release list page by page and returns the release ch
+// receives with the highest tag in version order among the pages read. Drafts and releases whose
+// tag is not a release version are skipped; order within and across pages does not matter. It
+// stops after the first page holding a release ch receives, after a page shorter than
+// listPageSize, and after maxListPages pages.
+func (s *GitHubSource) highestListed(ctx context.Context, ch Channel) (Release, error) {
+	base := fmt.Sprintf("%s/repos/%s/releases?per_page=%d",
 		strings.TrimSuffix(s.apiURL(), "/"), s.repoPath(), listPageSize)
 
-	var rel Release
+	var (
+		best  *gitHubRelease
+		pages int
+	)
 
-	err := s.apiGet(ctx, listURL, maxListResponseBody, func(body []byte) error {
-		var list []gitHubRelease
-		if err := json.Unmarshal(body, &list); err != nil {
-			return fmt.Errorf("update: GET %s: decoding releases: %w", listURL, err)
+	client, err := s.apiClient(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+
+	for pages < maxListPages {
+		pages++
+
+		list, err := s.listPage(ctx, client, fmt.Sprintf("%s&page=%d", base, pages))
+		if err != nil {
+			return Release{}, err
 		}
 
-		var best *gitHubRelease
 		for i := range list {
 			gr := &list[i]
-			if gr.Draft || !version.IsRelease(gr.TagName) {
+			if gr.Draft || !version.IsRelease(gr.TagName) || !ch.Receives(channelOf(gr.TagName, gr.Prerelease)) {
 				continue
 			}
 			if best == nil || version.Newer(best.TagName, gr.TagName) {
@@ -304,34 +330,45 @@ func (s *GitHubSource) highestListed(ctx context.Context) (Release, error) {
 			}
 		}
 
-		if best == nil {
-			return fmt.Errorf("update: GET %s: %w", listURL, errNoListedRelease)
+		if best != nil || len(list) < listPageSize {
+			break
 		}
+	}
 
-		rel = best.release()
+	if best == nil {
+		return Release{}, fmt.Errorf("update: GET %s: %w: channel %s, %d pages read", base, errNoListedRelease, ch, pages)
+	}
+
+	return best.release(), nil
+}
+
+// listPage reads one page of the REST API's release list from pageURL through client, the
+// [GitHubSource.apiClient] of the lookup.
+func (s *GitHubSource) listPage(ctx context.Context, client *http.Client, pageURL string) ([]gitHubRelease, error) {
+	var list []gitHubRelease
+
+	err := s.apiGet(ctx, client, pageURL, maxListResponseBody, func(body []byte) error {
+		if err := json.Unmarshal(body, &list); err != nil {
+			return fmt.Errorf("update: GET %s: decoding releases: %w", pageURL, err)
+		}
 
 		return nil
 	})
 	if err != nil {
-		return Release{}, err
+		return nil, err
 	}
 
-	return rel, nil
+	return list, nil
 }
 
-// apiGet makes the REST API request for rawURL through [GitHubSource.apiClient] and hands decode
-// the body of a success response, read up to limit bytes, or on a 304 Not Modified the body cached
-// for rawURL. The request carries If-None-Match only when Cache holds an entry for rawURL. A
+// apiGet makes the REST API request for rawURL through client, the [GitHubSource.apiClient] of the
+// lookup, and hands decode the body of a success response, read up to limit bytes, or on a 304 Not
+// Modified the body cached for rawURL. The request carries If-None-Match only when Cache holds an entry for rawURL. A
 // success response carrying an ETag replaces that entry once its body is read, whatever decode
 // returns, so a 304 answered later decodes to the same result; the write is skipped when ctx is
 // done and its failure is ignored. Any other status is the error [GitHubSource.apiStatusError]
 // returns, and a 304 with no entry is a [*StatusError].
-func (s *GitHubSource) apiGet(ctx context.Context, rawURL string, limit int64, decode func(body []byte) error) error {
-	client, err := s.apiClient(ctx)
-	if err != nil {
-		return err
-	}
-
+func (s *GitHubSource) apiGet(ctx context.Context, client *http.Client, rawURL string, limit int64, decode func(body []byte) error) error {
 	cached, hit := s.cacheGet(ctx, rawURL)
 
 	var etag string
@@ -341,7 +378,7 @@ func (s *GitHubSource) apiGet(ctx context.Context, rawURL string, limit int64, d
 
 	var fresh *CachedResponse
 
-	err = s.get(ctx, client, rawURL, etag, func(resp *http.Response) error {
+	err := s.get(ctx, client, rawURL, etag, func(resp *http.Response) error {
 		var body []byte
 
 		switch {

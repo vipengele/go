@@ -13,8 +13,10 @@ func TestFileStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	want := State{
-		LastAttempt:   time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC),
-		LatestVersion: "v1.2.3",
+		LastAttempt:    time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC),
+		LatestVersion:  "v1.2.3-beta.1",
+		LatestChannel:  Beta,
+		HighestApplied: "v1.2.0",
 	}
 	store := &fileStore{dir: t.TempDir()}
 
@@ -26,7 +28,8 @@ func TestFileStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !got.LastAttempt.Equal(want.LastAttempt) || got.LatestVersion != want.LatestVersion {
+	if !got.LastAttempt.Equal(want.LastAttempt) || got.LatestVersion != want.LatestVersion ||
+		got.LatestChannel != want.LatestChannel || got.HighestApplied != want.HighestApplied {
 		t.Errorf("Load = %+v, want %+v", got, want)
 	}
 }
@@ -49,6 +52,21 @@ func TestFileStoreSaveWritesJSON(t *testing.T) {
 				LatestVersion: "v1.2.3",
 			},
 			want: "{\n  \"last_attempt\": \"2026-03-04T05:06:07.123456789Z\",\n  \"latest_version\": \"v1.2.3\"\n}\n",
+		},
+		{
+			name: "edge channel",
+			st:   State{LatestVersion: "v1.2.3-alpha.1", LatestChannel: Edge},
+			want: "{\n  \"latest_version\": \"v1.2.3-alpha.1\",\n  \"latest_channel\": \"edge\"\n}\n",
+		},
+		{
+			name: "stable channel is omitted",
+			st:   State{LatestVersion: "v1.2.3", LatestChannel: Stable},
+			want: "{\n  \"latest_version\": \"v1.2.3\"\n}\n",
+		},
+		{
+			name: "highest applied",
+			st:   State{LatestVersion: "v1.2.3", HighestApplied: "v1.2.0"},
+			want: "{\n  \"latest_version\": \"v1.2.3\",\n  \"highest_applied\": \"v1.2.0\"\n}\n",
 		},
 		{
 			name: "version only",
@@ -93,6 +111,7 @@ func TestFileStoreLoadUnparseableIsEmpty(t *testing.T) {
 		{name: "empty", content: ptr("")},
 		{name: "corrupt", content: ptr("{not json")},
 		{name: "wrong type", content: ptr(`{"last_attempt": 5}`)},
+		{name: "unknown channel", content: ptr(`{"latest_version":"v1.0.0","latest_channel":"nightly"}`)},
 	}
 
 	for _, tt := range tests {
@@ -110,7 +129,7 @@ func TestFileStoreLoadUnparseableIsEmpty(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if !got.LastAttempt.IsZero() || got.LatestVersion != "" {
+			if got != (State{}) {
 				t.Errorf("Load = %+v, want the zero State", got)
 			}
 		})
@@ -132,6 +151,40 @@ func TestFileStoreLoadIgnoresUnknownFields(t *testing.T) {
 	}
 	if got.LatestVersion != "v2.0.0" {
 		t.Errorf("LatestVersion = %q, want v2.0.0", got.LatestVersion)
+	}
+}
+
+func TestFileStoreLoadReadsTheChannel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    Channel
+	}{
+		{name: "no key is stable", content: `{"last_attempt":"2026-03-04T05:06:07Z","latest_version":"v2.0.0"}`, want: Stable},
+		{name: "stable", content: `{"latest_version":"v2.0.0","latest_channel":"stable"}`, want: Stable},
+		{name: "beta", content: `{"latest_version":"v2.0.0","latest_channel":"beta"}`, want: Beta},
+		{name: "edge", content: `{"latest_version":"v2.0.0","latest_channel":"edge"}`, want: Edge},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &fileStore{dir: t.TempDir()}
+			if err := os.WriteFile(store.path(), []byte(tt.content), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			got, err := store.Load(context.Background())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got.LatestVersion != "v2.0.0" || got.LatestChannel != tt.want {
+				t.Errorf("Load = %+v, want v2.0.0 on %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -304,3 +357,25 @@ func TestFileStoreReturnsWhenContextIsCancelledDuringIO(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestStateReadsOnlyItsOwnChannel(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	st := State{LastAttempt: at, LatestVersion: "v1.3.0-beta.1", LatestChannel: Beta}
+
+	if got := st.latestVersionOn(Beta); got != "v1.3.0-beta.1" {
+		t.Errorf("latestVersionOn(Beta) = %q, want v1.3.0-beta.1", got)
+	}
+	if got := st.lastAttemptOn(Beta); !got.Equal(at) {
+		t.Errorf("lastAttemptOn(Beta) = %v, want %v", got, at)
+	}
+	for _, ch := range []Channel{Stable, Edge} {
+		if got := st.latestVersionOn(ch); got != "" {
+			t.Errorf("latestVersionOn(%v) = %q, want empty", ch, got)
+		}
+		if got := st.lastAttemptOn(ch); !got.IsZero() {
+			t.Errorf("lastAttemptOn(%v) = %v, want the zero time", ch, got)
+		}
+	}
+}

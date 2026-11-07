@@ -94,16 +94,18 @@ func (h *etagHandler) ifNoneMatch() []string {
 // cachedEndpoint is one REST API path a GitHubSource caches: a source pointed at a fake server
 // answering it with h, and the URL its responses are cached under.
 type cachedEndpoint struct {
-	name   string
-	source func(t *testing.T, h http.Handler) (s *GitHubSource, url string)
-	body   string
-	want   Release
+	name    string
+	channel Channel
+	source  func(t *testing.T, h http.Handler) (s *GitHubSource, url string)
+	body    string
+	want    Release
 }
 
 func cachedEndpoints() []cachedEndpoint {
 	return []cachedEndpoint{
 		{
-			name: "latest",
+			name:    "latest",
+			channel: Stable,
 			source: func(t *testing.T, h http.Handler) (*GitHubSource, string) {
 				t.Helper()
 				f := newFakeGitHub(t, respond(http.StatusOK, ""), h.ServeHTTP)
@@ -114,12 +116,13 @@ func cachedEndpoints() []cachedEndpoint {
 			want: Release{Tag: "v1.4.0", URL: "https://example.test/octo/tool/releases/tag/v1.4.0", Assets: apiAssets()},
 		},
 		{
-			name: "list",
+			name:    "list",
+			channel: Edge,
 			source: func(t *testing.T, h http.Handler) (*GitHubSource, string) {
 				t.Helper()
 				f := newFakeGitHubList(t, h.ServeHTTP)
 
-				return f.listSource(), f.server.URL + listPath + "?" + listQuery
+				return f.source(), f.server.URL + listPath + "?" + page1Query
 			},
 			body: apiListJSON(listedRelease{tag: "v1.0.0"}, listedRelease{tag: "v2.0.0-rc.1"}),
 			want: listedReleaseOf("v2.0.0-rc.1"),
@@ -140,13 +143,13 @@ func TestGitHubSource_CacheSendsIfNoneMatchOnlyForAnEntry(t *testing.T) {
 			cache.entries["https://example.test/another-url"] = CachedResponse{ETag: `"other"`, Body: []byte(ep.body)}
 			s.Cache = cache
 
-			if _, err := s.Latest(context.Background()); err != nil {
+			if _, err := s.Latest(context.Background(), ep.channel); err != nil {
 				t.Fatalf("first Latest() error = %v", err)
 			}
 			if _, ok := cache.entry(url); !ok {
 				t.Fatalf("no entry for %s after a 200 with an ETag", url)
 			}
-			if _, err := s.Latest(context.Background()); err != nil {
+			if _, err := s.Latest(context.Background(), ep.channel); err != nil {
 				t.Fatalf("second Latest() error = %v", err)
 			}
 
@@ -165,7 +168,7 @@ func TestGitHubSource_CacheWithoutCacheSendsNoIfNoneMatch(t *testing.T) {
 	s := f.source()
 
 	for range 2 {
-		if _, err := s.Latest(context.Background()); err != nil {
+		if _, err := s.Latest(context.Background(), Stable); err != nil {
 			t.Fatalf("Latest() error = %v", err)
 		}
 	}
@@ -189,7 +192,7 @@ func TestGitHubSource_CacheNotModifiedReturnsTheCachedRelease(t *testing.T) {
 			cache.entries[url] = CachedResponse{ETag: `"cached"`, Body: []byte(ep.body)}
 			s.Cache = cache
 
-			got, err := s.Latest(context.Background())
+			got, err := s.Latest(context.Background(), ep.channel)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -216,7 +219,7 @@ func TestGitHubSource_CacheOKWithAnETagReplacesTheEntry(t *testing.T) {
 			cache.entries[url] = CachedResponse{ETag: `"old"`, Body: []byte("stale")}
 			s.Cache = cache
 
-			got, err := s.Latest(context.Background())
+			got, err := s.Latest(context.Background(), ep.channel)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -242,7 +245,7 @@ func TestGitHubSource_CacheOKWithoutAnETagWritesNothing(t *testing.T) {
 	cache := newMemCache()
 	s.Cache = cache
 
-	if _, err := s.Latest(context.Background()); err != nil {
+	if _, err := s.Latest(context.Background(), Stable); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
 	if n := cache.putCount(); n != 0 {
@@ -287,12 +290,14 @@ func TestGitHubSource_CacheErrorResponsesIgnoreTheEntry(t *testing.T) {
 					s   *GitHubSource
 					url string
 				)
+				ch := Stable
 				if endpoint == "latest" {
 					f := newFakeGitHub(t, respond(http.StatusOK, ""), tc.handler)
 					s, url = f.source(), f.server.URL+apiPath
 				} else {
 					f := newFakeGitHubList(t, tc.handler)
-					s, url = f.listSource(), f.server.URL+listPath+"?"+listQuery
+					s, url = f.source(), f.server.URL+listPath+"?"+page1Query
+					ch = Edge
 				}
 				if tc.token {
 					s = withToken(s)
@@ -301,7 +306,7 @@ func TestGitHubSource_CacheErrorResponsesIgnoreTheEntry(t *testing.T) {
 				cache.entries[url] = CachedResponse{ETag: `"cached"`, Body: []byte(apiReleaseJSON("v1.4.0"))}
 				s.Cache = cache
 
-				got, err := s.Latest(context.Background())
+				got, err := s.Latest(context.Background(), ch)
 				if !tc.check(err) {
 					t.Fatalf("Latest() error = %v, want the response's error", err)
 				}
@@ -320,7 +325,7 @@ func TestGitHubSource_CacheNotModifiedWithoutAnEntryIsAStatusError(t *testing.T)
 	s := f.source()
 	s.Cache = newMemCache()
 
-	_, err := s.Latest(context.Background())
+	_, err := s.Latest(context.Background(), Stable)
 
 	var se *StatusError
 	if !errors.As(err, &se) || se.StatusCode != http.StatusNotModified {
@@ -351,7 +356,7 @@ func TestGitHubSource_CacheMissingOrCorruptFileIsAMiss(t *testing.T) {
 			s := f.source()
 			s.Cache = NewFileResponseCache(dir)
 
-			if _, err := s.Latest(context.Background()); err != nil {
+			if _, err := s.Latest(context.Background(), Stable); err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
 			if got := h.ifNoneMatch(); len(got) != 1 || got[0] != "" {
@@ -401,12 +406,12 @@ func TestGitHubSource_CacheCancelledContextWritesNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	s := f.listSource()
+	s := f.source()
 	s.HTTPClient = &http.Client{Transport: cancelAfterResponse{base: f.server.Client().Transport, cancel: cancel}}
 	cache := newMemCache()
 	s.Cache = cache
 
-	_, _ = s.Latest(ctx)
+	_, _ = s.Latest(ctx, Edge)
 
 	if n := cache.putCount(); n != 0 {
 		t.Errorf("Put called %d times once ctx was done, want 0", n)
@@ -445,7 +450,7 @@ func TestGitHubSource_CacheStalledIOReturnsWhenContextIsCancelled(t *testing.T) 
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Latest(ctx)
+		_, err := s.Latest(ctx, Stable)
 		done <- err
 	}()
 

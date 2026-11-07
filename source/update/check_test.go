@@ -211,7 +211,7 @@ func TestAfterAttempt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, save := afterAttempt(tt.ctx(), prev, now, "v2.0.0", tt.err)
+			got, save := afterAttempt(tt.ctx(), prev, now, Stable, "v2.0.0", tt.err)
 			if save != tt.wantSave {
 				t.Fatalf("afterAttempt() save = %v, want %v", save, tt.wantSave)
 			}
@@ -229,6 +229,63 @@ func TestAfterAttempt(t *testing.T) {
 			}
 			if got.LatestVersion != tt.wantLatest {
 				t.Errorf("LatestVersion = %q, want %q", got.LatestVersion, tt.wantLatest)
+			}
+		})
+	}
+}
+
+func TestAfterAttemptRecordsTheChannel(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		prev        State
+		err         error
+		wantVersion string
+	}{
+		{"success on the same channel", State{LatestVersion: "v1.0.0", LatestChannel: Beta}, nil, "v2.0.0-rc.1"},
+		{"success on another channel", State{LatestVersion: "v1.0.0", LatestChannel: Edge}, nil, "v2.0.0-rc.1"},
+		{"failure on the same channel keeps the version", State{LatestVersion: "v1.0.0", LatestChannel: Beta}, errors.New("boom"), "v1.0.0"},
+		{"failure on another channel clears the version", State{LatestVersion: "v1.0.0-alpha.1", LatestChannel: Edge}, errors.New("boom"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, save := afterAttempt(context.Background(), tt.prev, now, Beta, "v2.0.0-rc.1", tt.err)
+			if !save {
+				t.Fatal("afterAttempt() save = false, want true")
+			}
+			if got.LatestChannel != Beta || got.LatestVersion != tt.wantVersion || !got.LastAttempt.Equal(now) {
+				t.Errorf("afterAttempt() = %+v, want %q on Beta at %v", got, tt.wantVersion, now)
+			}
+		})
+	}
+}
+
+func TestCheckInputsFromIgnoresAnAttemptOnAnotherChannel(t *testing.T) {
+	t.Parallel()
+	last := time.Date(2026, 5, 31, 9, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name   string
+		stored Channel
+		config Channel
+		want   time.Time
+	}{
+		{"same channel", Beta, Beta, last},
+		{"stored beta, config stable", Beta, Stable, time.Time{}},
+		{"stored stable, config edge", Stable, Edge, time.Time{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(t.TempDir())
+			c.Channel = tt.config
+			c.Getenv = envOf(nil)
+			c.Now = func() time.Time { return last.Add(time.Hour) }
+			c.IsTerminal = func() bool { return true }
+
+			got := checkInputsFrom(c, State{LastAttempt: last, LatestVersion: "v1.0.0", LatestChannel: tt.stored})
+			if !got.LastAttempt.Equal(tt.want) {
+				t.Errorf("LastAttempt = %v, want %v", got.LastAttempt, tt.want)
 			}
 		})
 	}
