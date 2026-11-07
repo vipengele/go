@@ -33,7 +33,9 @@ golangci-lint run
   `MaxExtractBytes` (default 512 MiB) bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s)
   bounds how long the background check delays exit. `Channel` (default `Stable`, valid when one of
   `Stable`, `Beta` and `Edge`) is the release channel the update follows; a tool maps its own config
-  key onto it through `ParseChannel`. `Locker` (`filelock.Locker`) defaults to
+  key onto it through `ParseChannel`. The default `InContainer` is `paths.InContainerFor(Identity, ...)`:
+  `<EnvPrefix>_CONTAINER` decides when set (a boolean; any other non-empty value is true), else the
+  `paths.InContainer` heuristic. `Locker` (`filelock.Locker`) defaults to
   `dirLocker`, which runs `os.MkdirAll(StateDir, 0o700)` before locking `StateDir/update.lock`,
   because filelock refuses a missing directory and nothing else creates `StateDir` before the first
   save. `dirLocker.TryLock` does the same before its single attempt; the background check uses
