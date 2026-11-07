@@ -49,13 +49,19 @@ type Daemon struct {
 // a test of the grace period observes [daemon.ErrStopTimeout].
 func Start(t testing.TB, cfg Config) *Daemon {
 	t.Helper()
+	return start(t, cfg, &net.ListenConfig{})
+}
+
+// start is Start, binding the Handler's listener through lc.
+func start(t testing.TB, cfg Config, lc *net.ListenConfig) *Daemon {
+	t.Helper()
 
 	runners := slices.Clone(cfg.Runners)
 	d := &Daemon{done: make(chan struct{})}
 	var l net.Listener
 	if cfg.Handler != nil {
 		var err error
-		l, err = (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+		l, err = lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatalf("daemontest: listen: %v", err)
 		}
@@ -79,6 +85,9 @@ func Start(t testing.TB, cfg Config) *Daemon {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
+	// Cleanups run last-registered first, so this one runs after the cleanup below has released
+	// the Runners and stopped the daemon; cancelling a context twice is a no-op.
+	t.Cleanup(cancel)
 	go func() {
 		d.err = s.Run(ctx)
 		close(d.done)

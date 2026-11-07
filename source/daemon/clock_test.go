@@ -312,6 +312,77 @@ func TestWithDeadlineIsSafeForEveryOrderOfTimerParentAndCancel(t *testing.T) {
 	settle(t, baseline)
 }
 
+func TestRealClockAfterFuncRunsF(t *testing.T) {
+	fired := make(chan struct{})
+	realClock{}.AfterFunc(time.Millisecond, func() { close(fired) })
+	select {
+	case <-fired:
+	case <-time.After(10 * time.Second):
+		t.Fatal("AfterFunc never ran f")
+	}
+}
+
+func TestRealClockAfterFuncStopPreventsF(t *testing.T) {
+	stop := realClock{}.AfterFunc(time.Hour, func() { t.Error("f ran after stop") })
+	if !stop() {
+		t.Error("stop() = false before the timer fired, want true")
+	}
+	if stop() {
+		t.Error("second stop() = true, want false")
+	}
+}
+
+// firingClock is a Clock whose AfterFunc runs f before it returns, so a deadline ends its context
+// before withDeadline has recorded the stop functions. It counts the calls of each stop.
+type firingClock struct {
+	*manualClock
+	stops int
+}
+
+func (c *firingClock) AfterFunc(_ time.Duration, f func()) func() bool {
+	f()
+	return func() bool {
+		c.stops++
+		return false
+	}
+}
+
+// stopCountingContext is a live context whose AfterFunc, which context.AfterFunc calls, counts
+// the calls of the stop it returns. Its Done is a channel of its own, so that context.AfterFunc
+// takes it for a custom context rather than one of the standard library.
+type stopCountingContext struct {
+	context.Context
+	done  chan struct{}
+	stops int
+}
+
+func (c *stopCountingContext) Done() <-chan struct{} { return c.done }
+
+func (c *stopCountingContext) AfterFunc(func()) func() bool {
+	return func() bool {
+		c.stops++
+		return true
+	}
+}
+
+func TestWithDeadlineEndedBeforeItsWatchersAreRecordedStopsThem(t *testing.T) {
+	clock := &firingClock{manualClock: newManualClock()}
+	parent := &stopCountingContext{Context: context.Background(), done: make(chan struct{})}
+	ctx, cancel := withDeadline(clock, parent, time.Minute)
+	defer cancel()
+
+	checkDone(t, ctx, context.DeadlineExceeded)
+	if parent.stops != 1 || clock.stops != 1 {
+		t.Errorf("parent watcher stopped %d times and timer %d times, want each once", parent.stops, clock.stops)
+	}
+	cancel()
+	checkDone(t, ctx, context.DeadlineExceeded)
+	if parent.stops != 1 || clock.stops != 1 {
+		t.Errorf("after cancel: parent watcher stopped %d times and timer %d times, want each once",
+			parent.stops, clock.stops)
+	}
+}
+
 func TestNewRejectsANilClock(t *testing.T) {
 	if _, err := New([]Runner{&fakeRunner{"a"}}, WithClock(nil)); err == nil {
 		t.Fatal("New with a nil clock succeeded")

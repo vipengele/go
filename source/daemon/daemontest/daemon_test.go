@@ -3,8 +3,13 @@ package daemontest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -127,5 +132,62 @@ func TestCleanupReleasesIgnoreStopRunners(t *testing.T) {
 	})
 	if elapsed := time.Since(begin); elapsed > 5*time.Second {
 		t.Fatalf("cleanup took %v, want far under the default grace", elapsed)
+	}
+}
+
+// fatalTB is a testing.TB whose Fatalf records the message and ends the calling goroutine, so a
+// test can observe Start failing the test without failing itself.
+type fatalTB struct {
+	testing.TB
+	fatal chan string
+}
+
+func (f *fatalTB) Fatalf(format string, args ...any) {
+	f.fatal <- fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+// startFatal runs start with cfg and lc on a fatalTB and returns the message it fails with. It
+// fails the test when start returns instead.
+func startFatal(t *testing.T, cfg Config, lc *net.ListenConfig) string {
+	t.Helper()
+	tb := &fatalTB{TB: t, fatal: make(chan string, 1)}
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		start(tb, cfg, lc)
+	}()
+	<-exited
+	select {
+	case msg := <-tb.fatal:
+		return msg
+	default:
+		t.Fatal("start returned, want it to fail the test")
+		return ""
+	}
+}
+
+func TestStartFailsTheTestWhenTheListenerCannotBind(t *testing.T) {
+	refused := errors.New("refused")
+	lc := &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return refused }}
+	msg := startFatal(t, Config{Handler: ok()}, lc)
+	if !strings.HasPrefix(msg, "daemontest: listen: ") || !strings.Contains(msg, refused.Error()) {
+		t.Errorf("Fatalf message = %q, want a listen failure carrying %q", msg, refused)
+	}
+}
+
+func TestStartClosesTheListenerAndFailsTheTestWhenNewFails(t *testing.T) {
+	var conn syscall.RawConn
+	lc := &net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		conn = c
+		return nil
+	}}
+	msg := startFatal(t, Config{Handler: ok(), Options: []daemon.Option{daemon.WithClock(nil)}}, lc)
+	if !strings.HasPrefix(msg, "daemontest: daemon.New: ") {
+		t.Errorf("Fatalf message = %q, want a daemon.New failure", msg)
+	}
+	// The listener's descriptor refuses every use once the listener is closed.
+	if err := conn.Control(func(uintptr) {}); err == nil {
+		t.Error("the listener is open after daemon.New failed, want it closed")
 	}
 }

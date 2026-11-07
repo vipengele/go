@@ -88,6 +88,27 @@ func TestHangStartTimesOut(t *testing.T) {
 	}
 }
 
+func TestReleaseStartsAHungStart(t *testing.T) {
+	ctx, clock := setup(t)
+	r := NewRunner(t, "a", HangStart())
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := run(t, runCtx, clock, r)
+
+	if err := clock.BlockUntilTimers(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	r.Release()
+	wait(t, ctx, r.Started(), "start")
+	cancel()
+	if err := result(t, ctx, done); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if got, want := r.Calls(), []string{"start", "stop"}; !slices.Equal(got, want) {
+		t.Errorf("Calls = %v, want %v", got, want)
+	}
+}
+
 func TestIgnoreStopTimesOut(t *testing.T) {
 	ctx, clock := setup(t)
 	r := NewRunner(t, "a", IgnoreStop())

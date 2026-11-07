@@ -630,6 +630,12 @@ func TestEndedErr(t *testing.T) {
 	callerCause := errors.New("caller cause")
 	caused, cancelCause := context.WithCancelCause(context.Background())
 	cancelCause(callerCause)
+	// A deadline context of a clock other than the system clock carries no cause of its own, and
+	// its nearest standard cancellable ancestor is live and carries none either.
+	liveParent, cancelLiveParent := context.WithCancel(context.Background())
+	defer cancelLiveParent()
+	causeless, cancelCauseless := withDeadline(newManualClock(), liveParent, 0)
+	defer cancelCauseless()
 
 	tests := []struct {
 		name          string
@@ -642,6 +648,7 @@ func TestEndedErr(t *testing.T) {
 		{name: "caller deadline", ctx: expired, checkCtx: expired, want: context.DeadlineExceeded},
 		{name: "caller cancelled with a cause", ctx: caused, checkCtx: caused, want: callerCause},
 		{name: "check cancelled under a live caller", ctx: live, checkCtx: cancelled, want: context.Canceled},
+		{name: "caller expired without a cause", ctx: causeless, checkCtx: causeless, want: context.DeadlineExceeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -499,12 +499,14 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 	var err error
 	select {
 	case err = <-done:
-		if err != nil && checkCtx.Err() != nil {
-			err = h.endedErr(ctx, checkCtx)
-		}
 	case <-checkCtx.Done():
-		err = h.endedErr(ctx, checkCtx)
+		err = checkCtx.Err()
 		c.state.abandon(cr)
+	}
+	// An abandoned check, and one that returns an error after its context has ended, fail with
+	// why the context ended.
+	if err != nil && checkCtx.Err() != nil {
+		err = h.endedErr(ctx, checkCtx)
 	}
 	result.Duration = h.clock.Now().Sub(start)
 	if err != nil {
@@ -517,16 +519,13 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 // endedErr is what a check fails with once checkCtx, its context under the caller's ctx, has
 // ended. The check timed out when checkCtx reports context.DeadlineExceeded while ctx is still
 // live, and the error wraps ErrCheckTimeout. Otherwise checkCtx ended with ctx, and the error is
-// ctx's cause, or ctx.Err() when ctx carries none, so a caller that cancels with a cause sees the
-// check fail with it. checkCtx's own cause is never read: the clock's deadline context carries
-// none. A check that returns an error after its context has ended fails with this error too, so
-// a check that gives up on its context reports why the context ended.
+// context.Cause(ctx), which is ctx.Err() when ctx carries no cause, so a caller that cancels with
+// a cause sees the check fail with it. checkCtx's own cause is never read: the clock's deadline
+// context carries none. A check that returns an error after its context has ended fails with this
+// error too, so a check that gives up on its context reports why the context ended.
 func (h *Health) endedErr(ctx, checkCtx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		if cause := context.Cause(ctx); cause != nil {
-			return cause
-		}
-		return err
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
 	}
 	if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%w after %v", ErrCheckTimeout, h.timeout)
