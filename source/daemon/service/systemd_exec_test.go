@@ -24,9 +24,6 @@ func TestExecRunnerRefusesAProgramOtherThanSystemctlAndID(t *testing.T) {
 }
 
 func TestExecRunnerReturnsStdout(t *testing.T) {
-	if _, err := exec.LookPath("id"); err != nil {
-		t.Skip("id is not installed")
-	}
 	out, err := execRunner(context.Background(), []string{"id", "-u"})
 	if err != nil {
 		t.Fatalf("execRunner: %v", err)
@@ -37,9 +34,6 @@ func TestExecRunnerReturnsStdout(t *testing.T) {
 }
 
 func TestExecRunnerCarriesStderrInTheError(t *testing.T) {
-	if _, err := exec.LookPath("id"); err != nil {
-		t.Skip("id is not installed")
-	}
 	const account = "no-such-account-vipengele-test"
 	_, err := execRunner(context.Background(), []string{"id", "-u", "--", account})
 	var exitErr *exec.ExitError

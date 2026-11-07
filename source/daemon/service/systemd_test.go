@@ -306,6 +306,31 @@ func TestSystemdInstalledUnitPathIsEmptyWhenNotInstalled(t *testing.T) {
 	}
 }
 
+func TestSystemdInstalledUnitPathIsEmptyOnAnError(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, s *systemd)
+	}{
+		{"unit directory unknown", func(_ *testing.T, s *systemd) {
+			s.lookupEnv = func(string) (string, bool) { return "", false }
+		}},
+		{"unit directory under a regular file", blockUserUnitDir},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := newTestSystemd(t, ScopeUser, 1000)
+			tc.setup(t, s)
+			path, err := s.installedUnitPath()
+			if err == nil || errors.Is(err, ErrNotInstalled) {
+				t.Fatalf("installedUnitPath error = %v, want an error other than ErrNotInstalled", err)
+			}
+			if path != "" {
+				t.Fatalf("installedUnitPath = %q, want \"\"", path)
+			}
+		})
+	}
+}
+
 func TestSystemdWriteUnitRemovesItsTemporaryFileWhenTheRenameFails(t *testing.T) {
 	s, _, dir := newTestSystemd(t, ScopeUser, 1000)
 	blocker := filepath.Join(dir, "demo.service")
