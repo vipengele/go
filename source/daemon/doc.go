@@ -28,6 +28,12 @@
 // the phase ends it without a failure. In each case no further Start is called and shutdown
 // begins, stopping the Runners whose Start was called.
 //
+// # Ready
+//
+// WithReady registers a function Run calls once, after every Runner's Start has returned, as the
+// Supervisor begins waiting for shutdown. It runs synchronously on Run's goroutine, so one that
+// blocks blocks Run, and it is not called when the start phase fails or ends early.
+//
 // # Shutdown
 //
 // Once every Runner has started, shutdown begins when the context passed to Run is done or when a
@@ -51,7 +57,9 @@
 // Clock, the system clock unless WithClock sets another. A Runner reads the deadline of the
 // context it is given from that clock, and the context reports context.DeadlineExceeded once the
 // clock reaches it. A test passes a Clock it advances itself, so a deadline expires without
-// waiting for it.
+// waiting for it. A Health takes its own clock through WithHealthClock, which sets the clock behind
+// its uptime, each check's duration and the per-check timeout. The package
+// go.vipengele.org/daemon/daemontest holds the fake Clock and the other helpers for such tests.
 //
 // # Panics
 //

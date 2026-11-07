@@ -6,10 +6,12 @@ import (
 	"time"
 )
 
-// Clock is the time a Supervisor measures its deadlines against: the start timeout, the grace
-// period and the deadline of a reload round. WithClock sets it; without that option it is the
-// system clock. A test passes a Clock it advances itself, so that a deadline expires without
-// waiting for it.
+// Clock is the time a Supervisor and a Health measure their deadlines against. A Supervisor
+// measures the start timeout, the grace period and the deadline of a reload round; WithClock sets
+// it. A Health measures StartedAt, Uptime, each check's Duration and the per-check timeout;
+// WithHealthClock sets it. Without those options both use the system clock. A test passes a Clock
+// it advances itself, so that a deadline expires without waiting for it; daemontest.Clock, in
+// go.vipengele.org/daemon/daemontest, is that fake.
 type Clock interface {
 	// Now returns the current time on the clock.
 	Now() time.Time
