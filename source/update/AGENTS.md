@@ -75,8 +75,11 @@ golangci-lint run
   `runCheck`, the goroutine's body. A nil `*Check` is valid. `Notice` never names a release below the
   `HighestApplied` the state held at `Start`. When the check leaves a release to announce, the
   goroutine runs `CheckManaged` after `runCheck`; `Start` itself does no executable or container I/O.
-  A `*ManagedInstallError` sets the notice's `Instead`, any other error is ignored, and `Instead` is
-  read only once the goroutine has finished.
+  `CheckManaged` takes no context, so `managedInsteadWithin` runs it on a goroutine of its own and
+  waits only until the check's context ends (skipping it when that context is already done); an
+  abandoned managed check leaves `Instead` empty and delivers into a one-slot buffer, so it never
+  blocks `Finish` or leaks blocked on a send. A `*ManagedInstallError` sets the notice's `Instead`,
+  any other error is ignored, and `Instead` is read only once the goroutine has finished.
 - `notice.go` — `Notice` and its one-line `String`: the update command, or, with `Instead` set, the
   managed install's instruction in its place.
 - `checkhooks.go` — `Config.UpdateCheckHooks`: the pre-run and post-run hooks a tool passes to

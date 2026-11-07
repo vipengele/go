@@ -35,8 +35,8 @@ type Check struct {
 	// read only after done is closed.
 	result string
 	// instead is the Instead of the notice of the release this run announces, from the managed
-	// install check, or empty when the install is not managed, the check failed or there is no
-	// release to announce. It is read only after done is closed.
+	// install check, or empty when the install is not managed, the check failed, the check's
+	// context ended first or there is no release to announce. It is read only after done is closed.
 	instead string
 	// once makes the wait and the join of Finish and cancelNow happen once.
 	once sync.Once
@@ -62,7 +62,9 @@ type Check struct {
 // When the check leaves a release to announce, the goroutine then runs [Config.CheckManaged], so
 // that the [Notice] of a managed install says how to update it; Start itself never locates or
 // inspects the executable. Only a [*ManagedInstallError] changes the notice: any other error from
-// CheckManaged leaves its default text.
+// CheckManaged leaves its default text. CheckManaged takes no context, so it runs on a goroutine of
+// its own that the check waits for only until its context ends; a managed check still running then
+// is abandoned, leaves the default text, and never holds up [Check.Finish].
 func (c Config) Start(ctx context.Context) (*Check, error) {
 	r, err := c.resolve()
 	if err != nil {
@@ -89,7 +91,7 @@ func (c Config) Start(ctx context.Context) (*Check, error) {
 		defer close(k.done)
 		k.result = runCheck(checkCtx, r)
 		if k.announces(higher(k.saved, k.result)) {
-			k.instead = managedInstead(r)
+			k.instead = managedInsteadWithin(checkCtx, r)
 		}
 	}()
 	return k, nil
@@ -176,9 +178,27 @@ func managedInstead(r Config) string {
 	return ""
 }
 
+// managedInsteadWithin returns managedInstead(r), or empty once ctx ends first. A ctx already done
+// skips the managed check. CheckManaged honours no context, so it runs on a goroutine of its own;
+// the channel's buffer lets that goroutine deliver and return after it is abandoned.
+func managedInsteadWithin(ctx context.Context, r Config) string {
+	if ctx.Err() != nil {
+		return ""
+	}
+	result := make(chan string, 1)
+	go func() { result <- managedInstead(r) }()
+	select {
+	case instead := <-result:
+		return instead
+	case <-ctx.Done():
+		return ""
+	}
+}
+
 // Finish waits up to CheckWait for the check to finish, then cancels it and waits for its
 // goroutine to return. A check cancelled this way is not an attempt, so it saves nothing. Its
-// bound holds while the Locker, the Source and the StateStore honour their context.
+// bound holds while the Locker, the Source and the StateStore honour their context; the managed
+// install check is bounded by the context whether or not it returns.
 //
 // Finish is safe to call more than once and from several goroutines; every call returns once the
 // goroutine has. On a nil *Check it does nothing.

@@ -706,6 +706,49 @@ func TestStartRunsTheManagedCheckInTheBackground(t *testing.T) {
 	}
 }
 
+func TestFinishDoesNotWaitForABlockedManagedCheck(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	c := bgConfig(t, srv, &fakeStore{})
+	c.CheckWait = 50 * time.Millisecond
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	returned := make(chan struct{})
+	c.Executable = func() (string, error) {
+		defer close(returned)
+		close(entered)
+		<-gate
+		return "/usr/local/bin/atk", nil
+	}
+	c.InContainer = func() bool { return true }
+	t.Cleanup(func() {
+		close(gate)
+		<-returned
+	})
+
+	k := start(t, c)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the managed install check never ran")
+	}
+	finished := make(chan struct{})
+	go func() {
+		k.Finish()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Finish() waited for the blocked managed install check")
+	}
+
+	n, ok := k.Notice()
+	if !ok || n.Latest != "v1.2.3" || n.Instead != "" {
+		t.Errorf("Notice() = %+v, %v; want v1.2.3 with no Instead", n, ok)
+	}
+}
+
 func TestManagedCheckSkippedWithoutANotice(t *testing.T) {
 	t.Parallel()
 	srv := newKitServer(t)
