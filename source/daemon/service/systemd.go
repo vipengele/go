@@ -277,11 +277,3 @@ func (s *systemd) control(ctx context.Context, method, verb string) error {
 	}
 	return nil
 }
-
-func (s *systemd) Status(context.Context) (Status, error) {
-	return Status{}, s.unsupported("Status")
-}
-
-func (s *systemd) unsupported(method string) error {
-	return fmt.Errorf("%w: systemd %s", ErrUnsupported, method)
-}
