@@ -3,6 +3,7 @@ package daemontest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -102,6 +103,30 @@ func TestAdvanceFiresInDeadlineOrderAndTiesInArmOrder(t *testing.T) {
 	}
 	if c.BlockUntilTimers(canceled(), 2) == nil {
 		t.Fatal("a fired timer is still armed")
+	}
+}
+
+// The timers alternate between two deadlines, enough of them that the sort partitions rather than
+// running an insertion sort, so only the arm order recorded in each timer keeps ties in arm order.
+func TestAdvanceFiresTimersWithTheSameDeadlineInArmOrder(t *testing.T) {
+	c := NewClock(epoch())
+	var order []string
+	var early, late []string
+	for i := range 64 {
+		d, ties := 2*time.Second, &late
+		if i%2 == 1 {
+			d, ties = time.Second, &early
+		}
+		name := fmt.Sprintf("%v-%d", d, i)
+		*ties = append(*ties, name)
+		c.AfterFunc(d, func() { order = append(order, name) })
+	}
+
+	for _, f := range c.advance(2 * time.Second) {
+		f()
+	}
+	if want := slices.Concat(early, late); !slices.Equal(order, want) {
+		t.Fatalf("fired %v, want %v", order, want)
 	}
 }
 

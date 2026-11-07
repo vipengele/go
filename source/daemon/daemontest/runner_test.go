@@ -232,3 +232,30 @@ func TestOrderSortsRunners(t *testing.T) {
 		}
 	}
 }
+
+func TestNewRunnerIsAHelper(t *testing.T) {
+	tb := newRecordingTB(t)
+	NewRunner(tb, "a")
+	if tb.helpers != 1 {
+		t.Fatalf("Helper called %d times, want 1", tb.helpers)
+	}
+}
+
+func TestNewRunnerCleanupReleasesAHungStart(t *testing.T) {
+	ctx, _ := setup(t)
+	tb := newRecordingTB(t)
+	r := NewRunner(tb, "a", HangStart())
+
+	started := make(chan error, 1)
+	go func() { started <- r.Start(context.Background()) }()
+	tb.runCleanups()
+
+	select {
+	case err := <-started:
+		if err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Start still hangs after the test's cleanup")
+	}
+}

@@ -25,8 +25,7 @@ type Clock struct {
 	timers []*timer
 	// seq numbers timers in the order they were armed.
 	seq uint64
-	// changed is closed and replaced whenever the set of armed timers changes; nil until first
-	// needed.
+	// changed is closed and replaced whenever a timer is armed; nil until first needed.
 	changed chan struct{}
 }
 
@@ -75,7 +74,6 @@ func (c *Clock) stop(t *timer) bool {
 		return false
 	}
 	c.timers = slices.Delete(c.timers, i, i+1)
-	c.signal()
 	return true
 }
 
@@ -111,10 +109,6 @@ func (c *Clock) advance(d time.Duration) []func() {
 		due = append(due, t)
 		return true
 	})
-	if len(due) == 0 {
-		return nil
-	}
-	c.signal()
 
 	slices.SortFunc(due, func(a, b *timer) int {
 		if n := a.due.Compare(b.due); n != 0 {
@@ -131,8 +125,8 @@ func (c *Clock) advance(d time.Duration) []func() {
 
 // BlockUntilTimers waits until at least n timers are armed, that is, armed by AfterFunc and
 // neither fired nor stopped, and returns nil. It returns at once when that already holds, and
-// returns ctx.Err() when ctx ends first. It wakes whenever a timer is armed, fires or is stopped,
-// and never polls.
+// returns ctx.Err() when ctx ends first. It wakes whenever a timer is armed, the only change that
+// can raise the count, and never polls.
 func (c *Clock) BlockUntilTimers(ctx context.Context, n int) error {
 	for {
 		c.mu.Lock()
@@ -154,8 +148,7 @@ func (c *Clock) BlockUntilTimers(ctx context.Context, n int) error {
 	}
 }
 
-// signal wakes every BlockUntilTimers waiting on the current set of armed timers. The caller
-// holds mu.
+// signal wakes every BlockUntilTimers waiting for a timer to be armed. The caller holds mu.
 func (c *Clock) signal() {
 	if c.changed != nil {
 		close(c.changed)

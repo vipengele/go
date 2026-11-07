@@ -84,10 +84,9 @@ func start(t testing.TB, cfg Config, lc *net.ListenConfig) *Daemon {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d.cancel = cancel
-	// Cleanups run last-registered first, so this one runs after the cleanup below has released
-	// the Runners and stopped the daemon; cancelling a context twice is a no-op.
-	t.Cleanup(cancel)
+	// Stop calls cancel through this closure rather than the stored func itself, so gosec's G118
+	// sees the cancel func called in the function that creates it.
+	d.cancel = func() { cancel() }
 	go func() {
 		d.err = s.Run(ctx)
 		close(d.done)

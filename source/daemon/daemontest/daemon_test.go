@@ -135,6 +135,46 @@ func TestCleanupReleasesIgnoreStopRunners(t *testing.T) {
 	}
 }
 
+// recordingTB is a testing.TB that counts its Helper calls and holds the functions passed to
+// Cleanup until runCleanups, which the test's own cleanup also calls.
+type recordingTB struct {
+	testing.TB
+	helpers  int
+	cleanups []func()
+}
+
+func newRecordingTB(t *testing.T) *recordingTB {
+	tb := &recordingTB{TB: t}
+	t.Cleanup(tb.runCleanups)
+	return tb
+}
+
+func (r *recordingTB) Helper() {
+	r.helpers++
+	r.TB.Helper()
+}
+
+func (r *recordingTB) Cleanup(f func()) { r.cleanups = append(r.cleanups, f) }
+
+// runCleanups runs the held cleanups, last-registered first, and forgets them.
+func (r *recordingTB) runCleanups() {
+	for len(r.cleanups) > 0 {
+		f := r.cleanups[len(r.cleanups)-1]
+		r.cleanups = r.cleanups[:len(r.cleanups)-1]
+		f()
+	}
+}
+
+// Start and start each mark themselves helpers, so a failure inside either is reported at the
+// test's call to Start.
+func TestStartAndStartAreHelpers(t *testing.T) {
+	tb := newRecordingTB(t)
+	Start(tb, Config{Handler: ok()})
+	if tb.helpers != 2 {
+		t.Fatalf("Helper called %d times, want 2: once by Start and once by start", tb.helpers)
+	}
+}
+
 // fatalTB is a testing.TB whose Fatalf records the message and ends the calling goroutine, so a
 // test can observe Start failing the test without failing itself.
 type fatalTB struct {
