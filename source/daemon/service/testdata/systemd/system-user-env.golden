@@ -1,0 +1,24 @@
+[Unit]
+Description=Demo service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/demo" "serve" "--port=8080"
+User=demo
+Environment="APP_MODE=prod"
+Environment="LOG_LEVEL=debug"
+Environment="_FEATURE=on"
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

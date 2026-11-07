@@ -1,0 +1,23 @@
+[Unit]
+Description=Demo service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/demo"
+WorkingDirectory=/srv/app\/
+User=demo
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths="/srv/app\\"
+
+[Install]
+WantedBy=multi-user.target

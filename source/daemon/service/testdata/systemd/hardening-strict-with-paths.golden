@@ -1,0 +1,21 @@
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/demo"
+WorkingDirectory=/var/lib/demo/work
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths="/var/lib/demo" "/var/log/demo" "/var/lib/demo/work"
+
+[Install]
+WantedBy=multi-user.target

@@ -92,7 +92,13 @@ the Windows service control manager) behind the `Manager` interface: `Prepare`, 
 - `config.go` — `Config` (`Name`, `Description`, `Binary`, `Args`, `Env`, `WorkingDir`, `User`,
   `Scope`) and `Validate`.
 - `state.go` — `State` (unknown, not installed, stopped, starting, running, failed) and `Status`.
-- `errors.go` — the sentinel errors, `ErrInvalidConfig` and `ErrUnsupported` among them.
+- `errors.go` — the sentinel errors, `ErrInvalidConfig`, `ErrUnsupported`, `ErrNotInstalled`,
+  `ErrPrivilegesRequired` and `ErrManagerUnreachable` among them.
+- `hardening.go` — `Hardening`, `DefaultHardening(Scope)` and its validation; set with
+  `WithSystemdHardening`, which `New` validates on every GOOS and the other drivers ignore
+  (`docs/adr/0028-driver-specific-settings-are-options-not-config-fields.md`).
+- `systemd.go`, `systemd_unit.go`, `systemd_status.go` — the systemd driver: the unexported
+  `systemd` struct, the unit rendering and `Status`.
 
 Conventions of the package:
 
@@ -106,6 +112,60 @@ Conventions of the package:
 - `Validate` returns `errors.Join` of `ErrInvalidConfig`-wrapped violations in a fixed order: fields
   in declaration order, `Args` by index, `Env` by sorted key.
 - Standard library only.
+
+The systemd driver:
+
+- Scopes. A system unit lives in `/etc/systemd/system`, is driven by `systemctl`, is `WantedBy=
+  multi-user.target` with `After=`/`Wants=network-online.target`, and `Install`, `Uninstall`,
+  `Start`, `Stop` and `Prepare` need root (`ErrPrivilegesRequired`). A user unit lives in
+  `$XDG_CONFIG_HOME/systemd/user` (default `$HOME/.config/systemd/user`), is driven by
+  `systemctl --user`, is `WantedBy=default.target` with no network ordering, and needs no root;
+  `Config.User` must be empty with `ScopeUser` on POSIX. `Type=simple`, `Restart=always` and
+  `RestartSec=5` are fixed.
+- `Install` is: privileges, account check (`id -u -- <user>` for a system unit with a `User`; the
+  driver never creates an account, a missing one fails before anything is written, a missing `id` is
+  `ErrUnsupported`), `Prepare` (creates the unit directory only), atomic write (temp file, chmod
+  0644, rename), `daemon-reload`, `enable`, `restart`. Never `enable --now`: it leaves an already
+  running service on its old unit and binary, while `restart` starts a stopped service and replaces
+  a running one, so `Install` also applies an update.
+- `Uninstall` with no unit file is `ErrNotInstalled`. A failing `disable --now` does not stop the
+  removal of the unit file and the `daemon-reload`, and `Uninstall` then returns an error saying the
+  disable failed; data and the account stay. `Start` and `Stop` are `ErrNotInstalled` without a unit
+  file.
+- Escaping: values are escaped, never rejected.
+
+  | Directive | Rule |
+  |---|---|
+  | `ExecStart=` | each word double-quoted, `\` and `"` backslash-escaped, `%` to `%%`, `$` to `$$`, an empty argument is `""` |
+  | `Environment=` | one line per key in sorted order, `"K=v"` quoted and escaped, `%` to `%%`, no `$$` (systemd does not expand variables there) |
+  | `ReadWritePaths=` | each path a quoted word, `%` to `%%` |
+  | `WorkingDirectory=` | raw, `%` to `%%`, and a `/` appended when it ends in `\`, which names the same directory |
+  | `Description=` | raw, `%` to `%%`, and a trailing run of `\` dropped; no line when nothing is left |
+
+  systemd joins a line ending in an unescaped `\` with the next one, so no rendered line ends in
+  `\` (`checkNoContinuation` runs over every golden). Newlines never reach a raw value: `Validate`
+  rejects control characters. `Environment=` values are readable by every local account (the unit
+  is 0644 and `systemctl show` reports them), so `Config.Env` must not carry secrets.
+
+- Hardening: system defaults are `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`,
+  `ProtectHome=read-only`, `ProtectKernelTunables`, `ProtectControlGroups` and `RestrictSUIDSGID`; a
+  user unit gets `NoNewPrivileges` only, because sandboxing directives in a user unit need
+  unprivileged user namespaces. When `ProtectSystem` or `ProtectHome` is set, `WorkingDir` is
+  appended to `ReadWritePaths`.
+- `Status` is one `systemctl show --property=...`. `ActiveState` maps to a `State`; `Result=success`
+  passes `restarts=0` to `resolve`, so a restart after a clean exit (an update, or a requested
+  restart that `restart.go` turns into exit 0) reads Starting, not Failed, while a crash loop reads
+  Failed with a `journalctl` hint. A missing `NRestarts` (systemd before 235) counts as 0. When
+  `systemctl --user` cannot reach the user manager (`sudo -u`, cron, no session), `Status` returns
+  `StateUnknown` with a `Detail` and `ErrManagerUnreachable`. Lingering is never turned on; for a
+  user unit `Detail` says it is off when `/var/lib/systemd/linger/<user>` is absent. A missing
+  `systemctl` is `ErrUnsupported`; `New` never probes.
+- Test seam: the unexported `systemd` struct holds its operating-system touch points as fields
+  (`runner func(ctx, argv) ([]byte, error)`, `euid`, `lookupEnv`, `lingerDir`, `systemDir`). `New`
+  fills in the real ones and tests build the struct with fakes. There is no exported seam and no
+  package-level variable (`gochecknoglobals` and `depguard` apply to tests).
+- Goldens are `testdata/systemd/*.golden`; `go test ./service -update` (from `source/daemon`)
+  rewrites them. The flag is registered in `TestMain` in `main_test.go`.
 
 ## Conventions
 
