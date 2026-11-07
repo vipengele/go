@@ -34,6 +34,13 @@
 // are unavailable, systemd may refuse to start the unit or skip the directive,
 // depending on its version.
 //
+// # Environment
+//
+// The systemd driver writes Config.Env into the unit file, which is
+// world-readable, and "systemctl show" reports it to any local account. The
+// values are therefore public on the machine and must not carry secrets; a
+// service that needs one reads it from a file only its account may read.
+//
 // # Lingering
 //
 // The driver never turns lingering on. A user unit then stops when its user's

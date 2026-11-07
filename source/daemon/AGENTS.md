@@ -139,7 +139,13 @@ The systemd driver:
   | `ExecStart=` | each word double-quoted, `\` and `"` backslash-escaped, `%` to `%%`, `$` to `$$`, an empty argument is `""` |
   | `Environment=` | one line per key in sorted order, `"K=v"` quoted and escaped, `%` to `%%`, no `$$` (systemd does not expand variables there) |
   | `ReadWritePaths=` | each path a quoted word, `%` to `%%` |
-  | `WorkingDirectory=`, `Description=` | raw, `%` to `%%` only |
+  | `WorkingDirectory=` | raw, `%` to `%%`, and a `/` appended when it ends in `\`, which names the same directory |
+  | `Description=` | raw, `%` to `%%`, and a trailing run of `\` dropped; no line when nothing is left |
+
+  systemd joins a line ending in an unescaped `\` with the next one, so no rendered line ends in
+  `\` (`checkNoContinuation` runs over every golden). Newlines never reach a raw value: `Validate`
+  rejects control characters. `Environment=` values are readable by every local account (the unit
+  is 0644 and `systemctl show` reports them), so `Config.Env` must not carry secrets.
 
 - Hardening: system defaults are `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`,
   `ProtectHome=read-only`, `ProtectKernelTunables`, `ProtectControlGroups` and `RestrictSUIDSGID`; a

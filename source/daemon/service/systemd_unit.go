@@ -16,7 +16,15 @@ import (
 //   - Environment: one quoted "KEY=value" word per key, in sorted key order,
 //     with '%' doubled; systemd expands no variables there, so '$' stays.
 //   - ReadWritePaths: each path a quoted word, with '%' doubled.
-//   - WorkingDirectory, Description: the raw value with '%' doubled.
+//   - WorkingDirectory: the raw value with '%' doubled and, when it ends in
+//     '\', a '/' appended, which names the same directory.
+//   - Description: the raw value with '%' doubled and any trailing run of
+//     '\' dropped; a Description that is only backslashes writes no line.
+//
+// systemd joins a line ending in an unescaped '\' with the next one, so a
+// raw value ending in '\' would swallow the directive after it; no line of
+// the output ends in '\'. Newlines cannot reach a raw value: Validate
+// rejects control characters.
 //
 // A system unit is ordered after network-online.target, runs as cfg.User
 // when it is set and is wanted by multi-user.target; a user unit is wanted
@@ -34,8 +42,8 @@ func renderUnit(cfg Config, h Hardening) []byte {
 	system := cfg.Scope != ScopeUser
 
 	b.WriteString("[Unit]\n")
-	if cfg.Description != "" {
-		line("Description", escapeSpecifiers(cfg.Description))
+	if d := strings.TrimRight(cfg.Description, `\`); d != "" {
+		line("Description", escapeSpecifiers(d))
 	}
 	if system {
 		line("After", "network-online.target")
@@ -50,7 +58,11 @@ func renderUnit(cfg Config, h Hardening) []byte {
 	}
 	line("ExecStart", strings.Join(words, " "))
 	if cfg.WorkingDir != "" {
-		line("WorkingDirectory", escapeSpecifiers(cfg.WorkingDir))
+		dir := cfg.WorkingDir
+		if strings.HasSuffix(dir, `\`) {
+			dir += "/"
+		}
+		line("WorkingDirectory", escapeSpecifiers(dir))
 	}
 	if system && cfg.User != "" {
 		line("User", escapeSpecifiers(cfg.User))

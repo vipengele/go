@@ -34,7 +34,8 @@ type Config struct {
 	// digits, '.', '_' or '-', and is at most 128 bytes long.
 	Name string
 	// Description is human-readable text the service manager shows beside
-	// the service. It is optional.
+	// the service. It is optional. The systemd driver drops a trailing run
+	// of '\', which would otherwise continue the unit file's line.
 	Description string
 	// Binary is the absolute path of the executable the service runs. It is
 	// required.
@@ -44,10 +45,15 @@ type Config struct {
 	Args []string
 	// Env holds environment variables set for the service. Each key starts
 	// with an ASCII letter or '_' and continues with ASCII letters, digits
-	// or '_'.
+	// or '_'. On systemd the values are written into the unit file and are
+	// readable by every local account, through the file and through
+	// "systemctl show"; they must not carry secrets. Pass a secret another
+	// way, such as a file the service reads that only its account may read.
 	Env map[string]string
 	// WorkingDir is the absolute path of the directory the service runs in.
-	// When empty the service manager's default applies.
+	// When empty the service manager's default applies. The systemd driver
+	// appends '/' to a path ending in '\', naming the same directory, so the
+	// unit file's line does not continue onto the next.
 	WorkingDir string
 	// User is the account the service runs as. When empty the service
 	// manager's default for Scope applies. It must be empty with ScopeUser

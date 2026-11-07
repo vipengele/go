@@ -81,7 +81,7 @@ func TestRenderUnitGolden(t *testing.T) {
 				Description: "Demo service",
 				Binary:      "/usr/bin/demo",
 				Args:        []string{"serve", "--port=8080"},
-				Env:         map[string]string{"LOG_LEVEL": "debug", "APP_MODE": "prod", "_TOKEN": "s3cret"},
+				Env:         map[string]string{"LOG_LEVEL": "debug", "APP_MODE": "prod", "_FEATURE": "on"},
 				User:        "demo",
 			},
 			h: DefaultHardening(ScopeSystem),
@@ -104,6 +104,17 @@ func TestRenderUnitGolden(t *testing.T) {
 			h:    escHardening,
 		},
 		{
+			name: "trailing-backslash",
+			cfg: Config{
+				Name:        "demo",
+				Description: `Demo service\\\`,
+				Binary:      "/usr/bin/demo",
+				WorkingDir:  `/srv/app\`,
+				User:        "demo",
+			},
+			h: DefaultHardening(ScopeSystem),
+		},
+		{
 			name: "hardening-strict-with-paths",
 			cfg: Config{
 				Name:       "demo",
@@ -124,8 +135,65 @@ func TestRenderUnitGolden(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			checkGolden(t, "systemd", tt.name, renderUnit(tt.cfg, tt.h))
+			unit := renderUnit(tt.cfg, tt.h)
+			checkGolden(t, "systemd", tt.name, unit)
+			checkNoContinuation(t, unit)
 		})
+	}
+}
+
+// checkNoContinuation fails the test for every line of unit that ends in an
+// odd run of '\', which systemd joins with the line after it, so that the
+// next directive becomes part of the value.
+func checkNoContinuation(t *testing.T, unit []byte) {
+	t.Helper()
+	for i, l := range strings.Split(string(unit), "\n") {
+		run := len(l) - len(strings.TrimRight(l, `\`))
+		if run%2 == 1 {
+			t.Errorf("line %d %q ends in an unescaped '\\' and continues onto the next line", i+1, l)
+		}
+	}
+}
+
+func TestRenderUnitTrailingBackslashEndsTheLine(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want []string
+	}{
+		{
+			name: "working-dir",
+			cfg:  Config{Name: "demo", Binary: "/usr/bin/demo", WorkingDir: `/srv/app\`, User: "demo"},
+			want: []string{`WorkingDirectory=/srv/app\/`, "User=demo"},
+		},
+		{
+			name: "description",
+			cfg:  Config{Name: "demo", Description: `Demo\`, Binary: "/usr/bin/demo"},
+			want: []string{"Description=Demo", "After=network-online.target"},
+		},
+		{
+			name: "description-only-backslashes",
+			cfg:  Config{Name: "demo", Description: `\\\`, Binary: "/usr/bin/demo"},
+			want: []string{"[Unit]", "After=network-online.target"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			unit := renderUnit(tt.cfg, Hardening{})
+			checkNoContinuation(t, unit)
+			if !strings.Contains(string(unit), strings.Join(tt.want, "\n")+"\n") {
+				t.Errorf("unit does not hold the consecutive lines %q:\n%s", tt.want, unit)
+			}
+		})
+	}
+}
+
+func TestRenderUnitReadWritePathsQuotesTrailingBackslash(t *testing.T) {
+	cfg := Config{Name: "demo", Binary: "/usr/bin/demo", WorkingDir: `/srv/app\`}
+	unit := renderUnit(cfg, Hardening{ProtectSystem: "strict"})
+	want := `ReadWritePaths="/srv/app\\"`
+	if got := unitLines(unit, "ReadWritePaths"); len(got) != 1 || got[0] != want {
+		t.Errorf("ReadWritePaths lines = %q, want [%q]", got, want)
 	}
 }
 

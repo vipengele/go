@@ -9,7 +9,7 @@ ExecStart="/usr/bin/demo" "serve" "--port=8080"
 User=demo
 Environment="APP_MODE=prod"
 Environment="LOG_LEVEL=debug"
-Environment="_TOKEN=s3cret"
+Environment="_FEATURE=on"
 Restart=always
 RestartSec=5
 NoNewPrivileges=yes
