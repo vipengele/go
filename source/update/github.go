@@ -549,7 +549,7 @@ func (s *GitHubSource) apiStatusError(rawURL string, resp *http.Response) error 
 func (s *GitHubSource) rateLimitError(h http.Header, authenticated bool, status *StatusError) *RateLimitError {
 	limit, _ := strconv.Atoi(h.Get("X-RateLimit-Limit"))
 	remaining, remainingErr := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
-	rl := &RateLimitError{Limit: limit, Authenticated: authenticated, Status: status}
+	rl := &RateLimitError{Limit: limit, Remaining: remaining, Authenticated: authenticated, Status: status}
 
 	switch {
 	case remainingErr == nil && remaining == 0:

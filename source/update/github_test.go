@@ -1631,6 +1631,12 @@ func TestGitHubSource_APIRateLimitErrors(t *testing.T) {
 			wantMsg: []string{"2030-01-02T03:05:35Z"},
 		},
 		{
+			name:    "secondary limit with requests left",
+			status:  http.StatusForbidden,
+			headers: []string{"Retry-After", "60", "X-RateLimit-Limit", "5000", "X-RateLimit-Remaining", "4321"},
+			want:    RateLimitError{Reset: now.Add(60 * time.Second), Limit: 5000, Remaining: 4321},
+		},
+		{
 			name:    "429",
 			status:  http.StatusTooManyRequests,
 			headers: []string{"Retry-After", "30"},
@@ -1668,9 +1674,10 @@ func TestGitHubSource_APIRateLimitErrors(t *testing.T) {
 				if !errors.As(err, &rl) {
 					t.Fatalf("err = %v, want a *RateLimitError", err)
 				}
-				if !rl.Reset.Equal(tc.want.Reset) || rl.Limit != tc.want.Limit || rl.Authenticated != tc.want.Authenticated {
-					t.Errorf("RateLimitError = %+v, want Reset %v Limit %d Authenticated %v",
-						*rl, tc.want.Reset, tc.want.Limit, tc.want.Authenticated)
+				if !rl.Reset.Equal(tc.want.Reset) || rl.Limit != tc.want.Limit || rl.Remaining != tc.want.Remaining ||
+					rl.Authenticated != tc.want.Authenticated {
+					t.Errorf("RateLimitError = %+v, want Reset %v Limit %d Remaining %d Authenticated %v",
+						*rl, tc.want.Reset, tc.want.Limit, tc.want.Remaining, tc.want.Authenticated)
 				}
 				var se *StatusError
 				if !errors.As(err, &se) || se.StatusCode != tc.status || se.Body != "rate limited" {
