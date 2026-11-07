@@ -63,6 +63,10 @@ type Supervisor struct {
 	// bounds the stop phase by the grace period.
 	newStopContext func() (context.Context, context.CancelFunc)
 
+	// ready is the callback WithReady registered, called once per Run as the waiting loop is first
+	// entered; it does nothing without WithReady.
+	ready func()
+
 	// waiting is called each time Run starts waiting for shutdown while every Runner is running.
 	waiting func()
 
@@ -108,6 +112,7 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 		startTimeout: defaultStartTimeout,
 		policy:       PanicFail,
 		clock:        realClock{},
+		ready:        func() {},
 		waiting:      func() {},
 	}
 	slices.SortStableFunc(s.runners, func(a, b Runner) int { return cmp.Compare(orderOf(a), orderOf(b)) })
@@ -388,7 +393,8 @@ func isContextErr(err error) bool {
 // wait blocks until shutdown begins: ctx is done, a running Runner exits in a way that fails it,
 // or a reload round fails. It returns that failure, or nil when ctx began it. A panic exit under
 // PanicIsolate is recorded on its Runner and does not end the wait. Each value received on hangup
-// runs one reload round; a nil hangup never does.
+// runs one reload round; a nil hangup never does. wait calls the ready callback once, before it
+// first waits, and not again when it waits again after a reload round or an isolated panic exit.
 func (s *Supervisor) wait(ctx context.Context, runs []*launched, hangup <-chan os.Signal) error {
 	quit := make(chan struct{})
 	defer close(quit)
@@ -403,6 +409,9 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched, hangup <-chan o
 		}()
 	}
 
+	// Outside the loop, so a loop re-entered after a reload round or an isolated panic exit never
+	// calls it again, and before the first waiting call, so whatever observes waiting sees it done.
+	s.ready()
 	for {
 		s.waiting()
 		select {
