@@ -59,6 +59,19 @@ func WithStartTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithClock sets the clock the Supervisor measures its deadlines against: the start timeout, the
+// grace period and the deadline of a reload round. The default is the system clock. A nil clock is
+// rejected by New.
+func WithClock(clock Clock) Option {
+	return func(s *Supervisor) error {
+		if clock == nil {
+			return errors.New("daemon: nil clock")
+		}
+		s.clock = clock
+		return nil
+	}
+}
+
 // WithHealth has New register the Supervisor's health checks in h: supervisor.live, a Liveness
 // check, supervisor.ready, a Readiness check, and a Readiness check named after each Runner that
 // is a HealthChecker. New registers them as its last step, all or none, so a New that fails leaves

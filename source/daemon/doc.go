@@ -45,6 +45,14 @@
 // and once it has ended Run no longer waits for the Runners after it. An abandoned Stop or Start
 // may still be running when Run returns.
 //
+// # Clock
+//
+// The start timeout, the grace period and the deadline of a reload round are measured against a
+// Clock, the system clock unless WithClock sets another. A Runner reads the deadline of the
+// context it is given from that clock, and the context reports context.DeadlineExceeded once the
+// clock reaches it. A test passes a Clock it advances itself, so a deadline expires without
+// waiting for it.
+//
 // # Panics
 //
 // A panic in a Runner's Start, Stop or Err is recovered into a *PanicError and never re-raised. A

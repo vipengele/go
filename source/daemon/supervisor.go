@@ -34,6 +34,9 @@ type Supervisor struct {
 	startTimeout time.Duration
 	policy       PanicPolicy
 
+	// clock is what the start, stop and reload contexts measure their deadlines against.
+	clock Clock
+
 	// logger is the logger given to WithLogger, nil when none was; log is what Run resolved from
 	// it.
 	logger *slog.Logger
@@ -104,6 +107,7 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 		grace:        defaultGrace,
 		startTimeout: defaultStartTimeout,
 		policy:       PanicFail,
+		clock:        realClock{},
 		waiting:      func() {},
 	}
 	slices.SortStableFunc(s.runners, func(a, b Runner) int { return cmp.Compare(orderOf(a), orderOf(b)) })
@@ -116,14 +120,14 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 		}
 	}
 
-	startTimeout, grace := s.startTimeout, s.grace
+	clock, startTimeout, grace := s.clock, s.startTimeout, s.grace
 	s.newStartContext = func(parent context.Context) (context.Context, context.CancelFunc) {
-		return context.WithTimeout(parent, startTimeout)
+		return withDeadline(clock, parent, startTimeout)
 	}
 	s.newReloadContext = s.newStartContext
 	s.notify, s.unnotify = signal.Notify, signal.Stop
 	s.newStopContext = func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.Background(), grace)
+		return withDeadline(clock, context.Background(), grace)
 	}
 	s.feed.track(s.runners)
 	if s.health != nil {
