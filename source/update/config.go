@@ -102,6 +102,11 @@ type Config struct {
 	// and the checksum is the only check. It is required unless TrustedKeys is non-empty, and the
 	// two are mutually exclusive.
 	AllowUnsigned bool
+	// Channel is the channel whose releases the update selects: a channel receives every release
+	// whose own channel is at or below it. The zero value is [Stable]. A tool maps its own
+	// config-file key onto it through [ParseChannel]; a value outside Stable, Beta and Edge is
+	// invalid.
+	Channel Channel
 	// StateDir is the directory the library keeps its state in. Empty means the state directory
 	// [paths.Resolve] resolves for the Identity, through the GOOS, Getenv and UserHomeDir seams: on
 	// Linux $XDG_STATE_HOME/<DirName> or ~/.local/state/<DirName>, and <PREFIX>_HOME/state when
@@ -186,6 +191,9 @@ type Config struct {
 // [validate.ErrInvalid]: an entry of TrustedKeys that does not parse, naming it as TrustedKeys[i]
 // and wrapping the minisign error; an entry whose key id repeats an earlier one; TrustedKeys empty
 // with AllowUnsigned false; and both set.
+//
+// A Channel outside [Stable], [Beta] and [Edge] is a [validate.FieldError] wrapping
+// [validate.ErrInvalid].
 func (c Config) Validate() error {
 	return validate.Join(
 		c.Identity.Validate(),
@@ -197,9 +205,22 @@ func (c Config) Validate() error {
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
 		checkDetectors(c.Detectors),
 		checkSignaturePolicy(c.TrustedKeys, c.AllowUnsigned),
+		checkChannel(c.Channel),
 		checkInterval("CheckInterval", c.CheckInterval),
 		checkWait(c.CheckWait),
 	)
+}
+
+// checkChannel rejects a channel that is none of Stable, Beta and Edge.
+func checkChannel(ch Channel) error {
+	if !ch.valid() {
+		return &validate.FieldError{
+			Field: "Channel",
+			Value: strconv.Itoa(int(ch)),
+			Err:   fmt.Errorf("%w: must be Stable, Beta or Edge", validate.ErrInvalid),
+		}
+	}
+	return nil
 }
 
 // checkWait rejects a wait that is negative or over [maxCheckWait]; zero means the default.

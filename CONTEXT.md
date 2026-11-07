@@ -247,6 +247,13 @@ it lists releases and serves the assets of one. It does not choose among them; v
 (`cli/spec/version`) and asset selection do.
 _Avoid_: update server, registry, feed, repository
 
+**Channel**:
+A stream of a tool's releases an installation follows: stable, beta or edge. Each receives every
+release of the ones before it, so edge receives all of them. A release's channel is the higher of
+what its tag and its pre-release marking say; a tool that follows a lower channel than the version
+it runs stays on that version until a release of its channel sorts above it (ADR-0027).
+_Avoid_: track, ring, stream, pre-release (a **Channel** is followed, a pre-release is a property of one release)
+
 **Managed binary**:
 The installed executable of a tool, the file `update` replaces atomically with a verified staged
 binary. For a daemon it is also the file the **Service** starts, which makes pending, confirm and
@@ -288,6 +295,12 @@ _Avoid_: timeout, grace period (the **Supervisor**'s stop bound)
 What `update` remembers between runs: the time of the last **Check attempt** and the latest release
 version it saw. Losing or corrupting it costs one extra **Update check**, nothing more (ADR-0023).
 _Avoid_: cache, update config
+
+**Watermark**:
+The highest version a tool has applied. An update below it, or below the version the tool runs if
+that is higher, is a downgrade: it is refused unless the user asks for one explicitly, and a release
+below it is never announced as an update. Rolling back an update does not lower it (ADR-0027).
+_Avoid_: high-water mark, pin, minimum version
 
 **Trusted key**:
 A minisign public key a tool compiles into its `update` configuration. A release is authentic when

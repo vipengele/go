@@ -24,7 +24,7 @@ import (
 // stubSource is a Source that reports no release.
 type stubSource struct{}
 
-func (*stubSource) Latest(context.Context) (Release, error) {
+func (*stubSource) Latest(context.Context, Channel) (Release, error) {
 	return Release{}, errors.New("stubSource: no release")
 }
 
@@ -1327,6 +1327,44 @@ func TestValidateChecksCheckWait(t *testing.T) {
 			var fe *validate.FieldError
 			if !errors.Is(err, validate.ErrInvalid) || !errors.As(err, &fe) || fe.Field != "CheckWait" {
 				t.Errorf("Validate() = %v, want a FieldError for CheckWait wrapping %v", err, validate.ErrInvalid)
+			}
+			if _, rerr := c.resolve(); rerr == nil {
+				t.Error("resolve() error = nil, want the invalid Config rejected")
+			}
+		})
+	}
+}
+
+func TestValidateChecksChannel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		channel Channel
+		wantErr bool
+	}{
+		{"zero is stable", 0, false},
+		{"stable", Stable, false},
+		{"beta", Beta, false},
+		{"edge", Edge, false},
+		{"one past edge", Edge + 1, true},
+		{"seven", Channel(7), true},
+		{"negative", Channel(-1), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig("")
+			c.Channel = tc.channel
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() = %v, want error: %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				return
+			}
+			var fe *validate.FieldError
+			if !errors.Is(err, validate.ErrInvalid) || !errors.As(err, &fe) || fe.Field != "Channel" {
+				t.Errorf("Validate() = %v, want a FieldError for Channel wrapping %v", err, validate.ErrInvalid)
 			}
 			if _, rerr := c.resolve(); rerr == nil {
 				t.Error("resolve() error = nil, want the invalid Config rejected")

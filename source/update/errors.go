@@ -12,8 +12,8 @@ import (
 // maxErrorBody is the most response-body bytes a [StatusError] keeps.
 const maxErrorBody = 1 << 10
 
-// ErrPrerelease reports that the latest release is a pre-release and the source was not asked to
-// include pre-releases.
+// ErrPrerelease reports that the release a source marks as its latest is a pre-release, asked for
+// on the [Stable] channel, which receives no pre-release.
 var ErrPrerelease = errors.New("update: latest release is a pre-release")
 
 // ErrAssetsNotListed reports a release whose assets the source did not list, from a [Source] that
@@ -439,4 +439,23 @@ func (e *DevBuildError) Error() string {
 	}
 
 	return fmt.Sprintf("%s %s is a development build; install a release to update", e.Name, e.Version)
+}
+
+// DowngradeError reports a version below the downgrade floor: the higher of the highest version
+// ever applied and the running version. [Config.CheckDowngrade] returns it.
+type DowngradeError struct {
+	// Name is the tool's name.
+	Name string
+	// Version is the refused version.
+	Version string
+	// Floor is the lowest version an update may install without being asked to downgrade.
+	Floor string
+}
+
+// Error implements error.
+func (e *DowngradeError) Error() string {
+	return fmt.Sprintf(
+		"%s %s is below %s, the highest version applied or running; a downgrade must be asked for explicitly",
+		e.Name, e.Version, e.Floor,
+	)
 }

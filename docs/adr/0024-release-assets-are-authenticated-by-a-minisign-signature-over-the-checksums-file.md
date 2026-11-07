@@ -2,7 +2,8 @@
 
 Status: amends ADR-0020, whose checksums file is trusted as it arrives, and ADR-0023's install
 script, whose digest check is its only guarantee. Amended by ADR-0026, which makes a release
-refused unsigned unless the consumer opts out, in place of verifying only when keys are set.
+refused unsigned unless the consumer opts out, in place of verifying only when keys are set, and by
+ADR-0027, which refuses a version below the highest applied or running.
 
 A checksums file fetched from the same release as the archive proves the archive arrived intact,
 not that the tool's author published it: whoever can replace the archive can replace the checksums

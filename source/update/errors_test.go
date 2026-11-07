@@ -489,6 +489,27 @@ func TestManagedInstallError_As(t *testing.T) {
 	}
 }
 
+func TestDowngradeError(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("apply: %w", &DowngradeError{Name: "atk", Version: "v1.2.0", Floor: "v1.3.0"})
+
+	var down *DowngradeError
+	if !errors.As(err, &down) {
+		t.Fatal("errors.As did not find *DowngradeError")
+	}
+
+	if down.Name != "atk" || down.Version != "v1.2.0" || down.Floor != "v1.3.0" {
+		t.Errorf("DowngradeError = %+v", down)
+	}
+
+	for _, want := range []string{"atk", "v1.2.0", "v1.3.0", "downgrade must be asked for explicitly"} {
+		if !strings.Contains(down.Error(), want) {
+			t.Errorf("Error() = %q, missing %q", down.Error(), want)
+		}
+	}
+}
+
 func TestSignatureErrors(t *testing.T) {
 	t.Parallel()
 

@@ -32,7 +32,8 @@ type checkInputs struct {
 // checkInputsFrom reads the inputs of [eligibility] from r, a Config [Config.resolve] returned,
 // and st, the stored State. Every input is read through r's seams: the environment through
 // Getenv, the terminal through IsTerminal and the clock through Now. The opt-out variable is
-// Identity.EnvVar(optOutSuffix), set to any non-empty value, "0" included.
+// Identity.EnvVar(optOutSuffix), set to any non-empty value, "0" included. LastAttempt is zero
+// when st was learnt on a channel other than r.Channel, so a change of channel is checked at once.
 func checkInputsFrom(r Config, st State) checkInputs {
 	return checkInputs{
 		Version:     r.Version,
@@ -41,7 +42,7 @@ func checkInputsFrom(r Config, st State) checkInputs {
 		Disabled:    r.DisableCheck,
 		OptedOut:    optedOut(r),
 		Interval:    r.CheckInterval,
-		LastAttempt: st.LastAttempt,
+		LastAttempt: st.lastAttemptOn(r.Channel),
 		Now:         r.Now(),
 	}
 }
@@ -128,8 +129,8 @@ func throttleElapsed(last, now time.Time, interval time.Duration) bool {
 	return last.IsZero() || last.After(now) || now.Sub(last) >= interval
 }
 
-// afterAttempt returns the State to store once a check that ran under ctx finished at now with
-// latest and err, and whether to store it at all.
+// afterAttempt returns the State to store once a check of channel ch that ran under ctx finished
+// at now with latest and err, and whether to store it at all.
 //
 // A check stopped because the command ended is not an attempt: when ctx is done, cancelled or
 // past its deadline, or err is [context.Canceled], st is returned unchanged with false, so the
@@ -138,15 +139,21 @@ func throttleElapsed(last, now time.Time, interval time.Duration) bool {
 // per-request timeout, so ctx itself is consulted. A source request that timed out while ctx is
 // still live is an attempt.
 //
-// Any attempt sets LastAttempt to now in UTC and returns true. LatestVersion becomes latest only
-// when err is nil; a failed attempt keeps the LatestVersion st already holds.
-func afterAttempt(ctx context.Context, st State, now time.Time, latest string, err error) (State, bool) {
+// Any attempt sets LastAttempt to now in UTC, LatestChannel to ch, and returns true. LatestVersion
+// becomes latest when err is nil. A failed attempt keeps the LatestVersion st already holds when
+// st was learnt on ch, and clears it when st was learnt on another channel, whose version is
+// unknown on ch; recording ch either way makes the failed attempt throttle the next check of ch.
+func afterAttempt(ctx context.Context, st State, now time.Time, ch Channel, latest string, err error) (State, bool) {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 		return st, false
 	}
 	st.LastAttempt = now.UTC()
-	if err == nil {
+	switch {
+	case err == nil:
 		st.LatestVersion = latest
+	case st.LatestChannel != ch:
+		st.LatestVersion = ""
 	}
+	st.LatestChannel = ch
 	return st, true
 }

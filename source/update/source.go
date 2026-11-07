@@ -5,9 +5,10 @@ import "context"
 // Source reports the releases a tool can update to. A [Config] without one uses the [GitHubSource]
 // for its Identity.
 type Source interface {
-	// Latest returns the release the tool should consider updating to. It returns an error when
-	// the source cannot be reached or holds no release; ctx bounds the whole lookup.
-	Latest(ctx context.Context) (Release, error)
+	// Latest returns the release a follower of ch should consider updating to: the highest
+	// release ch receives, as [Channel.Receives] defines it. It returns an error when the source
+	// cannot be reached or holds no release ch receives; ctx bounds the whole lookup.
+	Latest(ctx context.Context, ch Channel) (Release, error)
 }
 
 // Release is one published version of a tool.

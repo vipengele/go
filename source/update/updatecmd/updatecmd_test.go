@@ -205,7 +205,7 @@ func TestCommandsDeclaresTheUpdateCommand(t *testing.T) {
 	for _, f := range cmd.Flags {
 		flags[f.Name()] = f.Shorthand()
 	}
-	want := map[string]string{"check": "", "yes": "y", "to": ""}
+	want := map[string]string{"check": "", "yes": "y", "to": "", "allow-downgrade": ""}
 	for name, short := range want {
 		got, ok := flags[name]
 		if !ok {
@@ -560,7 +560,7 @@ func TestToAnOlderReleaseDowngrades(t *testing.T) {
 	t.Parallel()
 
 	f := newFixture(t, "v2.0.0", "v1.0.0")
-	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0"}, "", false)
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0", "allow-downgrade": true}, "", false)
 
 	if r.err != nil {
 		t.Fatalf("Run error = %v, want nil", r.err)
@@ -570,6 +570,27 @@ func TestToAnOlderReleaseDowngrades(t *testing.T) {
 	}
 	if n := f.srv.Requests(updatetest.TargetLatest) + f.srv.Requests(updatetest.TargetLatestAPI); n != 0 {
 		t.Errorf("--to asked for the latest release %d times, want 0", n)
+	}
+}
+
+func TestToAnOlderReleaseWithoutAllowDowngradeIsRefused(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v2.0.0", "v1.0.0")
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0"}, "", false)
+
+	var down *update.DowngradeError
+	if !errors.As(r.err, &down) {
+		t.Fatalf("Run error = %v, want a *update.DowngradeError", r.err)
+	}
+	if want := (update.DowngradeError{Name: testName, Version: "v1.0.0", Floor: "v2.0.0"}); *down != want {
+		t.Errorf("DowngradeError = %+v, want %+v", *down, want)
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+	if f.requests() != 0 {
+		t.Errorf("server received %d requests, want 0", f.requests())
 	}
 }
 
@@ -674,14 +695,164 @@ func TestAConfigThatDoesNotResolveFails(t *testing.T) {
 	}
 }
 
-// staticSource is a Source whose Latest returns rel and err. It is not an update.AssetLocator.
+// staticSource is a Source whose Latest returns rel and err and records the channel it was asked
+// for in asked when that is not nil. It is not an update.AssetLocator.
 type staticSource struct {
-	rel update.Release
-	err error
+	rel   update.Release
+	err   error
+	asked *[]update.Channel
 }
 
-func (s staticSource) Latest(context.Context) (update.Release, error) {
+func (s staticSource) Latest(_ context.Context, ch update.Channel) (update.Release, error) {
+	if s.asked != nil {
+		*s.asked = append(*s.asked, ch)
+	}
 	return s.rel, s.err
+}
+
+// highestStore is a StateStore holding a State with the given HighestApplied.
+type highestStore struct{ highest string }
+
+func (s highestStore) Load(context.Context) (update.State, error) {
+	return update.State{HighestApplied: s.highest}, nil
+}
+
+func (s highestStore) Save(context.Context, update.State) error { return nil }
+
+func TestChannelFlagReachesTheSource(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		cfgChannel update.Channel
+		flags      map[string]any
+		want       update.Channel
+	}{
+		"flag beta":        {update.Stable, map[string]any{"check": true, "channel": "beta"}, update.Beta},
+		"flag overrides":   {update.Edge, map[string]any{"check": true, "channel": "stable"}, update.Stable},
+		"no flag":          {update.Beta, map[string]any{"check": true}, update.Beta},
+		"update with flag": {update.Stable, map[string]any{"yes": true, "channel": "edge"}, update.Edge},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var asked []update.Channel
+			f := newFixture(t, "v1.0.0", "v1.1.0")
+			f.cfg.Channel = tc.cfgChannel
+			f.cfg.Source = staticSource{rel: update.Release{Tag: "v1.0.0"}, asked: &asked}
+			r := runCommand(t, f.cfg, tc.flags, "", false)
+
+			if r.err != nil {
+				t.Fatalf("Run error = %v, want nil", r.err)
+			}
+			if len(asked) != 1 || asked[0] != tc.want {
+				t.Errorf("Source asked for %v, want [%v]", asked, tc.want)
+			}
+		})
+	}
+}
+
+func TestAnUnknownChannelIsAPlainError(t *testing.T) {
+	t.Parallel()
+
+	var asked []update.Channel
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.Source = staticSource{rel: update.Release{Tag: "v1.1.0"}, asked: &asked}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true, "channel": "nightly"}, "", false)
+
+	assertPlainError(t, r.err)
+	if len(asked) != 0 {
+		t.Errorf("Source asked %d times, want 0", len(asked))
+	}
+	if f.requests() != 0 {
+		t.Errorf("server received %d requests, want 0", f.requests())
+	}
+}
+
+func TestARefusedDowngradeNeverPrompts(t *testing.T) {
+	t.Parallel()
+
+	for name, flags := range map[string]map[string]any{
+		"pinned": {"to": "v1.5.0"},
+		"latest": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFixture(t, "v1.0.0", "v1.1.0")
+			f.cfg.StateStore = highestStore{highest: "v2.0.0"}
+			f.cfg.Source = staticSource{rel: update.Release{Tag: "v1.5.0"}}
+			stdin := &countingReader{r: strings.NewReader("y\n")}
+			r := runCommandWith(t, context.Background(), f.cfg, flags, stdin, true)
+
+			var down *update.DowngradeError
+			if !errors.As(r.err, &down) {
+				t.Fatalf("Run error = %v, want a *update.DowngradeError", r.err)
+			}
+			if stdin.reads != 0 {
+				t.Errorf("stdin read %d times, want 0", stdin.reads)
+			}
+			if strings.Contains(r.stderr.String(), "Update atk") {
+				t.Errorf("stderr = %q, want no question", r.stderr.String())
+			}
+			if f.requests() != 0 {
+				t.Errorf("server received %d requests, want 0", f.requests())
+			}
+			if got := f.binary(t); got != "old" {
+				t.Errorf("executable holds %q, want %q", got, "old")
+			}
+		})
+	}
+}
+
+// countingReader counts the reads made of r.
+type countingReader struct {
+	r     io.Reader
+	reads int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.reads++
+	return c.r.Read(p)
+}
+
+func TestCheckWithALatestBelowTheWatermarkIsUpToDate(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.StateStore = highestStore{highest: "v2.0.0"}
+	f.cfg.Source = staticSource{rel: update.Release{Tag: "v1.5.0"}}
+	r := runCommand(t, f.cfg, map[string]any{"check": true}, "", false)
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if got, want := r.stdout.String(), "atk v1.0.0 is up to date\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+// loadFailingStore is a StateStore whose Load fails with err.
+type loadFailingStore struct{ err error }
+
+func (s loadFailingStore) Load(context.Context) (update.State, error) { return update.State{}, s.err }
+
+func (loadFailingStore) Save(context.Context, update.State) error { return nil }
+
+func TestCheckReturnsAnUnreadableStoreWithoutReportingAnUpdate(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	unreadable := errors.New("state unreadable")
+	f.cfg.StateStore = loadFailingStore{err: unreadable}
+	f.cfg.Source = staticSource{rel: update.Release{Tag: "v1.1.0"}}
+	r := runCommand(t, f.cfg, map[string]any{"check": true}, "", false)
+
+	if !errors.Is(r.err, unreadable) {
+		t.Fatalf("Run error = %v, want %v", r.err, unreadable)
+	}
+	if r.stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", r.stdout.String())
+	}
 }
 
 func TestASourceThatFailsFailsTheRun(t *testing.T) {

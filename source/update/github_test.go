@@ -24,6 +24,7 @@ const (
 	tagPagePath = "/octo/tool/releases/tag/"
 	listPath    = "/repos/octo/tool/releases"
 	listQuery   = "per_page=100"
+	page1Query  = listQuery + "&page=1"
 )
 
 // apiReleaseJSON is a REST API latest-release document for tag with two assets.
@@ -139,7 +140,7 @@ func TestGitHubSource_LatestFromTheServer(t *testing.T) {
 
 		srv := newKitServer(t)
 
-		got, err := kitSource(srv).Latest(context.Background())
+		got, err := kitSource(srv).Latest(context.Background(), Stable)
 		if err != nil {
 			t.Fatalf("Latest() error = %v", err)
 		}
@@ -160,7 +161,7 @@ func TestGitHubSource_LatestFromTheServer(t *testing.T) {
 		rel := updatetest.NewRelease(t, testOwner, testRepo, "v1.2.3", "tool")
 		srv := updatetest.NewServer(t, rel, updatetest.APIOnly())
 
-		got, err := kitSource(srv).Latest(context.Background())
+		got, err := kitSource(srv).Latest(context.Background(), Stable)
 		if err != nil {
 			t.Fatalf("Latest() error = %v", err)
 		}
@@ -227,7 +228,7 @@ func TestGitHubSource_RedirectHit(t *testing.T) {
 
 			f := newFakeGitHub(t, redirectTo(tc.status, tc.location), unexpected(t, "API"))
 
-			got, err := f.source().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Stable)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -282,7 +283,7 @@ func TestGitHubSource_RedirectMissFallsBackToAPI(t *testing.T) {
 
 			f := newFakeGitHub(t, tc.web, respond(http.StatusOK, apiReleaseJSON("v1.4.0")))
 
-			got, err := f.source().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Stable)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -328,7 +329,7 @@ func TestGitHubSource_APIAssets(t *testing.T) {
 
 			f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, tc.body))
 
-			got, err := f.source().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Stable)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -353,7 +354,7 @@ func TestGitHubSource_APISuccessStatus(t *testing.T) {
 
 			f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(status, apiReleaseJSON("v1.0.0")))
 
-			got, err := f.source().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Stable)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -392,7 +393,7 @@ func TestGitHubSource_TagErrors(t *testing.T) {
 			}
 			f := newFakeGitHub(t, redirectTo(http.StatusFound, tagPagePath+escaped), unexpected(t, "API"))
 
-			_, err := f.source().Latest(context.Background())
+			_, err := f.source().Latest(context.Background(), Stable)
 
 			var tagErr *TagError
 			if !errors.As(err, &tagErr) {
@@ -408,7 +409,7 @@ func TestGitHubSource_TagErrors(t *testing.T) {
 
 			f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, apiReleaseJSON(tc.tag)))
 
-			_, err := f.source().Latest(context.Background())
+			_, err := f.source().Latest(context.Background(), Stable)
 
 			var tagErr *TagError
 			if !errors.As(err, &tagErr) {
@@ -430,7 +431,7 @@ func TestGitHubSource_Prerelease(t *testing.T) {
 
 			f := newFakeGitHub(t, redirectTo(http.StatusFound, tagPagePath+tag), unexpected(t, "API"))
 
-			got, err := f.source().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Stable)
 			if !errors.Is(err, ErrPrerelease) {
 				t.Fatalf("Latest() error = %v, want ErrPrerelease", err)
 			}
@@ -447,7 +448,7 @@ func TestGitHubSource_Prerelease(t *testing.T) {
 
 			f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, apiReleaseJSON(tag)))
 
-			got, err := f.source().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Stable)
 			if !errors.Is(err, ErrPrerelease) {
 				t.Fatalf("Latest() error = %v, want ErrPrerelease", err)
 			}
@@ -488,7 +489,7 @@ func TestGitHubSource_APIStatusError(t *testing.T) {
 
 			f := newFakeGitHub(t, respond(http.StatusNotFound, ""), respond(tc.status, tc.body))
 
-			_, err := f.source().Latest(context.Background())
+			_, err := f.source().Latest(context.Background(), Stable)
 
 			var statusErr *StatusError
 			if !errors.As(err, &statusErr) {
@@ -523,7 +524,7 @@ func TestGitHubSource_APIBodyLimit(t *testing.T) {
 			body := doc + strings.Repeat(" ", tc.size-len(doc))
 			f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, body))
 
-			got, err := f.source().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Stable)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("Latest() error = %v", err)
@@ -549,7 +550,7 @@ func TestGitHubSource_APIInvalidJSON(t *testing.T) {
 
 	f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusOK, "{not json"))
 
-	_, err := f.source().Latest(context.Background())
+	_, err := f.source().Latest(context.Background(), Stable)
 	if err == nil || !strings.Contains(err.Error(), "decoding release") {
 		t.Fatalf("Latest() error = %v, want a decoding error", err)
 	}
@@ -574,7 +575,7 @@ func TestGitHubSource_Headers(t *testing.T) {
 		record("api", respond(http.StatusOK, apiReleaseJSON("v1.0.0"))),
 	)
 
-	if _, err := f.source().Latest(context.Background()); err != nil {
+	if _, err := f.source().Latest(context.Background(), Stable); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
 
@@ -686,7 +687,7 @@ func TestGitHubSource_Timeout(t *testing.T) {
 					defer cancel()
 				}
 
-				_, err := s.Latest(ctx)
+				_, err := s.Latest(ctx, Stable)
 
 				var timeoutErr *TimeoutError
 				if !errors.As(err, &timeoutErr) {
@@ -755,7 +756,7 @@ func TestGitHubSource_TimeoutIsPerRequest(t *testing.T) {
 	s := f.source()
 	s.Timeout = timeout
 
-	got, err := s.Latest(context.Background())
+	got, err := s.Latest(context.Background(), Stable)
 	if err != nil {
 		t.Fatalf("Latest() error = %v, want the two requests bounded separately", err)
 	}
@@ -796,7 +797,7 @@ func TestGitHubSource_CallerCancellation(t *testing.T) {
 				}
 			}()
 
-			_, err := kitSource(srv).Latest(ctx)
+			_, err := kitSource(srv).Latest(ctx, Stable)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Latest() error = %v, want context.Canceled", err)
 			}
@@ -827,7 +828,7 @@ func TestGitHubSource_DoesNotFollowOrModifyCallerClient(t *testing.T) {
 	s := kitSource(srv)
 	s.HTTPClient = client
 
-	if _, err := s.Latest(context.Background()); err != nil {
+	if _, err := s.Latest(context.Background(), Stable); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
 	if client.CheckRedirect != nil {
@@ -848,7 +849,7 @@ func TestGitHubSource_RedirectRequestFailureFallsBackToAPI(t *testing.T) {
 	s := f.source()
 	s.WebURL = unreachable.URL
 
-	got, err := s.Latest(context.Background())
+	got, err := s.Latest(context.Background(), Stable)
 	if err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
@@ -868,7 +869,7 @@ func TestGitHubSource_TrailingSlashInBaseURLs(t *testing.T) {
 	s.WebURL += "/"
 	s.APIURL += "/"
 
-	if _, err := s.Latest(context.Background()); err != nil {
+	if _, err := s.Latest(context.Background(), Stable); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
 	if n := srv.Requests(updatetest.TargetLatest); n != 1 {
@@ -983,19 +984,11 @@ func newFakeGitHubList(t *testing.T, list http.HandlerFunc) *fakeGitHub {
 	return f
 }
 
-// listSource returns a GitHubSource with IncludePrereleases set whose addresses are the fake
-// server.
-func (f *fakeGitHub) listSource() *GitHubSource {
-	s := f.source()
-	s.IncludePrereleases = true
-
-	return s
-}
-
 // listedRelease is one entry of a REST API release list document.
 type listedRelease struct {
-	tag   string
-	draft bool
+	tag        string
+	draft      bool
+	prerelease bool
 }
 
 // apiListJSON is a REST API release list document holding entries in order. Each entry's html_url
@@ -1007,9 +1000,9 @@ func apiListJSON(entries ...listedRelease) string {
 			"tag_name": %q,
 			"html_url": "https://example.test/octo/tool/releases/tag/%s",
 			"draft": %t,
-			"prerelease": false,
+			"prerelease": %t,
 			"assets": [{"name": "tool_%s.tar.gz", "browser_download_url": "https://example.test/%s.tar.gz", "size": 10}]
-		}`, e.tag, e.tag, e.draft, e.tag, e.tag))
+		}`, e.tag, e.tag, e.draft, e.prerelease, e.tag, e.tag))
 	}
 
 	return "[" + strings.Join(parts, ",") + "]"
@@ -1100,7 +1093,7 @@ func TestGitHubSource_ListReturnsHighestEligible(t *testing.T) {
 
 			f := newFakeGitHubList(t, respond(http.StatusOK, apiListJSON(tc.entries...)))
 
-			got, err := f.listSource().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Edge)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -1141,7 +1134,7 @@ func TestGitHubSource_ListAssets(t *testing.T) {
 
 			f := newFakeGitHubList(t, respond(http.StatusOK, tc.body))
 
-			got, err := f.listSource().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Edge)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -1157,17 +1150,17 @@ func TestGitHubSource_ListAssets(t *testing.T) {
 	}
 }
 
-func TestGitHubSource_PrereleaseOnlyWhenIncluded(t *testing.T) {
+func TestGitHubSource_PrereleaseOnlyOffStable(t *testing.T) {
 	t.Parallel()
 
 	const tag = "v2.0.0-rc.1"
 
-	t.Run("included", func(t *testing.T) {
+	t.Run("beta", func(t *testing.T) {
 		t.Parallel()
 
 		f := newFakeGitHubList(t, respond(http.StatusOK, apiListJSON(listedRelease{tag: tag})))
 
-		got, err := f.listSource().Latest(context.Background())
+		got, err := f.source().Latest(context.Background(), Beta)
 		if err != nil {
 			t.Fatalf("Latest() error = %v", err)
 		}
@@ -1176,12 +1169,12 @@ func TestGitHubSource_PrereleaseOnlyWhenIncluded(t *testing.T) {
 		}
 	})
 
-	t.Run("not included", func(t *testing.T) {
+	t.Run("stable", func(t *testing.T) {
 		t.Parallel()
 
 		f := newFakeGitHub(t, redirectTo(http.StatusFound, tagPagePath+tag), unexpected(t, "API"))
 
-		_, err := f.source().Latest(context.Background())
+		_, err := f.source().Latest(context.Background(), Stable)
 		if !errors.Is(err, ErrPrerelease) {
 			t.Fatalf("Latest() error = %v, want ErrPrerelease", err)
 		}
@@ -1210,7 +1203,7 @@ func TestGitHubSource_ListWithoutEligibleRelease(t *testing.T) {
 
 			f := newFakeGitHubList(t, respond(http.StatusOK, tc.body))
 
-			got, err := f.listSource().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Edge)
 			if !errors.Is(err, errNoListedRelease) {
 				t.Fatalf("Latest() error = %v, want errNoListedRelease", err)
 			}
@@ -1221,6 +1214,353 @@ func TestGitHubSource_ListWithoutEligibleRelease(t *testing.T) {
 				t.Errorf("Latest() = %#v, want the zero Release", got)
 			}
 		})
+	}
+}
+
+func TestGitHubSource_ListByChannel(t *testing.T) {
+	t.Parallel()
+
+	plain := func(tag string) listedRelease { return listedRelease{tag: tag} }
+	flagged := func(tag string) listedRelease { return listedRelease{tag: tag, prerelease: true} }
+	draft := func(tag string) listedRelease { return listedRelease{tag: tag, draft: true} }
+
+	tests := []struct {
+		name    string
+		channel Channel
+		entries []listedRelease
+		want    string // empty when no release is eligible
+	}{
+		{
+			name:    "beta skips an edge tag",
+			channel: Beta,
+			entries: []listedRelease{plain("v1.1.0-edge.1"), plain("v1.0.0")},
+			want:    "v1.0.0",
+		},
+		{
+			name:    "beta skips a flagged edge tag",
+			channel: Beta,
+			entries: []listedRelease{flagged("v1.1.0-edge.1"), plain("v1.0.0")},
+			want:    "v1.0.0",
+		},
+		{
+			name:    "beta skips an alpha tag",
+			channel: Beta,
+			entries: []listedRelease{plain("v1.1.0-alpha"), plain("v1.0.0")},
+			want:    "v1.0.0",
+		},
+		{
+			name:    "beta takes a flagged plain tag",
+			channel: Beta,
+			entries: []listedRelease{flagged("v1.1.0"), plain("v1.0.0")},
+			want:    "v1.1.0",
+		},
+		{
+			name:    "beta takes an rc tag",
+			channel: Beta,
+			entries: []listedRelease{plain("v1.0.0"), plain("v1.1.0-rc.1")},
+			want:    "v1.1.0-rc.1",
+		},
+		{
+			name:    "beta takes a beta tag",
+			channel: Beta,
+			entries: []listedRelease{plain("v1.1.0-beta.2"), plain("v1.0.0")},
+			want:    "v1.1.0-beta.2",
+		},
+		{
+			name:    "beta takes a stable above its own rc",
+			channel: Beta,
+			entries: []listedRelease{plain("v1.1.0-rc.1"), plain("v1.1.0")},
+			want:    "v1.1.0",
+		},
+		{
+			name:    "beta skips drafts",
+			channel: Beta,
+			entries: []listedRelease{draft("v2.0.0-rc.1"), draft("v2.0.0"), plain("v1.0.0")},
+			want:    "v1.0.0",
+		},
+		{
+			name:    "edge takes the highest",
+			channel: Edge,
+			entries: []listedRelease{plain("v1.1.0-rc.1"), flagged("v1.2.0-edge.3"), plain("v1.0.0")},
+			want:    "v1.2.0-edge.3",
+		},
+		{
+			name:    "edge skips drafts",
+			channel: Edge,
+			entries: []listedRelease{draft("v1.2.0-edge.3"), plain("v1.1.0-rc.1")},
+			want:    "v1.1.0-rc.1",
+		},
+		{
+			name:    "beta with only edge releases",
+			channel: Beta,
+			entries: []listedRelease{plain("v1.1.0-edge.1"), flagged("v1.0.0-nightly")},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeGitHubList(t, respond(http.StatusOK, apiListJSON(tc.entries...)))
+
+			got, err := f.source().Latest(context.Background(), tc.channel)
+			if tc.want == "" {
+				if !errors.Is(err, errNoListedRelease) {
+					t.Fatalf("Latest() error = %v, want errNoListedRelease", err)
+				}
+				if !reflect.DeepEqual(got, Release{}) {
+					t.Errorf("Latest() = %#v, want the zero Release", got)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Latest() error = %v", err)
+				}
+				if want := listedReleaseOf(tc.want); !reflect.DeepEqual(got, want) {
+					t.Errorf("Latest() = %#v, want %#v", got, want)
+				}
+			}
+			// Every list here is shorter than a page, so it is the whole list.
+			if n := f.listCalls.Load(); n != 1 {
+				t.Errorf("list requests = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// edgePage is a full page of edge releases, numbered from first.
+func edgePage(first int) []listedRelease {
+	entries := make([]listedRelease, 0, listPageSize)
+	for i := range listPageSize {
+		entries = append(entries, listedRelease{tag: fmt.Sprintf("v9.0.%d-edge", first+i), prerelease: true})
+	}
+
+	return entries
+}
+
+// pagedList serves pages[n-1] as page n of the release list, and an empty list for any page past
+// them. It records the page numbers requested, in order.
+type pagedList struct {
+	pages     [][]listedRelease
+	mu        sync.Mutex
+	requested []string
+}
+
+func (p *pagedList) serve(w http.ResponseWriter, r *http.Request) {
+	page := r.URL.Query().Get("page")
+
+	p.mu.Lock()
+	p.requested = append(p.requested, page)
+	p.mu.Unlock()
+
+	var n int
+	if _, err := fmt.Sscan(page, &n); err != nil || n < 1 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if n > len(p.pages) {
+		respond(http.StatusOK, "[]")(w, r)
+		return
+	}
+	respond(http.StatusOK, apiListJSON(p.pages[n-1]...))(w, r)
+}
+
+func (p *pagedList) pagesRequested() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([]string(nil), p.requested...)
+}
+
+func TestGitHubSource_ListPages(t *testing.T) {
+	t.Parallel()
+
+	tail := []listedRelease{{tag: "v1.5.0-rc.1"}, {tag: "v1.4.0"}, {tag: "v1.6.0-edge"}}
+
+	tests := []struct {
+		name    string
+		channel Channel
+		pages   [][]listedRelease
+		want    string
+		wantReq []string
+	}{
+		{
+			name:    "beta reads past a full page of edge releases",
+			channel: Beta,
+			pages:   [][]listedRelease{edgePage(0), tail},
+			want:    "v1.5.0-rc.1",
+			wantReq: []string{"1", "2"},
+		},
+		{
+			name:    "edge stops at the first page holding a release",
+			channel: Edge,
+			pages:   [][]listedRelease{edgePage(0), tail},
+			want:    "v9.0.99-edge",
+			wantReq: []string{"1"},
+		},
+		{
+			name:    "beta stops at an empty page",
+			channel: Beta,
+			pages:   [][]listedRelease{edgePage(0)},
+			wantReq: []string{"1", "2"},
+		},
+		{
+			name:    "beta stops at a short page",
+			channel: Beta,
+			pages:   [][]listedRelease{edgePage(0), edgePage(100)[:99], tail},
+			wantReq: []string{"1", "2"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := &pagedList{pages: tc.pages}
+			f := newFakeGitHubList(t, p.serve)
+
+			got, err := f.source().Latest(context.Background(), tc.channel)
+			if tc.want == "" {
+				if !errors.Is(err, errNoListedRelease) {
+					t.Fatalf("Latest() error = %v, want errNoListedRelease", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Latest() error = %v", err)
+				}
+				if want := listedReleaseOf(tc.want); !reflect.DeepEqual(got, want) {
+					t.Errorf("Latest() = %#v, want %#v", got, want)
+				}
+			}
+			if got := p.pagesRequested(); !reflect.DeepEqual(got, tc.wantReq) {
+				t.Errorf("pages requested = %q, want %q", got, tc.wantReq)
+			}
+		})
+	}
+}
+
+func TestGitHubSource_ListPageBound(t *testing.T) {
+	t.Parallel()
+
+	pages := make([][]listedRelease, 0, maxListPages+1)
+	for i := range maxListPages {
+		pages = append(pages, edgePage(i*listPageSize))
+	}
+	// A receivable release past the bound is never read.
+	pages = append(pages, []listedRelease{{tag: "v1.0.0"}})
+
+	p := &pagedList{pages: pages}
+	f := newFakeGitHubList(t, p.serve)
+
+	got, err := f.source().Latest(context.Background(), Beta)
+	if !errors.Is(err, errNoListedRelease) {
+		t.Fatalf("Latest() error = %v, want errNoListedRelease", err)
+	}
+	if want := f.server.URL + listPath + "?" + listQuery; !strings.Contains(err.Error(), want) {
+		t.Errorf("Latest() error = %q, want it to name %q", err, want)
+	}
+	if !reflect.DeepEqual(got, Release{}) {
+		t.Errorf("Latest() = %#v, want the zero Release", got)
+	}
+
+	want := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
+	if got := p.pagesRequested(); !reflect.DeepEqual(got, want) {
+		t.Errorf("pages requested = %q, want %q", got, want)
+	}
+}
+
+func TestGitHubSource_ListPageErrorStopsTheLookup(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeGitHubList(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			respond(http.StatusOK, apiListJSON(edgePage(0)...))(w, r)
+			return
+		}
+		respond(http.StatusInternalServerError, "boom")(w, r)
+	})
+
+	_, err := f.source().Latest(context.Background(), Beta)
+
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("Latest() error = %v, want a *StatusError", err)
+	}
+	if want := f.server.URL + listPath + "?" + listQuery + "&page=2"; statusErr.URL != want {
+		t.Errorf("StatusError.URL = %q, want %q", statusErr.URL, want)
+	}
+	if n := f.listCalls.Load(); n != 2 {
+		t.Errorf("list requests = %d, want 2", n)
+	}
+}
+
+// deadlineTransport records the deadline of each request's context before passing the request
+// on, and waits gap after each response so that two requests never start at the same instant.
+type deadlineTransport struct {
+	next      http.RoundTripper
+	gap       time.Duration
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (d *deadlineTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	deadline, _ := r.Context().Deadline()
+
+	d.mu.Lock()
+	d.deadlines = append(d.deadlines, deadline)
+	d.mu.Unlock()
+
+	resp, err := d.next.RoundTrip(r)
+	time.Sleep(d.gap)
+
+	return resp, err
+}
+
+func TestGitHubSource_ListTimeoutIsPerPage(t *testing.T) {
+	t.Parallel()
+
+	// A Timeout shared by the pages gives both requests the same deadline; one per page gives the
+	// second a later deadline, set when it starts.
+	p := &pagedList{pages: [][]listedRelease{edgePage(0), {{tag: "v1.0.0"}}}}
+	f := newFakeGitHubList(t, p.serve)
+	s := f.source()
+	transport := &deadlineTransport{next: f.server.Client().Transport, gap: 10 * time.Millisecond}
+	s.HTTPClient = &http.Client{Transport: transport}
+	s.Timeout = time.Minute
+
+	got, err := s.Latest(context.Background(), Beta)
+	if err != nil {
+		t.Fatalf("Latest() error = %v", err)
+	}
+	if got.Tag != "v1.0.0" {
+		t.Errorf("Latest().Tag = %q, want %q", got.Tag, "v1.0.0")
+	}
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+
+	if len(transport.deadlines) != 2 {
+		t.Fatalf("requests = %d, want 2", len(transport.deadlines))
+	}
+	first, second := transport.deadlines[0], transport.deadlines[1]
+	if first.IsZero() || second.IsZero() {
+		t.Fatalf("deadlines = %v, want both set", transport.deadlines)
+	}
+	if !second.After(first) {
+		t.Errorf("second page deadline %v is not after the first %v, want each page bounded separately", second, first)
+	}
+}
+
+func TestGitHubSource_UnknownChannel(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeGitHub(t, unexpected(t, "web"), unexpected(t, "API"))
+
+	got, err := f.source().Latest(context.Background(), Channel(7))
+	if err == nil || !strings.Contains(err.Error(), "Channel(7)") {
+		t.Errorf("Latest() error = %v, want one naming the channel", err)
+	}
+	if !reflect.DeepEqual(got, Release{}) {
+		t.Errorf("Latest() = %#v, want the zero Release", got)
 	}
 }
 
@@ -1239,10 +1579,10 @@ func TestGitHubSource_ListRequest(t *testing.T) {
 		mu.Unlock()
 		respond(http.StatusOK, apiListJSON(listedRelease{tag: "v1.0.0"}))(w, r)
 	})
-	s := f.listSource()
+	s := f.source()
 	s.APIURL += "/"
 
-	if _, err := s.Latest(context.Background()); err != nil {
+	if _, err := s.Latest(context.Background(), Edge); err != nil {
 		t.Fatalf("Latest() error = %v", err)
 	}
 
@@ -1252,8 +1592,8 @@ func TestGitHubSource_ListRequest(t *testing.T) {
 	if path != listPath {
 		t.Errorf("list request path = %q, want %q", path, listPath)
 	}
-	if query != listQuery {
-		t.Errorf("list request query = %q, want %q", query, listQuery)
+	if query != page1Query {
+		t.Errorf("list request query = %q, want %q", query, page1Query)
 	}
 	want := map[string]string{
 		"User-Agent":           "go.vipengele.org/update",
@@ -1295,13 +1635,13 @@ func TestGitHubSource_ListStatusError(t *testing.T) {
 
 			f := newFakeGitHubList(t, respond(tc.status, tc.body))
 
-			_, err := f.listSource().Latest(context.Background())
+			_, err := f.source().Latest(context.Background(), Edge)
 
 			var statusErr *StatusError
 			if !errors.As(err, &statusErr) {
 				t.Fatalf("Latest() error = %v, want a *StatusError", err)
 			}
-			want := StatusError{URL: f.server.URL + listPath + "?" + listQuery, StatusCode: tc.status, Body: tc.body}
+			want := StatusError{URL: f.server.URL + listPath + "?" + page1Query, StatusCode: tc.status, Body: tc.body}
 			if *statusErr != want {
 				t.Errorf("StatusError = %#v, want %#v", *statusErr, want)
 			}
@@ -1318,7 +1658,7 @@ func TestGitHubSource_ListSuccessStatus(t *testing.T) {
 
 			f := newFakeGitHubList(t, respond(status, apiListJSON(listedRelease{tag: "v1.0.0"})))
 
-			got, err := f.listSource().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Edge)
 			if err != nil {
 				t.Fatalf("Latest() error = %v", err)
 			}
@@ -1338,7 +1678,7 @@ func TestGitHubSource_ListInvalidJSON(t *testing.T) {
 
 			f := newFakeGitHubList(t, respond(http.StatusOK, body))
 
-			_, err := f.listSource().Latest(context.Background())
+			_, err := f.source().Latest(context.Background(), Edge)
 			if err == nil || !strings.Contains(err.Error(), "decoding releases") {
 				t.Fatalf("Latest() error = %v, want a decoding error", err)
 			}
@@ -1371,7 +1711,7 @@ func TestGitHubSource_ListBodyLimit(t *testing.T) {
 			body := doc + strings.Repeat(" ", tc.size-len(doc))
 			f := newFakeGitHubList(t, respond(http.StatusOK, body))
 
-			got, err := f.listSource().Latest(context.Background())
+			got, err := f.source().Latest(context.Background(), Edge)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("Latest() error = %v", err)
@@ -1409,7 +1749,7 @@ func TestGitHubSource_ListTimeout(t *testing.T) {
 			t.Parallel()
 
 			f := newFakeGitHubList(t, blockUntilDone)
-			s := f.listSource()
+			s := f.source()
 			s.Timeout = tc.timeout
 			if tc.client != nil {
 				c := *s.HTTPClient
@@ -1424,13 +1764,13 @@ func TestGitHubSource_ListTimeout(t *testing.T) {
 				defer cancel()
 			}
 
-			_, err := s.Latest(ctx)
+			_, err := s.Latest(ctx, Edge)
 
 			var timeoutErr *TimeoutError
 			if !errors.As(err, &timeoutErr) {
 				t.Fatalf("Latest() error = %v, want a *TimeoutError", err)
 			}
-			if want := f.server.URL + listPath + "?" + listQuery; timeoutErr.URL != want {
+			if want := f.server.URL + listPath + "?" + page1Query; timeoutErr.URL != want {
 				t.Errorf("TimeoutError.URL = %q, want %q", timeoutErr.URL, want)
 			}
 			if tc.wantDeadlineExceeded && !errors.Is(err, context.DeadlineExceeded) {
@@ -1456,7 +1796,7 @@ func TestGitHubSource_ListCallerCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := f.listSource().Latest(ctx)
+	_, err := f.source().Latest(ctx, Edge)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Latest() error = %v, want context.Canceled", err)
 	}
@@ -1479,7 +1819,7 @@ func TestGitHubSource_APIBodyReadError(t *testing.T) {
 
 	f := newFakeGitHub(t, respond(http.StatusOK, ""), truncatedBody)
 
-	_, err := f.source().Latest(context.Background())
+	_, err := f.source().Latest(context.Background(), Stable)
 	if err == nil || !strings.Contains(err.Error(), "reading response") {
 		t.Errorf("Latest() error = %v, want a read error", err)
 	}
@@ -1490,7 +1830,7 @@ func TestGitHubSource_ListBodyReadError(t *testing.T) {
 
 	f := newFakeGitHubList(t, truncatedBody)
 
-	_, err := f.listSource().Latest(context.Background())
+	_, err := f.source().Latest(context.Background(), Edge)
 	if err == nil || !strings.Contains(err.Error(), "reading response") {
 		t.Errorf("Latest() error = %v, want a read error", err)
 	}
@@ -1500,18 +1840,19 @@ func TestGitHubSource_UnbuildableRequest(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		source *GitHubSource
+		name    string
+		source  *GitHubSource
+		channel Channel
 	}{
-		{name: "redirect then API", source: &GitHubSource{Owner: testOwner, Repo: testRepo, WebURL: "://bad", APIURL: "://bad"}},
-		{name: "list", source: &GitHubSource{Owner: testOwner, Repo: testRepo, APIURL: "://bad", IncludePrereleases: true}},
+		{name: "redirect then API", source: &GitHubSource{Owner: testOwner, Repo: testRepo, WebURL: "://bad", APIURL: "://bad"}, channel: Stable},
+		{name: "list", source: &GitHubSource{Owner: testOwner, Repo: testRepo, APIURL: "://bad"}, channel: Edge},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := tc.source.Latest(context.Background())
+			_, err := tc.source.Latest(context.Background(), tc.channel)
 			if err == nil || !strings.Contains(err.Error(), "://bad") {
 				t.Errorf("Latest() error = %v, want one naming the address", err)
 			}
