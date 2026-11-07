@@ -16,7 +16,7 @@ golangci-lint run
 
 - `config.go` — `Config`: embeds `spec.Identity` (from `go.vipengele.org/cli/spec`) and carries
   every seam to the outside world (HTTP client, clock, GOOS/GOARCH, executable, env lookup, user
-  home dir, `EvalSymlinks`, `InContainer`, `IsTerminal`, `CheckWait`, `Locker`) and the tool's own
+  home dir, `EvalSymlinks`, `InContainer`, `IsTerminal`, `CheckWait`, `Locker`, `Token`) and the tool's own
   `Detectors`; a nil `Detectors` entry is invalid. The signature policy is required (ADR-0024,
   ADR-0026): `TrustedKeys` (minisign public key entries, each with or without its
   `untrusted comment:` line, several for a rotation) or `AllowUnsigned`, exactly one. `Validate`
