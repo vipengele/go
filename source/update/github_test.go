@@ -1930,6 +1930,20 @@ func withHeaders(status int, body string, kv ...string) http.HandlerFunc {
 	}
 }
 
+func TestGitHubSource_NotModifiedWithoutCacheIsStatusError(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeGitHub(t, respond(http.StatusOK, ""), respond(http.StatusNotModified, ""))
+	s := f.source()
+
+	_, err := s.Latest(context.Background(), Stable)
+
+	var se *StatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusNotModified {
+		t.Fatalf("Latest error = %v, want a *StatusError with status 304", err)
+	}
+}
+
 func TestGitHubSource_APIRateLimitErrors(t *testing.T) {
 	t.Parallel()
 
@@ -1982,6 +1996,13 @@ func TestGitHubSource_APIRateLimitErrors(t *testing.T) {
 			status:  http.StatusTooManyRequests,
 			headers: []string{"Retry-After", "30"},
 			want:    RateLimitError{Reset: now.Add(30 * time.Second)},
+		},
+		{
+			name:    "Retry-After of zero seconds",
+			status:  http.StatusTooManyRequests,
+			headers: []string{"Retry-After", "0"},
+			want:    RateLimitError{Reset: now},
+			wantMsg: []string{"resets at 2030-01-02T03:04:05Z"},
 		},
 		{
 			name:    "Retry-After as an HTTP date",

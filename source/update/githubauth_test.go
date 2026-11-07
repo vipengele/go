@@ -557,3 +557,30 @@ func TestDownloadNeverSendsTheToken(t *testing.T) {
 	assetAuth.assertNoAuthorization(t, "the asset host")
 	cdnAuth.assertNoAuthorization(t, "the CDN host")
 }
+
+func TestHostOf(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ name, in, want string }{
+		{"host without port", "https://api.example.test/repos", "api.example.test"},
+		{"host with port", "http://127.0.0.1:8080/x", "127.0.0.1:8080"},
+		{"unparsable URL", "http://[::1", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hostOf(tc.in); got != tc.want {
+				t.Errorf("hostOf(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSameHost_EmptyAPIHostMatchesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, host := range []string{"", "api.example.test"} {
+		if sameHost(host, "") {
+			t.Errorf("sameHost(%q, \"\") = true, want false", host)
+		}
+	}
+}
