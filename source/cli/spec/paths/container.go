@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"os"
 	"runtime"
+	"strconv"
+
+	"go.vipengele.org/cli/spec"
 )
 
 // The files and variables [InContainer] probes.
@@ -87,6 +90,35 @@ func InContainer(p Probes) bool {
 		}
 	}
 	return false
+}
+
+// InContainerFor reports whether the process runs inside a container, letting the user of the
+// tool override the [InContainer] heuristic with the <PREFIX>_CONTAINER environment variable,
+// where PREFIX is id.EnvPrefix.
+//
+// An unset or empty variable defers to [InContainer]. A value strconv.ParseBool accepts decides:
+// "1" and "true" force true, "0" and "false" force false. Any other non-empty value, such as
+// "yes", forces true. The override applies on every operating system; only the heuristic is
+// Linux-only. An id whose EnvPrefix is invalid has no variable, so the heuristic answers.
+//
+// InContainerFor changes no path; the caller decides what to do with the answer.
+func InContainerFor(id spec.Identity, p Probes) bool {
+	name, err := id.EnvVar("CONTAINER")
+	if err != nil {
+		return InContainer(p)
+	}
+	lookup := p.LookupEnv
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	v, ok := lookup(name)
+	if !ok || v == "" {
+		return InContainer(p)
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
+	}
+	return true
 }
 
 // statExists reports whether os.Stat succeeds on path, the default [Probes.Exists].

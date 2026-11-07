@@ -77,6 +77,9 @@ golangci-lint run
   darwin). Runtime never uses `XDG_RUNTIME_DIR`, which the system removes at logout. Resolving
   creates and stats nothing; `Dirs.Ensure` creates directories 0700 on demand and reports a kind
   that was not resolved. `InContainer` is a heuristic over injectable `Probes` and changes no path.
+  `InContainerFor(id, Probes)` lets `<PREFIX>_CONTAINER` override it on any OS: unset or empty defers
+  to the heuristic, a `strconv.ParseBool` value decides, any other non-empty value (`yes`) is true,
+  and an invalid `EnvPrefix` uses the heuristic.
 - `terminal/` — `terminal.Detect(stdin, stdout, stderr)` returns the `func(spec.Stream) bool` for
   `Env.Terminal`; `DetectWith(Probes, ...)` takes the probes as a seam. Each stream is probed lazily
   and at most once, and anything that is not an `*os.File` is not a terminal. It is the only importer
