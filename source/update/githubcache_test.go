@@ -536,6 +536,34 @@ func TestFileResponseCacheUnreadableFileIsAMiss(t *testing.T) {
 	}
 }
 
+func TestFileResponseCachePutFailsWhenTheDirectoryCannotBeCreated(t *testing.T) {
+	t.Parallel()
+
+	parent := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parent, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := NewFileResponseCache(filepath.Join(parent, "state")).Put(context.Background(), "https://a.test", CachedResponse{ETag: `"a"`})
+	if err == nil {
+		t.Fatal("Put = nil, want an error")
+	}
+}
+
+func TestFileResponseCachePutFailsWhenADirectoryOccupiesTheFilePath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, cacheFileName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := NewFileResponseCache(dir).Put(context.Background(), "https://a.test", CachedResponse{ETag: `"a"`})
+	if err == nil {
+		t.Fatal("Put = nil, want an error")
+	}
+}
+
 func TestFileResponseCacheDoneContextTouchesNothing(t *testing.T) {
 	t.Parallel()
 

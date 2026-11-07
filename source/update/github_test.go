@@ -1984,6 +1984,25 @@ func TestGitHubSource_APIRateLimitErrors(t *testing.T) {
 			want:    RateLimitError{Reset: now.Add(30 * time.Second)},
 		},
 		{
+			name:    "Retry-After as an HTTP date",
+			status:  http.StatusForbidden,
+			headers: []string{"Retry-After", reset.Format(http.TimeFormat)},
+			want:    RateLimitError{Reset: reset},
+			wantMsg: []string{"resets at 2030-01-02T04:00:00Z"},
+		},
+		{
+			name:    "Retry-After that is neither seconds nor a date",
+			status:  http.StatusForbidden,
+			headers: []string{"Retry-After", "soon"},
+			notMsg:  []string{"resets at"},
+		},
+		{
+			name:    "Retry-After of negative seconds",
+			status:  http.StatusTooManyRequests,
+			headers: []string{"Retry-After", "-5"},
+			notMsg:  []string{"resets at"},
+		},
+		{
 			name:    "429 with an exhausted primary limit",
 			status:  http.StatusTooManyRequests,
 			headers: []string{"X-RateLimit-Remaining", "0", "X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10)},
