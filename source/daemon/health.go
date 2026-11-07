@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -237,14 +238,26 @@ func WithCheckTimeout(timeout time.Duration) HealthOption {
 	}
 }
 
+// WithHealthClock sets the clock behind StartedAt, Uptime, each check's Duration and the per-check
+// timeout. A test passes a Clock it advances itself, so that a check times out without waiting for
+// it. A nil clock is the system clock, which is also the clock without this option.
+func WithHealthClock(clock Clock) HealthOption {
+	return func(h *Health) {
+		if clock == nil {
+			clock = realClock{}
+		}
+		h.clock = clock
+	}
+}
+
 // Health is a registry of health checks that runs them all when asked for a Snapshot. Build one
 // with NewHealth. Add and Snapshot are safe to call from several goroutines at once.
 type Health struct {
 	timeout   time.Duration
 	startedAt time.Time
 
-	// now is the clock behind StartedAt, Uptime and each check's Duration.
-	now func() time.Time
+	// clock is the clock behind StartedAt, Uptime, each check's Duration and its timeout.
+	clock Clock
 
 	// mu guards checks.
 	mu     sync.Mutex
@@ -335,16 +348,11 @@ func (s *checkState) finish(r *checkRun) {
 	}
 }
 
-// NewHealth returns an empty Health whose uptime counts from now.
+// NewHealth returns an empty Health whose uptime counts from now on its clock.
 func NewHealth(opts ...HealthOption) *Health {
-	return newHealth(time.Now, opts...)
-}
-
-// newHealth returns an empty Health that reads the time from now.
-func newHealth(now func() time.Time, opts ...HealthOption) *Health {
 	h := &Health{
 		timeout: defaultCheckTimeout,
-		now:     now,
+		clock:   realClock{},
 		checks:  make(map[string]registered),
 	}
 	for _, opt := range opts {
@@ -352,7 +360,7 @@ func newHealth(now func() time.Time, opts ...HealthOption) *Health {
 			opt(h)
 		}
 	}
-	h.startedAt = h.now()
+	h.startedAt = h.clock.Now()
 	return h
 }
 
@@ -436,7 +444,7 @@ func (h *Health) snapshot(ctx context.Context, only Kind) Snapshot {
 		Live:      true,
 		Ready:     true,
 		StartedAt: h.startedAt,
-		Uptime:    h.now().Sub(h.startedAt),
+		Uptime:    h.clock.Now().Sub(h.startedAt),
 		Checks:    results,
 	}
 	for _, r := range results {
@@ -468,11 +476,12 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 		return result
 	}
 
-	checkCtx, cancel := context.WithTimeoutCause(ctx, h.timeout,
-		fmt.Errorf("%w after %v", ErrCheckTimeout, h.timeout))
+	// The start is read before the deadline is armed, so that the clock cannot reach the deadline
+	// before the start is taken and Duration never exceeds the timeout on a clock that only moves
+	// when advanced.
+	start := h.clock.Now()
+	checkCtx, cancel := withDeadline(h.clock, ctx, h.timeout)
 	defer cancel()
-
-	start := h.now()
 
 	// done is buffered so that an abandoned check can still deliver its error and exit.
 	done := make(chan error, 1)
@@ -490,12 +499,14 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 	var err error
 	select {
 	case err = <-done:
-		err = checkErr(checkCtx, err)
+		if err != nil && checkCtx.Err() != nil {
+			err = h.endedErr(ctx, checkCtx)
+		}
 	case <-checkCtx.Done():
-		err = context.Cause(checkCtx)
+		err = h.endedErr(ctx, checkCtx)
 		c.state.abandon(cr)
 	}
-	result.Duration = h.now().Sub(start)
+	result.Duration = h.clock.Now().Sub(start)
 	if err != nil {
 		result.Status = CheckFail
 		result.Error = err.Error()
@@ -503,12 +514,22 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 	return result
 }
 
-// checkErr is what a check that returned err under ctx fails with. A check that gives up because
-// its context ended reports why the context ended: the cause of ctx when err is not nil and ctx is
-// done, and err itself otherwise.
-func checkErr(ctx context.Context, err error) error {
-	if err != nil && ctx.Err() != nil {
-		return context.Cause(ctx)
+// endedErr is what a check fails with once checkCtx, its context under the caller's ctx, has
+// ended. The check timed out when checkCtx reports context.DeadlineExceeded while ctx is still
+// live, and the error wraps ErrCheckTimeout. Otherwise checkCtx ended with ctx, and the error is
+// ctx's cause, or ctx.Err() when ctx carries none, so a caller that cancels with a cause sees the
+// check fail with it. checkCtx's own cause is never read: the clock's deadline context carries
+// none. A check that returns an error after its context has ended fails with this error too, so
+// a check that gives up on its context reports why the context ended.
+func (h *Health) endedErr(ctx, checkCtx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		return err
 	}
-	return err
+	if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w after %v", ErrCheckTimeout, h.timeout)
+	}
+	return checkCtx.Err()
 }
