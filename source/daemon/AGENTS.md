@@ -31,7 +31,9 @@ golangci-lint run
   publishes at each transition (`feed`, `runPhase`, `runnerPhase`); `New` registers
   `supervisor.live`, `supervisor.ready` and each `HealthChecker` in the `WithHealth` registry as
   its last step, all or none. With `WithInstanceLock`, `Run` takes the instance lock before the
-  first `Start` and releases it in a `defer`, after the stop phase, on every return path.
+  first `Start` and releases it in a `defer`, after the stop phase, on every return path. With
+  `WithSystemd` the watchdog is a mutex-guarded `{stop, stopped}`: armed after `READY=1`, disarmed
+  when the stop phase begins, and it pings only while the unexported snapshot reports live.
 - `instance.go` — `AcquireInstance`, the instance lock (`instance.lock`, through
   `go.vipengele.org/filelock`) in the tool's runtime directory from `cli/spec/paths`, and the
   best-effort holder record (`instance.holder`); `Instance` with `Path` and an idempotent
@@ -55,7 +57,8 @@ golangci-lint run
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
   the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam) and `WithReady` (the Ready seam).
+  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam) and `WithSystemd`. Tests:
+  `systemd_test.go`.
 - `clock.go` — the `Clock` interface (`Now`, `AfterFunc`), the system clock, and `withDeadline`
   with its `clockContext`, the deadline context for any other clock. `Deadline` is the clock's
   deadline or the parent's when earlier, and `Err` is `context.DeadlineExceeded` when the clock's
@@ -69,6 +72,11 @@ golangci-lint run
   scripted Runner (`FailStart`, `HangStart`, `IgnoreStop`, `StopErr`, `Order`) that records its
   calls. `Start` runs a Supervisor on `127.0.0.1:0` and registers a cleanup that releases every
   hang and then stops it.
+- `systemd/` — package `go.vipengele.org/daemon/systemd` (ADR-0030). `notify.go` holds `Notify`
+  and the state constants, `watchdog.go` `WatchdogInterval`, `listeners.go` `Listeners` and
+  `UnknownName`. The seams are parameters of the unexported functions (`goos`, and `firstFD` for
+  `listeners`), never package variables; `Listeners` is called once per process. Tests re-exec the
+  test binary to pass descriptors through `ExtraFiles`.
 - `errors.go` — `PanicError` and the sentinel errors (`ErrRunnerExited`, `ErrStartTimeout`,
   `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels
@@ -97,6 +105,8 @@ golangci-lint run
   `WithHealthClock` for `Health`. A test passes `daemontest.Clock` and advances it.
 - Ready: `WithReady` is called once per `Run`, after every `Start` has returned, synchronously on
   `Run`'s goroutine.
+- Environment: `WithSystemd` and the `systemd` package take a `lookup func(key string)
+  (string, bool)`, never `os.Getenv`; a test passes a map-backed one.
 
 ## The `service` package
 
@@ -107,10 +117,10 @@ the Windows service control manager) behind the `Manager` interface: `Prepare`, 
 
 - `manager.go` — `Manager` and `New(cfg, opts...)`, which checks, in order, the `WithIdentity`
   identity (`ErrInvalidConfig`), whether the process runs in a container (`*ContainerError`), the
-  `Config` against the target GOOS, the `WithSystemdHardening` override, and then switches on the
+  `Config` against the target GOOS, the `WithSystemdHardening` override, the `WithSystemdNotify` validation, and then switches on the
   GOOS to select the driver (systemd on linux, `ErrUnsupported` elsewhere).
-- `option.go` — `Option`, `WithGOOS`, `WithIdentity`, `WithContainer` and
-  `WithSystemdHardening`; `""` means `runtime.GOOS`, `"windows"` applies the Windows rules and every other value the POSIX rules.
+- `option.go` — `Option`, `WithGOOS`, `WithIdentity`, `WithContainer`,
+  `WithSystemdHardening` and `WithSystemdNotify`; `""` means `runtime.GOOS`, `"windows"` applies the Windows rules and every other value the POSIX rules.
   `WithContainer` replaces container detection and wins over the environment and `WithIdentity`;
   without it, `New` asks `paths.InContainerFor` with the identity and `paths.InContainer` without
   one.
@@ -151,8 +161,9 @@ The systemd driver:
   `Start`, `Stop` and `Prepare` need root (`ErrPrivilegesRequired`). A user unit lives in
   `$XDG_CONFIG_HOME/systemd/user` (default `$HOME/.config/systemd/user`), is driven by
   `systemctl --user`, is `WantedBy=default.target` with no network ordering, and needs no root;
-  `Config.User` must be empty with `ScopeUser` on POSIX. `Type=simple`, `Restart=always` and
-  `RestartSec=5` are fixed.
+  `Config.User` must be empty with `ScopeUser` on POSIX. `Type=simple` by default, `Type=notify`
+  (plus `WatchdogSec=` in whole ms) with `WithSystemdNotify`; `Restart=always` and `RestartSec=5`
+  are fixed.
 - `Install` is: privileges, account check (`id -u -- <user>` for a system unit with a `User`; the
   driver never creates an account, a missing one fails before anything is written, a missing `id` is
   `ErrUnsupported`), `Prepare` (creates the unit directory only), atomic write (temp file, chmod
@@ -212,7 +223,7 @@ The systemd driver:
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
-  `daemon`, `daemon/service` and `daemon/httpserver`, `cli/spec`, `cli/spec/paths` and
+  `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and
   `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
