@@ -89,6 +89,40 @@ func WithReady(ready func()) Option {
 	}
 }
 
+// WithSystemd has Run tell systemd how the run goes, through the notification protocol of the
+// systemd package, with lookup reading the environment the service manager set, as
+// spec.Env.LookupEnv does. The process environment is never read nor changed. A nil lookup is
+// rejected by New.
+//
+// Run sends READY=1 once, at the point WithReady's callback is called, after it returns: after
+// every Runner's Start has returned, synchronously on Run's goroutine. It sends STOPPING=1 when
+// the stop phase begins, also after a failed start phase, which sends no READY=1. A Run that
+// cannot take the instance lock of WithInstanceLock sends neither.
+//
+// When WATCHDOG_USEC is set, and WATCHDOG_PID, if set, names this process, Run arms a watchdog
+// after READY=1: every half of WATCHDOG_USEC, on the clock of WithClock, it sends WATCHDOG=1. With
+// WithHealth it first runs the Liveness checks of the Health, each under the Health's check
+// timeout, and sends WATCHDOG=1 only when every one passes, so systemd restarts a process that is
+// not live; a check that hangs holds the ping back for as long as it runs. Without WithHealth the
+// ping is unconditional. The watchdog is disarmed as the stop phase begins, before STOPPING=1,
+// and no WATCHDOG=1 is sent after that, even by a tick whose checks were still running. A
+// WATCHDOG_USEC or WATCHDOG_PID that cannot be parsed is logged as a warning and leaves the
+// watchdog off.
+//
+// Outside systemd, when NOTIFY_SOCKET is absent or empty, and on any operating system but Linux,
+// nothing is sent and nothing is logged. A notification that fails to send is logged as a warning
+// through the Supervisor's logger and never fails Run. WithSystemd keeps its own state: it does not
+// replace the callback of WithReady, and both run.
+func WithSystemd(lookup func(key string) (string, bool)) Option {
+	return func(s *Supervisor) error {
+		if lookup == nil {
+			return errors.New("daemon: nil systemd lookup")
+		}
+		s.systemd = lookup
+		return nil
+	}
+}
+
 // WithHealth has New register the Supervisor's health checks in h: supervisor.live, a Liveness
 // check, supervisor.ready, a Readiness check, and a Readiness check named after each Runner that
 // is a HealthChecker. New registers them as its last step, all or none, so a New that fails leaves

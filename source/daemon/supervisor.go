@@ -18,6 +18,7 @@ import (
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/cli/spec/paths"
+	"go.vipengele.org/daemon/systemd"
 )
 
 // defaultGrace is the grace period when WithGrace is not given.
@@ -66,6 +67,13 @@ type Supervisor struct {
 	// ready is the callback WithReady registered, called once per Run as the waiting loop is first
 	// entered; it does nothing without WithReady.
 	ready func()
+
+	// systemd is the lookup WithSystemd gave, read for the systemd notification protocol; Run
+	// notifies nothing while it is nil.
+	systemd func(key string) (string, bool)
+
+	// watchdog is the systemd watchdog Run arms after READY=1 and disarms as the stop phase begins.
+	watchdog watchdog
 
 	// waiting is called each time Run starts waiting for shutdown while every Runner is running.
 	waiting func()
@@ -217,6 +225,11 @@ func (s *Supervisor) checks() []namedCheck {
 // round's failure, a Reload that returns an error, panics or overruns the round's deadline, is the
 // failure that begins shutdown, as a start failure is; see WithReload.
 //
+// With WithSystemd, Run sends READY=1 to systemd right after the callback of WithReady, arms the
+// systemd watchdog after it, disarms the watchdog as the stop phase begins and then sends
+// STOPPING=1; see WithSystemd. A notification that fails is logged and never changes what Run
+// returns.
+//
 // Run may be called once; a second call returns ErrAlreadyRan, even when the first returned
 // without starting a Runner.
 func (s *Supervisor) Run(ctx context.Context) error {
@@ -255,6 +268,8 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		failure = s.wait(ctx, runs, hangup)
 	}
 	s.feed.setPhase(phaseStopping)
+	s.watchdog.disarm()
+	s.notifySystemd(ctx, systemd.Stopping)
 
 	stopCtx, cancel := s.newStopContext()
 	defer cancel()
@@ -295,6 +310,107 @@ const (
 	msgReloadRejected = "reload rejected"
 	msgReloadApplied  = "reload applied"
 )
+
+// The messages of the records about the systemd notification protocol of WithSystemd, both at Warn
+// with no "runner" and the error under "err": msgNotifyFailed, with the state that was not sent
+// under "state", for a notification that failed, and msgWatchdogDisabled for a watchdog setting
+// that cannot be parsed. Nothing is logged when the process runs outside systemd.
+const (
+	msgNotifyFailed     = "systemd notify failed"
+	msgWatchdogDisabled = "systemd watchdog disabled"
+)
+
+// notifySystemd sends state to systemd when WithSystemd was given, and logs a failure to send it.
+func (s *Supervisor) notifySystemd(ctx context.Context, state string) {
+	if s.systemd == nil {
+		return
+	}
+	if _, err := systemd.Notify(s.systemd, state); err != nil {
+		s.log.LogAttrs(ctx, slog.LevelWarn, msgNotifyFailed, slog.String("state", state), slog.Any("err", err))
+	}
+}
+
+// armWatchdog arms the systemd watchdog when WithSystemd was given and systemd expects pings: a
+// tick every half of the interval it reports, on the Supervisor's clock. A watchdog setting that
+// cannot be parsed is logged and arms nothing.
+func (s *Supervisor) armWatchdog(ctx context.Context) {
+	if s.systemd == nil {
+		return
+	}
+	interval, enabled, err := systemd.WatchdogInterval(s.systemd)
+	if err != nil {
+		s.log.LogAttrs(ctx, slog.LevelWarn, msgWatchdogDisabled, slog.Any("err", err))
+		return
+	}
+	if !enabled {
+		return
+	}
+	s.watchdog.arm(s.clock, interval/2, s.live, func() {
+		s.notifySystemd(context.Background(), systemd.Watchdog)
+	})
+}
+
+// live reports whether every Liveness check of the Health passes, each under the Health's check
+// timeout, and true without a Health.
+func (s *Supervisor) live() bool {
+	if s.health == nil {
+		return true
+	}
+	return s.health.snapshot(context.Background(), Liveness).Live
+}
+
+// watchdog is the systemd watchdog timer. stop cancels the armed tick, and stopped, once set by
+// disarm, keeps every tick from pinging or arming the next, including a tick whose live was
+// already running when disarm was called.
+type watchdog struct {
+	mu      sync.Mutex
+	stop    func() bool
+	stopped bool
+}
+
+// arm has clock call tick every period from now on: each tick asks live, outside the lock so
+// that a slow check never holds up disarm, then pings when it reports true and arms the next
+// tick, both under the lock and only while the watchdog is not stopped.
+func (w *watchdog) arm(clock Clock, period time.Duration, live func() bool, ping func()) {
+	var tick func()
+	tick = func() {
+		w.mu.Lock()
+		stopped := w.stopped
+		w.mu.Unlock()
+		if stopped {
+			return
+		}
+		ok := live()
+
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.stopped {
+			return
+		}
+		if ok {
+			ping()
+		}
+		w.stop = clock.AfterFunc(period, tick)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return
+	}
+	w.stop = clock.AfterFunc(period, tick)
+}
+
+// disarm stops the watchdog for good. Once it returns no tick pings or arms another. It does
+// nothing more on a watchdog that was never armed.
+func (w *watchdog) disarm() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stopped = true
+	if w.stop != nil {
+		w.stop()
+	}
+}
 
 // logRunner logs msg at level about the Runner called name, with err when it is not nil.
 func logRunner(ctx context.Context, log *slog.Logger, level slog.Level, msg, name string, err error) {
@@ -412,6 +528,8 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched, hangup <-chan o
 	// Outside the loop, so a loop re-entered after a reload round or an isolated panic exit never
 	// calls it again, and before the first waiting call, so whatever observes waiting sees it done.
 	s.ready()
+	s.notifySystemd(ctx, systemd.Ready)
+	s.armWatchdog(ctx)
 	for {
 		s.waiting()
 		select {
