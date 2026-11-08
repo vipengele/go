@@ -1,0 +1,78 @@
+# A tool renders its GoReleaser config from its update config
+
+Status: accepted. It follows the install-script mechanism of ADR-0023, signs as the minisign
+signature of ADR-0024 and the unsigned opt-out of ADR-0026 decide, and keeps to ADR-0008, which
+takes the identity of `update` from `cli/spec` and keeps it from importing `cli/core`. The rendered
+`formats` and `binary` are the archive format and binary name that the extraction of ADR-0021
+derives from the same `Config`.
+
+`update` selects, verifies and extracts the assets of a release by the names its `Config` gives
+them. A GoReleaser config written by hand drifts from those names, and a tool then publishes assets
+its own updater does not find. `go.vipengele.org/update/goreleaser` renders the config from the
+`Config`: `Render(cfg update.Config, opts Options) ([]byte, error)`.
+
+## Decisions
+
+- **Link variables.** The build sets three variables with `-ldflags "-s -w -X <version>={{ .Tag }}
+  -X <commit>={{ .FullCommit }} -X <date>={{ .Date }}"`. The variables default to
+  `go.vipengele.org/cli/core/buildinfo.version`, `.commit` and `.date`, exported as the constants
+  `DefaultVersionVar`, `DefaultCommitVar` and `DefaultDateVar` and as `DefaultLinkVars()`, and
+  `Options.LinkVars` overrides each. They are not a package-level variable: `gochecknoglobals` is
+  enabled.
+- **The version is `.Tag`.** GoReleaser strips the `v` from `.Version`; a binary linked with
+  `1.2.3` is not a release version to `cli/spec/version.IsRelease`, reads as a development build,
+  and its updater never checks for or applies an update. `.Tag` keeps the `v`.
+- **Signing is in the template.** Unless the `Config` sets `AllowUnsigned`, the config carries the
+  `signs:` block of ADR-0024: `artifacts: checksum`, `cmd: minisign`, `args: -S -s <key> -m
+  ${artifact} -x ${signature}`, `signature: "${artifact}.minisig"`. `Options.SigningKeyPath` is the
+  key, `minisign.key` by default. Under `AllowUnsigned` there is no block and `update` fetches no
+  signature (ADR-0026). The release workflow that writes the key file and runs GoReleaser is outside
+  the package.
+- **Mechanism of ADR-0023.** The config is the embedded `goreleaser.yaml.in` with `@@TOKEN@@`
+  tokens, filled by one `strings.NewReplacer` pass, so a value holding a token stays literal. Every
+  inserted value is a double-quoted YAML scalar from one escaping helper. A value GoReleaser
+  expands as a template, the binary name, the link variables and the key path, has each `{` and `$`
+  written as a template action that yields it. Production code uses no YAML library.
+- **Inputs come from `Config.Resolved`.** Name, binary name, asset template and extension,
+  checksums asset and signature policy are never derived again, so `Render` inherits the
+  requirements of `Resolved` (ADR-0023). `Main`, `Dir`, `Platforms`, `LinkVars` and
+  `SigningKeyPath` come from `Options`.
+- **Scope is the contract and nothing else.** The config holds `version: 2`, `project_name`, one
+  build (`binary`, `main`, `dir` when set, `CGO_ENABLED=0`, `ldflags`, `goos`, `goarch`, `ignore`),
+  one archive (`name_template` from `asset.GoReleaserArchive`, `formats` the `AssetExt`, or `binary`
+  when the template holds no `{ext}`), `checksum` (`asset.GoReleaserChecksum`, `sha256`) and the
+  optional `signs`. It holds no `changelog`, `release`, `before` or `snapshot`; a tool adds those
+  without changing the keys above. GoReleaser puts its default README and LICENSE files in an
+  archive; that is accepted because the extractor takes the one file named `BinaryName` and
+  tolerates the rest. The minimum is GoReleaser v2.6, the first with the plural `formats`.
+- **Refusals.** `Render` fails, each wrapping a sentinel, on: an empty `Main` (`ErrNoMain`); an
+  empty or repeated platform (`ErrEmptyPlatform`, `ErrDuplicatePlatform`); a `ChecksumsAsset`
+  holding `{os}` or `{arch}`, since GoReleaser writes one checksums file per release
+  (`ErrPlatformChecksums`); a raw-binary `AssetTemplate` with a windows platform, since GoReleaser
+  appends `.exe` to the name of a binary-format asset (`ErrRawWindowsAsset`); a link variable
+  holding whitespace, a quote or `=` (`ErrInvalidLinkVar`); and a value that is not valid UTF-8
+  (`ErrNotUTF8`). An error of `Resolved`, `asset.GoReleaserArchive` or `asset.GoReleaserChecksum`
+  passes through.
+
+## Considered options
+
+- **`{{ .Version }}` for the version.** It is the common form in GoReleaser configs and it drops
+  the `v`, which leaves the tool unable to update itself (above).
+- **Marshalling a struct with `yaml/v3`.** It would couple the production package to a YAML library
+  and to GoReleaser's schema as Go types, which the package would have to track. The tests use
+  `yaml/v3` to parse the rendered config; production code does not.
+- **A package-level default for the link variables.** `gochecknoglobals` refuses it; constants and
+  `DefaultLinkVars()` give the same defaults.
+- **Leaving signing to the tool.** The signature name `update` fetches is `<checksums>.minisig`; a
+  hand-written `signs` block is one more place for the two to differ.
+
+## Consequences
+
+- **A rename in `buildinfo` is not caught at compile time.** `update` may not import `cli/core`
+  (ADR-0008), so the default paths are strings. A test cannot see `buildinfo` either; the cost is
+  accepted and the defaults are overridable through `Options.LinkVars`.
+- **The published names are the ones `Config.Select` looks for.** The tests round-trip the parsed
+  config through `Config.Select`.
+- **A tool with a raw-binary asset cannot target windows through this package.** It uses an
+  archive, or writes its own config.
+- **A tool needs GoReleaser v2.6 or later.**
