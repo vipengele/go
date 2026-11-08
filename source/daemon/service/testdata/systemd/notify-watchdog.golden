@@ -1,0 +1,21 @@
+[Unit]
+Description=Demo service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart="/usr/bin/demo"
+Restart=always
+RestartSec=5
+WatchdogSec=30000ms
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

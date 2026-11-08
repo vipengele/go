@@ -2,12 +2,43 @@ package service
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 )
 
-// renderUnit returns the systemd unit file for cfg, sandboxed by h. Every
-// value is escaped for the directive it is written into rather than
+// notify is the WithSystemdNotify setting of a unit. The zero value is a
+// Type=simple unit.
+type notify struct {
+	// enabled makes the unit Type=notify.
+	enabled bool
+	// watchdog is WatchdogSec= of a Type=notify unit; 0 writes no line.
+	watchdog time.Duration
+}
+
+// validate returns an error wrapping ErrInvalidConfig when the watchdog is
+// negative or not a whole number of milliseconds, which WatchdogSec= is
+// written in.
+func (n notify) validate() error {
+	switch {
+	case n.watchdog < 0:
+		return fmt.Errorf("%w: WithSystemdNotify: watchdog %v is negative", ErrInvalidConfig, n.watchdog)
+	case n.watchdog%time.Millisecond != 0:
+		return fmt.Errorf("%w: WithSystemdNotify: watchdog %v is not a whole number of milliseconds",
+			ErrInvalidConfig, n.watchdog)
+	}
+	return nil
+}
+
+// renderUnit returns the systemd unit file for cfg, sandboxed by h.
+//
+// The unit is Type=simple, or Type=notify when n is enabled. When n.watchdog
+// is above zero, WatchdogSec=<n.watchdog in whole milliseconds>ms follows
+// RestartSec=.
+//
+// Every value is escaped for the directive it is written into rather than
 // rejected:
 //
 //   - ExecStart: each word double-quoted with '\' and '"' backslash-escaped,
@@ -31,7 +62,7 @@ import (
 // by default.target. When ProtectSystem or ProtectHome is set,
 // cfg.WorkingDir stays writable through ReadWritePaths. The output is the
 // same for equal inputs and ends with a newline.
-func renderUnit(cfg Config, h Hardening) []byte {
+func renderUnit(cfg Config, h Hardening, n notify) []byte {
 	var b bytes.Buffer
 	line := func(key, value string) {
 		b.WriteString(key)
@@ -51,7 +82,11 @@ func renderUnit(cfg Config, h Hardening) []byte {
 	}
 
 	b.WriteString("\n[Service]\n")
-	line("Type", "simple")
+	if n.enabled {
+		line("Type", "notify")
+	} else {
+		line("Type", "simple")
+	}
 	words := make([]string, 0, 1+len(cfg.Args))
 	for _, w := range append([]string{cfg.Binary}, cfg.Args...) {
 		words = append(words, strings.ReplaceAll(quoteWord(w), "$", "$$"))
@@ -77,6 +112,9 @@ func renderUnit(cfg Config, h Hardening) []byte {
 	}
 	line("Restart", "always")
 	line("RestartSec", "5")
+	if n.enabled && n.watchdog > 0 {
+		line("WatchdogSec", strconv.FormatInt(n.watchdog.Milliseconds(), 10)+"ms")
+	}
 
 	yes := func(key string, on bool) {
 		if on {

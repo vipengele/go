@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // updateGolden reports whether the -update flag TestMain registers is set.
@@ -68,6 +69,7 @@ func TestRenderUnitGolden(t *testing.T) {
 		name string
 		cfg  Config
 		h    Hardening
+		n    notify
 	}{
 		{
 			name: "system-default",
@@ -132,10 +134,22 @@ func TestRenderUnitGolden(t *testing.T) {
 			},
 			h: Hardening{},
 		},
+		{
+			name: "notify",
+			cfg:  Config{Name: "demo", Description: "Demo service", Binary: "/usr/bin/demo"},
+			h:    DefaultHardening(ScopeSystem),
+			n:    notify{enabled: true},
+		},
+		{
+			name: "notify-watchdog",
+			cfg:  Config{Name: "demo", Description: "Demo service", Binary: "/usr/bin/demo"},
+			h:    DefaultHardening(ScopeSystem),
+			n:    notify{enabled: true, watchdog: 30 * time.Second},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			unit := renderUnit(tt.cfg, tt.h)
+			unit := renderUnit(tt.cfg, tt.h, tt.n)
 			checkGolden(t, "systemd", tt.name, unit)
 			checkNoContinuation(t, unit)
 		})
@@ -179,7 +193,7 @@ func TestRenderUnitTrailingBackslashEndsTheLine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			unit := renderUnit(tt.cfg, Hardening{})
+			unit := renderUnit(tt.cfg, Hardening{}, notify{})
 			checkNoContinuation(t, unit)
 			if !strings.Contains(string(unit), strings.Join(tt.want, "\n")+"\n") {
 				t.Errorf("unit does not hold the consecutive lines %q:\n%s", tt.want, unit)
@@ -190,7 +204,7 @@ func TestRenderUnitTrailingBackslashEndsTheLine(t *testing.T) {
 
 func TestRenderUnitReadWritePathsQuotesTrailingBackslash(t *testing.T) {
 	cfg := Config{Name: "demo", Binary: "/usr/bin/demo", WorkingDir: `/srv/app\`}
-	unit := renderUnit(cfg, Hardening{ProtectSystem: "strict"})
+	unit := renderUnit(cfg, Hardening{ProtectSystem: "strict"}, notify{})
 	want := `ReadWritePaths="/srv/app\\"`
 	if got := unitLines(unit, "ReadWritePaths"); len(got) != 1 || got[0] != want {
 		t.Errorf("ReadWritePaths lines = %q, want [%q]", got, want)
@@ -209,7 +223,7 @@ func unitLines(unit []byte, key string) []string {
 }
 
 func TestRenderUnitDollarIsDoubledOnlyInExecStart(t *testing.T) {
-	unit := renderUnit(escapingConfig(), Hardening{})
+	unit := renderUnit(escapingConfig(), Hardening{}, notify{})
 
 	env := unitLines(unit, "Environment")
 	if len(env) != 1 {
@@ -240,7 +254,7 @@ func TestRenderUnitKeepsCallerReadWritePaths(t *testing.T) {
 	h := Hardening{ProtectSystem: "strict", ReadWritePaths: paths}
 	cfg := Config{Name: "demo", Binary: "/usr/bin/demo", WorkingDir: "/srv/demo"}
 
-	unit := renderUnit(cfg, h)
+	unit := renderUnit(cfg, h, notify{})
 
 	if got := paths[:cap(paths)][1]; got != "" {
 		t.Errorf("renderUnit wrote %q into the caller's ReadWritePaths backing array", got)
@@ -265,9 +279,31 @@ func TestRenderUnitWorkingDirWritableOnlyUnderProtection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lines := unitLines(renderUnit(cfg, tt.h), "ReadWritePaths")
+			lines := unitLines(renderUnit(cfg, tt.h, notify{}), "ReadWritePaths")
 			if got := strings.Count(strings.Join(lines, "\n"), `"/srv/demo"`); got != tt.want {
 				t.Errorf("\"/srv/demo\" appears %d times in ReadWritePaths %q, want %d", got, lines, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderUnitWatchdogIsWholeMilliseconds(t *testing.T) {
+	cfg := Config{Name: "demo", Binary: "/usr/bin/demo"}
+	tests := []struct {
+		name string
+		n    notify
+		want []string
+	}{
+		{name: "simple", n: notify{watchdog: time.Second}, want: nil},
+		{name: "no-watchdog", n: notify{enabled: true}, want: nil},
+		{name: "sub-second", n: notify{enabled: true, watchdog: 1500 * time.Millisecond}, want: []string{"WatchdogSec=1500ms"}},
+		{name: "one-millisecond", n: notify{enabled: true, watchdog: time.Millisecond}, want: []string{"WatchdogSec=1ms"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unitLines(renderUnit(cfg, Hardening{}, tt.n), "WatchdogSec")
+			if strings.Join(got, "\n") != strings.Join(tt.want, "\n") {
+				t.Errorf("WatchdogSec lines = %q, want %q", got, tt.want)
 			}
 		})
 	}

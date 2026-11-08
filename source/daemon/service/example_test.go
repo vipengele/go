@@ -3,6 +3,7 @@ package service_test
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"go.vipengele.org/daemon/service"
 )
@@ -32,5 +33,14 @@ func ExampleNew_container() {
 	if errors.As(err, &ce) {
 		fmt.Println(errors.Is(err, service.ErrContainer))
 	}
+	// Output: true
+}
+
+func ExampleWithSystemdNotify() {
+	cfg := service.Config{Name: "my-svc", Binary: "/usr/local/bin/svc"}
+	_, err := service.New(cfg, service.WithGOOS("linux"),
+		service.WithContainer(func() bool { return false }),
+		service.WithSystemdNotify(1500*time.Microsecond))
+	fmt.Println(errors.Is(err, service.ErrInvalidConfig))
 	// Output: true
 }

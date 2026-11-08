@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.vipengele.org/cli/spec"
 )
@@ -226,6 +227,74 @@ func TestNewRefusesInAContainerBeforeValidatingHardening(t *testing.T) {
 	m, err := New(validConfig("linux"), WithGOOS("linux"),
 		WithSystemdHardening(Hardening{ProtectSystem: "yes"}), inContainer())
 	assertContainerError(t, m, err)
+}
+
+func TestNewRefusesInAContainerBeforeValidatingNotify(t *testing.T) {
+	m, err := New(validConfig("linux"), WithGOOS("linux"), WithSystemdNotify(-time.Second), inContainer())
+	assertContainerError(t, m, err)
+}
+
+func TestNewValidatesSystemdNotifyOnEveryGOOS(t *testing.T) {
+	tests := []struct {
+		name     string
+		watchdog time.Duration
+		invalid  bool
+	}{
+		{"zero", 0, false},
+		{"whole seconds", 30 * time.Second, false},
+		{"whole milliseconds", 1500 * time.Millisecond, false},
+		{"negative", -time.Second, true},
+		{"sub-millisecond fraction", time.Second + time.Microsecond, true},
+		{"below a millisecond", time.Nanosecond, true},
+	}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, tc := range tests {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				m, err := New(validConfig(goos), WithGOOS(goos), WithSystemdNotify(tc.watchdog), notInContainer())
+				if tc.invalid {
+					if !errors.Is(err, ErrInvalidConfig) {
+						t.Fatalf("err = %v, want ErrInvalidConfig", err)
+					}
+					if !strings.Contains(err.Error(), "WithSystemdNotify") {
+						t.Fatalf("err = %q, want it to name WithSystemdNotify", err)
+					}
+					if m != nil {
+						t.Fatalf("Manager = %v, want nil", m)
+					}
+					return
+				}
+				if errors.Is(err, ErrInvalidConfig) {
+					t.Fatalf("err = %v, want no ErrInvalidConfig", err)
+				}
+				if goos == "linux" {
+					assertNotRefused(t, m, err)
+				}
+			})
+		}
+	}
+}
+
+func TestNewValidatesSystemdNotifyAfterHardening(t *testing.T) {
+	_, err := New(validConfig("linux"), WithGOOS("linux"),
+		WithSystemdHardening(Hardening{ProtectSystem: "yes"}), WithSystemdNotify(-time.Second), notInContainer())
+	if !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), "Hardening.ProtectSystem") {
+		t.Fatalf("err = %v, want the Hardening violation", err)
+	}
+	if strings.Contains(err.Error(), "WithSystemdNotify") {
+		t.Fatalf("err = %v, want only the Hardening violation", err)
+	}
+}
+
+func TestNewPassesSystemdNotifyToTheDriver(t *testing.T) {
+	m, err := New(validConfig("linux"), WithGOOS("linux"), WithSystemdNotify(30*time.Second), notInContainer())
+	assertNotRefused(t, m, err)
+	s, ok := m.(*systemd)
+	if !ok {
+		t.Fatalf("Manager = %T, want *systemd", m)
+	}
+	if want := (notify{enabled: true, watchdog: 30 * time.Second}); s.notify != want {
+		t.Fatalf("notify = %+v, want %+v", s.notify, want)
+	}
 }
 
 func TestNewInvalidIdentity(t *testing.T) {

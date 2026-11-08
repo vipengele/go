@@ -122,7 +122,7 @@ func TestSystemdInstallWritesTheRenderedUnit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := renderUnit(s.cfg, s.hardening); !bytes.Equal(got, want) {
+			if want := renderUnit(s.cfg, s.hardening, s.notify); !bytes.Equal(got, want) {
 				t.Fatalf("unit file =\n%s\nwant\n%s", got, want)
 			}
 			fi, err := os.Stat(path)
