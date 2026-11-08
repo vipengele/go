@@ -62,11 +62,14 @@ func (c *fakeCalls) lastFile(t *testing.T) *os.File {
 	return c.files[len(c.files)-1]
 }
 
+// assertClosed fails unless f has been closed. It closes f a second time and expects os.ErrClosed:
+// Close checks the closed state on every platform, whereas Stat on Windows does not report a
+// closed file as closed and fails with an invalid handle instead.
 func assertClosed(t *testing.T, f *os.File) {
 	t.Helper()
 
-	if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
-		t.Errorf("Stat on the lock descriptor = %v, want %v", err, os.ErrClosed)
+	if err := f.Close(); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("second Close on the lock descriptor = %v, want %v", err, os.ErrClosed)
 	}
 }
 
