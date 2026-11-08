@@ -125,8 +125,9 @@ func (r *runningExecutable) stop(t *testing.T) {
 
 // TestInstallReplacesARunningExecutable installs over the file of a running process, in a
 // directory whose path holds a space. Windows lets the running file be renamed to the backup but
-// not removed, so Discard reports the backup locked while the process runs, and the next Install,
-// once it has exited, replaces that backup with one Discard removes.
+// not removed, so Discard and RemoveStaleBackup report the backup locked while the process runs.
+// Once it has exited, RemoveStaleBackup removes that backup, and the next Install keeps a backup
+// Discard removes.
 func TestInstallReplacesARunningExecutable(t *testing.T) {
 	t.Parallel()
 
@@ -175,7 +176,23 @@ func TestInstallReplacesARunningExecutable(t *testing.T) {
 		t.Errorf("backup after a locked Discard holds %d bytes, want the running executable's %d", len(got), len(original))
 	}
 
+	if err := config.RemoveStaleBackup(); !errors.As(err, &lerr) {
+		t.Fatalf("RemoveStaleBackup while the executable runs = %v, want a *BackupLockedError", err)
+	} else if lerr.Path != backup {
+		t.Errorf("BackupLockedError Path = %q, want %q", lerr.Path, backup)
+	}
+
+	if got := readFile(t, backup); got != original {
+		t.Errorf("backup after a locked RemoveStaleBackup holds %d bytes, want the running executable's %d", len(got), len(original))
+	}
+
 	running.stop(t)
+
+	if err := config.RemoveStaleBackup(); err != nil {
+		t.Fatalf("RemoveStaleBackup once the executable has exited: %v", err)
+	}
+
+	assertMissing(t, backup)
 
 	next, err := config.Install(stageBinary(t, dir, "newer"))
 	if err != nil {

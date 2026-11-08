@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +263,53 @@ func TestHooksDropAStartError(t *testing.T) {
 	}
 	if r.stderr.Len() != 0 || r.stdout.Len() != 0 {
 		t.Errorf("output stderr=%q stdout=%q, want none", r.stderr, r.stdout)
+	}
+}
+
+func TestHooksRemoveAStaleBackupOnlyOnWindows(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cmd  spec.CommandInfo
+	}{
+		{"a checked command", plainCommand()},
+		{"a command exempt from the check", spec.NewCommandInfo([]string{"atk", "version"}, map[string]string{spec.SkipUpdateCheck: "true"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			exe, backup, _ := staleFixture(t, true)
+			srv := newKitServer(t)
+			c := hookConfig(t, srv)
+			c.Executable = func() (string, error) { return exe, nil }
+			if err := runHooks(t, c, newHookRun(true), context.Background(), tt.cmd, nil); err != nil {
+				t.Fatalf("post() = %v, want nil", err)
+			}
+			if runtime.GOOS == "windows" {
+				assertMissing(t, backup)
+			} else if got := readFile(t, backup); got != "old" {
+				t.Errorf("backup on %s holds %q, want %q", runtime.GOOS, got, "old")
+			}
+			if got := readFile(t, exe); got != "new" {
+				t.Errorf("executable holds %q, want %q", got, "new")
+			}
+		})
+	}
+}
+
+func TestHooksIgnoreAFailingBackupRemoval(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	r := newHookRun(true)
+	c := hookConfig(t, srv)
+	c.Executable = func() (string, error) { return "", errors.New("no executable") }
+	if err := c.RemoveStaleBackup(); err == nil {
+		t.Fatal("RemoveStaleBackup() = nil, want the Executable error")
+	}
+	if err := runHooks(t, c, r, context.Background(), plainCommand(), nil); err != nil {
+		t.Fatalf("post() = %v, want nil", err)
+	}
+	if got := r.stderr.String(); got != wantLine {
+		t.Errorf("stderr = %q, want %q", got, wantLine)
 	}
 }
