@@ -12,6 +12,10 @@ var (
 	// ErrPlatformChecksums reports a ChecksumsAsset holding {os} or {arch}. GoReleaser writes one
 	// checksums file for every platform of a release, so its name cannot vary by platform.
 	ErrPlatformChecksums = errors.New("checksums template varies by platform")
+	// ErrSharedAssetName reports an AssetTemplate that renders the same name for two platforms of
+	// Options.Platforms. GoReleaser publishes each archive under its rendered name, so one overwrites
+	// the other and update cannot select the archive of either platform.
+	ErrSharedAssetName = errors.New("asset template names two platforms alike")
 	// ErrRawWindowsAsset reports an AssetTemplate without {ext}, a raw binary, rendered for a
 	// windows platform. GoReleaser appends ".exe" to the name of a binary-format asset for windows,
 	// so the published asset is not the one update selects.

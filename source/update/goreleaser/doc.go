@@ -36,6 +36,7 @@
 // Render refuses a Config and Options GoReleaser would publish under names update does not read: a
 // ChecksumsAsset holding {os} or {arch}, since GoReleaser writes one checksums file per release, and
 // a raw-binary AssetTemplate built for windows, since GoReleaser appends ".exe" to that asset's
-// name. It also refuses an empty Main, an empty or repeated platform, a link variable the -X flag
+// name, and an AssetTemplate that names two of the platforms alike, since GoReleaser publishes
+// both archives under one name. It also refuses an empty Main, an empty or repeated platform, a link variable the -X flag
 // cannot carry, and a value that is not valid UTF-8.
 package goreleaser

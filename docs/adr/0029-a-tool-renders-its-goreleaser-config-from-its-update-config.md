@@ -49,9 +49,10 @@ its own updater does not find. `go.vipengele.org/update/goreleaser` renders the 
   empty or repeated platform (`ErrEmptyPlatform`, `ErrDuplicatePlatform`); a `ChecksumsAsset`
   holding `{os}` or `{arch}`, since GoReleaser writes one checksums file per release
   (`ErrPlatformChecksums`); a raw-binary `AssetTemplate` with a windows platform, since GoReleaser
-  appends `.exe` to the name of a binary-format asset (`ErrRawWindowsAsset`); a link variable
-  holding whitespace, a quote or `=` (`ErrInvalidLinkVar`); and a value that is not valid UTF-8
-  (`ErrNotUTF8`). An error of `Resolved`, `asset.GoReleaserArchive` or `asset.GoReleaserChecksum`
+  appends `.exe` to the name of a binary-format asset (`ErrRawWindowsAsset`); an `AssetTemplate`
+  that renders the same name for two configured platforms, since GoReleaser publishes both archives
+  under that one name (`ErrSharedAssetName`); a link variable holding whitespace, a quote or `=`
+  (`ErrInvalidLinkVar`); and a value that is not valid UTF-8 (`ErrNotUTF8`). An error of `Resolved`, `asset.GoReleaserArchive` or `asset.GoReleaserChecksum`
   passes through.
 
 ## Considered options

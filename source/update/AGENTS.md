@@ -214,7 +214,8 @@ golangci-lint run
     and `version.IsRelease` then reads the binary as a dev build. Needs GoReleaser v2.6 (`formats`).
   - Refusals, each wrapping a sentinel: `ErrNoMain`, `ErrEmptyPlatform`, `ErrDuplicatePlatform`,
     `ErrPlatformChecksums` (`{os}` or `{arch}` in `ChecksumsAsset`), `ErrRawWindowsAsset` (raw
-    template with a windows platform: GoReleaser appends `.exe`), `ErrInvalidLinkVar` (whitespace,
+    template with a windows platform: GoReleaser appends `.exe`), `ErrSharedAssetName` (the
+    `AssetTemplate` renders one name for two platforms), `ErrInvalidLinkVar` (whitespace,
     quote or `=`), `ErrNotUTF8`. Errors of `Resolved` and the `asset` functions pass through.
   - Mechanism as `installscript`: `@@TOKEN@@` tokens in `goreleaser.yaml.in`, one `Replacer` pass,
     every value a `yamlQuote`d scalar; binary, link vars and key path pass through `templateLiteral`

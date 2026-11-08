@@ -92,7 +92,8 @@ const windows = "windows"
 // It fails with an error wrapping [ErrNoMain] when opts.Main is empty, [ErrEmptyPlatform] or
 // [ErrDuplicatePlatform] on a bad entry of opts.Platforms, [ErrPlatformChecksums] when the
 // ChecksumsAsset holds {os} or {arch}, [ErrRawWindowsAsset] when the AssetTemplate holds no {ext}
-// and a platform is windows, [ErrInvalidLinkVar] on a link variable that cannot be written into
+// and a platform is windows, [ErrSharedAssetName] when the AssetTemplate renders the same name for
+// two platforms, [ErrInvalidLinkVar] on a link variable that cannot be written into
 // -X, and [ErrNotUTF8] on any value that is not valid UTF-8.
 //
 // Every value reaches the config as a double-quoted YAML scalar. A value GoReleaser expands as a
@@ -138,6 +139,9 @@ func Render(cfg update.Config, opts Options) ([]byte, error) {
 	archiveName, err := asset.GoReleaserArchive(r.AssetTemplate, r.BinaryName)
 	if err != nil {
 		return nil, fmt.Errorf("goreleaser: AssetTemplate: %w", err)
+	}
+	if err := checkAssetNames(r, platforms); err != nil {
+		return nil, err
 	}
 	checksumName, err := asset.GoReleaserChecksum(r.ChecksumsAsset, r.BinaryName)
 	if err != nil {
@@ -252,6 +256,24 @@ func checkUTF8(r update.Config, opts Options, platforms []Platform, vars LinkVar
 		if !utf8.ValidString(v.value) {
 			return fmt.Errorf("goreleaser: %s %q: %w", v.field, v.value, ErrNotUTF8)
 		}
+	}
+	return nil
+}
+
+// checkAssetNames rejects an AssetTemplate, valid, that renders the same name for two of platforms.
+// GoReleaser publishes every archive of a release under its rendered name, so two platforms named
+// alike overwrite each other, and update cannot select the archive of either.
+func checkAssetNames(r update.Config, platforms []Platform) error {
+	seen := make(map[string]Platform, len(platforms))
+	for _, p := range platforms {
+		name, err := asset.Render(r.AssetTemplate, asset.Fields{Name: r.BinaryName, Tag: "v0.0.0", OS: p.GOOS, Arch: p.GOARCH, Ext: r.AssetExt})
+		if err != nil {
+			return fmt.Errorf("goreleaser: AssetTemplate: %w", err)
+		}
+		if first, dup := seen[name]; dup {
+			return fmt.Errorf("goreleaser: AssetTemplate %q names %s/%s and %s/%s alike: %w", r.AssetTemplate, first.GOOS, first.GOARCH, p.GOOS, p.GOARCH, ErrSharedAssetName)
+		}
+		seen[name] = p
 	}
 	return nil
 }

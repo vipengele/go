@@ -391,6 +391,40 @@ func TestRenderFormats(t *testing.T) {
 	}
 }
 
+func TestRenderAssetNamesDistinctPerPlatform(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		template  string
+		platforms []goreleaser.Platform
+	}{
+		{
+			name:      "one platform needs no platform in the name",
+			template:  "{name}.{ext}",
+			platforms: []goreleaser.Platform{{GOOS: "linux", GOARCH: "amd64"}},
+		},
+		{
+			name:     "the os alone tells the platforms apart",
+			template: "{name}_{os}.{ext}",
+			platforms: []goreleaser.Platform{
+				{GOOS: "linux", GOARCH: "amd64"},
+				{GOOS: "darwin", GOARCH: "arm64"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig(t)
+			cfg.AssetTemplate = tc.template
+			opts := testOptions()
+			opts.Platforms = tc.platforms
+			renderParsed(t, cfg, opts)
+		})
+	}
+}
+
 func TestRenderPlatforms(t *testing.T) {
 	t.Parallel()
 
@@ -585,6 +619,19 @@ func TestRenderErrors(t *testing.T) {
 			cfg:  func(c *update.Config) { c.AssetTemplate = "{name}_{os}_{arch}" },
 			opts: func(o *goreleaser.Options) { o.Platforms = windows },
 			want: goreleaser.ErrRawWindowsAsset,
+		},
+		{
+			name: "asset template without the platform",
+			cfg:  func(c *update.Config) { c.AssetTemplate = "{name}.{ext}" },
+			want: goreleaser.ErrSharedAssetName,
+		},
+		{
+			name: "asset template without the architecture of two platforms",
+			cfg:  func(c *update.Config) { c.AssetTemplate = "{name}_{os}.{ext}" },
+			opts: func(o *goreleaser.Options) {
+				o.Platforms = []goreleaser.Platform{{GOOS: "linux", GOARCH: "amd64"}, {GOOS: "linux", GOARCH: "arm64"}}
+			},
+			want: goreleaser.ErrSharedAssetName,
 		},
 		{
 			name: "version variable with a space",
