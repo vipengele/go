@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 
 	"go.vipengele.org/cli/spec/paths"
@@ -39,7 +40,8 @@ type Manager interface {
 //     ErrContainer, whatever cfg and the GOOS are. WithContainer decides
 //     when set; otherwise paths.InContainerFor decides with the identity,
 //     and paths.InContainer without one.
-//  3. An invalid cfg returns an error wrapping ErrInvalidConfig.
+//  3. An invalid cfg, then an invalid Hardening from WithSystemdHardening,
+//     returns an error wrapping ErrInvalidConfig.
 //  4. A GOOS without a driver returns an error wrapping ErrUnsupported.
 func New(cfg Config, opts ...Option) (Manager, error) {
 	var o options
@@ -61,9 +63,25 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 	if err := cfg.validate(goos); err != nil {
 		return nil, err
 	}
+	if o.hardening != nil {
+		if err := o.hardening.validate(); err != nil {
+			return nil, err
+		}
+	}
 	switch goos {
 	case "linux":
-		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
+		h := DefaultHardening(cfg.Scope)
+		if o.hardening != nil {
+			h = *o.hardening
+		}
+		return &systemd{
+			cfg:       cfg,
+			hardening: h,
+			run:       execRunner,
+			euid:      os.Geteuid(),
+			lookupEnv: os.LookupEnv,
+			lingerDir: "/var/lib/systemd/linger",
+		}, nil
 	case "darwin":
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
 	case "windows":

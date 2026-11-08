@@ -22,6 +22,10 @@ var (
 	// container. The error New returns is a *ContainerError, which matches it
 	// under errors.Is.
 	ErrContainer = errors.New("service: running in a container")
+
+	// ErrManagerUnreachable is returned when the service manager could not be
+	// reached, such as a user manager with no session bus.
+	ErrManagerUnreachable = errors.New("service: service manager unreachable")
 )
 
 // containerInstead is what a process in a container does in place of

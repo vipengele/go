@@ -55,7 +55,20 @@ golangci-lint run
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
   the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`, and `WithLogger`.
+  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam) and `WithReady` (the Ready seam).
+- `clock.go` — the `Clock` interface (`Now`, `AfterFunc`), the system clock, and `withDeadline`
+  with its `clockContext`, the deadline context for any other clock. `Deadline` is the clock's
+  deadline or the parent's when earlier, and `Err` is `context.DeadlineExceeded` when the clock's
+  timer fires, the parent's error when the parent ends, or `context.Canceled` on cancel, whichever
+  comes first. `Health` takes its own clock through `WithHealthClock`, and its check context
+  carries no `context.Cause`, so `Health` never reads it from that context (only from the caller's).
+  Tests: `clock_test.go`, and `ready_test.go` for `WithReady`.
+- `daemontest/` — package `go.vipengele.org/daemon/daemontest`, the test kit (ADR-0028), written
+  against the exported API only. `Clock` is a fake whose time moves only on `Advance`, with
+  `BlockUntilTimers` to wait until the code under test has armed its timers. `NewRunner` returns a
+  scripted Runner (`FailStart`, `HangStart`, `IgnoreStop`, `StopErr`, `Order`) that records its
+  calls. `Start` runs a Supervisor on `127.0.0.1:0` and registers a cleanup that releases every
+  hang and then stops it.
 - `errors.go` — `PanicError` and the sentinel errors (`ErrRunnerExited`, `ErrStartTimeout`,
   `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels
@@ -78,6 +91,13 @@ golangci-lint run
   - `errors.go` — `Error`, the JSON error envelope written by `spec.WriteJSON`.
   - `decode.go` — `DecodeJSON` and `*RequestError`.
 
+## The seams
+
+- Clock: `WithClock` for the Supervisor's start timeout, grace period and reload deadline,
+  `WithHealthClock` for `Health`. A test passes `daemontest.Clock` and advances it.
+- Ready: `WithReady` is called once per `Run`, after every `Start` has returned, synchronously on
+  `Run`'s goroutine.
+
 ## The `service` package
 
 `go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd, launchd,
@@ -87,17 +107,24 @@ the Windows service control manager) behind the `Manager` interface: `Prepare`, 
 
 - `manager.go` — `Manager` and `New(cfg, opts...)`, which checks, in order, the `WithIdentity`
   identity (`ErrInvalidConfig`), whether the process runs in a container (`*ContainerError`), the
-  `Config` against the target GOOS, and then switches on the GOOS to select the driver.
-- `option.go` — `Option`, `WithGOOS`, `WithIdentity` and `WithContainer`; `""` means
-  `runtime.GOOS`, `"windows"` applies the Windows rules and every other value the POSIX rules.
+  `Config` against the target GOOS, the `WithSystemdHardening` override, and then switches on the
+  GOOS to select the driver (systemd on linux, `ErrUnsupported` elsewhere).
+- `option.go` — `Option`, `WithGOOS`, `WithIdentity`, `WithContainer` and
+  `WithSystemdHardening`; `""` means `runtime.GOOS`, `"windows"` applies the Windows rules and every other value the POSIX rules.
   `WithContainer` replaces container detection and wins over the environment and `WithIdentity`;
   without it, `New` asks `paths.InContainerFor` with the identity and `paths.InContainer` without
   one.
 - `config.go` — `Config` (`Name`, `Description`, `Binary`, `Args`, `Env`, `WorkingDir`, `User`,
   `Scope`) and `Validate`.
 - `state.go` — `State` (unknown, not installed, stopped, starting, running, failed) and `Status`.
-- `errors.go` — the sentinel errors, `ErrInvalidConfig`, `ErrUnsupported` and `ErrContainer` among
-  them, and `ContainerError`, which matches `ErrContainer` and carries the `Instead` advice.
+- `errors.go` — the sentinel errors, `ErrInvalidConfig`, `ErrUnsupported`, `ErrNotInstalled`,
+  `ErrPrivilegesRequired`, `ErrManagerUnreachable` and `ErrContainer` among them, and
+  `ContainerError`, which matches `ErrContainer` and carries the `Instead` advice.
+- `hardening.go` — `Hardening`, `DefaultHardening(Scope)` and its validation; set with
+  `WithSystemdHardening`, which `New` validates on every GOOS and the other drivers ignore
+  (`docs/adr/0028-driver-specific-settings-are-options-not-config-fields.md`).
+- `systemd.go`, `systemd_unit.go`, `systemd_status.go` — the systemd driver: the unexported
+  `systemd` struct, the unit rendering and `Status`.
 - `export_test.go` — `WithLookupEnv`, the test-only seam for the environment container detection
   reads.
 
@@ -116,6 +143,60 @@ Conventions of the package:
   `container` variable) so that no test result depends on the host being a container.
 - Standard library only, apart from `go.vipengele.org/cli/spec` and `cli/spec/paths`, for
   `spec.Identity` and container detection.
+
+The systemd driver:
+
+- Scopes. A system unit lives in `/etc/systemd/system`, is driven by `systemctl`, is `WantedBy=
+  multi-user.target` with `After=`/`Wants=network-online.target`, and `Install`, `Uninstall`,
+  `Start`, `Stop` and `Prepare` need root (`ErrPrivilegesRequired`). A user unit lives in
+  `$XDG_CONFIG_HOME/systemd/user` (default `$HOME/.config/systemd/user`), is driven by
+  `systemctl --user`, is `WantedBy=default.target` with no network ordering, and needs no root;
+  `Config.User` must be empty with `ScopeUser` on POSIX. `Type=simple`, `Restart=always` and
+  `RestartSec=5` are fixed.
+- `Install` is: privileges, account check (`id -u -- <user>` for a system unit with a `User`; the
+  driver never creates an account, a missing one fails before anything is written, a missing `id` is
+  `ErrUnsupported`), `Prepare` (creates the unit directory only), atomic write (temp file, chmod
+  0644, rename), `daemon-reload`, `enable`, `restart`. Never `enable --now`: it leaves an already
+  running service on its old unit and binary, while `restart` starts a stopped service and replaces
+  a running one, so `Install` also applies an update.
+- `Uninstall` with no unit file is `ErrNotInstalled`. A failing `disable --now` does not stop the
+  removal of the unit file and the `daemon-reload`, and `Uninstall` then returns an error saying the
+  disable failed; data and the account stay. `Start` and `Stop` are `ErrNotInstalled` without a unit
+  file.
+- Escaping: values are escaped, never rejected.
+
+  | Directive | Rule |
+  |---|---|
+  | `ExecStart=` | each word double-quoted, `\` and `"` backslash-escaped, `%` to `%%`, `$` to `$$`, an empty argument is `""` |
+  | `Environment=` | one line per key in sorted order, `"K=v"` quoted and escaped, `%` to `%%`, no `$$` (systemd does not expand variables there) |
+  | `ReadWritePaths=` | each path a quoted word, `%` to `%%` |
+  | `WorkingDirectory=` | raw, `%` to `%%`, and a `/` appended when it ends in `\`, which names the same directory |
+  | `Description=` | raw, `%` to `%%`, and a trailing run of `\` dropped; no line when nothing is left |
+
+  systemd joins a line ending in an unescaped `\` with the next one, so no rendered line ends in
+  `\` (`checkNoContinuation` runs over every golden). Newlines never reach a raw value: `Validate`
+  rejects control characters. `Environment=` values are readable by every local account (the unit
+  is 0644 and `systemctl show` reports them), so `Config.Env` must not carry secrets.
+
+- Hardening: system defaults are `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`,
+  `ProtectHome=read-only`, `ProtectKernelTunables`, `ProtectControlGroups` and `RestrictSUIDSGID`; a
+  user unit gets `NoNewPrivileges` only, because sandboxing directives in a user unit need
+  unprivileged user namespaces. When `ProtectSystem` or `ProtectHome` is set, `WorkingDir` is
+  appended to `ReadWritePaths`.
+- `Status` is one `systemctl show --property=...`. `ActiveState` maps to a `State`; `Result=success`
+  passes `restarts=0` to `resolve`, so a restart after a clean exit (an update, or a requested
+  restart that `restart.go` turns into exit 0) reads Starting, not Failed, while a crash loop reads
+  Failed with a `journalctl` hint. A missing `NRestarts` (systemd before 235) counts as 0. When
+  `systemctl --user` cannot reach the user manager (`sudo -u`, cron, no session), `Status` returns
+  `StateUnknown` with a `Detail` and `ErrManagerUnreachable`. Lingering is never turned on; for a
+  user unit `Detail` says it is off when `/var/lib/systemd/linger/<user>` is absent. A missing
+  `systemctl` is `ErrUnsupported`; `New` never probes.
+- Test seam: the unexported `systemd` struct holds its operating-system touch points as fields
+  (`runner func(ctx, argv) ([]byte, error)`, `euid`, `lookupEnv`, `lingerDir`, `systemDir`). `New`
+  fills in the real ones and tests build the struct with fakes. There is no exported seam and no
+  package-level variable (`gochecknoglobals` and `depguard` apply to tests).
+- Goldens are `testdata/systemd/*.golden`; `go test ./service -update` (from `source/daemon`)
+  rewrites them. The flag is registered in `TestMain` in `main_test.go`.
 
 ## Conventions
 
@@ -145,3 +226,12 @@ Conventions of the package:
   `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`, and, for reload,
   `reload_test.go` (the real SIGHUP in `reload_signal_test.go`). Log records are tested in
   `logging_test.go`.
+- `daemon`'s own tests cannot import `daemontest`: it imports `daemon`, an import cycle. They use
+  their own fakes.
+- `depguard` lets only `daemoncmd` import `daemontest`, so `daemontest`'s own tests are internal
+  (`package daemontest`).
+- `gochecknoglobals` covers test files too.
+- Every `daemontest` hang must be released (`Runner.Release`, done by the `Start` cleanup): an
+  unreleased one is an abandoned goroutine (ADR-0014).
+- A `daemontest.Start` call with a `HangStart` runner does not return until the start timeout, so
+  start-timeout tests drive `daemon.New(...).Run` directly.
