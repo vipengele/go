@@ -1,0 +1,11 @@
+# The install-script templates are embedded into the binary and rendered byte for byte: a CRLF
+# checkout leaves "\r" at every line end of the scripts and a signed-region marker that matches
+# neither signedBegin nor signedEnd, which PowerShell rejects. They stay LF on every platform.
+installscript/*.in text eol=lf
+
+# The minisign interop vector is the exact bytes an independent signer produced: the signatures
+# cover checksums.txt as written, and every file is parsed line by line with "\n" as the line
+# ending. Git never converts their line endings, on checkout or on commit.
+internal/minisign/testdata/minisign.pub -text
+internal/minisign/testdata/checksums.txt -text
+internal/minisign/testdata/*.minisig -text

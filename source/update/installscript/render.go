@@ -128,7 +128,7 @@ func Render(cfg update.Config) ([]byte, error) {
 		"@@ASSET_URL@@", shellWord(r.AssetTemplate, r.BinaryName, r.AssetExt, url.PathEscape),
 		"@@CHECKSUMS@@", shellWord(r.ChecksumsAsset, r.BinaryName, "", identity),
 		"@@CHECKSUMS_URL@@", shellWord(r.ChecksumsAsset, r.BinaryName, "", url.PathEscape),
-		"@@INSTALL_STEP@@", strings.TrimSuffix(step, "\n"),
+		"@@INSTALL_STEP@@", strings.TrimSuffix(lf(step), "\n"),
 		"@@SNIPPET@@", snippet,
 		"@@TRUSTED_KEYS@@", strings.Join(trustedKeys(r, shellQuote), " "),
 	}
@@ -171,7 +171,7 @@ func RenderPowerShell(cfg update.Config) ([]byte, error) {
 		"@@ASSET_URL@@", powerShellExpr(r.AssetTemplate, r.BinaryName, r.AssetExt, url.PathEscape),
 		"@@CHECKSUMS@@", powerShellExpr(r.ChecksumsAsset, r.BinaryName, "", identity),
 		"@@CHECKSUMS_URL@@", powerShellExpr(r.ChecksumsAsset, r.BinaryName, "", url.PathEscape),
-		"@@INSTALL_STEP@@", strings.TrimSuffix(step, "\n"),
+		"@@INSTALL_STEP@@", strings.TrimSuffix(lf(step), "\n"),
 		"@@SNIPPET@@", strings.TrimSuffix(snippet, "\n"),
 		"@@TRUSTED_KEYS@@", strings.Join(trustedKeys(r, powerShellQuote), ", "),
 	}
@@ -205,8 +205,8 @@ func trustedKeys(r update.Config, quote func(string) string) []string {
 	return keys
 }
 
-// fill returns src with its signed regions kept or dropped by r's signature policy and each token
-// of pairs, and each environment-variable token, replaced.
+// fill returns src, its line endings made LF by [lf], with its signed regions kept or dropped by
+// r's signature policy and each token of pairs, and each environment-variable token, replaced.
 func fill(src string, r update.Config, pairs []string) []byte {
 	for _, v := range []struct{ token, suffix string }{
 		{"@@VERSION_ENV@@", versionEnvSuffix},
@@ -225,7 +225,14 @@ func fill(src string, r update.Config, pairs []string) []byte {
 
 	// One pass of a Replacer never scans the text it inserts, so a token inside a value, such as
 	// an asset template holding "@@NAME@@", stays literal.
-	return []byte(strings.NewReplacer(pairs...).Replace(signedRegions(src, !r.AllowUnsigned)))
+	return []byte(strings.NewReplacer(pairs...).Replace(signedRegions(lf(src), !r.AllowUnsigned)))
+}
+
+// lf returns the template src with each CRLF line ending as LF, so a script renders with LF line
+// endings from a checkout that converts the embedded templates to CRLF. A marker line ending in
+// "\r\n" matches neither signedBegin nor signedEnd, and would leave the marker in the script.
+func lf(src string) string {
+	return strings.ReplaceAll(src, "\r\n", "\n")
 }
 
 // signedRegions returns src with each region from a signedBegin line to the next signedEnd line

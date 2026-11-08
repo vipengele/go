@@ -389,6 +389,30 @@ func TestRenderUnsignedOmitsTheSignatureCheck(t *testing.T) {
 	}
 }
 
+func TestRenderFillsACRLFTemplateWithLFLineEndings(t *testing.T) {
+	t.Parallel()
+	src := "a\r\n@@SIGNED_BEGIN@@\r\ncheck\r\n@@SIGNED_END@@\r\nb @@VERSION_ENV@@\r\n"
+	for _, tt := range []struct {
+		name string
+		cfg  update.Config
+		want string
+	}{
+		{"signed", testConfig("", ""), "a\ncheck\nb ATK_VERSION\n"},
+		{"unsigned", unsignedConfig("", ""), "a\nb ATK_VERSION\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := installscript.FillTemplate(src, tt.cfg)
+			if err != nil {
+				t.Fatalf("FillTemplate: %v", err)
+			}
+			if string(out) != tt.want {
+				t.Errorf("FillTemplate = %q, want %q", out, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderResolvesForAPOSIXSystemWhateverTheHost(t *testing.T) {
 	t.Parallel()
 	for _, tmpl := range []string{"", "{name}_{os}_{arch}"} {
