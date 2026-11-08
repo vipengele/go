@@ -1,0 +1,23 @@
+[Unit]
+Description=100%% "odd" $HOME \n
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/opt/my app/bin%%$$\\\"x" "--name=a b" "" "50%%" "$$HOME" "back\\slash" "say \"hi\""
+WorkingDirectory=/srv/my dir%%$\"w
+Environment="ODD=a b%%c$d\\e\"f"
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths="/data/a b%%$\\\"p" "/srv/my dir%%$\\\"w"
+
+[Install]
+WantedBy=multi-user.target

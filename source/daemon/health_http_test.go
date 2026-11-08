@@ -19,8 +19,7 @@ import (
 // likewise.
 func healthFor(t *testing.T, liveErr, readyErr string) *Health {
 	t.Helper()
-	clock := &fakeClock{t: time.Date(2026, 11, 4, 3, 22, 0, 0, time.UTC)}
-	h := newHealth(clock.now)
+	h := NewHealth(WithHealthClock(&manualClock{now: time.Date(2026, 11, 4, 3, 22, 0, 0, time.UTC)}))
 	live, ready := Check(pass), Check(pass)
 	if liveErr != "" {
 		live = failWith(liveErr)

@@ -56,7 +56,8 @@ func seededKeyLine(seed byte) string {
 // validConfig is a Config with every required field set and every optional field at its zero
 // value, except the two seams the default StateDir is resolved through: Getenv reports every
 // variable unset and UserHomeDir returns home, so that no test reads the host's environment or
-// home directory.
+// home directory. Executable names a path under home that no managed-install detector matches and
+// InContainer reports false, so no test reads the host's binary location or container state.
 func validConfig(home string) Config {
 	return Config{
 		Identity:    validIdentity(),
@@ -64,6 +65,8 @@ func validConfig(home string) Config {
 		Source:      &stubSource{},
 		Getenv:      envOf(nil),
 		UserHomeDir: func() (string, error) { return home, nil },
+		Executable:  func() (string, error) { return filepath.Join(home, "bin", "atk"), nil },
+		InContainer: func() bool { return false },
 	}
 }
 
@@ -315,11 +318,14 @@ func TestResolveDefaultInContainerFollowsTheSeams(t *testing.T) {
 		{"linux with a podman container variable", "linux", map[string]string{"container": "podman"}, true},
 		{"darwin with a container variable", "darwin", kubernetes, false},
 		{"windows with a container variable", "windows", kubernetes, false},
+		{"override off beats a container variable", "linux", map[string]string{"ATK_CONTAINER": "0", "KUBERNETES_SERVICE_HOST": "10.0.0.1"}, false},
+		{"override on alone", "linux", map[string]string{"ATK_CONTAINER": "1"}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig(t.TempDir())
+			c.InContainer = nil
 			c.GOOS = tc.goos
 			c.Getenv = envOf(tc.env)
 
@@ -652,6 +658,8 @@ func TestResolveReportsHomeDirError(t *testing.T) {
 func TestResolveDoesNotModifyItsReceiver(t *testing.T) {
 	t.Parallel()
 	c := validConfig(t.TempDir())
+	c.Executable = nil
+	c.InContainer = nil
 	before := plainFieldsOf(c)
 
 	if _, err := c.resolve(); err != nil {

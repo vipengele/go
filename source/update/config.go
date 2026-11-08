@@ -174,8 +174,9 @@ type Config struct {
 	// after the built-in ones. Nil means the built-in detectors alone; a nil entry is invalid.
 	Detectors []Detector
 	// InContainer reports whether the process runs inside a container. Nil means
-	// [paths.InContainer] for the resolved GOOS, reading the environment through Getenv and the
-	// real filesystem.
+	// [paths.InContainerFor] the Identity: the <EnvPrefix>_CONTAINER override when set, else the
+	// [paths.InContainer] heuristic for the resolved GOOS, reading the environment through Getenv
+	// and the real filesystem.
 	InContainer func() bool
 	// IsTerminal reports whether stderr is a terminal. Nil means the real standard streams, as
 	// [terminal.Detect] probes them.
@@ -529,7 +530,7 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.InContainer == nil {
 		probes := paths.Probes{GOOS: r.GOOS, LookupEnv: lookupEnvOf(r.Getenv)}
-		r.InContainer = func() bool { return paths.InContainer(probes) }
+		r.InContainer = func() bool { return paths.InContainerFor(r.Identity, probes) }
 	}
 	if r.CheckInterval == 0 {
 		r.CheckInterval = defaultCheckInterval

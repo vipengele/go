@@ -34,7 +34,8 @@ type Config struct {
 	// digits, '.', '_' or '-', and is at most 128 bytes long.
 	Name string
 	// Description is human-readable text the service manager shows beside
-	// the service. It is optional.
+	// the service. It is optional. The systemd driver drops a trailing run
+	// of '\', which would otherwise continue the unit file's line.
 	Description string
 	// Binary is the absolute path of the executable the service runs. It is
 	// required.
@@ -44,13 +45,19 @@ type Config struct {
 	Args []string
 	// Env holds environment variables set for the service. Each key starts
 	// with an ASCII letter or '_' and continues with ASCII letters, digits
-	// or '_'.
+	// or '_'. On systemd the values are written into the unit file and are
+	// readable by every local account, through the file and through
+	// "systemctl show"; they must not carry secrets. Pass a secret another
+	// way, such as a file the service reads that only its account may read.
 	Env map[string]string
 	// WorkingDir is the absolute path of the directory the service runs in.
-	// When empty the service manager's default applies.
+	// When empty the service manager's default applies. The systemd driver
+	// appends '/' to a path ending in '\', naming the same directory, so the
+	// unit file's line does not continue onto the next.
 	WorkingDir string
 	// User is the account the service runs as. When empty the service
-	// manager's default for Scope applies. On Windows it is an account name
+	// manager's default for Scope applies. It must be empty with ScopeUser
+	// on every GOOS but Windows. On Windows it is an account name
 	// with an optional "DOMAIN\" prefix ("." for the local machine); on
 	// every other GOOS it is a POSIX user name.
 	User string
@@ -80,19 +87,7 @@ func (c Config) validate(goos string) error {
 		errs = append(errs, fmt.Errorf("%w: "+format, append([]any{ErrInvalidConfig}, args...)...))
 	}
 
-	switch {
-	case c.Name == "":
-		fail("Name: is required")
-	case textProblem(c.Name) != "":
-		fail("Name: %s", textProblem(c.Name))
-	default:
-		if !validName(c.Name) {
-			fail("Name: %q must start with an ASCII letter or digit and hold only ASCII letters, digits, '.', '_' or '-'", c.Name)
-		}
-		if len(c.Name) > maxNameLen {
-			fail("Name: is %d bytes long, longer than %d", len(c.Name), maxNameLen)
-		}
-	}
+	c.validateName(fail)
 
 	if p := textProblem(c.Description); p != "" {
 		fail("Description: %s", p)
@@ -137,6 +132,35 @@ func (c Config) validate(goos string) error {
 		}
 	}
 
+	c.validateUser(windows, fail)
+
+	if c.Scope != ScopeSystem && c.Scope != ScopeUser {
+		fail("Scope: %d is neither ScopeSystem nor ScopeUser", int(c.Scope))
+	}
+
+	return errors.Join(errs...)
+}
+
+// validateName reports through fail every rule Name breaks.
+func (c Config) validateName(fail func(format string, args ...any)) {
+	switch {
+	case c.Name == "":
+		fail("Name: is required")
+	case textProblem(c.Name) != "":
+		fail("Name: %s", textProblem(c.Name))
+	default:
+		if !validName(c.Name) {
+			fail("Name: %q must start with an ASCII letter or digit and hold only ASCII letters, digits, '.', '_' or '-'", c.Name)
+		}
+		if len(c.Name) > maxNameLen {
+			fail("Name: is %d bytes long, longer than %d", len(c.Name), maxNameLen)
+		}
+	}
+}
+
+// validateUser reports through fail every rule User breaks on a Windows or a
+// POSIX target, including that a POSIX user service takes no User.
+func (c Config) validateUser(windows bool, fail func(format string, args ...any)) {
 	if c.User != "" {
 		switch {
 		case textProblem(c.User) != "":
@@ -148,11 +172,9 @@ func (c Config) validate(goos string) error {
 		}
 	}
 
-	if c.Scope != ScopeSystem && c.Scope != ScopeUser {
-		fail("Scope: %d is neither ScopeSystem nor ScopeUser", int(c.Scope))
+	if !windows && c.Scope == ScopeUser && c.User != "" {
+		fail("User: %q cannot be set with ScopeUser, a user service runs as the user who installs it", c.User)
 	}
-
-	return errors.Join(errs...)
 }
 
 // textProblem describes why s cannot be passed to a service manager, or

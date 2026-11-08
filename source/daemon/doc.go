@@ -28,6 +28,12 @@
 // the phase ends it without a failure. In each case no further Start is called and shutdown
 // begins, stopping the Runners whose Start was called.
 //
+// # Ready
+//
+// WithReady registers a function Run calls once, after every Runner's Start has returned, as the
+// Supervisor begins waiting for shutdown. It runs synchronously on Run's goroutine, so one that
+// blocks blocks Run, and it is not called when the start phase fails or ends early.
+//
 // # Shutdown
 //
 // Once every Runner has started, shutdown begins when the context passed to Run is done or when a
@@ -44,6 +50,16 @@
 // Stop, Done or Start is still pending when the grace period ends, is reported as ErrStopTimeout,
 // and once it has ended Run no longer waits for the Runners after it. An abandoned Stop or Start
 // may still be running when Run returns.
+//
+// # Clock
+//
+// The start timeout, the grace period and the deadline of a reload round are measured against a
+// Clock, the system clock unless WithClock sets another. A Runner reads the deadline of the
+// context it is given from that clock, and the context reports context.DeadlineExceeded once the
+// clock reaches it. A test passes a Clock it advances itself, so a deadline expires without
+// waiting for it. A Health takes its own clock through WithHealthClock, which sets the clock behind
+// its uptime, each check's duration and the per-check timeout. The package
+// go.vipengele.org/daemon/daemontest holds the fake Clock and the other helpers for such tests.
 //
 // # Panics
 //
@@ -229,4 +245,49 @@
 // SIGHUP, from once the instance lock is held until Run returns after the stop phase, so a SIGHUP
 // during start or shutdown never ends the process. On Windows the option is accepted and a reload
 // never fires.
+//
+// # Running in a container
+//
+// In a container the container runtime supervises the process, so the daemon runs as the image's
+// entrypoint and no service manager is involved. A multi-stage build keeps the toolchain out of
+// the image. MYTOOL stands for the tool's EnvPrefix:
+//
+//	FROM golang:1.27 AS build
+//	WORKDIR /src
+//	COPY . .
+//	RUN CGO_ENABLED=0 go build -o /out/mytool ./cmd/mytool
+//
+//	FROM debian:bookworm-slim
+//	RUN groupadd --gid 10001 mytool \
+//	 && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/mytool mytool \
+//	 && mkdir -p /var/lib/mytool \
+//	 && chown 10001:10001 /var/lib/mytool
+//	COPY --from=build /out/mytool /usr/local/bin/mytool
+//	ENV MYTOOL_HOME=/var/lib/mytool
+//	ENV MYTOOL_CONTAINER=1
+//	VOLUME /var/lib/mytool
+//	USER 10001:10001
+//	ENTRYPOINT ["/usr/local/bin/mytool", "--log-format", "json", "serve"]
+//
+// The user and group have the pinned id 10001, so a named volume keeps its ownership when the
+// image is rebuilt. MYTOOL_HOME, the variable paths.Resolve reads for the tool's directories,
+// points at the volume that holds the state, the instance lock included. MYTOOL_CONTAINER=1
+// states that the process runs in a container rather than leaving it to detection, which reads
+// Linux container markers only; any set value other than a false one (0, false) forces it on.
+//
+// The exec form of ENTRYPOINT makes the daemon PID 1, and no init process is needed: the daemon
+// spawns no child processes, so none is left unreaped. PID 1 has no default action for SIGTERM,
+// which is how a container is asked to stop. A program built on go.vipengele.org/cli/core
+// already cancels the context passed to Run on SIGINT and SIGTERM. A program that calls Run
+// itself cancels that context, for example with signal.NotifyContext, or SIGTERM is ignored and
+// the runtime kills the process when its stop timeout ends.
+//
+// The restart policy is always or unless-stopped (docker run --restart unless-stopped, Compose
+// restart: unless-stopped, or a Kubernetes Deployment), never on-failure: a requested restart
+// exits with status 0, which on-failure does not restart. Logs go to stderr, which the runtime
+// collects, as JSON under --log-format json; stdout is left to data.
+//
+// Package service refuses in a container: New returns a *ContainerError matching ErrContainer,
+// which says to run the process as the entrypoint. A tool that updates itself tells the user to
+// pull a newer image in place of installing the release.
 package daemon

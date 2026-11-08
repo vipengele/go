@@ -3,7 +3,9 @@
 Status: accepted. It extends ADR-0003, which gives `daemon` its project, and keeps to ADR-0019,
 which vets Windows only for a project holding a `*_windows.go` file, as ADR-0023 does for the
 instance lock. `WithGOOS` follows the semantics of the injectable `GOOS` in the `Options` of
-`cli/spec/paths` (ADR-0009).
+`cli/spec/paths` (ADR-0009). Amended by ADR-0029, which makes `service` import `cli/spec` and
+`cli/spec/paths` and has `New` refuse inside a container before it validates the `Config` and
+switches on the `GOOS`.
 
 `go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd, launchd,
 the Windows service control manager) behind one `Manager` interface. `New(cfg, opts...)` picks the
