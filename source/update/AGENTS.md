@@ -30,7 +30,8 @@ golangci-lint run
   env lookup and user home dir seams; only the state kind is resolved, so the home directory is
   needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
   and `AssetExt` to the asset format (raw, tar.gz or zip), which `Validate` and `Extract` share;
-  `MaxExtractBytes` (default 512 MiB) bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s)
+  an empty `AssetExt` is `asset.DefaultExtFor` the resolved `GOOS` (`zip` on `windows`, `tar.gz`
+  elsewhere), which `resolve` fills after `GOOS`; `MaxExtractBytes` (default 512 MiB) bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s)
   bounds how long the background check delays exit. `Channel` (default `Stable`, valid when one of
   `Stable`, `Beta` and `Edge`) is the release channel the update follows; a tool maps its own config
   key onto it through `ParseChannel`. The default `InContainer` is `paths.InContainerFor(Identity, ...)`:
@@ -84,7 +85,11 @@ golangci-lint run
   managed install's instruction in its place.
 - `checkhooks.go` — `Config.UpdateCheckHooks`: the pre-run and post-run hooks a tool passes to
   `core.WithPreRun` and `core.WithPostRun`, typed with `spec` types only. The `*Check` travels from
-  one to the other in the context, under an unexported key.
+  one to the other in the context, under an unexported key. The pre-run hook first calls
+  `removeStaleBackupOnHost(runtime.GOOS)`, which removes a stale backup on a Windows host only.
+- `stale.go` — `Config.RemoveStaleBackup` (removes `<Target>.old`; none is nil; a held-open backup
+  is a `*BackupLockedError` and stays) and `removeStaleBackupOnHost`, which does nothing unless the
+  host GOOS it is given is `windows` (ADR-0031).
 - `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
   `Source.Latest(ctx, ch)` takes the channel; `Release` carries none.
@@ -128,6 +133,8 @@ golangci-lint run
   `{ext}`. With `{ext}` in the template, `Config.AssetExt` is `tar.gz`, `tgz` or `zip` (`Validate`
   rejects any other), and GoReleaser's archive `format` must produce that extension, or the published
   name and the one `Select` looks for differ. A raw-binary tool leaves `{ext}` out of its template.
+  `DefaultExtFor(goos)` is the one source of the default extension: `zip` for `windows`, `tar.gz`
+  for every other GOOS (ADR-0031); a non-empty `AssetExt` is used on every GOOS.
 - `errors.go` — `StatusError`, `RateLimitError` (a 403 or 429 from the REST API with
   `X-RateLimit-Remaining: 0` or a `Retry-After`; carries `Reset`, `Limit`, `Remaining`,
   `Authenticated`, `Status`; its text names the reset in RFC 3339 UTC and reads no clock),
@@ -166,10 +173,14 @@ golangci-lint run
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
   tool (`install.sh.in`, embedded), which downloads the release asset, verifies it against the
   checksums file (and, with `TrustedKeys`, the checksums file against its minisign signature),
-  places the binary with one rename and installs the shell completion.
-  - Input: `Render` calls `Config.Resolved` and never re-derives a default. A template holding
-    `{ext}` with `AssetExt` `tar.gz` or `tgz` renders the archive path (extract exactly one regular
-    file named `BinaryName`); a template without `{ext}` renders the raw-binary path (no `tar`).
+  places the binary with one rename and installs the shell completion. `RenderPowerShell` is the
+  same install for Windows (`install.ps1.in`, ADR-0031).
+  - Input: `Render` calls `Config.Resolved` and never re-derives a default. Each renderer resolves
+    for its target: `Render` sets `GOOS` `linux` and `RenderPowerShell` `windows` on a copy when the
+    `Config` names none, so the host never decides a default; a `Config` naming `windows` resolves
+    `AssetExt` to `zip` and has no sh script. A template holding `{ext}` with `AssetExt` `tar.gz` or
+    `tgz` renders the archive path (extract exactly one regular file named `BinaryName`); a template
+    without `{ext}` renders the raw-binary path (no `tar`).
     `{ext}` with `zip` fails with `ErrZipAsset`. `{name}` and `{ext}` are fixed at render time;
     `{os}`, `{arch}`, `{tag}` and `{version}` are shell variables expanded when the script runs.
     Every value reaches the script as a single-quoted shell literal.
@@ -194,9 +205,23 @@ golangci-lint run
     copies the completion path table. `completion_target` is called as `if completion_target ...`,
     never bare, because it returns non-zero by design under `set -e`. A completion failure is a
     warning and the exit status stays 0.
-  - Not handled: zip, Windows, an API fallback for the latest version (only the `releases/latest`
-    redirect is read) and a non-GitHub `Source`. `Config.Source`, `HTTPClient`, the `GOOS` and
-    `GOARCH` overrides and the size limits are ignored.
+  - PowerShell (`RenderPowerShell`): the sh script's releases, checksums, signature policy and
+    variables, for Windows PowerShell 5.1 and PowerShell 7, saved or run as `irm <url> | iex`.
+    `@@INSTALL_STEP@@` takes `extract-zip.ps1.in` (`Expand-Archive`), `extract-tar.ps1.in`
+    (`tar.exe`, Windows 10 and later) or `install-raw.ps1.in`; every value is a single-quoted
+    PowerShell literal (`powerShellQuote`, which doubles the typographic quotes too). The default
+    install directory is `%LOCALAPPDATA%\Programs\<name>`. An existing `<name>.exe` is moved to
+    `<name>.exe.old` before the staged file moves in; the `.old` is removed at once when nothing runs
+    it, and otherwise by the next install. When the install directory is not on PATH it is appended
+    to the raw `HKCU\Environment\Path` (written back with its own kind, `REG_EXPAND_SZ` kept),
+    `WM_SETTINGCHANGE` is broadcast and the session's PATH gains it; `<P>_NO_MODIFY_PATH=1`
+    replaces that with a warning. The sh script only warns. The completion is
+    `completioninstall.PowerShellSnippet(BinaryName)`, verbatim, skipped on `<P>_NO_COMPLETION=1`;
+    `$PROFILE` is never edited. Its tests (`script_windows_test.go`) run on the Windows CI job.
+  - Not handled: zip in the sh script (`ErrZipAsset`; Windows uses `RenderPowerShell`), an API
+    fallback for the latest version (only the `releases/latest` redirect is read) and a non-GitHub
+    `Source`. `Config.Source`, `HTTPClient`, the `GOARCH` override and the size limits are ignored;
+    `GOOS` decides only the defaults.
   - Tests run the rendered script under `sh` against `updatetest.NewServer`, with a `PATH` of
     symlinked tools so a test can leave one out; a test skips when a tool the host lacks is needed.
     `minisign` is never the host's: `TestMain` builds a stand-in from `testdata/fakeminisign` and
@@ -222,7 +247,7 @@ golangci-lint run
   seam: createTemp, remove, chmod, rename, evalSymlinks, stat, abs), `defaultSteps` and `fsError`,
   which maps a permission failure to `*PermissionError`.
 - `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
-  `backupLocked`.
+  `backupLocked`. `install_windows_test.go` replaces a running executable on Windows.
 - `release.go` — `Config.CheckRelease`: refuses a development build with a `*DevBuildError`.
 - `apply.go` — `Config.Apply(ctx, sel, opts...)`, eight steps stopping at the first error: 1
   CheckManaged, 2 CheckWritable, 3 CheckDowngrade of `sel.Tag` (skipped, with its State read, by
@@ -321,8 +346,8 @@ golangci-lint run
   one filesystem. `TempDir` is for the download only.
 - The format is derived from the `Config`, never sniffed from the bytes: a resolved `AssetTemplate`
   without `{ext}` is raw, otherwise `AssetExt` `tar.gz` or `tgz` is tar.gz and `zip` is zip, matched
-  exactly in lower case. An empty template or extension counts as `asset.DefaultTemplate` or
-  `asset.DefaultExt`. `UnsupportedFormatError` reports a format with no extractor.
+  exactly in lower case. An empty template counts as `asset.DefaultTemplate` and an empty extension
+  as `asset.DefaultExtFor` the `GOOS` (`runtime.GOOS` when that is empty too). `UnsupportedFormatError` reports a format with no extractor.
 - Entry policy: every entry is checked before anything is written, and one unsafe entry (absolute
   path, `..` component, backslash, drive letter, NUL, symlink, hardlink, device, FIFO or any other
   entry that is neither a regular file nor a directory) rejects the whole archive with an
@@ -364,11 +389,27 @@ golangci-lint run
   remove error unwraps to errno 5 (access denied) or 32 (sharing violation). Access denied matches
   too, so an ACL denial on Windows reads as locked. The update has succeeded, and a caller may ignore
   it. Any other remove failure is a `*PermissionError` or a wrapped error.
+- On Windows the backup of the running executable outlives the process that ran the update:
+  `Discard` returns `*BackupLockedError` and `<target>.old` stays until `RemoveStaleBackup`, which
+  the `UpdateCheckHooks` pre-run hook calls on every command of a Windows host, removes it after
+  the process exits. Off Windows the hook removes none: an open file can be removed there, so a
+  removal could take the backup an unsettled update's `Rollback` needs, and `Discard` always removes
+  the backup, so only a crash leaves one, which the next `Install` replaces (ADR-0031).
+  `RemoveStaleBackup` itself removes on every OS; never call it between `Install` and the settling
+  `Discard` or `Rollback`.
 - `*PermissionError` comes from `CheckWritable` and from any write step of `Install`, `Discard` and
   `Rollback`. `CheckWritable` is best-effort; `Install` is the authority.
-- Windows behaviour is unverified: one code path, no `_windows.go` file, so the `GOOS=windows go
-  vet` gate stays off for this project (ADR-0022). The injected-error tests cover the locked-backup
-  branch.
+- One code path for every OS, no `_windows.go` file. Windows behaviour is tested on the gated
+  `test-windows` job (ADR-0030): `install_windows_test.go` installs over a running executable in a
+  path holding a space and checks `Discard` and `RemoveStaleBackup` report it locked until it exits.
+  The project's `*_windows_test.go` files also turn on `GOOS=windows go vet` in `ci-build.yml` and
+  `release.yml`. The injected-error tests cover the locked-backup branch on Linux, where coverage
+  is measured.
+- Limits (ADR-0031): an antivirus or indexer lock can fail a rename, and then the executable is
+  untouched or the backup is renamed back and the user retries, or it keeps `.old` from being
+  removed, and the next run removes it; there is no retry loop. Paths with spaces are supported.
+  The sh installer refuses zip, so Windows uses the PowerShell installer, which needs Windows
+  PowerShell 5.1 or later, and `tar.exe` (Windows 10 and later) for a tar.gz asset.
 - The seams are the unexported `fsSteps`, set by in-package tests; `Config` has no field for them.
   Tests run as root in CI, so injection is what covers the permission path.
 - `Install` and `Apply` run no `PostUpdate` hook. The caller runs `RunPostUpdate` with
@@ -395,15 +436,20 @@ golangci-lint run
   when set and the Env's stderr otherwise, and a run that fails it has no `*Check`.
 - A command carrying `spec.SkipUpdateCheck` starts no check; `updatecmd`'s `update` command
   carries it.
+- `Start` does no executable I/O. On a Windows host the pre-run hook calls `RemoveStaleBackup`
+  before it looks at `SkipUpdateCheck`, so every command removes a stale backup, the update command
+  included; its error is dropped. Off Windows the hook removes nothing.
 
 ## Conventions
 
 - Reach the outside world only through a `Config` field, never through `http.DefaultClient`,
   `time.Now`, `runtime.GOOS`, `os.Getenv` and the like called directly. A new seam is a new `Config`
-  field with a documented zero-value default, resolved in `resolve`; there are two exceptions. One
+  field with a documented zero-value default, resolved in `resolve`; there are three exceptions. One
   is `Install`'s unexported `fsSteps` (see the Install contract), which only in-package tests set.
-  The other is the `CheckWait` bound in `Finish`, a `time.NewTimer`: it is wall-clock time, while
-  `Now` stamps state only.
+  Another is the `CheckWait` bound in `Finish`, a `time.NewTimer`: it is wall-clock time, while
+  `Now` stamps state only. The third is the `runtime.GOOS` the `UpdateCheckHooks` pre-run hook
+  passes to `removeStaleBackupOnHost`: it is the host's, which decides whether a backup can be
+  removed while open, while `Config.GOOS` is the target platform's.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - Commands are framework-neutral `spec.Command`s (ADR-0005). `depguard` forbids importing
   `go.vipengele.org/cli/core` and cobra anywhere in the module: update depends on no

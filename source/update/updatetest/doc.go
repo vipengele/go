@@ -21,7 +21,8 @@
 //	}
 //	sums := updatetest.Checksums(map[string][]byte{"tool_linux_amd64.tar.gz": archive})
 //
-// [NewRelease] builds a [Release] for the running platform, and [NewServer] starts a [Server] that
+// [NewRelease] builds a [Release] for the running platform, in the archive format the updater
+// defaults to there: [ExtZip] on Windows and [ExtTarGz] elsewhere. [NewServer] starts a [Server] that
 // publishes it, closed when the test ends. The server answers the latest-release redirect and the
 // REST API from one address, so a source reads the release by the redirect unless [APIOnly] makes
 // that page answer 404. The server also signs the checksums file with a key it generates and
