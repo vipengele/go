@@ -1,0 +1,12 @@
+[Unit]
+Description=Demo service
+
+[Service]
+Type=simple
+ExecStart="/home/me/bin/demo" "serve"
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
