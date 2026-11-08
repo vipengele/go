@@ -67,13 +67,16 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
 
 - `ci-build.yml` runs, per affected project with `GOWORK=off`: `go mod tidy` cleanliness, `gofmt`,
   `golangci-lint`, `go vet`, `go build`, and `GOOS=windows go vet ./...` for a project with any
-  `*_windows.go` file (CI never runs Windows, ADR-0019). It first runs `verify-sibling-deps` across
+  `*_windows.go` or `*_windows_test.go` file (ADR-0019). It first runs `verify-sibling-deps` across
   the repo.
   `GOWORK=off` resolves each sibling as the project's `go.mod` names it: through its directory
   `replace` while they are developed together, at its tag in strict mode.
 - `ci-test.yml` runs `go test -race -shuffle=on ./...` per affected project with `GOWORK=off`. The
   `lydite` stage gates coverage separately, running each `.lydite/components.yml` component's suite
   itself.
+  Its `test-windows` job also runs that command on `windows-latest`, for each affected project
+  holding a `*_windows.go` or `*_windows_test.go` file, and is skipped when none does. It gates
+  merges like the Linux job (ADR-0030). Coverage stays Linux-only.
 - A change to a shared CI file (`ci-*.yml`, the actions, `.lydite/`) selects every project; a change
   that touches no project (docs, agentic instructions) selects none and the stages skip.
 - A new project needs a component in `.lydite/components.yml`, a `gomod` entry in `.gt-repo.yaml`
