@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+
+	"go.vipengele.org/cli/spec/paths"
 )
 
 // Manager controls one service through the service manager of its operating
@@ -27,9 +29,20 @@ type Manager interface {
 
 // New validates cfg against the rules of the target GOOS and returns the
 // Manager of the driver for that GOOS. The target is runtime.GOOS unless
-// WithGOOS sets another. An invalid cfg returns an error wrapping
-// ErrInvalidConfig; a GOOS without a driver returns an error wrapping
-// ErrUnsupported. The Manager is nil on every error.
+// WithGOOS sets another. The Manager is nil on every error.
+//
+// The checks run in a fixed order, and the first that fails decides the
+// error:
+//
+//  1. An identity from WithIdentity that fails its Validate returns an error
+//     wrapping ErrInvalidConfig.
+//  2. A process inside a container returns a *ContainerError, which matches
+//     ErrContainer, whatever cfg and the GOOS are. WithContainer decides
+//     when set; otherwise paths.InContainerFor decides with the identity,
+//     and paths.InContainer without one.
+//  3. An invalid cfg, then an invalid Hardening from WithSystemdHardening,
+//     returns an error wrapping ErrInvalidConfig.
+//  4. A GOOS without a driver returns an error wrapping ErrUnsupported.
 func New(cfg Config, opts ...Option) (Manager, error) {
 	var o options
 	for _, opt := range opts {
@@ -38,6 +51,14 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 	goos := o.goos
 	if goos == "" {
 		goos = runtime.GOOS
+	}
+	if o.identity != nil {
+		if err := o.identity.Validate(); err != nil {
+			return nil, fmt.Errorf("%w: identity: %w", ErrInvalidConfig, err)
+		}
+	}
+	if o.inContainer(goos) {
+		return nil, &ContainerError{Instead: containerInstead}
 	}
 	if err := cfg.validate(goos); err != nil {
 		return nil, err
@@ -68,4 +89,19 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
 	}
+}
+
+// inContainer reports whether the process runs inside a container on goos:
+// the WithContainer seam when set, and otherwise the detection of
+// cli/spec/paths, with the <PREFIX>_CONTAINER override when an identity is
+// set.
+func (o *options) inContainer(goos string) bool {
+	if o.container != nil {
+		return o.container()
+	}
+	p := paths.Probes{GOOS: goos, LookupEnv: o.lookupEnv}
+	if o.identity != nil {
+		return paths.InContainerFor(*o.identity, p)
+	}
+	return paths.InContainer(p)
 }

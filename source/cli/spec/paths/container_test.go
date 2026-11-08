@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"go.vipengele.org/cli/spec"
 )
 
 // probes builds Probes on goos from the existing paths, the environment and the cgroup file. A
@@ -120,6 +122,46 @@ func TestInContainerProbesOnlyTheDocumentedPaths(t *testing.T) {
 	}
 	if want := []string{"/proc/1/cgroup"}; !reflect.DeepEqual(readPaths, want) {
 		t.Errorf("reads = %v, want %v", readPaths, want)
+	}
+}
+
+func TestInContainerFor(t *testing.T) {
+	id := spec.Identity{Name: "tool", EnvPrefix: "TOOL"}
+	docker := []string{"/.dockerenv"}
+	tests := []struct {
+		name     string
+		id       spec.Identity
+		goos     string
+		existing []string
+		env      map[string]string
+		want     bool
+	}{
+		{name: "unset, no marker", id: id, goos: "linux", want: false},
+		{name: "unset, marker", id: id, goos: "linux", existing: docker, want: true},
+		{name: "empty, no marker", id: id, goos: "linux", env: map[string]string{"TOOL_CONTAINER": ""}, want: false},
+		{name: "empty, marker", id: id, goos: "linux", existing: docker, env: map[string]string{"TOOL_CONTAINER": ""}, want: true},
+		{name: "1", id: id, goos: "linux", env: map[string]string{"TOOL_CONTAINER": "1"}, want: true},
+		{name: "true", id: id, goos: "linux", env: map[string]string{"TOOL_CONTAINER": "true"}, want: true},
+		{name: "0 over marker", id: id, goos: "linux", existing: docker, env: map[string]string{"TOOL_CONTAINER": "0"}, want: false},
+		{name: "false over marker", id: id, goos: "linux", existing: docker, env: map[string]string{"TOOL_CONTAINER": "false"}, want: false},
+		{name: "yes", id: id, goos: "linux", env: map[string]string{"TOOL_CONTAINER": "yes"}, want: true},
+		{name: "forced on, darwin", id: id, goos: "darwin", env: map[string]string{"TOOL_CONTAINER": "1"}, want: true},
+		{name: "invalid prefix uses heuristic", id: spec.Identity{Name: "tool", EnvPrefix: "bad-prefix"}, goos: "linux",
+			existing: docker, env: map[string]string{"bad-prefix_CONTAINER": "0"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InContainerFor(tt.id, probes(tt.goos, tt.existing, tt.env, nil)); got != tt.want {
+				t.Errorf("InContainerFor = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInContainerForReadsTheRealEnvironmentByDefault(t *testing.T) {
+	t.Setenv("TOOL_CONTAINER", "0")
+	if InContainerFor(spec.Identity{Name: "tool", EnvPrefix: "TOOL"}, Probes{}) {
+		t.Error("InContainerFor = true, want false")
 	}
 }
 

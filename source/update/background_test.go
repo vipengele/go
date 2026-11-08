@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -629,5 +630,140 @@ func TestCheckAttemptKeepsTheWatermark(t *testing.T) {
 				t.Errorf("saved HighestApplied %q, want v1.4.0", saves[0].HighestApplied)
 			}
 		})
+	}
+}
+
+func TestNoticeCarriesTheManagedInstallInstruction(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	c := bgConfig(t, srv, &fakeStore{})
+	c.InContainer = func() bool { return true }
+	k := start(t, c)
+	finishWithin(t, k, 10*time.Second)
+
+	n, ok := k.Notice()
+	want := Notice{Name: "atk", Current: "v1.0.0", Latest: "v1.2.3", Instead: "pull a newer image of the container"}
+	if !ok || n != want {
+		t.Fatalf("Notice() = %+v, %v; want %+v, true", n, ok, want)
+	}
+	if s := n.String(); strings.Contains(s, "Run '") {
+		t.Errorf("String() = %q, want no update command for a managed install", s)
+	}
+}
+
+func TestNoticeIgnoresAFailedManagedCheck(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	c := bgConfig(t, srv, &fakeStore{})
+	c.Executable = func() (string, error) { return "", errors.New("no executable") }
+	c.InContainer = func() bool { return true }
+	k := start(t, c)
+	finishWithin(t, k, 10*time.Second)
+
+	assertNotice(t, k, "v1.2.3")
+}
+
+func TestStartRunsTheManagedCheckInTheBackground(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	c := bgConfig(t, srv, &fakeStore{})
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	c.Executable = func() (string, error) {
+		close(entered)
+		<-gate
+		return "/usr/local/bin/atk", nil
+	}
+	c.InContainer = func() bool { return true }
+
+	started := make(chan *Check, 1)
+	go func() {
+		k, _ := c.Start(context.Background())
+		started <- k
+	}()
+	var k *Check
+	select {
+	case k = <-started:
+		if k == nil {
+			close(gate)
+			t.Fatal("Start() = nil, want a running check")
+		}
+	case <-time.After(10 * time.Second):
+		close(gate)
+		t.Fatal("Start() blocked on the managed install check")
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		close(gate)
+		t.Fatal("the managed install check never ran")
+	}
+	close(gate)
+	finishWithin(t, k, 10*time.Second)
+
+	if n, ok := k.Notice(); !ok || n.Instead != "pull a newer image of the container" {
+		t.Errorf("Notice() = %+v, %v; want the container's Instead", n, ok)
+	}
+}
+
+func TestFinishDoesNotWaitForABlockedManagedCheck(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	c := bgConfig(t, srv, &fakeStore{})
+	c.CheckWait = 50 * time.Millisecond
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	returned := make(chan struct{})
+	c.Executable = func() (string, error) {
+		defer close(returned)
+		close(entered)
+		<-gate
+		return "/usr/local/bin/atk", nil
+	}
+	c.InContainer = func() bool { return true }
+	t.Cleanup(func() {
+		close(gate)
+		<-returned
+	})
+
+	k := start(t, c)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the managed install check never ran")
+	}
+	finished := make(chan struct{})
+	go func() {
+		k.Finish()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Finish() waited for the blocked managed install check")
+	}
+
+	n, ok := k.Notice()
+	if !ok || n.Latest != "v1.2.3" || n.Instead != "" {
+		t.Errorf("Notice() = %+v, %v; want v1.2.3 with no Instead", n, ok)
+	}
+}
+
+func TestManagedCheckSkippedWithoutANotice(t *testing.T) {
+	t.Parallel()
+	srv := newKitServer(t)
+	c := bgConfig(t, srv, &fakeStore{})
+	c.Version = "v1.3.0"
+	var calls atomic.Int32
+	c.Executable = func() (string, error) {
+		calls.Add(1)
+		return "/usr/local/bin/atk", nil
+	}
+	k := start(t, c)
+	finishWithin(t, k, 10*time.Second)
+
+	assertNoNotice(t, k)
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Executable called %d times, want none when there is no release to announce", n)
 	}
 }
