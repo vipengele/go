@@ -42,6 +42,8 @@
 //
 // [Config.Extract] turns the verified [*Archive] into a [*Staged] binary: a new file, mode 0700 and
 // synced, in a directory the caller supplies, so that a rename into place stays on one filesystem.
+// It is named TempPrefix, a random suffix and the extension of the binary's file name, ".exe" on a
+// Windows GOOS, so that Windows can run it.
 // The format comes from the Config, never from the archive's bytes: an AssetTemplate without {ext}
 // names a raw binary, and otherwise the AssetExt is "tar.gz" or "tgz" for a gzip-compressed tar, or
 // "zip". Every entry of an archive is checked before anything is written, and one unsafe entry (an

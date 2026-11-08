@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -28,7 +29,10 @@ var errNoStagingDir = errors.New("update: no directory to stage the binary in")
 type Staged struct {
 	f *os.File
 	// remove deletes the file by name. Extract sets it to [os.Remove].
-	remove  func(string) error
+	remove func(string) error
+	// closed records that f is closed, so that it is closed at most once whichever of closeFile,
+	// Keep and Discard comes first.
+	closed  bool
 	settled bool
 }
 
@@ -46,7 +50,7 @@ func (s *Staged) Keep() error {
 		return nil
 	}
 	s.settled = true
-	return wrapNonNil("update: closing staged binary", s.f.Close())
+	return s.closeFile()
 }
 
 // Discard closes the staged binary and removes it, returning both errors joined. The file is
@@ -57,12 +61,21 @@ func (s *Staged) Discard() error {
 		return nil
 	}
 	s.settled = true
-	closeErr := s.f.Close()
+	closeErr := s.closeFile()
 	removeErr := s.remove(s.f.Name())
-	return errors.Join(
-		wrapNonNil("update: closing staged binary", closeErr),
-		wrapNonNil("update: removing staged binary", removeErr),
-	)
+	return errors.Join(closeErr, wrapNonNil("update: removing staged binary", removeErr))
+}
+
+// closeFile closes the staged binary's write descriptor without settling it: [Staged.Discard]
+// still removes the file and [Staged.Keep] still keeps it. A file still open for writing cannot be
+// run: Linux fails its execve with ETXTBSY and Windows refuses it too. It returns the error closing
+// the file; once the file is closed, by closeFile, Keep or Discard, it does nothing and returns nil.
+func (s *Staged) closeFile() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return wrapNonNil("update: closing staged binary", s.f.Close())
 }
 
 // Extract writes the binary a verified archive holds to a new file in dir and returns it as a
@@ -77,8 +90,10 @@ func (s *Staged) Discard() error {
 // is the file named BinaryName, followed by ".exe" when GOOS is "windows". In every format the
 // binary must not be empty ([ErrEmptyAsset]).
 //
-// The staged binary is a file named TempPrefix followed by a random suffix, with mode 0700 whatever
-// mode the archive records, synced to disk before Extract returns. At most MaxExtractBytes are
+// The staged binary is a file named TempPrefix, then a random suffix, then the extension of the
+// binary's file name: a binary "tool.exe" is staged with ".exe" last and a binary "tool" with no
+// extension, in every format, raw included, so that Windows can run the staged file. It has mode
+// 0700 whatever mode the archive records, and is synced to disk before Extract returns. At most MaxExtractBytes are
 // written, or the extraction fails with an [*ExtractLimitError]. ctx is checked before each entry
 // and between reads, and a cancelled ctx is an error matching [context.Canceled]. On any failure
 // the partial file is already removed, and an error removing it is joined onto the error returned.
@@ -120,7 +135,7 @@ func (c Config) extract(ctx context.Context, a *Archive, dir string) (*Staged, e
 		return nil, err
 	}
 
-	f, err := os.CreateTemp(dir, r.TempPrefix+"*")
+	f, err := os.CreateTemp(dir, r.TempPrefix+"*"+filepath.Ext(binaryFileName(r)))
 	if err != nil {
 		return nil, fmt.Errorf("update: creating staged binary: %w", err)
 	}
