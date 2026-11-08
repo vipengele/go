@@ -5,7 +5,8 @@
 // powershell, chosen from an [Env] the caller has resolved. [Install] writes the script that
 // `<exe> completion <shell>` prints to the path Target chooses, and [Snippet] renders the same
 // table as a POSIX-sh fragment for a tool's install script; a test holds the paths the two choose
-// equal.
+// equal. [PowerShellSnippet] renders the powershell entry as a PowerShell fragment for a Windows
+// install script. Neither fragment guards itself: the embedding script owns the opt-out.
 //
 // # Requirements
 //

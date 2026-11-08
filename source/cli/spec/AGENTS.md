@@ -96,7 +96,11 @@ golangci-lint run
   `docs/adr/0015-table-helper-lives-in-cli-spec-table.md`.
 - `completioninstall/` — `Install(Options)` writes the script `<exe> completion <shell>` prints to the
   per-shell file `Target(shell, name, Env)` chooses (zsh, bash, fish, powershell), and `Snippet(name)`
-  renders the same table as POSIX sh; a test holds the two equal. Files only: no rc file or profile
+  renders the same table as POSIX sh; a test holds the two equal. `PowerShellSnippet(name)` renders a
+  PowerShell fragment (5.1-compatible) that writes `& $CompletionBinary completion powershell` to the
+  powershell path, prints the `. '<file>'` line for `$PROFILE`, never edits it, and warns instead of
+  failing; the embedding script sets `$CompletionBinary` to the installed tool, and like `Snippet` it
+  carries no opt-out guard, the embedding script guards it with its own `<EnvPrefix>_NO_COMPLETION`. Files only: no rc file or profile
   is edited, a `Note` says what the user adds. Needs `core.WithCompletion()` in the tool, else
   `Install` errors. Opt-out is `<PREFIX>_NO_COMPLETION=1` or `Options.Disabled`
   (`NoCompletionFlag`); every side effect is an `Options` seam. See
