@@ -99,12 +99,22 @@ func TestPowerShellSnippetParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(t.TempDir(), "snippet.ps1")
+	dir := t.TempDir()
+	file := filepath.Join(dir, "snippet.ps1")
 	if err := os.WriteFile(file, []byte(s), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const parse = `$errs = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$null, [ref]$errs); if ($errs.Count -gt 0) { $errs | ForEach-Object { $_.Message }; exit 1 }`
-	out, err := exec.Command(pwsh, "-NoProfile", "-Command", parse, file).CombinedOutput()
+	// -File passes the path as a real argument; with -Command every following argument is
+	// joined into the command text and $args[0] is empty.
+	const parse = "$errs = $null\n" +
+		"[void][System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$null, [ref]$errs)\n" +
+		"foreach ($e in $errs) { [Console]::Out.WriteLine($e.Extent.StartLineNumber.ToString() + ': ' + $e.Message) }\n" +
+		"if ($errs.Count) { exit 1 }\n"
+	checker := filepath.Join(dir, "check.ps1")
+	if err := os.WriteFile(checker, []byte(parse), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(pwsh, "-NoProfile", "-NonInteractive", "-File", checker, file).CombinedOutput()
 	if err != nil {
 		t.Fatalf("snippet does not parse: %v\n%s", err, out)
 	}
