@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -78,10 +80,12 @@ func Example_completionHook() {
 
 // A tool updates itself with Apply, which refuses a managed install, checks that the executable's
 // directory is writable, refuses a release below the highest version applied or running, downloads
-// and verifies the release archive, stages the binary beside the running executable and swaps it
-// in, keeping the previous binary as a backup, and records the release as the highest applied. The
-// tool then runs its post-update hooks on the installed path, reporting a failure without undoing
-// the update, and Discard drops the backup.
+// and verifies the release archive, stages the binary beside the running executable, runs it with
+// "version --json" and its Preflight hooks to check it is the selected release for the platform,
+// swaps it in, keeping the previous binary as a backup, and records the release as the highest
+// applied. The tool then runs its post-update hooks on the installed path, reporting a failure
+// without undoing the update, and Discard drops the backup. The release's binary here is the POSIX
+// shell script of [updatetest.ReleaseBinary], so the example runs on unix only.
 func Example_install() {
 	dir, err := os.MkdirTemp("", "update-example-")
 	if err != nil {
@@ -96,14 +100,16 @@ func Example_install() {
 		return
 	}
 
+	// The release's binary answers "version --json" as v2 built for the platform the example runs
+	// on, and prints its version when run with no arguments.
 	archive, err := updatetest.BuildArchive(updatetest.ExtTarGz, []updatetest.Entry{
-		{Name: "atk", Mode: 0o755, Body: []byte("v2")},
+		{Name: "atk", Mode: 0o755, Body: updatetest.ReleaseBinary("v2")},
 	})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	const archiveName = "atk_linux_amd64.tar.gz"
+	archiveName := updatetest.ArchiveName("atk", runtime.GOOS, runtime.GOARCH, updatetest.ExtTarGz)
 	sums := updatetest.Checksums(map[string][]byte{archiveName: archive})
 
 	// The release's signing key, which a real tool's release pipeline holds and whose public half
@@ -137,17 +143,25 @@ func Example_install() {
 			DirName:   "agentic-toolkit",
 		},
 		TrustedKeys: []string{key.PublicKey()},
-		GOOS:        "linux",
-		GOARCH:      "amd64",
+		GOOS:        runtime.GOOS,
+		GOARCH:      runtime.GOARCH,
 		TempDir:     dir,
 		StateDir:    dir,
 		Executable:  func() (string, error) { return exe, nil },
 		// The example's executable is never a container's, wherever it runs.
 		InContainer: func() bool { return false },
+		// A Preflight hook vetoes a binary the built-in check accepted, such as one whose database
+		// schema the tool cannot migrate to; this one only reports what the binary answered.
+		Preflight: []update.Preflight{
+			func(_ context.Context, b update.StagedBinary) error {
+				fmt.Printf("preflight sees %s, schema %d\n", b.Version, b.Schema)
+				return nil
+			},
+		},
 		PostUpdate: []update.PostUpdate{
 			func(installedPath string) error {
-				body, err := os.ReadFile(installedPath)
-				fmt.Printf("hook sees %s\n", body)
+				out, err := exec.CommandContext(context.Background(), installedPath).Output()
+				fmt.Printf("hook runs %s", out)
 				return err
 			},
 		},
@@ -174,12 +188,12 @@ func Example_install() {
 	// A locked backup (*update.BackupLockedError) is not a failed update and may be ignored.
 	_ = installed.Discard()
 
-	body, _ := os.ReadFile(exe)
 	_, statErr := os.Stat(installed.Backup())
-	fmt.Printf("installed %s, backup removed=%t\n", body, os.IsNotExist(statErr))
+	fmt.Printf("backup removed=%t\n", os.IsNotExist(statErr))
 	// Output:
-	// hook sees v2
-	// installed v2, backup removed=true
+	// preflight sees v2, schema 1
+	// hook runs v2
+	// backup removed=true
 }
 
 // newerSource is a Source whose latest release is always v1.3.0.
