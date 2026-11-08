@@ -830,3 +830,42 @@ func assertNothingRecorded(t *testing.T, store *fakeStore) {
 		t.Errorf("saves = %+v, want none", saves)
 	}
 }
+
+// TestApplyJoinsTheDiscardFailureOntoThePreflightRefusal replaces the staged file with a directory
+// holding a file while the preflight runs, so removing the staged binary fails.
+func TestApplyJoinsTheDiscardFailureOntoThePreflightRefusal(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	f.cfg.StateStore = &fakeStore{loads: []loadResult{{}}}
+
+	s := defaultSteps()
+	s.run = func(_ context.Context, name string, _ []string, _, _ io.Writer) error {
+		if err := os.Remove(name); err != nil {
+			return err
+		}
+
+		if err := os.Mkdir(name, 0o700); err != nil {
+			return err
+		}
+
+		return os.WriteFile(filepath.Join(name, "keep"), nil, 0o600)
+	}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, s)
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	var pe *PreflightError
+	if !errors.As(err, &pe) {
+		t.Fatalf("apply error = %v, want a *PreflightError", err)
+	}
+
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) || pathErr.Op != "remove" {
+		t.Errorf("apply error = %v, want it to carry the failed remove of the staged binary", err)
+	}
+
+	t.Cleanup(func() { _ = os.RemoveAll(pe.Path) })
+}
