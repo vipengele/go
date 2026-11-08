@@ -716,3 +716,15 @@ func checkPowerShellSyntax(t *testing.T, script string) {
 		t.Fatalf("PowerShell's parser rejects the script: %v\n%s", err, msg)
 	}
 }
+
+func TestRenderPowerShellDoublesEverySingleQuoteInTheAssetLiteral(t *testing.T) {
+	t.Parallel()
+	out := renderPowerShell(t, testConfig("a'b‘c’d‚e‛f-{name}", "zip"))
+
+	line := powerShellLine(t, out, "$asset = ")
+	for _, want := range []string{"a''b", "‘‘c", "’’d", "‚‚e", "‛‛f"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("asset line %q lacks the doubled quote %q", line, want)
+		}
+	}
+}
