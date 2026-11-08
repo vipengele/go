@@ -212,13 +212,15 @@ jobs:
             exit 1
           fi
       - run: go build ./...
-      # CI never runs Windows (ADR-0019), so a project's `*_windows.go` files,
-      # in any of its packages, are vetted by a cross-compile, which writes no
-      # artefacts. A project without one skips the vet step.
+      # A project holding a `*_windows.go` or `*_windows_test.go` file, in any
+      # of its packages, runs its suite on the gated windows-latest job in
+      # ci-test (ADR-0030); a release runs no Windows tests, and this
+      # cross-compile still vets those files, writing no artefacts. A project
+      # without one skips the step.
       - id: windows
-        name: detect *_windows.go
+        name: detect *_windows.go and *_windows_test.go
         run: |
-          if [[ -n "$(find . -name '*_windows.go' -not -path './vendor/*' -print -quit)" ]]; then
+          if [[ -n "$(find . \( -name '*_windows.go' -o -name '*_windows_test.go' \) -not -path './vendor/*' -print -quit)" ]]; then
             echo "files=true" >> "$GITHUB_OUTPUT"
           else
             echo "files=false" >> "$GITHUB_OUTPUT"
