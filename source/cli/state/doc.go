@@ -6,6 +6,10 @@
 // durable. Rename is atomic only within one filesystem, which is why the temporary file lives
 // beside the destination.
 //
+// The temporary file is synced through a handle open for reading and writing, which Windows
+// requires to flush a file. Windows cannot sync a directory, and NTFS journals the rename itself,
+// so on Windows the directory sync is skipped.
+//
 // The package takes paths and nothing more: it resolves no directories, takes no lock and creates
 // no directory, so writing into a directory that does not exist is an error.
 //

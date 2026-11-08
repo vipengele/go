@@ -292,11 +292,82 @@ func TestSyncDirMissingDirectory(t *testing.T) {
 	}
 }
 
+// TestSyncDirExistingDirectory skips on Windows, where a directory handle cannot be flushed and
+// WriteFile never calls syncDir.
 func TestSyncDirExistingDirectory(t *testing.T) {
 	t.Parallel()
 
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot sync a directory")
+	}
+
 	if err := state.SyncDir(t.TempDir()); err != nil {
 		t.Fatalf("SyncDir: %v", err)
+	}
+}
+
+func TestSyncDirForWindowsDoesNothing(t *testing.T) {
+	t.Parallel()
+
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	if err := state.SyncDirFor("windows")(missing); err != nil {
+		t.Fatalf("SyncDirFor(windows)(%s) = %v, want nil", missing, err)
+	}
+}
+
+func TestSyncDirForOtherSystemsSyncsTheDirectory(t *testing.T) {
+	t.Parallel()
+
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Parallel()
+
+			missing := filepath.Join(t.TempDir(), "missing")
+
+			err := state.SyncDirFor(goos)(missing)
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("SyncDirFor(%s)(%s) = %v, want an error matching os.ErrNotExist", goos, missing, err)
+			}
+
+			if want := "state: open directory " + missing + ": "; !strings.HasPrefix(err.Error(), want) {
+				t.Errorf("error %q does not start with %q", err, want)
+			}
+		})
+	}
+}
+
+// TestWriteFileAtAModeWithoutOwnerWrite writes at 0o400: the temporary file is opened for writing
+// before it takes that mode, so the sync still has a writable handle.
+func TestWriteFileAtAModeWithoutOwnerWrite(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		existing bool
+	}{
+		{name: "creates the file", existing: false},
+		{name: "replaces an existing 0644 file", existing: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+
+			if tt.existing {
+				writeAt(t, path, "old", 0o644)
+			}
+
+			if err := state.WriteFile(path, []byte("key = 1\n"), 0o400); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			assertFile(t, path, "key = 1\n", 0o400)
+			assertEntries(t, dir, "config.toml")
+		})
 	}
 }
 
@@ -350,7 +421,7 @@ func TestWriteFileAbortedAfterAnyStepLeavesOldOrNewContent(t *testing.T) {
 			name: "open",
 			abort: func(s *state.Steps) {
 				s.Open = func(name string) (*os.File, error) {
-					f, err := os.Open(filepath.Clean(name))
+					f, err := os.OpenFile(filepath.Clean(name), os.O_RDWR, 0)
 					if err == nil {
 						err = f.Close()
 					}

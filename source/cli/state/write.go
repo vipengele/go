@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 )
 
 // steps is the write path, one field per filesystem operation, in the order WriteFile performs
 // them: Create, Write, CloseWritten, Open, Chmod, Sync, CloseSynced, Rename, SyncDir. Replace
 // starts at Open. Open names the temporary file by path, so Chmod, Sync and CloseSynced act on
-// the inode the path names when Replace is called, never on the handle Create returned.
+// the inode the path names when Replace is called, never on the handle Create returned. Open
+// returns a handle with write access, because Windows flushes a file only through such a handle.
 type steps struct {
 	Create       func(dir, pattern string) (*os.File, error)
 	Write        func(f *os.File, data []byte) (int, error)
@@ -30,13 +32,30 @@ func newSteps() steps {
 		Create:       os.CreateTemp,
 		Write:        (*os.File).Write,
 		CloseWritten: (*os.File).Close,
-		Open:         func(name string) (*os.File, error) { return os.Open(filepath.Clean(name)) },
+		Open:         openForSync,
 		Chmod:        (*os.File).Chmod,
 		Sync:         (*os.File).Sync,
 		CloseSynced:  (*os.File).Close,
 		Rename:       os.Rename,
-		SyncDir:      syncDir,
+		SyncDir:      syncDirFor(runtime.GOOS),
 	}
+}
+
+// openForSync opens name for reading and writing. Sync is FlushFileBuffers on Windows, which
+// fails with ERROR_ACCESS_DENIED on a handle without write access.
+func openForSync(name string) (*os.File, error) {
+	return os.OpenFile(filepath.Clean(name), os.O_RDWR, 0)
+}
+
+// syncDirFor returns the directory sync for the operating system goos. Windows has no directory
+// sync: a directory handle cannot be flushed, and NTFS journals the rename's metadata itself, so
+// on "windows" it returns a function that does nothing. Every other goos gets syncDir.
+func syncDirFor(goos string) func(dir string) error {
+	if goos == "windows" {
+		return func(string) error { return nil }
+	}
+
+	return syncDir
 }
 
 // Replace moves tmp over final with the permission bits mode.
@@ -46,7 +65,8 @@ func newSteps() steps {
 // that save by writing a new file and renaming it over the old one (vim with backupcopy=no,
 // VS Code) leave a file at the umask default. Replace therefore opens tmp by path when it is
 // called and chmods and syncs that inode, so whatever tmp names at that moment is what lands at
-// final, at mode.
+// final, at mode. tmp must be readable and writable by its owner when Replace is called, since it
+// is opened for both before it takes mode.
 //
 // tmp and final must be in the same directory, or at least on the same filesystem; a rename
 // across filesystems fails and that failure is returned.
@@ -105,8 +125,11 @@ func (s steps) replace(tmp, final string, mode os.FileMode) error {
 	return s.SyncDir(filepath.Dir(final))
 }
 
-// prepare opens tmp by path, sets its mode and syncs its content. Opening before chmod means a
-// mode without read permission for the owner cannot prevent the sync.
+// prepare opens tmp by path for reading and writing, sets its mode and syncs its content. Opening
+// before chmod means a mode without read or write permission for the owner, 0o400 or 0o000,
+// cannot prevent the open, and the sync goes through the handle already open. tmp must therefore
+// be readable and writable by the owner when Replace is called; the temporary file WriteFile
+// creates is, at 0o600.
 func (s steps) prepare(tmp string, mode os.FileMode) error {
 	f, err := s.Open(tmp)
 	if err != nil {

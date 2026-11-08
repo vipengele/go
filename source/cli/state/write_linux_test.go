@@ -11,12 +11,13 @@ import (
 	"go.vipengele.org/cli/state"
 )
 
-// TestReplaceFailsWhenTempCannotBeChmodded names a file of /proc as the temporary file: it opens,
-// and the proc filesystem refuses every change of mode, whoever runs the test.
+// TestReplaceFailsWhenTempCannotBeChmodded names a file of /proc as the temporary file: its owner
+// may open it for reading and writing, and the proc filesystem refuses every change of mode,
+// whoever runs the test.
 func TestReplaceFailsWhenTempCannotBeChmodded(t *testing.T) {
 	t.Parallel()
 
-	const tmp = "/proc/self/status"
+	const tmp = "/proc/self/comm"
 	if _, err := os.Stat(tmp); err != nil {
 		t.Skipf("no %s: %v", tmp, err)
 	}
