@@ -112,7 +112,7 @@ func (f applyFixture) apply(t *testing.T, opts ...ApplyOption) {
 
 	t.Cleanup(func() { _ = installed.Discard() })
 
-	if got, want := readFile(t, f.exe), "#!/bin/sh\necho "+dlTag+"\n"; got != want {
+	if got, want := readFile(t, f.exe), string(updatetest.ReleaseBinary(dlTag)); got != want {
 		t.Errorf("executable holds %q, want the release's binary %q", got, want)
 	}
 }
@@ -155,7 +155,7 @@ func TestApplyInstallsTheRelease(t *testing.T) {
 	}
 
 	// The binary updatetest.NewRelease packs prints the release's tag.
-	want := "#!/bin/sh\necho " + dlTag + "\n"
+	want := string(updatetest.ReleaseBinary(dlTag))
 	if got := readFile(t, f.exe); got != want {
 		t.Errorf("executable holds %q, want the release's binary %q", got, want)
 	}

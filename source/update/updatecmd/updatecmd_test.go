@@ -110,7 +110,7 @@ func (f fixture) binary(t *testing.T) string {
 
 // releaseBinary is the content of the binary updatetest.NewRelease packs for tag.
 func releaseBinary(tag string) string {
-	return "#!/bin/sh\necho " + tag + "\n"
+	return string(updatetest.ReleaseBinary(tag))
 }
 
 // run is one execution of the command: its streams and the error it returned.
