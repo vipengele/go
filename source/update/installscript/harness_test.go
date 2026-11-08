@@ -59,7 +59,12 @@ func runTests(m *testing.M) int {
 			fmt.Fprintf(os.Stderr, "removing the stand-in: %v\n", err)
 		}
 	}()
-	bin := filepath.Join(dir, "minisign")
+	name := "minisign"
+	if runtime.GOOS == "windows" {
+		// exec finds a program on Windows only by an extension PATHEXT lists.
+		name += ".exe"
+	}
+	bin := filepath.Join(dir, name)
 	build := exec.Command("go", "build", "-o", bin, "./testdata/fakeminisign")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "building the minisign stand-in: %v\n%s", err, out)

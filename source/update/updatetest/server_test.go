@@ -133,9 +133,13 @@ func TestNewReleaseIsTheDefaultRelease(t *testing.T) {
 	if rel.ChecksumsName != updatetest.DefaultChecksumsName {
 		t.Errorf("ChecksumsName = %q, want %q", rel.ChecksumsName, updatetest.DefaultChecksumsName)
 	}
+	entry := testBinary
+	if runtime.GOOS == "windows" {
+		entry += ".exe"
+	}
 	got := readTarGz(t, rel.Archive)
-	if len(got) != 1 || got[0].Name != testBinary || got[0].Mode != 0o755 || !strings.Contains(string(got[0].Body), testTag) {
-		t.Errorf("archive entries = %+v, want one executable %q printing %s", got, testBinary, testTag)
+	if len(got) != 1 || got[0].Name != entry || got[0].Mode != 0o755 || !strings.Contains(string(got[0].Body), testTag) {
+		t.Errorf("archive entries = %+v, want one executable %q printing %s", got, entry, testTag)
 	}
 }
 

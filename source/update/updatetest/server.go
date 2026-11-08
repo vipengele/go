@@ -43,14 +43,15 @@ func ArchiveName(binary, goos, goarch, ext string) string {
 }
 
 // NewRelease returns the release tagged tag of the repository owner/repo for the platform the
-// test runs on, as the updater finds it with every template and the extension at their defaults:
-// an [ExtTarGz] archive named by [ArchiveName] for [runtime.GOOS] and [runtime.GOARCH], holding
-// one executable entry called binary whose content is a shell script printing tag, and the
+// test runs on, as the updater finds it there with every template and the extension at their
+// defaults: an [ExtTarGz] archive named by [ArchiveName] for [runtime.GOOS] and [runtime.GOARCH],
+// holding one executable entry named as the updater looks for the binary on [runtime.GOOS] —
+// binary, followed by ".exe" on "windows" — whose content is a shell script printing tag, and the
 // checksums file [DefaultChecksumsName]. It fails t when the archive cannot be built.
 func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 	t.Helper()
 	archive, err := BuildArchive(ExtTarGz, []Entry{
-		{Name: binary, Mode: 0o755, Body: []byte("#!/bin/sh\necho " + tag + "\n")},
+		{Name: binaryFileName(binary, runtime.GOOS), Mode: 0o755, Body: []byte("#!/bin/sh\necho " + tag + "\n")},
 	})
 	if err != nil {
 		t.Fatalf("updatetest: building the archive of %s: %v", tag, err)
@@ -63,6 +64,15 @@ func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 		Archive:       archive,
 		ChecksumsName: DefaultChecksumsName,
 	}
+}
+
+// binaryFileName returns the name of the entry the updater reads binary from in an archive for
+// goos: binary, followed by ".exe" when goos is "windows".
+func binaryFileName(binary, goos string) string {
+	if goos == "windows" {
+		return binary + ".exe"
+	}
+	return binary
 }
 
 // Server is a fake GitHub serving one [Release] over HTTP, on these routes, each a [Target]:

@@ -3,6 +3,7 @@ package installscript_test
 import (
 	"errors"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -52,9 +53,15 @@ func render(t *testing.T, cfg update.Config) string {
 	return string(out)
 }
 
-// shPath returns the sh the script is checked with, skipping the test when there is none.
+// shPath returns the sh the script is checked with, skipping the test when there is none or the
+// host is Windows. The script installs on Linux and macOS only and renders to the same bytes on
+// every host, so those hosts check it; the sh a Windows host has is an emulation whose path
+// translation the script never meets.
 func shPath(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the install script runs on Linux and macOS only, and those hosts check it")
+	}
 	sh, err := exec.LookPath("sh")
 	if err != nil {
 		t.Skip("sh is not on PATH")
