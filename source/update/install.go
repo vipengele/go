@@ -18,7 +18,7 @@ const (
 	windowsSharingViolation syscall.Errno = 32
 )
 
-// errNoStaged reports a nil [*Staged] passed to [Config.Install].
+// errNoStaged reports a nil [*Staged] passed to [Config.Install] or [Config.CheckStaged].
 var errNoStaged = errors.New("update: no staged binary to install")
 
 // Install replaces the executable [Config.Target] names with the staged binary, keeping the
