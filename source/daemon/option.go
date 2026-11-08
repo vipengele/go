@@ -105,9 +105,10 @@ func WithReady(ready func()) Option {
 // timeout, and sends WATCHDOG=1 only when every one passes, so systemd restarts a process that is
 // not live; a check that hangs holds the ping back for as long as it runs. Without WithHealth the
 // ping is unconditional. The watchdog is disarmed as the stop phase begins, before STOPPING=1,
-// and no WATCHDOG=1 is sent after that, even by a tick whose checks were still running. A
-// WATCHDOG_USEC or WATCHDOG_PID that cannot be parsed is logged as a warning and leaves the
-// watchdog off.
+// and no WATCHDOG=1 is sent after that, even by a tick whose checks were still running; a ping
+// already being sent when the stop phase begins can delay it by up to the one-second bound
+// systemd.Notify puts on a write. A WATCHDOG_USEC or WATCHDOG_PID that cannot be parsed is logged
+// as a warning and leaves the watchdog off.
 //
 // Outside systemd, when NOTIFY_SOCKET is absent or empty, and on any operating system but Linux,
 // nothing is sent and nothing is logged. A notification that fails to send is logged as a warning
