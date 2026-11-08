@@ -1,8 +1,10 @@
 package systemd
 
 import (
+	"math"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,5 +71,31 @@ func TestWatchdogIntervalOutsideSystemdThroughTheExportedFunction(t *testing.T) 
 	got, enabled, err := WatchdogInterval(env{}.lookup)
 	if err != nil || got != 0 || enabled {
 		t.Errorf("WatchdogInterval = %v, %v, %v; want 0, false, nil", got, enabled, err)
+	}
+}
+
+func TestWatchdogIntervalAcceptsTheLargestDuration(t *testing.T) {
+	const largest = math.MaxInt64 / int64(time.Microsecond)
+
+	got, enabled, err := watchdogInterval("linux", env{"WATCHDOG_USEC": strconv.FormatInt(largest, 10)}.lookup)
+	if want := time.Duration(largest) * time.Microsecond; err != nil || got != want || !enabled {
+		t.Errorf("watchdogInterval = %v, %v, %v; want %v, true, nil", got, enabled, err, want)
+	}
+
+	got, enabled, err = watchdogInterval("linux", env{"WATCHDOG_USEC": strconv.FormatInt(largest+1, 10)}.lookup)
+	if err == nil || got != 0 || enabled {
+		t.Fatalf("watchdogInterval past the largest = %v, %v, %v; want 0, false and an error", got, enabled, err)
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("err = %v, want WATCHDOG_USEC rejected as too large", err)
+	}
+}
+
+func TestParsePIDReturnsZeroWithItsError(t *testing.T) {
+	for _, raw := range []string{"", "abc", "0", "-1"} {
+		pid, err := parsePID("WATCHDOG_PID", raw)
+		if err == nil || pid != 0 {
+			t.Errorf("parsePID(%q) = %d, %v; want 0 and an error", raw, pid, err)
+		}
 	}
 }

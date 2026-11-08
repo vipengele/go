@@ -97,11 +97,30 @@ func TestListenersRejectsMalformedValues(t *testing.T) {
 	}
 }
 
-func TestListenersRejectsACountPastTheLastDescriptor(t *testing.T) {
-	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": "2"}
-	got, err := listeners("linux", math.MaxInt-1, e.lookup)
+func TestListenersRejectsACountAboveTheCap(t *testing.T) {
+	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": strconv.Itoa(maxListenFDs + 1)}
+	got, err := listeners("linux", unopenedFD, e.lookup)
 	if err == nil || got != nil {
-		t.Errorf("listeners = %v, %v; want nil and an error", got, err)
+		t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("err = %v, want the count rejected as too large", err)
+	}
+}
+
+// At the cap the count is accepted and the descriptors are adopted, from one that is never open,
+// so the adoption fails on its first descriptor and closes the rest, none of them open either.
+func TestListenersAcceptsACountAtTheCap(t *testing.T) {
+	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": strconv.Itoa(maxListenFDs)}
+	got, err := listeners("linux", unopenedFD, e.lookup)
+	if err == nil || got != nil {
+		t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
+	}
+	if strings.Contains(err.Error(), "too large") {
+		t.Errorf("err = %v, want the count accepted", err)
+	}
+	if want := "listener " + strconv.Itoa(unopenedFD); !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %v, want it to name %q", err, want)
 	}
 }
 
@@ -169,6 +188,21 @@ func listenTCP(t *testing.T) (string, *os.File) {
 	return l.Addr().String(), f
 }
 
+// pipe returns the read end of a pipe, closed with its write end when the test ends. A failure
+// scenario passes it at descriptor 6, the first one past LISTEN_FDS, which Listeners leaves open.
+func pipe(t *testing.T) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.Close()
+		_ = w.Close()
+	})
+	return r
+}
+
 func skipWithoutInheritedFiles(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -203,7 +237,7 @@ func TestListenersFailsOnAUDPSocket(t *testing.T) {
 	t.Cleanup(func() { _ = udpFile.Close() })
 	_, last := listenTCP(t)
 
-	runChild(t, scenarioFail, []*os.File{tcp, udpFile, last}, []string{addr})
+	runChild(t, scenarioFail, []*os.File{tcp, udpFile, last, pipe(t)}, []string{addr})
 }
 
 func TestListenersFailsOnAUnixDatagramSocket(t *testing.T) {
@@ -217,7 +251,7 @@ func TestListenersFailsOnAUnixDatagramSocket(t *testing.T) {
 	t.Cleanup(func() { _ = gramFile.Close() })
 	_, last := listenTCP(t)
 
-	runChild(t, scenarioFail, []*os.File{tcp, gramFile, last}, []string{addr})
+	runChild(t, scenarioFail, []*os.File{tcp, gramFile, last, pipe(t)}, []string{addr})
 }
 
 // TestListenersChild is the child process of the tests above. It runs only when childScenario is
@@ -272,6 +306,7 @@ func TestListenersChild(t *testing.T) {
 		}
 		assertSockets(t, 0)
 		assertClosed(t, 3, 6)
+		assertOpen(t, 6)
 
 	default:
 		t.Fatalf("unknown scenario %q", scenario)
@@ -290,6 +325,18 @@ func assertClosed(t *testing.T, first, end int) {
 		if err == nil {
 			t.Errorf("descriptor %d is open", fd)
 		}
+	}
+}
+
+// assertOpen fails the test unless descriptor fd is open. It checks on linux only, where
+// /proc/self/fd lists the descriptors, and never closes fd; elsewhere it does nothing.
+func assertOpen(t *testing.T, fd int) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return
+	}
+	if _, err := os.Lstat("/proc/self/fd/" + strconv.Itoa(fd)); err != nil {
+		t.Errorf("descriptor %d is not open: %v", fd, err)
 	}
 }
 

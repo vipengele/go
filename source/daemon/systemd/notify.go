@@ -5,7 +5,12 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"time"
 )
+
+// notifyTimeout bounds the write of a Notify datagram. A receiver that has stopped reading fills
+// the socket buffer, and a write without a deadline would then block its caller indefinitely.
+const notifyTimeout = time.Second
 
 // The states a daemon sends with Notify. Each is one newline-free assignment, as systemd reads
 // it from the datagram.
@@ -29,13 +34,15 @@ const (
 // absent or empty: the process is not run by a systemd that listens for notifications, and
 // there is nobody to tell. A NOTIFY_SOCKET starting with @ names a socket in the abstract
 // namespace. A NOTIFY_SOCKET that is neither an absolute path nor an abstract name, an empty
-// state, and a failure to reach the socket or write to it are errors, with sent false.
+// state, and a failure to reach the socket or write to it are errors, with sent false. A write
+// that cannot complete within one second, because the receiver has stopped reading and the socket
+// buffer is full, fails with an error matching os.ErrDeadlineExceeded.
 func Notify(lookup func(key string) (string, bool), state string) (sent bool, err error) {
-	return notify(runtime.GOOS, lookup, state)
+	return notify(runtime.GOOS, notifyTimeout, lookup, state)
 }
 
-// notify is Notify for the operating system goos.
-func notify(goos string, lookup func(key string) (string, bool), state string) (bool, error) {
+// notify is Notify for the operating system goos, with timeout bounding the write.
+func notify(goos string, timeout time.Duration, lookup func(key string) (string, bool), state string) (bool, error) {
 	if goos != "linux" {
 		return false, nil
 	}
@@ -56,6 +63,10 @@ func notify(goos string, lookup func(key string) (string, bool), state string) (
 
 	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: name, Net: "unixgram"})
 	if err != nil {
+		return false, fmt.Errorf("systemd: notify: %w", err)
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		_ = conn.Close()
 		return false, fmt.Errorf("systemd: notify: %w", err)
 	}
 	if _, err := conn.Write([]byte(state)); err != nil {

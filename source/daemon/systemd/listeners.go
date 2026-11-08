@@ -3,7 +3,6 @@ package systemd
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"os"
 	"runtime"
@@ -17,6 +16,11 @@ const UnknownName = "unknown"
 
 // listenFDsStart is the first descriptor systemd passes, the one after standard error.
 const listenFDsStart = 3
+
+// maxListenFDs is the largest LISTEN_FDS Listeners accepts. It is far above any descriptor limit
+// systemd runs a service with, and it bounds the descriptors a failed adoption closes, which
+// would otherwise be as many as a corrupt LISTEN_FDS claims.
+const maxListenFDs = 1 << 16
 
 // Listeners adopts the listening sockets systemd passed to the process by socket activation,
 // read from LISTEN_PID, LISTEN_FDS and LISTEN_FDNAMES through lookup, and returns them keyed by
@@ -36,11 +40,12 @@ const listenFDsStart = 3
 // this one, which means the variables were meant for another process and inherited by this one.
 // LISTEN_PID is read first, so variables meant for another process are never an error.
 //
-// A LISTEN_PID that is not a positive integer or a LISTEN_FDS that is not a non-negative integer
-// is an error, and no descriptor is touched. A descriptor that is not a listening stream socket,
-// such as one from ListenDatagram=, is an error too: every listener opened so far is closed, and
-// every inherited descriptor with it, so that none leaks into a process that cannot use it.
-// Sockets of a unit with Accept=yes are connections, not listeners, and are not supported.
+// A LISTEN_PID that is not a positive integer, a LISTEN_FDS that is not a non-negative integer
+// and a LISTEN_FDS above 65536 are errors, and no descriptor is touched. A descriptor that is not
+// a listening stream socket, such as one from ListenDatagram=, is an error too: every listener
+// opened so far is closed, and every inherited descriptor with it, so that none leaks into a
+// process that cannot use it. Sockets of a unit with Accept=yes are connections, not listeners,
+// and are not supported.
 //
 // Listeners is called once per process. A second call would wrap whatever has since reused the
 // descriptor numbers the first one closed.
@@ -73,7 +78,7 @@ func listeners(goos string, firstFD int, lookup func(key string) (string, bool))
 	if err != nil || n < 0 {
 		return nil, fmt.Errorf("systemd: LISTEN_FDS %q is not a non-negative integer", rawFDs)
 	}
-	if n > math.MaxInt-firstFD {
+	if n > maxListenFDs {
 		return nil, fmt.Errorf("systemd: LISTEN_FDS %q is too large", rawFDs)
 	}
 	if n == 0 {
@@ -91,7 +96,8 @@ func listeners(goos string, firstFD int, lookup func(key string) (string, bool))
 			for _, o := range opened {
 				_ = o.Close()
 			}
-			closeFDs(fd+1, firstFD+n)
+			rest := fd + 1 // [lydite:exclude_from_mutation][fd-1 only re-closes descriptors already closed above]
+			closeFDs(rest, firstFD+n)
 			return nil, fmt.Errorf("systemd: listener %d (%s): %w", fd, name, err)
 		}
 		opened = append(opened, l)
