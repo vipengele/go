@@ -100,11 +100,13 @@
 // WATCHDOG=1 ping at half the interval for as long as the run is live. The function it takes reads
 // the environment, so a test passes its own and no code reads os.Getenv. Outside systemd, and on
 // any operating system but Linux, nothing is sent. A notification that fails is logged and never
-// changes what Run returns.
+// changes what Run returns. A Run that cannot take the WithInstanceLock lock sends neither READY=1
+// nor STOPPING=1. The unit side is service.WithSystemdNotify: a unit installed by daemon/service
+// is Type=notify only with it, and systemd gives a unit of any other type no NOTIFY_SOCKET.
 //
 // Socket activation is go.vipengele.org/daemon/systemd: Listeners returns the sockets systemd
-// opened, keyed by name, and one is passed to NewHTTPServerListener to serve on it. The unit side
-// is service.WithSystemdNotify.
+// opened, keyed by name, and one is passed to NewHTTPServerListener to serve on it. The sockets
+// come from a .socket unit the user writes; this library generates none.
 //
 // # Single instance
 //

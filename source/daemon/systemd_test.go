@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/daemon/systemd"
 )
 
@@ -167,6 +168,26 @@ func TestSystemdStoppingWithoutReadyWhenAStartFails(t *testing.T) {
 	sdReceive(t, conn, systemd.Stopping)
 	sdSilent(t, conn)
 	h.finish()
+}
+
+func TestSystemdSendsNothingWhenTheInstanceLockIsHeld(t *testing.T) {
+	path, conn := sdSocket(t)
+	opts := paths.Options{RuntimeDir: t.TempDir()}
+	holder, err := AcquireInstance(lockIdentity(), opts)
+	if err != nil {
+		t.Fatalf("AcquireInstance: %v", err)
+	}
+	defer holder.Release()
+
+	s, err := New([]Runner{&fakeRunner{name: "a"}},
+		WithInstanceLock(lockIdentity(), opts), WithSystemd(sdEnv{"NOTIFY_SOCKET": path}.lookup))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.Run(context.Background()); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("Run = %v, want ErrAlreadyRunning", err)
+	}
+	sdSilent(t, conn)
 }
 
 func TestSystemdCoexistsWithReady(t *testing.T) {
