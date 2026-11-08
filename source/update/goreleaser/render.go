@@ -136,16 +136,12 @@ func Render(cfg update.Config, opts Options) ([]byte, error) {
 			}
 		}
 	}
-	archiveName, err := asset.GoReleaserArchive(r.AssetTemplate, r.BinaryName)
+	archiveName, checksumName, names, err := translate(r, platforms)
 	if err != nil {
-		return nil, fmt.Errorf("goreleaser: AssetTemplate: %w", err)
-	}
-	if err := checkAssetNames(r, platforms); err != nil {
 		return nil, err
 	}
-	checksumName, err := asset.GoReleaserChecksum(r.ChecksumsAsset, r.BinaryName)
-	if err != nil {
-		return nil, fmt.Errorf("goreleaser: ChecksumsAsset: %w", err)
+	if err := checkAssetNames(r.AssetTemplate, platforms, names); err != nil {
+		return nil, err
 	}
 
 	goos, goarch, ignore := matrix(platforms)
@@ -260,20 +256,39 @@ func checkUTF8(r update.Config, opts Options, platforms []Platform, vars LinkVar
 	return nil
 }
 
-// checkAssetNames rejects an AssetTemplate, valid, that renders the same name for two of platforms.
-// GoReleaser publishes every archive of a release under its rendered name, so two platforms named
-// alike overwrite each other, and update cannot select the archive of either.
-func checkAssetNames(r update.Config, platforms []Platform) error {
+// translate returns the GoReleaser name_templates of the archive and of the checksums file of r,
+// and the asset name the AssetTemplate renders for each of platforms, in order. It fails with the
+// error of [asset.GoReleaserArchive], [asset.Render] or [asset.GoReleaserChecksum], prefixed with
+// the field whose template it refused. Each step runs only once every earlier one has succeeded.
+func translate(r update.Config, platforms []Platform) (archive, checksum string, names []string, err error) {
+	field := "AssetTemplate"
+	archive, err = asset.GoReleaserArchive(r.AssetTemplate, r.BinaryName)
+	names = make([]string, len(platforms))
+	for i := 0; err == nil && i < len(platforms); i++ {
+		p := platforms[i]
+		names[i], err = asset.Render(r.AssetTemplate, asset.Fields{Name: r.BinaryName, Tag: "v0.0.0", OS: p.GOOS, Arch: p.GOARCH, Ext: r.AssetExt})
+	}
+	if err == nil {
+		field = "ChecksumsAsset"
+		checksum, err = asset.GoReleaserChecksum(r.ChecksumsAsset, r.BinaryName)
+	}
+	if err != nil {
+		return "", "", nil, fmt.Errorf("goreleaser: %s: %w", field, err)
+	}
+	return archive, checksum, names, nil
+}
+
+// checkAssetNames rejects an AssetTemplate tmpl whose names, the name it renders for each of
+// platforms in order, hold one name twice. GoReleaser publishes every archive of a release under
+// its rendered name, so two platforms named alike overwrite each other, and update cannot select
+// the archive of either.
+func checkAssetNames(tmpl string, platforms []Platform, names []string) error {
 	seen := make(map[string]Platform, len(platforms))
-	for _, p := range platforms {
-		name, err := asset.Render(r.AssetTemplate, asset.Fields{Name: r.BinaryName, Tag: "v0.0.0", OS: p.GOOS, Arch: p.GOARCH, Ext: r.AssetExt})
-		if err != nil {
-			return fmt.Errorf("goreleaser: AssetTemplate: %w", err)
+	for i, p := range platforms {
+		if first, dup := seen[names[i]]; dup {
+			return fmt.Errorf("goreleaser: AssetTemplate %q names %s/%s and %s/%s alike: %w", tmpl, first.GOOS, first.GOARCH, p.GOOS, p.GOARCH, ErrSharedAssetName)
 		}
-		if first, dup := seen[name]; dup {
-			return fmt.Errorf("goreleaser: AssetTemplate %q names %s/%s and %s/%s alike: %w", r.AssetTemplate, first.GOOS, first.GOARCH, p.GOOS, p.GOARCH, ErrSharedAssetName)
-		}
-		seen[name] = p
+		seen[names[i]] = p
 	}
 	return nil
 }
@@ -316,23 +331,15 @@ func matrix(platforms []Platform) (goos, goarch []string, ignore []Platform) {
 }
 
 // archiveFormat returns the GoReleaser archive format of a raw asset, "binary", or of an archive
-// whose extension is ext. GoReleaser names an archive with "." and its format, so each format is
-// the extension update looks for. ext is the AssetExt of a resolved Config, which with a template
-// holding {ext} is one of the three cases; any other is returned as is, for GoReleaser to refuse.
+// whose extension is ext. GoReleaser names an archive with "." and its format, and each of the
+// extensions a resolved Config allows with a template holding {ext}, "tar.gz", "tgz" and "zip", is
+// a format of that name, so the format is ext itself and GoReleaser publishes the extension update
+// looks for.
 func archiveFormat(raw bool, ext string) string {
 	if raw {
 		return "binary"
 	}
-	switch ext {
-	case "tar.gz":
-		return "tar.gz"
-	case "tgz":
-		return "tgz"
-	case "zip":
-		return "zip"
-	default:
-		return ext
-	}
+	return ext
 }
 
 // regions returns src with each region from a begin line to the next end line reduced to the lines
