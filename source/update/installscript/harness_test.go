@@ -37,6 +37,42 @@ const noTool = "none"
 // minisign stand-in it builds from testdata/fakeminisign.
 const fakeMinisignEnv = "INSTALLSCRIPT_TEST_FAKE_MINISIGN"
 
+// fakeToolEnv names the variable through which TestMain hands the Windows tests the path of the
+// fake tool it builds from fakeToolSource.
+const fakeToolEnv = "INSTALLSCRIPT_TEST_FAKE_TOOL"
+
+// fakeToolSource is the Go program standing in for the tool on Windows, where the sh script
+// fakeTool returns cannot run. It answers as fakeTool does, with the tag main.tag is linked with.
+const fakeToolSource = `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+var tag = "unset"
+
+func main() {
+	arg := ""
+	if len(os.Args) > 1 {
+		arg = os.Args[1]
+	}
+	switch arg {
+	case "--version":
+		fmt.Printf("fake-tool %s\n", tag)
+	case "completion":
+		shell := ""
+		if len(os.Args) > 2 {
+			shell = os.Args[2]
+		}
+		fmt.Printf("# fake-tool completion for %s\n", shell)
+	default:
+		fmt.Fprintf(os.Stderr, "fake-tool: unknown command %s\n", arg)
+		os.Exit(2)
+	}
+}
+`
+
 // ttyDrainTimeout bounds the wait, once the script has exited, for the last of its terminal output.
 // A process the script left running with the terminal open would otherwise hold Run until it exits.
 const ttyDrainTimeout = 5 * time.Second
@@ -46,8 +82,9 @@ func TestMain(m *testing.M) {
 }
 
 // runTests builds the minisign stand-in into a temporary directory, names it in fakeMinisignEnv
-// and runs the tests. A stand-in that does not build fails the whole package rather than skipping
-// the tests that run the script.
+// and, on Windows, builds the fake tool into a directory below it and names it in fakeToolEnv;
+// then it runs the tests. A stand-in that does not build fails the whole package rather than
+// skipping the tests that run the script.
 func runTests(m *testing.M) int {
 	dir, err := os.MkdirTemp("", "fakeminisign")
 	if err != nil {
@@ -74,7 +111,46 @@ func runTests(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "naming the stand-in: %v\n", err)
 		return 1
 	}
+	if runtime.GOOS == "windows" {
+		tool, err := buildFakeTool(filepath.Join(dir, "tool"), harnessTag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "building the fake tool: %v\n", err)
+			return 1
+		}
+		if err := os.Setenv(fakeToolEnv, tool); err != nil {
+			fmt.Fprintf(os.Stderr, "naming the fake tool: %v\n", err)
+			return 1
+		}
+	}
 	return m.Run()
+}
+
+// buildFakeTool builds fakeToolSource, linked with tag, as a module of its own in dir, which it
+// creates, and returns the path of the executable. The module stands outside this one, so the
+// build reads no go.mod or go.work of the repository.
+func buildFakeTool(dir, tag string) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	for name, body := range map[string]string{
+		"go.mod":  "module faketool\n\ngo 1.21\n",
+		"main.go": fakeToolSource,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			return "", err
+		}
+	}
+	bin := filepath.Join(dir, "fake-tool")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	build := exec.Command("go", "build", "-ldflags", "-X main.tag="+tag, "-o", bin, ".")
+	build.Dir = dir
+	build.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=")
+	if out, err := build.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("%w\n%s", err, out)
+	}
+	return bin, nil
 }
 
 // fakeMinisign returns the path of the minisign stand-in TestMain built.

@@ -1,0 +1,11 @@
+		# The tar.exe of Windows 10 and later is bsdtar, named by its full path: a GNU tar earlier on
+		# PATH, such as Git for Windows', reads the drive letter of C:\... as a remote host.
+		$tar = [System.IO.Path]::Combine([Environment]::SystemDirectory, 'tar.exe')
+		if (-not [System.IO.File]::Exists($tar)) {
+			Fail ('extracting ' + $asset + ' needs ' + $tar + ', which Windows 10 and later include')
+		}
+		$extract = [System.IO.Path]::Combine($tmp, 'extract')
+		[System.IO.Directory]::CreateDirectory($extract) | Out-Null
+		$run = InvokeTool $tar @('-xzf', $assetFile, '-C', $extract)
+		if ($run.Code -ne 0) { Fail ('extracting ' + $asset + ' failed: ' + $run.Output) }
+		$binary = FindBinary $extract
