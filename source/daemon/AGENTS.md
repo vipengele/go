@@ -55,7 +55,20 @@ golangci-lint run
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
   the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`, and `WithLogger`.
+  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam) and `WithReady` (the Ready seam).
+- `clock.go` — the `Clock` interface (`Now`, `AfterFunc`), the system clock, and `withDeadline`
+  with its `clockContext`, the deadline context for any other clock. `Deadline` is the clock's
+  deadline or the parent's when earlier, and `Err` is `context.DeadlineExceeded` when the clock's
+  timer fires, the parent's error when the parent ends, or `context.Canceled` on cancel, whichever
+  comes first. `Health` takes its own clock through `WithHealthClock`, and its check context
+  carries no `context.Cause`, so `Health` never reads it from that context (only from the caller's).
+  Tests: `clock_test.go`, and `ready_test.go` for `WithReady`.
+- `daemontest/` — package `go.vipengele.org/daemon/daemontest`, the test kit (ADR-0028), written
+  against the exported API only. `Clock` is a fake whose time moves only on `Advance`, with
+  `BlockUntilTimers` to wait until the code under test has armed its timers. `NewRunner` returns a
+  scripted Runner (`FailStart`, `HangStart`, `IgnoreStop`, `StopErr`, `Order`) that records its
+  calls. `Start` runs a Supervisor on `127.0.0.1:0` and registers a cleanup that releases every
+  hang and then stops it.
 - `errors.go` — `PanicError` and the sentinel errors (`ErrRunnerExited`, `ErrStartTimeout`,
   `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels
@@ -77,6 +90,13 @@ golangci-lint run
     unauthenticated paths.
   - `errors.go` — `Error`, the JSON error envelope written by `spec.WriteJSON`.
   - `decode.go` — `DecodeJSON` and `*RequestError`.
+
+## The seams
+
+- Clock: `WithClock` for the Supervisor's start timeout, grace period and reload deadline,
+  `WithHealthClock` for `Health`. A test passes `daemontest.Clock` and advances it.
+- Ready: `WithReady` is called once per `Run`, after every `Start` has returned, synchronously on
+  `Run`'s goroutine.
 
 ## The `service` package
 
@@ -135,3 +155,12 @@ Conventions of the package:
   `supervisor_test.go`, or, for the instance lock, `supervisor_instance_test.go`, and, for reload,
   `reload_test.go` (the real SIGHUP in `reload_signal_test.go`). Log records are tested in
   `logging_test.go`.
+- `daemon`'s own tests cannot import `daemontest`: it imports `daemon`, an import cycle. They use
+  their own fakes.
+- `depguard` lets only `daemoncmd` import `daemontest`, so `daemontest`'s own tests are internal
+  (`package daemontest`).
+- `gochecknoglobals` covers test files too.
+- Every `daemontest` hang must be released (`Runner.Release`, done by the `Start` cleanup): an
+  unreleased one is an abandoned goroutine (ADR-0014).
+- A `daemontest.Start` call with a `HangStart` runner does not return until the start timeout, so
+  start-timeout tests drive `daemon.New(...).Run` directly.

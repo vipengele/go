@@ -59,6 +59,36 @@ func WithStartTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithClock sets the clock the Supervisor measures its deadlines against: the start timeout, the
+// grace period and the deadline of a reload round. The default is the system clock. A nil clock is
+// rejected by New.
+func WithClock(clock Clock) Option {
+	return func(s *Supervisor) error {
+		if clock == nil {
+			return errors.New("daemon: nil clock")
+		}
+		s.clock = clock
+		return nil
+	}
+}
+
+// WithReady registers ready, which Run calls once, after every Runner's Start has returned, at the
+// moment the Supervisor begins waiting for shutdown. It is not called again while Run waits, after
+// a reload round or a panic exit isolated under PanicIsolate, and it is never called when the start
+// phase fails or ends early. Run calls it synchronously on its own goroutine, so a ready that
+// blocks blocks Run: until it returns, the Supervisor does not notice a Runner exiting or the
+// cancellation of Run's context. A ready with work to do starts its own goroutine. A nil ready is
+// rejected by New.
+func WithReady(ready func()) Option {
+	return func(s *Supervisor) error {
+		if ready == nil {
+			return errors.New("daemon: nil ready")
+		}
+		s.ready = ready
+		return nil
+	}
+}
+
 // WithHealth has New register the Supervisor's health checks in h: supervisor.live, a Liveness
 // check, supervisor.ready, a Readiness check, and a Readiness check named after each Runner that
 // is a HealthChecker. New registers them as its last step, all or none, so a New that fails leaves

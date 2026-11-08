@@ -13,24 +13,6 @@ import (
 	"time"
 )
 
-// fakeClock is a clock for newHealth that tests move by hand. It is safe for concurrent use.
-type fakeClock struct {
-	mu sync.Mutex
-	t  time.Time
-}
-
-func (c *fakeClock) now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.t
-}
-
-func (c *fakeClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.t = c.t.Add(d)
-}
-
 func pass(context.Context) error { return nil }
 
 func failWith(msg string) Check {
@@ -111,12 +93,12 @@ func mustAdd(t *testing.T, h *Health, name string, check Check, kinds ...Kind) {
 }
 
 func TestSnapshotCheckResults(t *testing.T) {
-	clock := &fakeClock{t: time.Date(2026, 11, 4, 3, 22, 0, 0, time.UTC)}
-	h := newHealth(clock.now)
+	clock := &manualClock{now: time.Date(2026, 11, 4, 3, 22, 0, 0, time.UTC)}
+	h := NewHealth(WithHealthClock(clock))
 	mustAdd(t, h, "zeta", pass)
 	mustAdd(t, h, "alpha", failWith("refused"), Readiness, Liveness, Readiness)
 	mustAdd(t, h, "mid", pass, Liveness)
-	clock.advance(90*time.Second + 500*time.Millisecond)
+	clock.Advance(90*time.Second + 500*time.Millisecond)
 
 	snap := h.Snapshot(t.Context())
 
@@ -172,6 +154,107 @@ func TestSnapshotTimeout(t *testing.T) {
 		if r.Duration < time.Millisecond {
 			t.Errorf("check %q: Duration = %v, want at least the timeout", r.Name, r.Duration)
 		}
+	}
+}
+
+// blockingCheck returns a Check that signals entered once it runs and then waits for its context
+// to end, returning the context's error.
+func blockingCheck(entered chan<- struct{}) Check {
+	return func(ctx context.Context) error {
+		entered <- struct{}{}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+// snapshotAsync takes a Snapshot of h under ctx in a goroutine of its own and delivers it on the
+// returned channel.
+func snapshotAsync(h *Health, ctx context.Context) <-chan Snapshot {
+	snap := make(chan Snapshot, 1)
+	go func() { snap <- h.Snapshot(ctx) }()
+	return snap
+}
+
+func TestSnapshotTimeoutExpiresOnTheClock(t *testing.T) {
+	clock := newManualClock()
+	h := NewHealth(WithHealthClock(clock), WithCheckTimeout(time.Minute))
+	entered := make(chan struct{}, 1)
+	mustAdd(t, h, "waits", blockingCheck(entered))
+
+	snap := snapshotAsync(h, t.Context())
+	<-entered
+	clock.Advance(time.Minute - time.Nanosecond)
+	select {
+	case s := <-snap:
+		t.Fatalf("Snapshot returned before the timeout: %+v", s)
+	default:
+	}
+	clock.Advance(time.Nanosecond)
+
+	got := (<-snap).Checks[0]
+	want := fmt.Errorf("%w after %v", ErrCheckTimeout, time.Minute).Error()
+	if got.Status != CheckFail || got.Error != want {
+		t.Errorf("check = %+v, want a fail with %q", got, want)
+	}
+	if got.Duration != time.Minute {
+		t.Errorf("Duration = %v, want the timeout on the clock", got.Duration)
+	}
+	awaitNoTimers(t, clock)
+}
+
+func TestSnapshotCallerCancelIsNotATimeout(t *testing.T) {
+	clock := newManualClock()
+	h := NewHealth(WithHealthClock(clock), WithCheckTimeout(time.Minute))
+	entered := make(chan struct{}, 1)
+	mustAdd(t, h, "waits", blockingCheck(entered))
+	ctx, cancel := context.WithCancel(t.Context())
+
+	snap := snapshotAsync(h, ctx)
+	<-entered
+	cancel()
+
+	got := (<-snap).Checks[0]
+	if got.Status != CheckFail || got.Error != context.Canceled.Error() {
+		t.Errorf("check = %+v, want a fail with %q", got, context.Canceled)
+	}
+	awaitNoTimers(t, clock)
+}
+
+func TestSnapshotCallerDeadlineIsNotATimeout(t *testing.T) {
+	clock := newManualClock()
+	h := NewHealth(WithHealthClock(clock), WithCheckTimeout(time.Minute))
+	entered := make(chan struct{}, 1)
+	mustAdd(t, h, "waits", blockingCheck(entered))
+	ctx, cancel := withDeadline(clock, t.Context(), time.Second)
+	defer cancel()
+
+	snap := snapshotAsync(h, ctx)
+	<-entered
+	clock.Advance(time.Second)
+
+	got := (<-snap).Checks[0]
+	if got.Status != CheckFail || got.Error != context.DeadlineExceeded.Error() {
+		t.Errorf("check = %+v, want a fail with %q", got, context.DeadlineExceeded)
+	}
+}
+
+func TestWithHealthClock(t *testing.T) {
+	clock := newManualClock()
+	tests := []struct {
+		name string
+		opts []HealthOption
+		want Clock
+	}{
+		{name: "default", want: realClock{}},
+		{name: "nil is the system clock", opts: []HealthOption{WithHealthClock(nil)}, want: realClock{}},
+		{name: "a clock", opts: []HealthOption{WithHealthClock(clock)}, want: clock},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NewHealth(tt.opts...).clock; got != tt.want {
+				t.Errorf("clock = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -537,27 +620,48 @@ func TestCheckStateAbandonBeforeFinishIsStuckUntilFinish(t *testing.T) {
 	}
 }
 
-func TestCheckErrReportsTheCauseOfAnEndedContext(t *testing.T) {
-	errCause := errors.New("check deadline")
-	errCheck := errors.New("query cancelled")
-	ended, cancel := context.WithCancelCause(context.Background())
-	cancel(errCause)
+func TestEndedErr(t *testing.T) {
+	h := NewHealth(WithCheckTimeout(time.Minute))
+	live := context.Background()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancelExpired()
+	callerCause := errors.New("caller cause")
+	caused, cancelCause := context.WithCancelCause(context.Background())
+	cancelCause(callerCause)
+	// A deadline context of a clock other than the system clock carries no cause of its own, and
+	// its nearest standard cancellable ancestor is live and carries none either.
+	liveParent, cancelLiveParent := context.WithCancel(context.Background())
+	defer cancelLiveParent()
+	causeless, cancelCauseless := withDeadline(newManualClock(), liveParent, 0)
+	defer cancelCauseless()
 
 	tests := []struct {
-		name string
-		ctx  context.Context
-		err  error
-		want error
+		name          string
+		ctx, checkCtx context.Context
+		want          error
+		timeout       bool
 	}{
-		{name: "error under an ended context", ctx: ended, err: errCheck, want: errCause},
-		{name: "error under a live context", ctx: context.Background(), err: errCheck, want: errCheck},
-		{name: "nil under an ended context", ctx: ended, err: nil, want: nil},
-		{name: "nil under a live context", ctx: context.Background(), err: nil, want: nil},
+		{name: "check deadline under a live caller", ctx: live, checkCtx: expired, timeout: true},
+		{name: "caller cancelled", ctx: cancelled, checkCtx: cancelled, want: context.Canceled},
+		{name: "caller deadline", ctx: expired, checkCtx: expired, want: context.DeadlineExceeded},
+		{name: "caller cancelled with a cause", ctx: caused, checkCtx: caused, want: callerCause},
+		{name: "check cancelled under a live caller", ctx: live, checkCtx: cancelled, want: context.Canceled},
+		{name: "caller expired without a cause", ctx: causeless, checkCtx: causeless, want: context.DeadlineExceeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := checkErr(tt.ctx, tt.err); got != tt.want {
-				t.Errorf("checkErr = %v, want %v", got, tt.want)
+			got := h.endedErr(tt.ctx, tt.checkCtx)
+			if tt.timeout {
+				want := fmt.Errorf("%w after %v", ErrCheckTimeout, time.Minute).Error()
+				if !errors.Is(got, ErrCheckTimeout) || got.Error() != want {
+					t.Errorf("endedErr = %v, want %q", got, want)
+				}
+				return
+			}
+			if !errors.Is(got, tt.want) || got.Error() != tt.want.Error() {
+				t.Errorf("endedErr = %v, want %v", got, tt.want)
 			}
 		})
 	}
