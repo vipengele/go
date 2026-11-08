@@ -12,8 +12,11 @@ const DefaultTemplate = "{name}_{os}_{arch}.{ext}"
 // DefaultChecksumsTemplate is the checksums template a tool that names none uses.
 const DefaultChecksumsTemplate = "checksums.txt"
 
-// DefaultExt is the archive extension a tool that names none uses.
-const DefaultExt = "tar.gz"
+// extTarGz is the extension of a gzip-compressed tar archive.
+const extTarGz = "tar.gz"
+
+// extZip is the extension of a zip archive.
+const extZip = "zip"
 
 // extPlaceholder is the placeholder for the archive extension, which a checksums template and a
 // GoReleaser name_template cannot carry except as the archive's trailing ".{ext}".
@@ -53,6 +56,16 @@ type Fields struct {
 type segment struct {
 	text        string
 	placeholder bool
+}
+
+// DefaultExtFor returns the archive extension a tool that names none uses for the target
+// operating system goos: "zip" for "windows", whose stock tools open a zip and no tar.gz, and
+// "tar.gz" for every other goos.
+func DefaultExtFor(goos string) string {
+	if goos == "windows" {
+		return extZip
+	}
+	return extTarGz
 }
 
 // Validate returns nil when tmpl is a template [Render] accepts: it is not empty, and every "{"

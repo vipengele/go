@@ -119,7 +119,7 @@ func TestNewReleaseIsTheDefaultRelease(t *testing.T) {
 	t.Parallel()
 	rel := newRelease(t)
 	want, err := asset.Render(asset.DefaultTemplate, asset.Fields{
-		Name: testBinary, Tag: testTag, OS: runtime.GOOS, Arch: runtime.GOARCH, Ext: asset.DefaultExt,
+		Name: testBinary, Tag: testTag, OS: runtime.GOOS, Arch: runtime.GOARCH, Ext: asset.DefaultExtFor(runtime.GOOS),
 	})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
@@ -137,7 +137,11 @@ func TestNewReleaseIsTheDefaultRelease(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		entry += ".exe"
 	}
-	got := readTarGz(t, rel.Archive)
+	read := readTarGz
+	if runtime.GOOS == "windows" {
+		read = readZip
+	}
+	got := read(t, rel.Archive)
 	if len(got) != 1 || got[0].Name != entry || got[0].Mode != 0o755 || !strings.Contains(string(got[0].Body), testTag) {
 		t.Errorf("archive entries = %+v, want one executable %q printing %s", got, entry, testTag)
 	}
@@ -331,10 +335,13 @@ func TestServerReportsNothingForExpectedRoutes(t *testing.T) {
 
 func TestNewReleaseFailsOnAnUnbuildableArchive(t *testing.T) {
 	t.Parallel()
+	// A tar entry cannot hold a NUL byte in its name, and a zip entry cannot hold a name longer than
+	// 65535 bytes, so this binary name fails the archive of every host's default format.
+	binary := strings.Repeat("t", 1<<16) + "\x00"
 	f := &fatalTB{TB: t}
-	runFatal(f, func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, "to\x00ol") })
+	runFatal(f, func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, binary) })
 	if !f.failed || !strings.Contains(f.message, testTag) {
-		t.Errorf("NewRelease with a NUL in the binary name: failed = %v with %q, want a failure naming %s", f.failed, f.message, testTag)
+		t.Errorf("NewRelease with an unbuildable binary name: failed = %v, want a failure naming %s", f.failed, testTag)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/asset"
 	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
@@ -1101,7 +1102,7 @@ func TestDownloadMissingAsset(t *testing.T) {
 				dir := t.TempDir()
 				name := updatetest.DefaultChecksumsName
 				if missing == "archive" {
-					name = updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, updatetest.ExtTarGz)
+					name = updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, asset.DefaultExtFor(runtime.GOOS))
 				}
 				k := newKitRelease(t, dir, append([]updatetest.Option{updatetest.MissingAsset(name)}, m.opts...)...)
 

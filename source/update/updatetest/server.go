@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.vipengele.org/update/asset"
 	"go.vipengele.org/update/internal/minisigntest"
 )
 
@@ -44,13 +45,15 @@ func ArchiveName(binary, goos, goarch, ext string) string {
 
 // NewRelease returns the release tagged tag of the repository owner/repo for the platform the
 // test runs on, as the updater finds it there with every template and the extension at their
-// defaults: an [ExtTarGz] archive named by [ArchiveName] for [runtime.GOOS] and [runtime.GOARCH],
+// defaults: an archive of the extension [asset.DefaultExtFor] returns for [runtime.GOOS] ([ExtZip]
+// on "windows", [ExtTarGz] elsewhere), named by [ArchiveName] for [runtime.GOOS] and [runtime.GOARCH],
 // holding one executable entry named as the updater looks for the binary on [runtime.GOOS] —
 // binary, followed by ".exe" on "windows" — whose content is a shell script printing tag, and the
 // checksums file [DefaultChecksumsName]. It fails t when the archive cannot be built.
 func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 	t.Helper()
-	archive, err := BuildArchive(ExtTarGz, []Entry{
+	ext := asset.DefaultExtFor(runtime.GOOS)
+	archive, err := BuildArchive(ext, []Entry{
 		{Name: binaryFileName(binary, runtime.GOOS), Mode: 0o755, Body: []byte("#!/bin/sh\necho " + tag + "\n")},
 	})
 	if err != nil {
@@ -60,7 +63,7 @@ func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 		Owner:         owner,
 		Repo:          repo,
 		Tag:           tag,
-		ArchiveName:   ArchiveName(binary, runtime.GOOS, runtime.GOARCH, ExtTarGz),
+		ArchiveName:   ArchiveName(binary, runtime.GOOS, runtime.GOARCH, ext),
 		Archive:       archive,
 		ChecksumsName: DefaultChecksumsName,
 	}

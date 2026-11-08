@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/asset"
 	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
@@ -284,7 +285,7 @@ func TestApplyRefusesAReleaseSignedByAnUntrustedKey(t *testing.T) {
 func TestApplyMissingArchive(t *testing.T) {
 	t.Parallel()
 
-	name := updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, updatetest.ExtTarGz)
+	name := updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, asset.DefaultExtFor(runtime.GOOS))
 	f := newApplyFixture(t, updatetest.MissingAsset(name))
 
 	installed, err := f.cfg.Apply(context.Background(), f.sel)
