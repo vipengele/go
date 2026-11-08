@@ -193,7 +193,8 @@ func (c Config) runPreflight(ctx context.Context, path, tag string, steps fsStep
 // environment is the process's own and its standard input the null device; its standard output
 // and error are copied to stdout and stderr. It returns the error [exec.Cmd.Run] returns.
 func runCommand(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is the staged binary the updater extracted from a release archive whose checksum and signature it verified, into a file it created; it runs without a shell, with the fixed arguments version --json; running it is the purpose of CheckStaged
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- name is the staged binary the updater extracted from a release archive whose checksum and signature it verified, into a file it created; it runs without a shell, with the fixed arguments version --json; running it is the purpose of CheckStaged
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.WaitDelay = preflightWaitDelay

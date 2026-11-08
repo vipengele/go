@@ -86,7 +86,8 @@ type versionJSON struct {
 // version document; invoked any other way it prints tag. The tag and the JSON reach the script as
 // single-quoted literals, so no character of either is interpreted by the shell.
 func ReleaseBinary(tag string) []byte {
-	doc, err := json.Marshal(versionJSON{
+	// Marshal cannot fail for a struct of strings, an int and a bool.
+	doc, _ := json.Marshal(versionJSON{
 		Schema:  1,
 		Version: tag,
 		Commit:  "0123456789abcdef0123456789abcdef01234567",
@@ -95,10 +96,6 @@ func ReleaseBinary(tag string) []byte {
 		OS:      runtime.GOOS,
 		Arch:    runtime.GOARCH,
 	})
-	if err != nil {
-		// Every field is a string, an int or a bool, which Marshal always encodes.
-		panic("updatetest: encoding the version document: " + err.Error())
-	}
 	return []byte("#!/bin/sh\n" +
 		"if [ \"$1\" = version ] && [ \"$2\" = --json ]; then\n" +
 		"\tprintf '%s\\n' " + shellQuote(string(doc)) + "\n" +

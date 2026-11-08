@@ -435,3 +435,57 @@ func TestCheckStagedRunsAnAbsolutePath(t *testing.T) {
 		t.Errorf("run calls = %q, want one with an absolute path", calls)
 	}
 }
+
+func TestCheckStagedReportsACloseError(t *testing.T) {
+	t.Parallel()
+
+	s := newStagedFile(t)
+	if err := s.f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var calls [][]string
+	got, err := preflightConfig(t).checkStaged(context.Background(), s, Selection{Tag: preflightTag}, answering(versionJSON("v1.2.3", "linux", "amd64"), "", nil, &calls))
+
+	if !errors.Is(err, os.ErrClosed) {
+		t.Errorf("checkStaged error = %v, want os.ErrClosed", err)
+	}
+
+	if got != (StagedBinary{}) {
+		t.Errorf("StagedBinary = %+v, want the zero value", got)
+	}
+
+	if len(calls) != 0 {
+		t.Errorf("run calls = %q, want none", calls)
+	}
+}
+
+func TestCheckStagedReportsAnUnresolvablePath(t *testing.T) {
+	t.Parallel()
+
+	errAbs := errors.New("getwd failed")
+
+	var calls [][]string
+	steps := answering(versionJSON("v1.2.3", "linux", "amd64"), "", nil, &calls)
+	steps.abs = func(string) (string, error) { return "", errAbs }
+
+	s := newStagedFile(t)
+
+	got, err := preflightConfig(t).checkStaged(context.Background(), s, Selection{Tag: preflightTag}, steps)
+
+	if !errors.Is(err, errAbs) {
+		t.Errorf("checkStaged error = %v, want one wrapping the abs error", err)
+	}
+
+	if want := "update: resolving the staged binary "; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("checkStaged error = %v, want the prefix %q", err, want)
+	}
+
+	if got != (StagedBinary{}) {
+		t.Errorf("StagedBinary = %+v, want the zero value", got)
+	}
+
+	if len(calls) != 0 {
+		t.Errorf("run calls = %q, want none", calls)
+	}
+}
