@@ -288,7 +288,9 @@ golangci-lint run
   - After `Apply`, a `RunPostUpdate` failure and a `Discard` failure (naming the backup path) are
     warnings and the exit stays 0.
 - `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
-  `Release` in the redirect and REST-API modes, in-memory tar.gz and zip archive (`BuildArchive`) and
+  `Release` in the redirect and REST-API modes, the release binary `NewRelease` packs
+  (`ReleaseExecutable`: the shell script `ReleaseBinary` off Windows, a Go program built at test
+  time on Windows), in-memory tar.gz and zip archive (`BuildArchive`) and
   checksums (`Checksums`) builders, and the fault options `BadChecksum`, `BadSignature`,
   `UnknownKey`, `Tampered`, `MissingAsset`, `Slow` and `APIOnly`. The server signs the checksums
   file with a key generated per server (`internal/minisigntest`), serves it as
@@ -417,8 +419,9 @@ golangci-lint run
   The project's `*_windows_test.go` files also turn on `GOOS=windows go vet` in `ci-build.yml` and
   `release.yml`. The injected-error tests cover the locked-backup branch on Linux, where coverage
   is measured.
-  The Windows job does not run the preflight's real execution of a staged `.exe`: the release
-  binary `updatetest` packs is a shell script, so every test that executes it skips on Windows.
+  The Windows job runs the preflight's real execution of a staged `.exe`: the release binary
+  `updatetest.NewRelease` packs on Windows is a Go program (`updatetest.ReleaseExecutable`), so
+  `TestApplyRunsTheStagedBinary` and `updatecmd`'s install tests run there too.
 - Limits (ADR-0031): an antivirus or indexer lock can fail a rename, and then the executable is
   untouched or the backup is renamed back and the user retries, or it keeps `.old` from being
   removed, and the next run removes it; there is no retry loop. Paths with spaces are supported.
@@ -468,8 +471,10 @@ golangci-lint run
 - A test that executes a staged file (any real `Apply` or `CheckStaged`, `updatecmd` tests included)
   does not call `t.Parallel()`: a process forked by a parallel test inherits the staged file's
   write descriptor until it execs, and the exec then fails with `ETXTBSY` ("text file busy").
-  `updatetest.ReleaseBinary`, the shell script `NewRelease` packs, answers `version --json` and is
-  unix-only, so a test that executes it skips on Windows.
+  `updatetest.ReleaseExecutable(t, tag)` is the binary `NewRelease` packs and answers
+  `version --json`: off Windows the shell script `updatetest.ReleaseBinary`, on Windows a Go program
+  built with the go command on the PATH, so a test that executes it runs on every OS. A test
+  comparing installed bytes compares them with `ReleaseExecutable`, never `ReleaseBinary`.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - Commands are framework-neutral `spec.Command`s (ADR-0005). `depguard` forbids importing
   `go.vipengele.org/cli/core` and cobra anywhere in the module: update depends on no

@@ -145,24 +145,46 @@ func TestNewReleaseIsTheDefaultRelease(t *testing.T) {
 		read = readZip
 	}
 	got := read(t, rel.Archive)
-	if len(got) != 1 || got[0].Name != entry || got[0].Mode != 0o755 || !strings.Contains(string(got[0].Body), testTag) {
-		t.Errorf("archive entries = %+v, want one executable %q printing %s", got, entry, testTag)
+	if len(got) != 1 || got[0].Name != entry || got[0].Mode != 0o755 || !bytes.Equal(got[0].Body, updatetest.ReleaseExecutable(t, testTag)) {
+		names := make([]string, 0, len(got))
+		for _, e := range got {
+			names = append(names, fmt.Sprintf("%s (mode %v, %d bytes)", e.Name, e.Mode, len(e.Body)))
+		}
+		t.Errorf("archive entries = %q, want one executable %q holding the release executable of %s", names, entry, testTag)
 	}
 }
 
+// releaseTag holds a single quote, a double quote and a backslash, so a release binary that
+// quotes its tag wrongly prints another one.
+const releaseTag = `v1.2.3-it's-"q"-\`
+
+// TestReleaseBinaryAnswersVersionJSONAndEchoesTheTag executes the script, so it does not run in
+// parallel: a process a parallel test forks while this one's file is open for writing inherits that
+// descriptor until it execs, and the exec then fails with ETXTBSY.
 func TestReleaseBinaryAnswersVersionJSONAndEchoesTheTag(t *testing.T) {
-	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("the release binary is a shell script")
 	}
-	const tag = "v1.2.3-it's"
-	rel := updatetest.NewRelease(t, testOwner, testRepo, tag, testBinary)
-	entries := readTarGz(t, rel.Archive)
-	if len(entries) != 1 {
-		t.Fatalf("archive entries = %+v, want one", entries)
+	assertAnswersAsTheRelease(t, updatetest.ReleaseBinary(releaseTag), releaseTag)
+}
+
+// TestReleaseExecutableAnswersVersionJSONAndEchoesTheTag executes the release's executable, so it
+// does not run in parallel, for the reason TestReleaseBinaryAnswersVersionJSONAndEchoesTheTag gives.
+func TestReleaseExecutableAnswersVersionJSONAndEchoesTheTag(t *testing.T) {
+	assertAnswersAsTheRelease(t, updatetest.ReleaseExecutable(t, releaseTag), releaseTag)
+}
+
+// assertAnswersAsTheRelease writes body as an executable and fails t unless it answers
+// "version --json" with the schema-1 version JSON of tag for the running platform, and any other
+// invocation with tag.
+func assertAnswersAsTheRelease(t *testing.T, body []byte, tag string) {
+	t.Helper()
+	name := testBinary
+	if runtime.GOOS == "windows" {
+		name += ".exe"
 	}
-	path := filepath.Join(t.TempDir(), testBinary)
-	if err := os.WriteFile(path, entries[0].Body, 0o700); err != nil {
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, body, 0o700); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := os.Chmod(path, 0o700); err != nil {
@@ -419,6 +441,7 @@ func TestNewReleaseAndNewServerAreTestHelpers(t *testing.T) {
 		call func(tb testing.TB)
 	}{
 		{"NewRelease", func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, testBinary) }},
+		{"ReleaseExecutable", func(tb testing.TB) { updatetest.ReleaseExecutable(tb, testTag) }},
 		{"NewServer", func(tb testing.TB) { updatetest.NewServer(tb, newRelease(t)) }},
 	} {
 		h := &helperTB{TB: t}

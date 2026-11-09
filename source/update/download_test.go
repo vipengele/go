@@ -1470,8 +1470,8 @@ func TestUpdateInstallsASignedRelease(t *testing.T) {
 			if err := k.installAll(context.Background()); err != nil {
 				t.Fatalf("update error = %v", err)
 			}
-			if got, err := os.ReadFile(exe); err != nil || string(got) != string(updatetest.ReleaseBinary(dlTag)) {
-				t.Errorf("executable = %q, %v; want the release's binary", got, err)
+			if got, err := os.ReadFile(exe); err != nil || string(got) != string(updatetest.ReleaseExecutable(t, dlTag)) {
+				t.Errorf("executable = %.64q, %v; want the release's binary", got, err)
 			}
 			assertDirEmpty(t, tmp)
 			k.assertRequests(t, 1, 1)

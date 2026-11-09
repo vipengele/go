@@ -50,16 +50,16 @@ func ArchiveName(binary, goos, goarch, ext string) string {
 // on "windows", [ExtTarGz] elsewhere), named by [ArchiveName] for [runtime.GOOS] and [runtime.GOARCH],
 // holding one executable entry named as the updater looks for the binary on [runtime.GOOS] —
 // binary, followed by ".exe" on "windows" — and the checksums file [DefaultChecksumsName]. The
-// entry is [ReleaseBinary], a POSIX shell script, so the release runs on unix only. Invoked with
-// the arguments "version --json" it prints one line of schema-1 version JSON with every key set:
-// schema 1, version tag, a fixed commit and date, go [runtime.Version], os [runtime.GOOS], arch
-// [runtime.GOARCH] and dev false. Invoked any other way it prints tag. It fails t when the archive
-// cannot be built.
+// entry is [ReleaseExecutable], which runs on the test's platform: invoked with the arguments
+// "version --json" it prints one line of schema-1 version JSON with every key set: schema 1,
+// version tag, a fixed commit and date, go [runtime.Version], os [runtime.GOOS], arch
+// [runtime.GOARCH] and dev false. Invoked any other way it prints tag. It fails t when the
+// executable or the archive cannot be built.
 func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 	t.Helper()
 	ext := asset.DefaultExtFor(runtime.GOOS)
 	archive, err := BuildArchive(ext, []Entry{
-		{Name: binaryFileName(binary, runtime.GOOS), Mode: 0o755, Body: ReleaseBinary(tag)},
+		{Name: binaryFileName(binary, runtime.GOOS), Mode: 0o755, Body: ReleaseExecutable(t, tag)},
 	})
 	if err != nil {
 		t.Fatalf("updatetest: building the archive of %s: %v", tag, err)
@@ -95,11 +95,9 @@ type versionJSON struct {
 	Dev     bool   `json:"dev"`
 }
 
-// ReleaseBinary returns the content of the executable [NewRelease] packs for tag: a POSIX shell
-// script, so it runs on unix only. Invoked with the arguments "version --json" it prints the schema-1
-// version document; invoked any other way it prints tag. The tag and the JSON reach the script as
-// single-quoted literals, so no character of either is interpreted by the shell.
-func ReleaseBinary(tag string) []byte {
+// versionDocument returns the schema-1 version JSON the release binary tagged tag prints for
+// goos/goarch, on one line with no newline.
+func versionDocument(tag, goos, goarch string) string {
 	// Marshal cannot fail for a struct of strings, an int and a bool.
 	doc, _ := json.Marshal(versionJSON{
 		Schema:  1,
@@ -107,12 +105,51 @@ func ReleaseBinary(tag string) []byte {
 		Commit:  "0123456789abcdef0123456789abcdef01234567",
 		Date:    "2026-01-02T03:04:05Z",
 		Go:      runtime.Version(),
-		OS:      runtime.GOOS,
-		Arch:    runtime.GOARCH,
+		OS:      goos,
+		Arch:    goarch,
 	})
+	return string(doc)
+}
+
+// ReleaseExecutable returns the content of the executable [NewRelease] packs for tag on the
+// platform the test runs on. Off Windows it is [ReleaseBinary]. On Windows, where a shell script
+// cannot be run, it is a Go program built with the go command on the PATH for [runtime.GOOS] and
+// [runtime.GOARCH] into a temporary directory of t, answering every invocation with the bytes
+// ReleaseBinary prints. ReleaseExecutable fails t, with the go command's output, when the program
+// cannot be built.
+func ReleaseExecutable(t testing.TB, tag string) []byte {
+	t.Helper()
+	return releaseExecutable(t, tag, runtime.GOOS, runtime.GOARCH)
+}
+
+// releaseExecutable is [ReleaseExecutable] for the target goos/goarch: the shell script of
+// [releaseScript] for any goos but "windows", the Go program of [releaseProgramSource] built for
+// the target on "windows".
+func releaseExecutable(t testing.TB, tag, goos, goarch string) []byte {
+	t.Helper()
+	if goos != "windows" {
+		return releaseScript(tag, goos, goarch)
+	}
+	b, err := buildReleaseProgram(t.TempDir(), tag, goos, goarch)
+	if err != nil {
+		t.Fatalf("updatetest: building the release program of %s for %s/%s: %v", tag, goos, goarch, err)
+	}
+	return b
+}
+
+// ReleaseBinary returns the release binary of tag for the running platform as a POSIX shell
+// script, which runs on unix only. Invoked with the arguments "version --json" it prints the
+// schema-1 version document; invoked any other way it prints tag. The tag and the JSON reach the
+// script as single-quoted literals, so no character of either is interpreted by the shell.
+func ReleaseBinary(tag string) []byte {
+	return releaseScript(tag, runtime.GOOS, runtime.GOARCH)
+}
+
+// releaseScript is [ReleaseBinary] for the target goos/goarch.
+func releaseScript(tag, goos, goarch string) []byte {
 	return []byte("#!/bin/sh\n" +
 		"if [ \"$1\" = version ] && [ \"$2\" = --json ]; then\n" +
-		"\tprintf '%s\\n' " + shellQuote(string(doc)) + "\n" +
+		"\tprintf '%s\\n' " + shellQuote(versionDocument(tag, goos, goarch)) + "\n" +
 		"else\n" +
 		"\tprintf '%s\\n' " + shellQuote(tag) + "\n" +
 		"fi\n")
