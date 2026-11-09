@@ -41,7 +41,7 @@ dependabot:
       - name: vitest
         patterns:
           - vitest
-          - "@vitest/*"
+          - '@vitest/*'
         note: |-
           @vitest/* packages declare an exact peer dependency on the vitest
           release of the same version, so npm ci refuses an update that moves
