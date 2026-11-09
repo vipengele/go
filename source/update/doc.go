@@ -42,6 +42,8 @@
 //
 // [Config.Extract] turns the verified [*Archive] into a [*Staged] binary: a new file, mode 0700 and
 // synced, in a directory the caller supplies, so that a rename into place stays on one filesystem.
+// It is named TempPrefix, a random suffix and the extension of the binary's file name, ".exe" on a
+// Windows GOOS, so that Windows can run it.
 // The format comes from the Config, never from the archive's bytes: an AssetTemplate without {ext}
 // names a raw binary, and otherwise the AssetExt is "tar.gz" or "tgz" for a gzip-compressed tar, or
 // "zip". An empty AssetExt is [asset.DefaultExtFor] the resolved GOOS: "zip" for "windows" and
@@ -76,10 +78,18 @@
 // [Installed.Path]; Install runs none itself. [Config.RemoveStaleBackup] removes a backup left
 // beside the executable.
 //
+// [Config.CheckStaged] preflights a [*Staged] binary before it is installed: it runs the binary
+// with "version --json", killing it after PreflightTimeout, 10 seconds by default, and refuses it
+// with a [*PreflightError] unless it answers with schema 1 or greater, the selected tag as its
+// version and the Config's GOOS and GOARCH. The tool's [Preflight] hooks, Config.Preflight, then
+// run in order on the [StagedBinary] it reported, and the first error vetoes the install.
+// CheckStaged neither keeps nor discards the staged binary; its caller settles it.
+//
 // [Config.Apply] is the whole update of a [Selection] in one call: CheckManaged and CheckWritable,
-// both before any request, then CheckDowngrade, Download, Extract into Target's directory and
-// Install, and last records the installed version in the State, stopping at the first error. It
-// returns the [*Installed] with the backup still on disk; the caller runs its
+// both before any request, then CheckDowngrade, Download, Extract into Target's directory,
+// CheckStaged and Install, and last records the installed version in the State, stopping at the
+// first error. A binary CheckStaged refuses is discarded, and the installed executable and the
+// State are left as they were. It returns the [*Installed] with the backup still on disk; the caller runs its
 // PostUpdate hooks, whose failure is reported and does not undo the update, and then settles it
 // with Discard or Rollback.
 //

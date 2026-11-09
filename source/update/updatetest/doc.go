@@ -22,10 +22,12 @@
 //	sums := updatetest.Checksums(map[string][]byte{"tool_linux_amd64.tar.gz": archive})
 //
 // [NewRelease] builds a [Release] for the running platform, in the archive format the updater
-// defaults to there: [ExtZip] on Windows and [ExtTarGz] elsewhere. [NewServer] starts a [Server] that
-// publishes it, closed when the test ends. The server answers the latest-release redirect and the
-// REST API from one address, so a source reads the release by the redirect unless [APIOnly] makes
-// that page answer 404. The server also signs the checksums file with a key it generates and
+// defaults to there: [ExtZip] on Windows and [ExtTarGz] elsewhere. Its binary is a POSIX shell
+// script, so the release runs on unix only: "version --json" prints schema-1 version JSON for the
+// release's tag and the running platform, and any other invocation prints the tag. [NewServer]
+// starts a [Server] that publishes it, closed when the test ends. The server answers the
+// latest-release redirect and the REST API from one address, so a source reads the release by the
+// redirect unless [APIOnly] makes that page answer 404. The server also signs the checksums file with a key it generates and
 // serves the minisign signature as the checksums file's name and ".minisig"; [Server.PublicKey]
 // returns the key to trust. [BadChecksum] lists a wrong digest, [BadSignature] serves a signature
 // that does not verify, [UnknownKey] one made by another key, [Tampered] an archive and checksums

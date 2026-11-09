@@ -35,6 +35,8 @@ const (
 	defaultMaxExtractBytes int64 = 512 << 20
 	// defaultDownloadTimeout is the [Config.DownloadTimeout] a zero value resolves to.
 	defaultDownloadTimeout = 5 * time.Minute
+	// defaultPreflightTimeout is the [Config.PreflightTimeout] a zero value resolves to.
+	defaultPreflightTimeout = 10 * time.Second
 	// defaultCheckInterval is the [Config.CheckInterval] a zero value resolves to.
 	defaultCheckInterval = 24 * time.Hour
 	// minCheckInterval is the shortest [Config.CheckInterval] that is valid.
@@ -78,6 +80,10 @@ type Config struct {
 	// DownloadTimeout bounds the whole of a single download. Zero means 5 minutes; a negative value
 	// is invalid.
 	DownloadTimeout time.Duration
+	// PreflightTimeout bounds the run of the staged binary's "version --json" by
+	// [Config.CheckStaged]; the binary is killed when it expires. Zero means 10 seconds; a negative
+	// value is invalid.
+	PreflightTimeout time.Duration
 	// AssetTemplate names the release asset that holds the binary for a platform, written in the
 	// template language of package asset: {name}, {version}, {tag}, {os}, {arch} and {ext}. Empty
 	// means [asset.DefaultTemplate].
@@ -123,6 +129,12 @@ type Config struct {
 	// PostUpdate lists the hooks [RunPostUpdate] runs, in order, once the installed binary has
 	// replaced the old one. Empty means none.
 	PostUpdate []PostUpdate
+	// Preflight lists the tool's own checks of a staged binary, which [Config.CheckStaged] runs in
+	// order once the binary has answered "version --json" as the selected release for the
+	// platform. The first hook to return an error vetoes the install and the later hooks do not
+	// run. The binary may still be refused after a hook passes, so a hook is side-effect-free or
+	// cleans up after itself. Empty means none.
+	Preflight []Preflight
 	// Version is the running program's version. A version that is not a release version, as
 	// version.IsRelease in go.vipengele.org/cli/spec/version defines it (empty, "dev", a
 	// pseudo-version, or any version with build metadata such as "+dirty"), never checks for an
@@ -191,7 +203,7 @@ type Config struct {
 // AssetTemplate, ChecksumsAsset or AssetExt must be valid: AssetTemplate by [asset.Validate],
 // ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
 // "}" and not starting with ".", and, when the AssetTemplate holds {ext}, being "tar.gz", "tgz" or
-// "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative, no entry of
+// "zip". MaxDownloadBytes, MaxExtractBytes, DownloadTimeout and PreflightTimeout must not be negative, no entry of
 // Detectors may be nil, CheckInterval must be zero or at least 1 hour, and CheckWait must be
 // between zero and 2 seconds. Each of those is a [validate.FieldError] wrapping
 // [validate.ErrInvalid], the one for a nil detector naming its index as Detectors[i], and the
@@ -213,6 +225,7 @@ func (c Config) Validate() error {
 		checkNotNegative("MaxDownloadBytes", c.MaxDownloadBytes),
 		checkNotNegative("MaxExtractBytes", c.MaxExtractBytes),
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
+		checkNotNegative("PreflightTimeout", int64(c.PreflightTimeout)),
 		checkDetectors(c.Detectors),
 		checkSignaturePolicy(c.TrustedKeys, c.AllowUnsigned),
 		checkChannel(c.Channel),
@@ -480,6 +493,9 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.DownloadTimeout == 0 {
 		r.DownloadTimeout = defaultDownloadTimeout
+	}
+	if r.PreflightTimeout == 0 {
+		r.PreflightTimeout = defaultPreflightTimeout
 	}
 	if r.AssetTemplate == "" {
 		r.AssetTemplate = asset.DefaultTemplate

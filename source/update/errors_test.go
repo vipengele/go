@@ -619,3 +619,51 @@ func TestSignatureErrorFromVerify(t *testing.T) {
 		}
 	})
 }
+
+func TestPreflightError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  *PreflightError
+		want string
+	}{
+		{
+			name: "reason alone",
+			err:  &PreflightError{Path: "/bin/atk-update-1", Reason: `reported version "v1.2.2", want "v1.2.3"`},
+			want: `update: preflight of /bin/atk-update-1: reported version "v1.2.2", want "v1.2.3"`,
+		},
+		{
+			name: "cause and stderr",
+			err: &PreflightError{
+				Path: "/bin/atk-update-1", Reason: "running version --json", Stderr: "boom", Err: errors.New("exit status 3"),
+			},
+			want: "update: preflight of /bin/atk-update-1: running version --json: exit status 3; stderr: boom",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+
+			if !errors.Is(tc.err.Unwrap(), tc.err.Err) {
+				t.Errorf("Unwrap() = %v, want %v", tc.err.Unwrap(), tc.err.Err)
+			}
+		})
+	}
+
+	wrapped := fmt.Errorf("apply: %w", &PreflightError{Path: "/bin/atk-update-1", Reason: "timed out", Err: context.DeadlineExceeded})
+
+	var pe *PreflightError
+	if !errors.As(wrapped, &pe) {
+		t.Fatal("errors.As did not find *PreflightError")
+	}
+
+	if !errors.Is(wrapped, context.DeadlineExceeded) {
+		t.Error("errors.Is does not reach the cause")
+	}
+}

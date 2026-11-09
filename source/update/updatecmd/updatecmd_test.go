@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -108,9 +109,19 @@ func (f fixture) binary(t *testing.T) string {
 	return string(b)
 }
 
+// skipWithoutShell skips a test that installs a release binary on Windows: the binary
+// updatetest.ReleaseBinary builds is a POSIX shell script, which the preflight run cannot execute
+// there.
+func skipWithoutShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the release binary is a POSIX shell script")
+	}
+}
+
 // releaseBinary is the content of the binary updatetest.NewRelease packs for tag.
 func releaseBinary(tag string) string {
-	return "#!/bin/sh\necho " + tag + "\n"
+	return string(updatetest.ReleaseBinary(tag))
 }
 
 // run is one execution of the command: its streams and the error it returned.
@@ -442,8 +453,11 @@ func TestUpdateInterruptedAtThePromptDownloadsNothing(t *testing.T) {
 	}
 }
 
+// A test that reaches a real install runs the staged binary for its preflight and so is not
+// parallel: a process another test forks while this one's staged file is open for writing inherits
+// that descriptor until it execs, and the exec then fails with "text file busy" (ETXTBSY).
 func TestUpdateConfirmedAtThePromptInstalls(t *testing.T) {
-	t.Parallel()
+	skipWithoutShell(t)
 
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	r := runCommand(t, f.cfg, map[string]any{}, "y\n", true)
@@ -457,7 +471,7 @@ func TestUpdateConfirmedAtThePromptInstalls(t *testing.T) {
 }
 
 func TestUpdateWithYesInstallsAndRunsTheHooks(t *testing.T) {
-	t.Parallel()
+	skipWithoutShell(t)
 
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	var hooked []string
@@ -488,7 +502,7 @@ func TestUpdateWithYesInstallsAndRunsTheHooks(t *testing.T) {
 }
 
 func TestAFailingHookIsAWarning(t *testing.T) {
-	t.Parallel()
+	skipWithoutShell(t)
 
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	f.cfg.PostUpdate = []update.PostUpdate{func(string) error { return errors.New("completion broke") }}
@@ -505,8 +519,48 @@ func TestAFailingHookIsAWarning(t *testing.T) {
 	}
 }
 
+func TestAPreflightRefusalFailsTheUpdateAndLeavesTheTarget(t *testing.T) {
+	skipWithoutShell(t)
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.Preflight = []update.Preflight{func(context.Context, update.StagedBinary) error {
+		return errors.New("tool rejects this build")
+	}}
+	var hooked bool
+	f.cfg.PostUpdate = []update.PostUpdate{func(string) error {
+		hooked = true
+		return nil
+	}}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	var refused *update.PreflightError
+	if !errors.As(r.err, &refused) {
+		t.Fatalf("Run error = %v, want a *update.PreflightError", r.err)
+	}
+	if !strings.Contains(r.err.Error(), "tool rejects this build") {
+		t.Errorf("Run error = %q, want the hook's refusal", r.err.Error())
+	}
+	if hooked {
+		t.Error("post-update hook ran after a refused update")
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+	entries, err := os.ReadDir(filepath.Dir(f.exe))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != testName {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("target directory holds %v, want only %q", names, testName)
+	}
+}
+
 func TestABackupThatCannotBeRemovedIsAWarning(t *testing.T) {
-	t.Parallel()
+	skipWithoutShell(t)
 
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	backup := f.exe + ".old"
@@ -557,7 +611,7 @@ func TestUpdateWhenUpToDateDoesNothing(t *testing.T) {
 }
 
 func TestToAnOlderReleaseDowngrades(t *testing.T) {
-	t.Parallel()
+	skipWithoutShell(t)
 
 	f := newFixture(t, "v2.0.0", "v1.0.0")
 	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0", "allow-downgrade": true}, "", false)

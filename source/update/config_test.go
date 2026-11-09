@@ -184,6 +184,9 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if want := 5 * time.Minute; r.DownloadTimeout != want {
 		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, want)
 	}
+	if want := 10 * time.Second; r.PreflightTimeout != want {
+		t.Errorf("PreflightTimeout = %v, want %v", r.PreflightTimeout, want)
+	}
 	if r.EvalSymlinks == nil {
 		t.Fatal("EvalSymlinks = nil, want filepath.EvalSymlinks")
 	}
@@ -400,6 +403,7 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	c.MaxDownloadBytes = 1024
 	c.MaxExtractBytes = 2048
 	c.DownloadTimeout = 7 * time.Second
+	c.PreflightTimeout = 3 * time.Second
 	c.AssetTemplate = "{name}-{os}-{arch}.{ext}"
 	c.AssetExt = "zip"
 	c.ChecksumsAsset = "SHA256SUMS"
@@ -439,6 +443,9 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	}
 	if r.DownloadTimeout != 7*time.Second {
 		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, 7*time.Second)
+	}
+	if r.PreflightTimeout != 3*time.Second {
+		t.Errorf("PreflightTimeout = %v, want %v", r.PreflightTimeout, 3*time.Second)
 	}
 	if r.AssetTemplate != "{name}-{os}-{arch}.{ext}" {
 		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, "{name}-{os}-{arch}.{ext}")
@@ -798,6 +805,9 @@ func TestResolvedFillsDefaultsFromTheIdentity(t *testing.T) {
 	if r.ChecksumsAsset != asset.DefaultChecksumsTemplate {
 		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, asset.DefaultChecksumsTemplate)
 	}
+	if r.PreflightTimeout != 10*time.Second {
+		t.Errorf("PreflightTimeout = %v, want %v", r.PreflightTimeout, 10*time.Second)
+	}
 }
 
 func TestResolvedRejectsInvalidConfig(t *testing.T) {
@@ -931,6 +941,7 @@ func TestValidateRejectsNegativeDownloadLimits(t *testing.T) {
 		{"negative MaxDownloadBytes", func(c *Config) { c.MaxDownloadBytes = -1 }, "MaxDownloadBytes"},
 		{"negative MaxExtractBytes", func(c *Config) { c.MaxExtractBytes = -1 }, "MaxExtractBytes"},
 		{"negative DownloadTimeout", func(c *Config) { c.DownloadTimeout = -time.Second }, "DownloadTimeout"},
+		{"negative PreflightTimeout", func(c *Config) { c.PreflightTimeout = -time.Nanosecond }, "PreflightTimeout"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -963,7 +974,9 @@ func TestValidateAcceptsZeroAndPositiveDownloadLimits(t *testing.T) {
 			c.MaxDownloadBytes = 1
 			c.MaxExtractBytes = 1
 			c.DownloadTimeout = time.Nanosecond
+			c.PreflightTimeout = time.Nanosecond
 		}},
+		{"long PreflightTimeout", func(c *Config) { c.PreflightTimeout = 24 * time.Hour }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -150,7 +150,9 @@ golangci-lint run
   the error `CheckDowngrade` returns. `classifyError` maps deadline and timeout failures to
   `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
   `UnsafeEntryError`, `BinaryNotFoundError`, `MultipleBinariesError`, `UnsupportedFormatError`,
-  `ErrEmptyAsset`, `ErrNotGzip` and `ErrTruncatedGzip` are the errors `Extract` returns. `PermissionError` (unwraps to
+  `ErrEmptyAsset`, `ErrNotGzip` and `ErrTruncatedGzip` are the errors `Extract` returns.
+  `PreflightError` (`Path`, `Reason`, `Stderr`, `Err`; unwraps to `Err`) is the error `CheckStaged`
+  returns. `PermissionError` (unwraps to
   `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
   errors `CheckWritable`, `Install` and `Installed` return.
 - `managed.go` — `Config.CheckManaged`, `Detector` and `Install`: resolves the symlinks of the
@@ -244,20 +246,28 @@ golangci-lint run
 - `extract_zip.go` — the zip extractor and its entry policy (`zipEntryCheck`).
 - `target.go` — `Config.Target` (the executable with symlinks resolved, absolute), `Config.CheckWritable`
   (create and remove a temp file in the target's directory), `fsSteps` (the unexported filesystem
-  seam: createTemp, remove, chmod, rename, evalSymlinks, stat, abs), `defaultSteps` and `fsError`,
+  seam: createTemp, remove, chmod, rename, evalSymlinks, stat, abs, run), `defaultSteps` and `fsError`,
   which maps a permission failure to `*PermissionError`.
 - `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
   `backupLocked`. `install_windows_test.go` replaces a running executable on Windows.
 - `release.go` — `Config.CheckRelease`: refuses a development build with a `*DevBuildError`.
-- `apply.go` — `Config.Apply(ctx, sel, opts...)`, eight steps stopping at the first error: 1
+- `preflight.go` — `Preflight` (a tool's hook over a `StagedBinary`; an error vetoes the install),
+  `StagedBinary` and `Config.CheckStaged(ctx, s, sel)`: runs the staged binary with `version --json`
+  and refuses it unless the answer is the selected release for the resolved GOOS and GOARCH, then
+  runs each `Config.Preflight` hook in order. `Config.PreflightTimeout` (default 10s, not negative)
+  kills the run. The binary's standard output is capped at 64 KiB. Every refusal is a
+  `*PreflightError`; a done `ctx` returns its own error. It closes the staged file's write
+  descriptor (a file open for writing cannot be run) and neither keeps nor discards the `*Staged`.
+- `apply.go` — `Config.Apply(ctx, sel, opts...)`, nine steps stopping at the first error: 1
   CheckManaged, 2 CheckWritable, 3 CheckDowngrade of `sel.Tag` (skipped, with its State read, by
-  `AllowDowngrade()`), 4 Download, 5 Target, 6 Extract into the target's directory, 7 Install, 8 the
-  record (`recordApplied`): under the Locker, load the State, raise `HighestApplied` to the tag when
-  newer, save the whole State. The guard fails closed (an unreadable State refuses the install); the
-  record fails open (a failed lock, load or save is ignored, since the new binary's `Version` floors
-  the next run). Steps 1 to 3 make no request. It returns the `*Installed` with the backup kept, runs
-  no hook and calls neither `Discard` nor `Rollback`. It closes the archive itself only when Target
-  fails. `WithDownloadOptions` passes options to Download.
+  `AllowDowngrade()`), 4 Download, 5 Target, 6 Extract into the target's directory, 7 CheckStaged
+  (a refusal discards the staged file), 8 Install, 9 the record (`recordApplied`): under the
+  Locker, load the State, raise `HighestApplied` to the tag when newer, save the whole State. The
+  guard fails closed (an unreadable State refuses the install); the record fails open (a failed
+  lock, load or save is ignored, since the new binary's `Version` floors the next run). Steps 1 to 3
+  make no request. It returns the `*Installed` with the backup kept, runs no hook and calls neither
+  `Discard` nor `Rollback`. It closes the archive itself only when Target fails.
+  `WithDownloadOptions` passes options to Download.
 - `updatecmd/` — `Commands(cfg, opts...) []*spec.Command`: one `update` command with `--check`,
   `--yes`/`-y`, `--to`, `--allow-downgrade` and `--channel`, carrying `spec.SkipUpdateCheck`.
   - `ExitUpdateAvailable = 10` is the exit code of `--check` when a newer release exists; the
@@ -340,7 +350,9 @@ golangci-lint run
 - `Staged` exposes `Name`, `Keep` (close, leave on disk so a rename can follow) and `Discard` (close,
   then remove). Whichever is called first decides; every later call of either does nothing and
   returns nil. Not safe for concurrent use.
-- The staged file is `os.CreateTemp(dir, TempPrefix+"*")`, mode 0700 whatever mode the archive
+- The staged file is `os.CreateTemp(dir, TempPrefix+"*"+ext)`, where `ext` is the extension of the
+  binary's file name (`.exe` for a Windows target, empty otherwise): the name is `TempPrefix`, a
+  random part and `ext`, so a staged Windows binary can be run. Mode 0700 whatever mode the archive
   records, synced. `dir` is supplied by the caller, has no default and must exist; nothing creates
   it. The caller picks the directory of the file it will rename into place, so the rename stays on
   one filesystem. `TempDir` is for the download only.
@@ -405,6 +417,8 @@ golangci-lint run
   The project's `*_windows_test.go` files also turn on `GOOS=windows go vet` in `ci-build.yml` and
   `release.yml`. The injected-error tests cover the locked-backup branch on Linux, where coverage
   is measured.
+  The Windows job does not run the preflight's real execution of a staged `.exe`: the release
+  binary `updatetest` packs is a shell script, so every test that executes it skips on Windows.
 - Limits (ADR-0031): an antivirus or indexer lock can fail a rename, and then the executable is
   untouched or the backup is renamed back and the user retries, or it keeps `.old` from being
   removed, and the next run removes it; there is no retry loop. Paths with spaces are supported.
@@ -444,12 +458,18 @@ golangci-lint run
 
 - Reach the outside world only through a `Config` field, never through `http.DefaultClient`,
   `time.Now`, `runtime.GOOS`, `os.Getenv` and the like called directly. A new seam is a new `Config`
-  field with a documented zero-value default, resolved in `resolve`; there are three exceptions. One
+  field with a documented zero-value default, resolved in `resolve`; there are four exceptions. One
   is `Install`'s unexported `fsSteps` (see the Install contract), which only in-package tests set.
-  Another is the `CheckWait` bound in `Finish`, a `time.NewTimer`: it is wall-clock time, while
-  `Now` stamps state only. The third is the `runtime.GOOS` the `UpdateCheckHooks` pre-run hook
-  passes to `removeStaleBackupOnHost`: it is the host's, which decides whether a backup can be
-  removed while open, while `Config.GOOS` is the target platform's.
+  The second is the exec seam `fsSteps.run`, which `CheckStaged` runs the staged binary through and
+  only in-package tests stub. The third is the `CheckWait` bound in `Finish`, a `time.NewTimer`: it
+  is wall-clock time, while `Now` stamps state only. The fourth is the `runtime.GOOS` the
+  `UpdateCheckHooks` pre-run hook passes to `removeStaleBackupOnHost`: it is the host's, which
+  decides whether a backup can be removed while open, while `Config.GOOS` is the target platform's.
+- A test that executes a staged file (any real `Apply` or `CheckStaged`, `updatecmd` tests included)
+  does not call `t.Parallel()`: a process forked by a parallel test inherits the staged file's
+  write descriptor until it execs, and the exec then fails with `ETXTBSY` ("text file busy").
+  `updatetest.ReleaseBinary`, the shell script `NewRelease` packs, answers `version --json` and is
+  unix-only, so a test that executes it skips on Windows.
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
 - Commands are framework-neutral `spec.Command`s (ADR-0005). `depguard` forbids importing
   `go.vipengele.org/cli/core` and cobra anywhere in the module: update depends on no

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,13 +49,17 @@ func ArchiveName(binary, goos, goarch, ext string) string {
 // defaults: an archive of the extension [asset.DefaultExtFor] returns for [runtime.GOOS] ([ExtZip]
 // on "windows", [ExtTarGz] elsewhere), named by [ArchiveName] for [runtime.GOOS] and [runtime.GOARCH],
 // holding one executable entry named as the updater looks for the binary on [runtime.GOOS] —
-// binary, followed by ".exe" on "windows" — whose content is a shell script printing tag, and the
-// checksums file [DefaultChecksumsName]. It fails t when the archive cannot be built.
+// binary, followed by ".exe" on "windows" — and the checksums file [DefaultChecksumsName]. The
+// entry is [ReleaseBinary], a POSIX shell script, so the release runs on unix only. Invoked with
+// the arguments "version --json" it prints one line of schema-1 version JSON with every key set:
+// schema 1, version tag, a fixed commit and date, go [runtime.Version], os [runtime.GOOS], arch
+// [runtime.GOARCH] and dev false. Invoked any other way it prints tag. It fails t when the archive
+// cannot be built.
 func NewRelease(t testing.TB, owner, repo, tag, binary string) Release {
 	t.Helper()
 	ext := asset.DefaultExtFor(runtime.GOOS)
 	archive, err := BuildArchive(ext, []Entry{
-		{Name: binaryFileName(binary, runtime.GOOS), Mode: 0o755, Body: []byte("#!/bin/sh\necho " + tag + "\n")},
+		{Name: binaryFileName(binary, runtime.GOOS), Mode: 0o755, Body: ReleaseBinary(tag)},
 	})
 	if err != nil {
 		t.Fatalf("updatetest: building the archive of %s: %v", tag, err)
@@ -76,6 +81,46 @@ func binaryFileName(binary, goos string) string {
 		return binary + ".exe"
 	}
 	return binary
+}
+
+// versionJSON is the schema-1 "version --json" object, in the key order the command writes.
+type versionJSON struct {
+	Schema  int    `json:"schema"`
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Date    string `json:"date"`
+	Go      string `json:"go"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	Dev     bool   `json:"dev"`
+}
+
+// ReleaseBinary returns the content of the executable [NewRelease] packs for tag: a POSIX shell
+// script, so it runs on unix only. Invoked with the arguments "version --json" it prints the schema-1
+// version document; invoked any other way it prints tag. The tag and the JSON reach the script as
+// single-quoted literals, so no character of either is interpreted by the shell.
+func ReleaseBinary(tag string) []byte {
+	// Marshal cannot fail for a struct of strings, an int and a bool.
+	doc, _ := json.Marshal(versionJSON{
+		Schema:  1,
+		Version: tag,
+		Commit:  "0123456789abcdef0123456789abcdef01234567",
+		Date:    "2026-01-02T03:04:05Z",
+		Go:      runtime.Version(),
+		OS:      runtime.GOOS,
+		Arch:    runtime.GOARCH,
+	})
+	return []byte("#!/bin/sh\n" +
+		"if [ \"$1\" = version ] && [ \"$2\" = --json ]; then\n" +
+		"\tprintf '%s\\n' " + shellQuote(string(doc)) + "\n" +
+		"else\n" +
+		"\tprintf '%s\\n' " + shellQuote(tag) + "\n" +
+		"fi\n")
+}
+
+// shellQuote returns s as one single-quoted shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Server is a fake GitHub serving one [Release] over HTTP, on these routes, each a [Target]:
