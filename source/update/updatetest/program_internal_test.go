@@ -67,6 +67,27 @@ func TestReleaseExecutableFailsWithTheBuildOutput(t *testing.T) {
 	}
 }
 
+func TestReleaseExecutableStepsAreTestHelpers(t *testing.T) {
+	t.Parallel()
+
+	// Each step marks itself a helper, so a failure in it names the test's own call:
+	// releaseExecutable once, and ReleaseExecutable once for itself and once for the step it calls.
+	for _, tc := range []struct {
+		name string
+		call func(tb testing.TB)
+		want int64
+	}{
+		{"releaseExecutable", func(tb testing.TB) { releaseExecutable(tb, programTag, "linux", "amd64") }, 1},
+		{"ReleaseExecutable", func(tb testing.TB) { ReleaseExecutable(tb, programTag) }, 2},
+	} {
+		h := &helperCountingTB{TB: t}
+		tc.call(h)
+		if got := h.helpers.Load(); got != tc.want {
+			t.Errorf("%s called Helper %d times, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestBuildReleaseProgramFailsWithoutItsDirectory(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "missing")
