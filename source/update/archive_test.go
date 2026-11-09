@@ -3,6 +3,7 @@ package update
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,6 +262,13 @@ func TestArchiveFinishFailureLeavesFileToDiscard(t *testing.T) {
 	if err := a.f.Close(); err != nil {
 		t.Fatalf("closing the file: %v", err)
 	}
+	// The failure a closed file reports depends on the OS, so the expected one is observed.
+	_, statErr := a.f.Stat()
+	var pathErr *fs.PathError
+	if !errors.As(statErr, &pathErr) {
+		t.Fatalf("Stat on the closed file = %v, want a *fs.PathError", statErr)
+	}
+	closedErr := pathErr.Err
 	removed := 0
 	a.remove = func(name string) error {
 		removed++
@@ -268,8 +276,8 @@ func TestArchiveFinishFailureLeavesFileToDiscard(t *testing.T) {
 	}
 
 	err = a.finish()
-	if !errors.Is(err, os.ErrClosed) {
-		t.Errorf("finish = %v, want it to wrap the failure", err)
+	if !errors.Is(err, closedErr) {
+		t.Errorf("finish = %v, want it to wrap %v", err, closedErr)
 	}
 	if err == nil || !strings.HasPrefix(err.Error(), "update: rewinding temporary file: ") {
 		t.Errorf("finish = %v, want it to name the rewind", err)
@@ -277,12 +285,12 @@ func TestArchiveFinishFailureLeavesFileToDiscard(t *testing.T) {
 	if removed != 0 {
 		t.Errorf("finish removed the file %d times, want it left for the caller", removed)
 	}
-	if _, statErr := os.Stat(a.Name()); statErr != nil {
-		t.Errorf("Stat after finish: %v, want the file still present", statErr)
+	if _, err := os.Stat(a.Name()); err != nil {
+		t.Errorf("Stat after finish: %v, want the file still present", err)
 	}
 
 	err = a.discard(err)
-	if !errors.Is(err, os.ErrClosed) || !errors.Is(err, errRemove) {
+	if !errors.Is(err, closedErr) || !errors.Is(err, errRemove) {
 		t.Errorf("discard = %v, want it to wrap the finish failure and the remove error", err)
 	}
 	assertDirEmpty(t, dir)
