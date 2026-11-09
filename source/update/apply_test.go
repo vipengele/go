@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -96,12 +97,27 @@ func (f applyFixture) stateDir(t *testing.T) string {
 	return r.StateDir
 }
 
-// apply runs Apply with opts and fails t unless it installs the release, settling the update when
-// t ends.
+// steps returns the real fsSteps with run answering "version --json" as the release's binary does
+// for the Config's platform, without running it. A test that runs the staged binary for real does
+// not run in parallel (see TestApplyRunsTheStagedBinary), so every parallel test that reaches the
+// preflight goes through these steps.
+func (f applyFixture) steps(t *testing.T) fsSteps {
+	t.Helper()
+
+	r, err := f.cfg.resolve()
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	return answering(versionJSON(f.sel.Tag, r.GOOS, r.GOARCH), "", nil, nil)
+}
+
+// apply runs Apply with opts through f's steps and fails t unless it installs the release,
+// settling the update when t ends.
 func (f applyFixture) apply(t *testing.T, opts ...ApplyOption) {
 	t.Helper()
 
-	installed, err := f.cfg.Apply(context.Background(), f.sel, opts...)
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t), opts...)
 	if err != nil {
 		t.Fatalf("Apply error = %v, want nil", err)
 	}
@@ -112,7 +128,7 @@ func (f applyFixture) apply(t *testing.T, opts ...ApplyOption) {
 
 	t.Cleanup(func() { _ = installed.Discard() })
 
-	if got, want := readFile(t, f.exe), "#!/bin/sh\necho "+dlTag+"\n"; got != want {
+	if got, want := readFile(t, f.exe), string(updatetest.ReleaseBinary(dlTag)); got != want {
 		t.Errorf("executable holds %q, want the release's binary %q", got, want)
 	}
 }
@@ -138,13 +154,25 @@ func TestApplyInstallsTheRelease(t *testing.T) {
 
 	f := newApplyFixture(t)
 
-	var calls []progressCall
-	installed, err := f.cfg.Apply(context.Background(), f.sel, WithDownloadOptions(recordProgress(&calls)))
+	r, err := f.cfg.resolve()
 	if err != nil {
-		t.Fatalf("Apply error = %v", err)
+		t.Fatalf("resolve: %v", err)
+	}
+
+	var runs [][]string
+	s := answering(versionJSON(dlTag, r.GOOS, r.GOARCH), "", nil, &runs)
+
+	var calls []progressCall
+	installed, err := f.cfg.apply(context.Background(), f.sel, s, WithDownloadOptions(recordProgress(&calls)))
+	if err != nil {
+		t.Fatalf("apply error = %v", err)
 	}
 
 	t.Cleanup(func() { _ = installed.Discard() })
+
+	if len(runs) != 1 || !slices.Equal(runs[0][1:], []string{"version", "--json"}) {
+		t.Errorf("runs = %q, want one run with the arguments version --json", runs)
+	}
 
 	if installed.Path() != f.exe {
 		t.Errorf("Path = %q, want %q", installed.Path(), f.exe)
@@ -155,7 +183,7 @@ func TestApplyInstallsTheRelease(t *testing.T) {
 	}
 
 	// The binary updatetest.NewRelease packs prints the release's tag.
-	want := "#!/bin/sh\necho " + dlTag + "\n"
+	want := string(updatetest.ReleaseBinary(dlTag))
 	if got := readFile(t, f.exe); got != want {
 		t.Errorf("executable holds %q, want the release's binary %q", got, want)
 	}
@@ -391,7 +419,7 @@ func TestApplyReturnsTheInstallErrorAndRecordsNothing(t *testing.T) {
 	f.cfg.StateStore = store
 	cause := errors.New("rename refused")
 
-	s := defaultSteps()
+	s := f.steps(t)
 	s.rename = func(string, string) error { return cause }
 
 	installed, err := f.cfg.apply(context.Background(), f.sel, s)
@@ -630,4 +658,214 @@ func TestApplyIgnoresAFailedLockOfTheRecord(t *testing.T) {
 	if saves := store.recordedSaves(); len(saves) != 0 {
 		t.Errorf("saves = %+v, want none", saves)
 	}
+}
+
+// TestApplyRunsTheStagedBinary runs the release's binary for real in the preflight. It does not run
+// in parallel: a process another test forks inherits every descriptor open at that moment until it
+// execs, so a staged file some parallel test still holds open for writing would fail this exec
+// with ETXTBSY.
+func TestApplyRunsTheStagedBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the release's binary is a POSIX shell script")
+	}
+
+	f := newApplyFixture(t)
+
+	var seen []StagedBinary
+	f.cfg.Preflight = []Preflight{
+		func(_ context.Context, b StagedBinary) error {
+			seen = append(seen, b)
+			return nil
+		},
+	}
+
+	installed, err := f.cfg.Apply(context.Background(), f.sel)
+	if err != nil {
+		t.Fatalf("Apply error = %v", err)
+	}
+
+	t.Cleanup(func() { _ = installed.Discard() })
+
+	if len(seen) != 1 {
+		t.Fatalf("Preflight hook calls = %d, want 1", len(seen))
+	}
+
+	want := StagedBinary{Path: seen[0].Path, Version: dlTag, Schema: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
+	if seen[0] != want {
+		t.Errorf("StagedBinary = %+v, want %+v", seen[0], want)
+	}
+
+	if filepath.Dir(seen[0].Path) != f.dir {
+		t.Errorf("StagedBinary.Path = %q, want one in %q", seen[0].Path, f.dir)
+	}
+
+	if got, want := readFile(t, f.exe), string(updatetest.ReleaseBinary(dlTag)); got != want {
+		t.Errorf("executable holds %q, want the release's binary %q", got, want)
+	}
+}
+
+func TestApplyRefusesABinaryThePreflightRefuses(t *testing.T) {
+	t.Parallel()
+
+	veto := errors.New("database schema too new")
+
+	tests := []struct {
+		name  string
+		setup func(f *applyFixture, s *fsSteps, goos, goarch string)
+		cause error
+	}{
+		{
+			name: "wrong version",
+			setup: func(_ *applyFixture, s *fsSteps, goos, goarch string) {
+				s.run = answering(versionJSON("v9.9.9", goos, goarch), "", nil, nil).run
+			},
+		},
+		{
+			name: "hook veto",
+			setup: func(f *applyFixture, s *fsSteps, goos, goarch string) {
+				s.run = answering(versionJSON(dlTag, goos, goarch), "", nil, nil).run
+				f.cfg.Preflight = []Preflight{func(context.Context, StagedBinary) error { return veto }}
+			},
+			cause: veto,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newApplyFixture(t)
+			store := &fakeStore{loads: []loadResult{{}}}
+			f.cfg.StateStore = store
+
+			r, err := f.cfg.resolve()
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+
+			var log stepLog
+			s := loggedSteps(&log)
+			tt.setup(&f, &s, r.GOOS, r.GOARCH)
+
+			installed, err := f.cfg.apply(context.Background(), f.sel, s)
+			if installed != nil {
+				t.Errorf("apply Installed = %v, want nil", installed)
+			}
+
+			var pe *PreflightError
+			if !errors.As(err, &pe) {
+				t.Fatalf("apply error = %v, want a *PreflightError", err)
+			}
+
+			if tt.cause != nil && !errors.Is(err, tt.cause) {
+				t.Errorf("apply error = %v, want one matching %v", err, tt.cause)
+			}
+
+			assertNoReplacement(t, &log)
+			f.assertUntouched(t)
+			assertNothingRecorded(t, store)
+		})
+	}
+}
+
+func TestApplyPassesAParentCancelDuringThePreflightThrough(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := &fakeStore{loads: []loadResult{{}}}
+	f.cfg.StateStore = store
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var log stepLog
+	s := loggedSteps(&log)
+	s.run = func(context.Context, string, []string, io.Writer, io.Writer) error {
+		cancel()
+		return ctx.Err()
+	}
+
+	installed, err := f.cfg.apply(ctx, f.sel, s)
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("apply error = %v, want context.Canceled", err)
+	}
+
+	var pe *PreflightError
+	if errors.As(err, &pe) {
+		t.Errorf("apply error = %v, want no *PreflightError", err)
+	}
+
+	assertNoReplacement(t, &log)
+	f.assertUntouched(t)
+	assertNothingRecorded(t, store)
+}
+
+// assertNoReplacement fails t if log holds a chmod or a rename: the steps that replace the
+// executable.
+func assertNoReplacement(t *testing.T, log *stepLog) {
+	t.Helper()
+
+	for _, call := range log.list() {
+		if strings.HasPrefix(call, "chmod ") || strings.HasPrefix(call, "rename ") {
+			t.Errorf("steps = %q, want no chmod and no rename", log.list())
+			return
+		}
+	}
+}
+
+// assertNothingRecorded fails t unless store was loaded only by the downgrade guard and never
+// saved, so HighestApplied is as it was.
+func assertNothingRecorded(t *testing.T, store *fakeStore) {
+	t.Helper()
+
+	if store.loadCalls != 1 {
+		t.Errorf("Load calls = %d, want 1, the guard's", store.loadCalls)
+	}
+
+	if saves := store.recordedSaves(); len(saves) != 0 {
+		t.Errorf("saves = %+v, want none", saves)
+	}
+}
+
+// TestApplyJoinsTheDiscardFailureOntoThePreflightRefusal replaces the staged file with a directory
+// holding a file while the preflight runs, so removing the staged binary fails.
+func TestApplyJoinsTheDiscardFailureOntoThePreflightRefusal(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	f.cfg.StateStore = &fakeStore{loads: []loadResult{{}}}
+
+	s := defaultSteps()
+	s.run = func(_ context.Context, name string, _ []string, _, _ io.Writer) error {
+		if err := os.Remove(name); err != nil {
+			return err
+		}
+
+		if err := os.Mkdir(name, 0o700); err != nil {
+			return err
+		}
+
+		return os.WriteFile(filepath.Join(name, "keep"), nil, 0o600)
+	}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, s)
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	var pe *PreflightError
+	if !errors.As(err, &pe) {
+		t.Fatalf("apply error = %v, want a *PreflightError", err)
+	}
+
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) || pathErr.Op != "remove" {
+		t.Errorf("apply error = %v, want it to carry the failed remove of the staged binary", err)
+	}
+
+	t.Cleanup(func() { _ = os.RemoveAll(pe.Path) })
 }

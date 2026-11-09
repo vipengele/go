@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -136,6 +139,61 @@ func TestNewReleaseIsTheDefaultRelease(t *testing.T) {
 	got := readTarGz(t, rel.Archive)
 	if len(got) != 1 || got[0].Name != testBinary || got[0].Mode != 0o755 || !strings.Contains(string(got[0].Body), testTag) {
 		t.Errorf("archive entries = %+v, want one executable %q printing %s", got, testBinary, testTag)
+	}
+}
+
+func TestReleaseBinaryAnswersVersionJSONAndEchoesTheTag(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the release binary is a shell script")
+	}
+	const tag = "v1.2.3-it's"
+	rel := updatetest.NewRelease(t, testOwner, testRepo, tag, testBinary)
+	entries := readTarGz(t, rel.Archive)
+	if len(entries) != 1 {
+		t.Fatalf("archive entries = %+v, want one", entries)
+	}
+	path := filepath.Join(t.TempDir(), testBinary)
+	if err := os.WriteFile(path, entries[0].Body, 0o700); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	out, err := exec.CommandContext(t.Context(), path, "version", "--json").Output()
+	if err != nil {
+		t.Fatalf("version --json: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decoding %q: %v", out, err)
+	}
+	want := map[string]any{
+		"schema":  float64(1),
+		"version": tag,
+		"commit":  "0123456789abcdef0123456789abcdef01234567",
+		"date":    "2026-01-02T03:04:05Z",
+		"go":      runtime.Version(),
+		"os":      runtime.GOOS,
+		"arch":    runtime.GOARCH,
+		"dev":     false,
+	}
+	if len(got) != len(want) {
+		t.Errorf("version --json = %v, want exactly the keys of %v", got, want)
+	}
+	for k, w := range want {
+		if g, ok := got[k]; !ok || g != w {
+			t.Errorf("version --json key %q = %v (present %v), want %v", k, g, ok, w)
+		}
+	}
+
+	out, err = exec.CommandContext(t.Context(), path).Output()
+	if err != nil {
+		t.Fatalf("no arguments: %v", err)
+	}
+	if string(out) != tag+"\n" {
+		t.Errorf("output without arguments = %q, want %q", out, tag+"\n")
 	}
 }
 

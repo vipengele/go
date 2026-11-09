@@ -17,7 +17,7 @@ saw:
   other extension than `tar.gz`, `tgz` and `zip` when the template uses `{ext}`.
 - The budget is `Config.MaxExtractBytes` (default 512 MiB, zero = default, negative invalid), enforced with the
   `readBound` limit+1 pattern; `*ExtractLimitError` is distinct from `*SizeLimitError`, which carries a URL.
-- The staged file is `os.CreateTemp(dir, TempPrefix+"*")` in a directory the caller supplies, so a later rename
+- The staged file is `os.CreateTemp(dir, TempPrefix+"*"+filepath.Ext(binaryFileName(r)))` (so a Windows binary keeps `.exe` and can be run) in a directory the caller supplies, so a later rename
   onto the managed binary stays on one filesystem; `Config.TempDir` is for the download only. It is chmod 0700 and
   synced. `Staged.Keep` and `Staged.Discard` are separate because Windows cannot remove an open file.
 - `resolve` rejects unknown extensions before `Extract` picks an extractor, so `*UnsupportedFormatError` is not

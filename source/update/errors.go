@@ -34,16 +34,22 @@ type StatusError struct {
 // newStatusError returns a [StatusError] whose Body is body cut to 1 KiB, on a character
 // boundary so the result stays valid UTF-8 when body is.
 func newStatusError(url string, statusCode int, body string) *StatusError {
-	if len(body) > maxErrorBody {
-		cut := maxErrorBody
-		for cut > 0 && !utf8.RuneStart(body[cut]) {
-			cut--
-		}
+	return &StatusError{URL: url, StatusCode: statusCode, Body: cutErrorBody(body)}
+}
 
-		body = body[:cut]
+// cutErrorBody returns body cut to [maxErrorBody] bytes, on a character boundary so the result
+// stays valid UTF-8 when body is. A body within the limit is returned as it is.
+func cutErrorBody(body string) string {
+	if len(body) <= maxErrorBody {
+		return body
 	}
 
-	return &StatusError{URL: url, StatusCode: statusCode, Body: body}
+	cut := maxErrorBody
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+
+	return body[:cut]
 }
 
 // Error implements error.
@@ -511,3 +517,38 @@ func (e *DowngradeError) Error() string {
 		e.Name, e.Version, e.Floor,
 	)
 }
+
+// PreflightError reports a staged binary that [Config.CheckStaged] refused: running it with
+// "version --json" failed, timed out or printed an answer that is not the selected release for
+// the Config's platform, or a [Preflight] hook vetoed it.
+type PreflightError struct {
+	// Path is the path of the staged binary.
+	Path string
+	// Reason says why the binary was refused, such as the version it reported against the tag
+	// that was selected.
+	Reason string
+	// Stderr is the start of what the binary wrote to its standard error, at most 1 KiB, cut on a
+	// character boundary; empty when it wrote nothing or did not run.
+	Stderr string
+	// Err is the underlying cause: the error running the binary, [context.DeadlineExceeded] when
+	// PreflightTimeout expired, the error decoding its output, or the hook's error. It is nil when
+	// the refusal has no cause beyond Reason.
+	Err error
+}
+
+// Error implements error.
+func (e *PreflightError) Error() string {
+	msg := fmt.Sprintf("update: preflight of %s: %s", e.Path, e.Reason)
+	if e.Err != nil {
+		msg = fmt.Sprintf("%s: %v", msg, e.Err)
+	}
+
+	if e.Stderr != "" {
+		msg = fmt.Sprintf("%s; stderr: %s", msg, e.Stderr)
+	}
+
+	return msg
+}
+
+// Unwrap returns the underlying cause.
+func (e *PreflightError) Unwrap() error { return e.Err }
