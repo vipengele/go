@@ -47,12 +47,11 @@ func buildReleaseProgram(dir, tag, goos, goarch string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	bin := filepath.Join(dir, "release")
-	build := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", bin, ".")
+	build := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", "release", ".")
 	build.Dir = dir
 	build.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0", "GOWORK=off", "GOFLAGS=")
 	if out, err := build.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("go build: %w\n%s", err, out)
 	}
-	return os.ReadFile(bin)
+	return os.ReadFile(filepath.Clean(filepath.Join(dir, "release")))
 }
