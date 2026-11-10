@@ -3,6 +3,11 @@
 # neither signedBegin nor signedEnd, which PowerShell rejects. They stay LF on every platform.
 installscript/*.in text eol=lf
 
+# The GoReleaser config template is embedded and rendered the same way: its optional regions are
+# cut at marker lines ending in "\n", so a CRLF checkout leaves every marker and region in the
+# rendered config, which is no longer valid YAML. It stays LF on every platform.
+goreleaser/*.in text eol=lf
+
 # The minisign interop vector is the exact bytes an independent signer produced: the signatures
 # cover checksums.txt as written, and every file is parsed line by line with "\n" as the line
 # ending. Git never converts their line endings, on checkout or on commit.
