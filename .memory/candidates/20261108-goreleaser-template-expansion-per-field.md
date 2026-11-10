@@ -4,7 +4,7 @@ saw:
   - source/update/goreleaser/render.go
   - source/update/goreleaser/goreleaser.yaml.in
   - source/update/goreleaser/roundtrip_test.go
-  - docs/adr/0029-a-tool-renders-its-goreleaser-config-from-its-update-config.md
+  - docs/adr/0032-a-tool-renders-its-goreleaser-config-from-its-update-config.md
 ---
 
 What a GoReleaser v2 config field does with its value decides how update/goreleaser must escape it.
@@ -15,7 +15,7 @@ What a GoReleaser v2 config field does with its value decides how update/gorelea
   the link variables and the signing key path only. Archive and checksum `name_template`s are
   already escaped by `asset.GoReleaserArchive`/`GoReleaserChecksum`, which escape `{` only.
 - `{{ .Version }}` is the tag without its leading `v`; a binary linked with it fails
-  `cli/spec/version.IsRelease` and never updates itself. The ldflags use `{{ .Tag }}` (ADR-0029).
+  `cli/spec/version.IsRelease` and never updates itself. The ldflags use `{{ .Tag }}` (ADR-0032).
 - With `formats: [binary]`, GoReleaser names the asset `name_template + binary.Ext()`, which is
   `.exe` on windows (internal/pipe/archive/archive.go upstream), so a raw-binary AssetTemplate
   cannot target windows: `ErrRawWindowsAsset`. An archive is named `<name>.<format>`, so each

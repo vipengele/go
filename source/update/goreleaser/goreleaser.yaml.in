@@ -17,6 +17,9 @@ builds:
 archives:
   - name_template: @@ARCHIVE_NAME@@
     formats: @@FORMATS@@
+@@OVERRIDES_BEGIN@@
+    format_overrides: @@FORMAT_OVERRIDES@@
+@@OVERRIDES_END@@
 checksum:
   name_template: @@CHECKSUM_NAME@@
   algorithm: sha256

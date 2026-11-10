@@ -4,7 +4,8 @@ Status: accepted. It follows the install-script mechanism of ADR-0023, signs as 
 signature of ADR-0024 and the unsigned opt-out of ADR-0026 decide, and keeps to ADR-0008, which
 takes the identity of `update` from `cli/spec` and keeps it from importing `cli/core`. The rendered
 `formats` and `binary` are the archive format and binary name that the extraction of ADR-0021
-derives from the same `Config`.
+derives from the same `Config`, and the format of each platform follows the per-GOOS default
+extension of ADR-0031.
 
 `update` selects, verifies and extracts the assets of a release by the names its `Config` gives
 them. A GoReleaser config written by hand drifts from those names, and a tool then publishes assets
@@ -33,18 +34,26 @@ its own updater does not find. `go.vipengele.org/update/goreleaser` renders the 
   inserted value is a double-quoted YAML scalar from one escaping helper. A value GoReleaser
   expands as a template, the binary name, the link variables and the key path, has each `{` and `$`
   written as a template action that yields it. Production code uses no YAML library.
-- **Inputs come from `Config.Resolved`.** Name, binary name, asset template and extension,
-  checksums asset and signature policy are never derived again, so `Render` inherits the
-  requirements of `Resolved` (ADR-0023). `Main`, `Dir`, `Platforms`, `LinkVars` and
-  `SigningKeyPath` come from `Options`.
+- **Inputs come from `Config.Resolved`.** Name, binary name, asset template, checksums asset and
+  signature policy are never derived again, so `Render` inherits the requirements of `Resolved`
+  (ADR-0023). `Main`, `Dir`, `Platforms`, `LinkVars` and `SigningKeyPath` come from `Options`.
+- **The extension is decided per platform.** `Resolved` fills an empty `AssetExt` for the one GOOS
+  the `Config` names, the host's by default, but a release serves every platform. The extension of
+  a platform is the caller's `AssetExt` when set, else `asset.DefaultExtFor` of that platform's
+  GOOS (ADR-0031): `zip` for windows, `tar.gz` for every other GOOS. The archive's `formats` is the
+  format of the first GOOS of `Platforms`; a `format_overrides` entry (`goos`, `formats`) gives each
+  other GOOS whose format differs its own, and the key is left out when every platform shares one.
+  A raw-binary template is `binary` on every platform. The rendered config is therefore the same on
+  every host and for every GOOS the `Config` names.
 - **Scope is the contract and nothing else.** The config holds `version: 2`, `project_name`, one
   build (`binary`, `main`, `dir` when set, `CGO_ENABLED=0`, `ldflags`, `goos`, `goarch`, `ignore`),
-  one archive (`name_template` from `asset.GoReleaserArchive`, `formats` the `AssetExt`, or `binary`
-  when the template holds no `{ext}`), `checksum` (`asset.GoReleaserChecksum`, `sha256`) and the
+  one archive (`name_template` from `asset.GoReleaserArchive`, `formats` and, when a GOOS differs,
+  `format_overrides`, as above), `checksum` (`asset.GoReleaserChecksum`, `sha256`) and the
   optional `signs`. It holds no `changelog`, `release`, `before` or `snapshot`; a tool adds those
   without changing the keys above. GoReleaser puts its default README and LICENSE files in an
   archive; that is accepted because the extractor takes the one file named `BinaryName` and
-  tolerates the rest. The minimum is GoReleaser v2.6, the first with the plural `formats`.
+  tolerates the rest. The minimum is GoReleaser v2.6, the first with the plural `formats`, in the archive and in
+  `format_overrides`.
 - **Refusals.** `Render` fails, each wrapping a sentinel, on: an empty `Main` (`ErrNoMain`); an
   empty or repeated platform (`ErrEmptyPlatform`, `ErrDuplicatePlatform`); a `ChecksumsAsset`
   holding `{os}` or `{arch}`, since GoReleaser writes one checksums file per release
@@ -64,6 +73,13 @@ its own updater does not find. `go.vipengele.org/update/goreleaser` renders the 
   `yaml/v3` to parse the rendered config; production code does not.
 - **A package-level default for the link variables.** `gochecknoglobals` refuses it; constants and
   `DefaultLinkVars()` give the same defaults.
+- **One `formats` from the resolved `AssetExt`.** It is the extension for the GOOS the `Config`
+  resolves for, the host's by default: rendered on Linux with no `AssetExt`, a windows archive
+  would be published as `tar.gz` while `Select` on windows looks for `zip`, and the same `Config`
+  would render differently on a Windows host.
+- **A fixed `formats` of the non-windows default.** It would need a GOOS standing for "not
+  windows" beside `asset.DefaultExtFor`, a second statement of which GOOS has which default; the
+  first platform's format needs none, and either choice publishes the same names.
 - **Leaving signing to the tool.** The signature name `update` fetches is `<checksums>.minisig`; a
   hand-written `signs` block is one more place for the two to differ.
 

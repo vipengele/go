@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"text/template"
@@ -48,8 +49,14 @@ type ignoredTarget struct {
 }
 
 type archiveConfig struct {
-	NameTemplate string   `yaml:"name_template"`
-	Formats      []string `yaml:"formats"`
+	NameTemplate    string           `yaml:"name_template"`
+	Formats         []string         `yaml:"formats"`
+	FormatOverrides []formatOverride `yaml:"format_overrides"`
+}
+
+type formatOverride struct {
+	Goos    string   `yaml:"goos"`
+	Formats []string `yaml:"formats"`
 }
 
 type checksumConfig struct {
@@ -361,11 +368,19 @@ func TestRenderSigns(t *testing.T) {
 func TestRenderFormats(t *testing.T) {
 	t.Parallel()
 
+	withWindows := []goreleaser.Platform{
+		{GOOS: "linux", GOARCH: "amd64"},
+		{GOOS: "windows", GOARCH: "amd64"},
+		{GOOS: "darwin", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "arm64"},
+	}
 	tests := []struct {
-		name     string
-		template string
-		ext      string
-		want     string
+		name          string
+		template      string
+		ext           string
+		platforms     []goreleaser.Platform
+		want          string
+		wantOverrides []formatOverride
 	}{
 		{name: "default extension", want: "tar.gz"},
 		{name: "tar.gz", template: asset.DefaultTemplate, ext: "tar.gz", want: "tar.gz"},
@@ -373,6 +388,32 @@ func TestRenderFormats(t *testing.T) {
 		{name: "zip", template: asset.DefaultTemplate, ext: "zip", want: "zip"},
 		{name: "raw binary", template: "{name}_{os}_{arch}", want: "binary"},
 		{name: "raw binary ignores the extension", template: "{name}_{os}_{arch}", ext: "zip", want: "binary"},
+		{
+			name:          "default extension with windows",
+			platforms:     withWindows,
+			want:          asset.DefaultExtFor("linux"),
+			wantOverrides: []formatOverride{{Goos: "windows", Formats: []string{asset.DefaultExtFor("windows")}}},
+		},
+		{
+			name: "default extension with windows first",
+			platforms: []goreleaser.Platform{
+				{GOOS: "windows", GOARCH: "amd64"},
+				{GOOS: "linux", GOARCH: "amd64"},
+				{GOOS: "darwin", GOARCH: "arm64"},
+			},
+			want: asset.DefaultExtFor("windows"),
+			wantOverrides: []formatOverride{
+				{Goos: "linux", Formats: []string{asset.DefaultExtFor("linux")}},
+				{Goos: "darwin", Formats: []string{asset.DefaultExtFor("darwin")}},
+			},
+		},
+		{
+			name:      "default extension for windows alone",
+			platforms: []goreleaser.Platform{{GOOS: "windows", GOARCH: "amd64"}},
+			want:      asset.DefaultExtFor("windows"),
+		},
+		{name: "tar.gz with windows", ext: "tar.gz", platforms: withWindows, want: "tar.gz"},
+		{name: "zip with windows", ext: "zip", platforms: withWindows, want: "zip"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -380,12 +421,55 @@ func TestRenderFormats(t *testing.T) {
 			cfg := testConfig(t)
 			cfg.AssetTemplate = tc.template
 			cfg.AssetExt = tc.ext
-			conf := renderParsed(t, cfg, testOptions())
+			opts := testOptions()
+			opts.Platforms = tc.platforms
+			out := render(t, cfg, opts)
+			conf := parse(t, out)
 			if want := []string{tc.want}; !slices.Equal(conf.Archives[0].Formats, want) {
 				t.Errorf("formats = %q, want %q", conf.Archives[0].Formats, want)
 			}
+			if !slices.EqualFunc(conf.Archives[0].FormatOverrides, tc.wantOverrides, func(a, b formatOverride) bool {
+				return a.Goos == b.Goos && slices.Equal(a.Formats, b.Formats)
+			}) {
+				t.Errorf("format_overrides = %+v, want %+v", conf.Archives[0].FormatOverrides, tc.wantOverrides)
+			}
+			if len(tc.wantOverrides) == 0 && bytes.Contains(out, []byte("format_overrides:")) {
+				t.Errorf("the config holds a format_overrides key:\n%s", out)
+			}
 			if conf.Checksum.Algorithm != "sha256" {
 				t.Errorf("checksum algorithm = %q, want sha256", conf.Checksum.Algorithm)
+			}
+		})
+	}
+}
+
+// TestRenderIndependentOfGOOS renders one Config resolved for each of several operating systems
+// and checks the configs are identical: what GoReleaser publishes for a platform depends on that
+// platform, never on the GOOS the Config names or on the host that renders it.
+func TestRenderIndependentOfGOOS(t *testing.T) {
+	t.Parallel()
+
+	opts := goreleaser.Options{Main: "./cmd/atk", Platforms: []goreleaser.Platform{
+		{GOOS: "linux", GOARCH: "amd64"},
+		{GOOS: "darwin", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "amd64"},
+	}}
+	for _, ext := range []string{"", "tar.gz", "zip"} {
+		t.Run("extension "+strconv.Quote(ext), func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig(t)
+			cfg.AssetExt = ext
+			var want []byte
+			for _, goos := range []string{"", "linux", "windows", "darwin"} {
+				cfg.GOOS = goos
+				out := render(t, cfg, opts)
+				if want == nil {
+					want = out
+					continue
+				}
+				if !bytes.Equal(out, want) {
+					t.Errorf("the config rendered with GOOS %q differs from the one with an empty GOOS:\n%s\nwant:\n%s", goos, out, want)
+				}
 			}
 		})
 	}

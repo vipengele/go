@@ -75,12 +75,15 @@ type Options struct {
 var configSource string
 
 // The markers of the optional regions of configSource: the dir key, kept when Options.Dir is set,
-// and the signs block, kept unless the Config allows unsigned releases.
+// the format_overrides key, kept when some goos archives in a format other than the archive's
+// formats, and the signs block, kept unless the Config allows unsigned releases.
 const (
-	dirBegin    = "@@DIR_BEGIN@@\n"
-	dirEnd      = "@@DIR_END@@\n"
-	signedBegin = "@@SIGNED_BEGIN@@\n"
-	signedEnd   = "@@SIGNED_END@@\n"
+	dirBegin       = "@@DIR_BEGIN@@\n"
+	dirEnd         = "@@DIR_END@@\n"
+	overridesBegin = "@@OVERRIDES_BEGIN@@\n"
+	overridesEnd   = "@@OVERRIDES_END@@\n"
+	signedBegin    = "@@SIGNED_BEGIN@@\n"
+	signedEnd      = "@@SIGNED_END@@\n"
 )
 
 // windows is the GOOS for which GoReleaser names a binary with ".exe".
@@ -95,6 +98,12 @@ const windows = "windows"
 // and a platform is windows, [ErrSharedAssetName] when the AssetTemplate renders the same name for
 // two platforms, [ErrInvalidLinkVar] on a link variable that cannot be written into
 // -X, and [ErrNotUTF8] on any value that is not valid UTF-8.
+//
+// The archive of each platform takes the format of the extension update selects on its GOOS: the
+// Config's AssetExt when it is set, else [asset.DefaultExtFor] that GOOS, or "binary" when the
+// AssetTemplate holds no {ext}. The archive's formats is the format of the first GOOS of
+// opts.Platforms, and a format_overrides entry gives each other GOOS whose format differs its own.
+// The GOOS the Config names, the host's when it names none, decides nothing in the output.
 //
 // Every value reaches the config as a double-quoted YAML scalar. A value GoReleaser expands as a
 // template, the binary name, the link variables and the signing key path, has each "{" and "$"
@@ -136,7 +145,11 @@ func Render(cfg update.Config, opts Options) ([]byte, error) {
 			}
 		}
 	}
-	archiveName, checksumName, names, err := translate(r, platforms)
+	exts := make([]string, len(platforms))
+	for i, p := range platforms {
+		exts[i] = archiveFormat(raw, cfg.AssetExt, p.GOOS)
+	}
+	archiveName, checksumName, names, err := translate(r, platforms, exts)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +158,7 @@ func Render(cfg update.Config, opts Options) ([]byte, error) {
 	}
 
 	goos, goarch, ignore := matrix(platforms)
+	baseFormat, overrides := archiveFormats(raw, cfg.AssetExt, goos)
 	ldflags := []string{
 		"-s -w",
 		"-X " + templateLiteral(vars.Version) + "={{ .Tag }}",
@@ -161,11 +175,13 @@ func Render(cfg update.Config, opts Options) ([]byte, error) {
 		"@@GOARCH@@", yamlList(goarch),
 		"@@IGNORE@@", yamlIgnore(ignore),
 		"@@ARCHIVE_NAME@@", yamlQuote(archiveName),
-		"@@FORMATS@@", yamlList([]string{archiveFormat(raw, r.AssetExt)}),
+		"@@FORMATS@@", yamlList([]string{baseFormat}),
+		"@@FORMAT_OVERRIDES@@", yamlOverrides(overrides),
 		"@@CHECKSUM_NAME@@", yamlQuote(checksumName),
 		"@@SIGNING_KEY@@", yamlQuote(templateLiteral(keyPath)),
 	}
 	src := regions(configSource, dirBegin, dirEnd, opts.Dir != "")
+	src = regions(src, overridesBegin, overridesEnd, len(overrides) > 0)
 	src = regions(src, signedBegin, signedEnd, !r.AllowUnsigned)
 	// One pass of a Replacer never scans the text it inserts, so a token inside a value, such as a
 	// main package path holding "@@MAIN@@", stays literal.
@@ -257,25 +273,26 @@ func checkUTF8(r update.Config, opts Options, platforms []Platform, vars LinkVar
 }
 
 // translate returns the GoReleaser name_templates of the archive and of the checksums file of r,
-// and the asset name the AssetTemplate renders for each of platforms, in order. It fails with the
-// error of [asset.GoReleaserArchive], [asset.Render] or [asset.GoReleaserChecksum], prefixed with
-// the field whose template it refused. Each step runs only once every earlier one has succeeded.
-func translate(r update.Config, platforms []Platform) (archive, checksum string, names []string, err error) {
+// and the asset name the AssetTemplate renders for each of platforms, in order, with the extension
+// of the same index of exts. It fails with the error of [asset.GoReleaserArchive], [asset.Render]
+// or [asset.GoReleaserChecksum], prefixed with the field whose template it refused. Each step runs
+// only once every earlier one has succeeded. Render reads no other result alongside an error.
+func translate(r update.Config, platforms []Platform, exts []string) (archive, checksum string, names []string, err error) {
 	field := "AssetTemplate"
 	archive, err = asset.GoReleaserArchive(r.AssetTemplate, r.BinaryName)
 	names = make([]string, len(platforms))
 	for i := 0; err == nil && i < len(platforms); i++ {
 		p := platforms[i]
-		names[i], err = asset.Render(r.AssetTemplate, asset.Fields{Name: r.BinaryName, Tag: "v0.0.0", OS: p.GOOS, Arch: p.GOARCH, Ext: r.AssetExt})
+		names[i], err = asset.Render(r.AssetTemplate, asset.Fields{Name: r.BinaryName, Tag: "v0.0.0", OS: p.GOOS, Arch: p.GOARCH, Ext: exts[i]})
 	}
 	if err == nil {
 		field = "ChecksumsAsset"
 		checksum, err = asset.GoReleaserChecksum(r.ChecksumsAsset, r.BinaryName)
 	}
 	if err != nil {
-		return "", "", nil, fmt.Errorf("goreleaser: %s: %w", field, err)
+		err = fmt.Errorf("goreleaser: %s: %w", field, err)
 	}
-	return archive, checksum, names, nil
+	return archive, checksum, names, err
 }
 
 // checkAssetNames rejects an AssetTemplate tmpl whose names, the name it renders for each of
@@ -330,16 +347,40 @@ func matrix(platforms []Platform) (goos, goarch []string, ignore []Platform) {
 	return goos, goarch, ignore
 }
 
-// archiveFormat returns the GoReleaser archive format of a raw asset, "binary", or of an archive
-// whose extension is ext. GoReleaser names an archive with "." and its format, and each of the
-// extensions a resolved Config allows with a template holding {ext}, "tar.gz", "tgz" and "zip", is
-// a format of that name, so the format is ext itself and GoReleaser publishes the extension update
-// looks for.
-func archiveFormat(raw bool, ext string) string {
+// archiveFormat returns the GoReleaser archive format of the asset built for goos: "binary" for a
+// raw asset, else ext, the Config's AssetExt as the caller set it, or, when it is empty,
+// [asset.DefaultExtFor] goos. GoReleaser names an archive with "." and its format, and each
+// extension a valid Config allows with a template holding {ext}, "tar.gz", "tgz" and "zip", is a
+// format of that name, so GoReleaser publishes the extension update looks for on goos. The format
+// never depends on the GOOS the Config resolves for, so neither does the rendered config.
+func archiveFormat(raw bool, ext, goos string) string {
 	if raw {
 		return "binary"
 	}
+	if ext == "" {
+		return asset.DefaultExtFor(goos)
+	}
 	return ext
+}
+
+// formatOverride is a format_overrides entry: the archive format of every build for GOOS.
+type formatOverride struct {
+	GOOS   string
+	Format string
+}
+
+// archiveFormats returns the archive's formats entry, base, and a format_overrides entry for each
+// of goos, in order, whose [archiveFormat] differs from base. base is the format of goos[0], and
+// GoReleaser applies it to every goos without an entry; formats that agree on every goos need no
+// entry. goos is not empty.
+func archiveFormats(raw bool, ext string, goos []string) (base string, overrides []formatOverride) {
+	base = archiveFormat(raw, ext, goos[0])
+	for _, o := range goos {
+		if f := archiveFormat(raw, ext, o); f != base {
+			overrides = append(overrides, formatOverride{GOOS: o, Format: f})
+		}
+	}
+	return base, overrides
 }
 
 // regions returns src with each region from a begin line to the next end line reduced to the lines
@@ -384,6 +425,15 @@ func yamlIgnore(platforms []Platform) string {
 	entries := make([]string, len(platforms))
 	for i, p := range platforms {
 		entries[i] = "{goos: " + yamlQuote(p.GOOS) + ", goarch: " + yamlQuote(p.GOARCH) + "}"
+	}
+	return "[" + strings.Join(entries, ", ") + "]"
+}
+
+// yamlOverrides returns overrides as a YAML flow sequence of goos and formats mappings.
+func yamlOverrides(overrides []formatOverride) string {
+	entries := make([]string, len(overrides))
+	for i, o := range overrides {
+		entries[i] = "{goos: " + yamlQuote(o.GOOS) + ", formats: " + yamlList([]string{o.Format}) + "}"
 	}
 	return "[" + strings.Join(entries, ", ") + "]"
 }

@@ -123,6 +123,30 @@ func TestRenderRoundTrip(t *testing.T) {
 			}},
 		},
 		{
+			name: "default extension with windows",
+			cfg:  testConfig,
+			opts: goreleaser.Options{Main: "./cmd/atk", Platforms: []goreleaser.Platform{
+				{GOOS: "linux", GOARCH: "amd64"},
+				{GOOS: "linux", GOARCH: "arm64"},
+				{GOOS: "darwin", GOARCH: "arm64"},
+				{GOOS: "windows", GOARCH: "amd64"},
+			}},
+		},
+		{
+			name: "tar.gz with windows",
+			cfg: func(t *testing.T) update.Config {
+				t.Helper()
+				cfg := testConfig(t)
+				cfg.AssetExt = "tar.gz"
+				return cfg
+			},
+			opts: goreleaser.Options{Main: "./cmd/atk", Platforms: []goreleaser.Platform{
+				{GOOS: "linux", GOARCH: "amd64"},
+				{GOOS: "windows", GOARCH: "amd64"},
+				{GOOS: "windows", GOARCH: "arm64"},
+			}},
+		},
+		{
 			name: "raw binary",
 			cfg: func(t *testing.T) update.Config {
 				t.Helper()
@@ -208,10 +232,7 @@ func roundTrip(t *testing.T, cfg update.Config, opts goreleaser.Options) {
 		t.Fatalf("the config builds %v, want %v", built, wantPlatforms)
 	}
 
-	if len(conf.Archives[0].Formats) != 1 {
-		t.Fatalf("formats = %q, want one", conf.Archives[0].Formats)
-	}
-	format := conf.Archives[0].Formats[0]
+	formats := archiveFormats(t, conf.Archives[0])
 	version := strings.TrimPrefix(roundTripTag, "v")
 
 	var assets []published
@@ -219,7 +240,7 @@ func roundTrip(t *testing.T, cfg update.Config, opts goreleaser.Options) {
 		name := execute(t, conf.Archives[0].NameTemplate, archiveData{
 			ProjectName: conf.ProjectName, Version: version, Tag: roundTripTag, Os: p.GOOS, Arch: p.GOARCH,
 		})
-		if format != "binary" {
+		if format := formats(p.GOOS); format != "binary" {
 			name += "." + format
 		}
 		assets = append(assets, published{asset: releaseAsset(name), platform: p})
@@ -277,6 +298,32 @@ func roundTrip(t *testing.T, cfg update.Config, opts goreleaser.Options) {
 		if sel.Signature != wantSignature {
 			t.Errorf("Select for %s/%s signature = %+v, want %+v", a.platform.GOOS, a.platform.GOARCH, sel.Signature, wantSignature)
 		}
+	}
+}
+
+// archiveFormats returns the format GoReleaser archives a build for a goos in, as the archive
+// states it: the formats of its format_overrides entry for that goos, else its formats. It fails
+// the test unless each holds exactly one format and no goos has two entries.
+func archiveFormats(t *testing.T, archive archiveConfig) func(goos string) string {
+	t.Helper()
+	if len(archive.Formats) != 1 {
+		t.Fatalf("formats = %q, want one", archive.Formats)
+	}
+	overrides := make(map[string]string, len(archive.FormatOverrides))
+	for _, o := range archive.FormatOverrides {
+		if len(o.Formats) != 1 {
+			t.Fatalf("format_overrides for %q = %q, want one format", o.Goos, o.Formats)
+		}
+		if _, dup := overrides[o.Goos]; dup {
+			t.Fatalf("format_overrides holds %q twice", o.Goos)
+		}
+		overrides[o.Goos] = o.Formats[0]
+	}
+	return func(goos string) string {
+		if f, ok := overrides[goos]; ok {
+			return f
+		}
+		return archive.Formats[0]
 	}
 }
 
