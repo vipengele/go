@@ -158,3 +158,15 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 25
+    # Grouped dependencies share a single PR. A group exists when its members
+    # must move together: landing one alone breaks the default branch, and the
+    # sibling PR then fails that same broken check — so auto-merge cannot
+    # recover on its own.
+    groups:
+      # @vitest/* packages declare an exact peer dependency on the vitest
+      # release of the same version, so npm ci refuses an update that moves
+      # one of them without the others.
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"

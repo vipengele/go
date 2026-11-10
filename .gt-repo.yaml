@@ -37,6 +37,15 @@ dependabot:
     directory: /source/filelock
   - ecosystem: npm
     directory: /tools/vanity-worker
+    groups:
+      - name: vitest
+        patterns:
+          - vitest
+          - '@vitest/*'
+        note: |-
+          @vitest/* packages declare an exact peer dependency on the vitest
+          release of the same version, so npm ci refuses an update that moves
+          one of them without the others.
 pipeline:
   ci:
     stages:
