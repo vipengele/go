@@ -145,6 +145,32 @@ func ExampleWithInstanceLock() {
 	}
 }
 
+// A program run as a systemd service with Type=notify tells systemd when it is ready, that it is
+// stopping and, with WatchdogSec=, that its liveness checks pass. A program on cli/core passes the
+// LookupEnv of its spec.Env; os.LookupEnv stands in for it here. Outside systemd nothing is sent.
+func ExampleWithSystemd() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	health := daemon.NewHealth()
+	worker := daemon.Func("worker", func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	sup, err := daemon.New([]daemon.Runner{worker},
+		daemon.WithHealth(health),
+		daemon.WithSystemd(os.LookupEnv))
+	if err != nil {
+		fmt.Println("new:", err)
+		return
+	}
+
+	if err := sup.Run(ctx); err != nil {
+		fmt.Println("run:", err)
+	}
+}
+
 // reloadable is a Runner that applies a new configuration without restarting.
 type reloadable struct {
 	daemon.Runner

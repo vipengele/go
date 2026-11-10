@@ -93,6 +93,21 @@
 // ErrNilListener. A server hardened for the Runner, with the middleware, authentication and TLS
 // configuration a daemon needs, is built by New in go.vipengele.org/daemon/httpserver.
 //
+// # Systemd
+//
+// WithSystemd has Run report to systemd through its notification protocol: READY=1 once every
+// Start has returned, STOPPING=1 as the stop phase begins and, when the unit sets WatchdogSec=, a
+// WATCHDOG=1 ping at half the interval for as long as the run is live. The function it takes reads
+// the environment, so a test passes its own and no code reads os.Getenv. Outside systemd, and on
+// any operating system but Linux, nothing is sent. A notification that fails is logged and never
+// changes what Run returns. A Run that cannot take the WithInstanceLock lock sends neither READY=1
+// nor STOPPING=1. The unit side is service.WithSystemdNotify: a unit installed by daemon/service
+// is Type=notify only with it, and systemd gives a unit of any other type no NOTIFY_SOCKET.
+//
+// Socket activation is go.vipengele.org/daemon/systemd: Listeners returns the sockets systemd
+// opened, keyed by name, and one is passed to NewHTTPServerListener to serve on it. The sockets
+// come from a .socket unit the user writes; this library generates none.
+//
 // # Single instance
 //
 // The instance lock lets one instance of a tool run at a time for one runtime directory. A program
@@ -167,8 +182,8 @@
 // Supervisor with New. A Reload that returns an error or panics is a failure of the Runner,
 // naming it, and one that overruns the round's deadline is ErrReloadTimeout naming it; a deadline
 // that passes between two Reloads is ErrReloadTimeout naming no Runner. Each begins shutdown and
-// leads the joined errors as a start failure does. A rejected configuration is not an error. Match
-// with errors.Is and errors.As.
+// leads the joined errors as a start failure does. A rejected configuration is not an error. A
+// failed systemd notification is logged, never returned. Match with errors.Is and errors.As.
 //
 // # Restart
 //

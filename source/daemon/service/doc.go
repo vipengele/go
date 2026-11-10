@@ -51,6 +51,14 @@
 // are unavailable, systemd may refuse to start the unit or skip the directive,
 // depending on its version.
 //
+// # Readiness
+//
+// WithSystemdNotify makes the unit Type=notify in place of Type=simple, so systemd waits for the
+// service to report READY=1 (daemon.WithSystemd sends it). Given a watchdog interval it also
+// writes WatchdogSec= in whole milliseconds, and the service must ping within it or systemd
+// restarts it. New validates the option on every GOOS, wrapping ErrInvalidConfig, and the other
+// drivers ignore it.
+//
 // # Environment
 //
 // The systemd driver writes Config.Env into the unit file, which is

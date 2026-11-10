@@ -48,6 +48,7 @@ func execRunner(ctx context.Context, argv []string) ([]byte, error) {
 type systemd struct {
 	cfg       Config
 	hardening Hardening
+	notify    notify
 	// run starts every command the driver runs: systemctl and id.
 	run runner
 	// euid is the effective user id of the process.
@@ -175,7 +176,7 @@ func (s *systemd) writeUnit() error {
 	if err != nil {
 		return fmt.Errorf("service: create unit file: %w", err)
 	}
-	if err := commitUnitFile(f, renderUnit(s.cfg, s.hardening), path); err != nil {
+	if err := commitUnitFile(f, renderUnit(s.cfg, s.hardening, s.notify), path); err != nil {
 		_ = os.Remove(f.Name())
 		return err
 	}
