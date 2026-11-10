@@ -90,6 +90,10 @@ func NewHTTPServer(srv *http.Server, opts ...HTTPOption) Runner {
 // Serve takes l over and closes it when the server stops; a listener Start never served stays the
 // caller's to close. A nil srv makes Start return ErrNilServer, and a nil l ErrNilListener.
 //
+// A socket-activated listener from systemd.Listeners can be passed as l. Closing it when the
+// server stops is safe: systemd keeps its own copy of the socket, so connections queue for the
+// next instance.
+//
 // Start may be called once: a second Start returns an error and changes nothing. Stop before Start
 // returns nil and leaves the Runner never started: Done never closes, and a Start that follows
 // neither binds nor serves and returns an error wrapping context.Canceled. The Supervisor stops a

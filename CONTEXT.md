@@ -369,6 +369,19 @@ a Service are the `daemoncmd` commands.
 _Avoid_: daemon for the registration (the daemon is the program, the Service is its registration),
 unit, agent, microservice
 
+**Readiness notification**:
+A **Service**'s message to the operating system's service manager that it is ready, that it is
+stopping, or, repeatedly, that it is alive. It tells the manager about the process and is not the
+**Readiness** answer a **Health snapshot** gives; the alive message is sent only while **Liveness**
+holds. Only systemd receives it, and only on Linux (ADR-0030).
+_Avoid_: heartbeat, ping, readiness (the **Health check** question)
+
+**Socket activation**:
+The service manager opening a **Service**'s listening sockets and handing them to the process at
+start, so the sockets exist before the process is ready and outlive its restarts. A daemon that is
+not activated this way opens its own (ADR-0030).
+_Avoid_: socket passing, inherited listener (the socket handed over, not the mechanism)
+
 **Lock**:
 Exclusive ownership of a **Lock file** that the operating system gives to one process at a time and
 takes back when that process exits, however it exits. A daemon holds one so only one instance runs,
