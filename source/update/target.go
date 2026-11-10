@@ -1,8 +1,10 @@
 package update
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,9 +15,10 @@ import (
 const permissionHint = "reinstall the tool into a directory you can write to, or rerun the update with elevated privileges"
 
 // fsSteps are the filesystem operations of resolving, probing and replacing the installed
-// executable, one field each. [defaultSteps] returns the ones that act on the real filesystem; an
-// in-package test substitutes a field to produce a failure the real filesystem cannot, such as a
-// permission error while running as root.
+// executable, one field each, and run, the exec seam through which [Config.CheckStaged] runs the
+// staged binary. [defaultSteps] returns the ones that act on the real filesystem and start a real
+// process; an in-package test substitutes a field to produce a failure the real filesystem cannot,
+// such as a permission error while running as root, or an answer from a binary it never builds.
 type fsSteps struct {
 	createTemp   func(dir, pattern string) (*os.File, error)
 	remove       func(name string) error
@@ -24,6 +27,7 @@ type fsSteps struct {
 	evalSymlinks func(path string) (string, error)
 	stat         func(name string) (os.FileInfo, error)
 	abs          func(path string) (string, error)
+	run          func(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error
 }
 
 // defaultSteps returns the fsSteps that act on the real filesystem.
@@ -36,6 +40,7 @@ func defaultSteps() fsSteps {
 		evalSymlinks: filepath.EvalSymlinks,
 		stat:         os.Stat,
 		abs:          filepath.Abs,
+		run:          runCommand,
 	}
 }
 

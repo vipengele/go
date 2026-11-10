@@ -12,6 +12,11 @@
 # once per affected project, in that project's directory, with `GOWORK=off` so it
 # resolves siblings as its go.mod names them: a directory `replace` while they
 # are developed together, a released version in strict mode (ADR-0006).
+#
+# A project holding a `*_windows.go` or `*_windows_test.go` file also runs its
+# suite on windows-latest (ADR-0030). Every other project's suite exercises no
+# Windows-only code, so the Windows job is gated to the affected projects that
+# hold one and skips when there are none.
 name: ci-test
 
 on:
@@ -30,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       projects: ${{ steps.projects.outputs.projects }}
+      windows-projects: ${{ steps.windows.outputs.projects }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,6 +43,25 @@ jobs:
           persist-credentials: false
       - id: projects
         uses: ./.github/actions/changed-projects
+      # The affected projects with a `*_windows.go` or `*_windows_test.go` file
+      # in any of their packages, as a JSON array. A project directory holds no
+      # other go.mod (ADR-0004), so every file found belongs to that project.
+      - id: windows
+        name: detect projects with Windows files
+        env:
+          PROJECTS: ${{ steps.projects.outputs.projects }}
+        run: |
+          set -euo pipefail
+          selected="[]"
+          while IFS= read -r project; do
+            [[ -n "$project" ]] || continue
+            dir="source/${project}"
+            if [[ -n "$(find "$dir" \( -name '*_windows.go' -o -name '*_windows_test.go' \) -not -path "${dir}/vendor/*" -print -quit)" ]]; then
+              selected="$(jq -c --arg p "$project" '. + [$p]' <<<"$selected")"
+            fi
+          done < <(jq -r '.[]' <<<"$PROJECTS")
+          echo "windows projects: ${selected}"
+          echo "projects=${selected}" >> "$GITHUB_OUTPUT"
 
   test:
     name: test (${{ matrix.project }})
@@ -52,6 +77,36 @@ jobs:
     defaults:
       run:
         working-directory: source/${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/${{ matrix.project }}/go.mod
+          cache-dependency-path: source/${{ matrix.project }}/go.sum
+      - run: go test -race -shuffle=on ./...
+
+  test-windows:
+    name: test-windows (${{ matrix.project }})
+    needs: detect
+    # An empty matrix is a workflow error, so a run with no affected project
+    # holding a Windows file skips the job instead. A skipped job leaves this
+    # workflow's result a success, so ci-gate passes it.
+    if: needs.detect.outputs.windows-projects != '[]'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.detect.outputs.windows-projects) }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: source/${{ matrix.project }}
+    # -race needs cgo; windows-latest ships the mingw gcc it builds with.
+    env:
+      CGO_ENABLED: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

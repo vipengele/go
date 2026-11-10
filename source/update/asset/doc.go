@@ -13,16 +13,19 @@
 // "{" without its "}" and an empty template are errors. [Render] substitutes the placeholders in
 // one left-to-right pass: a substituted value is never expanded again, so a binary name or tag
 // that itself contains "{os}" appears as written. The archive template defaults to
-// [DefaultTemplate] and the checksums template to [DefaultChecksumsTemplate]. The checksums
-// template takes every placeholder except {ext}, which [ValidateChecksums] rejects.
+// [DefaultTemplate] and the checksums template to [DefaultChecksumsTemplate], and the archive
+// extension to [DefaultExtFor] the target operating system: "zip" for windows and "tar.gz" for
+// every other system. The checksums template takes every placeholder except {ext}, which
+// [ValidateChecksums] rejects.
 //
 // [GoReleaserArchive] and [GoReleaserChecksum] translate a template into a GoReleaser
 // name_template that names the same files. The binary name is inlined as literal text, and
 // {version}, {tag}, {os} and {arch} become {{ .Version }}, {{ .Tag }}, {{ .Os }} and
 // {{ .Arch }}. GoReleaser appends the archive extension itself, from the archive's format, so
 // GoReleaserArchive drops a trailing ".{ext}" and the GoReleaser format must equal the
-// Config.AssetExt the template is rendered with; otherwise the published name and the one the
-// library looks for differ.
+// Config.AssetExt the template is rendered with, for each operating system: a tool that leaves
+// AssetExt empty publishes zip for windows and tar.gz elsewhere. Otherwise the published name and
+// the one the library looks for differ.
 //
 // The two renderings accept different languages. Render is generic: {ext} is valid anywhere in a
 // template, and in a checksums template too. GoReleaserArchive accepts {ext} only as the trailing

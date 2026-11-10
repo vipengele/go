@@ -62,7 +62,7 @@ func TestHardeningValidate(t *testing.T) {
 	for _, goos := range []string{"linux", "plan9"} {
 		for _, tc := range tests {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
-				_, err := New(validConfig(goos), WithGOOS(goos), WithSystemdHardening(tc.h))
+				_, err := New(validConfig(goos), WithGOOS(goos), WithSystemdHardening(tc.h), notInContainer())
 				if tc.want == nil {
 					if errors.Is(err, ErrInvalidConfig) {
 						t.Fatalf("New = %v, want no ErrInvalidConfig", err)

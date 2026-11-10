@@ -33,7 +33,8 @@
 // The lock is flock on linux, darwin, freebsd, netbsd, openbsd and dragonfly, and LockFileEx on
 // windows. On every other system Lock and TryLock fail with an error that wraps ErrUnsupported.
 //
-// CI cross-compiles and vets the Windows implementation but never runs it, so its behaviour is
-// untested there. The behaviour tests that every platform shares are what to run on a Windows
-// machine when one is available.
+// The suite runs on Windows in CI, on a gated windows-latest job (ADR-0030): the behaviour tests
+// every platform shares, and the examples, which take LockFileEx locks on a real file and see a
+// second TryLock fail with ErrLocked. The cross-process tests and the tests of real locks between
+// lockers run on the Unix systems alone.
 package filelock

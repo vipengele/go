@@ -5,8 +5,9 @@
 // lock file is never deleted. This file never opens or closes a handle; Lock closes the file on
 // every failure path, including every error tryLock returns.
 //
-// CI vets and cross-compiles this file for Windows but never runs it, so its behaviour is untested
-// there.
+// The suite runs on Windows in CI, on a gated windows-latest job (ADR-0030): the behaviour tests
+// every platform shares, and the examples, which take LockFileEx locks on a real file. The
+// cross-process tests run on the Unix systems alone.
 
 //go:build windows
 

@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -119,7 +122,7 @@ func TestNewReleaseIsTheDefaultRelease(t *testing.T) {
 	t.Parallel()
 	rel := newRelease(t)
 	want, err := asset.Render(asset.DefaultTemplate, asset.Fields{
-		Name: testBinary, Tag: testTag, OS: runtime.GOOS, Arch: runtime.GOARCH, Ext: asset.DefaultExt,
+		Name: testBinary, Tag: testTag, OS: runtime.GOOS, Arch: runtime.GOARCH, Ext: asset.DefaultExtFor(runtime.GOOS),
 	})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
@@ -133,9 +136,94 @@ func TestNewReleaseIsTheDefaultRelease(t *testing.T) {
 	if rel.ChecksumsName != updatetest.DefaultChecksumsName {
 		t.Errorf("ChecksumsName = %q, want %q", rel.ChecksumsName, updatetest.DefaultChecksumsName)
 	}
-	got := readTarGz(t, rel.Archive)
-	if len(got) != 1 || got[0].Name != testBinary || got[0].Mode != 0o755 || !strings.Contains(string(got[0].Body), testTag) {
-		t.Errorf("archive entries = %+v, want one executable %q printing %s", got, testBinary, testTag)
+	entry := testBinary
+	if runtime.GOOS == "windows" {
+		entry += ".exe"
+	}
+	read := readTarGz
+	if runtime.GOOS == "windows" {
+		read = readZip
+	}
+	got := read(t, rel.Archive)
+	if len(got) != 1 || got[0].Name != entry || got[0].Mode != 0o755 || !bytes.Equal(got[0].Body, updatetest.ReleaseExecutable(t, testTag)) {
+		names := make([]string, 0, len(got))
+		for _, e := range got {
+			names = append(names, fmt.Sprintf("%s (mode %v, %d bytes)", e.Name, e.Mode, len(e.Body)))
+		}
+		t.Errorf("archive entries = %q, want one executable %q holding the release executable of %s", names, entry, testTag)
+	}
+}
+
+// releaseTag holds a single quote, a double quote and a backslash, so a release binary that
+// quotes its tag wrongly prints another one.
+const releaseTag = `v1.2.3-it's-"q"-\`
+
+// TestReleaseBinaryAnswersVersionJSONAndEchoesTheTag executes the script, so it does not run in
+// parallel: a process a parallel test forks while this one's file is open for writing inherits that
+// descriptor until it execs, and the exec then fails with ETXTBSY.
+func TestReleaseBinaryAnswersVersionJSONAndEchoesTheTag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the release binary is a shell script")
+	}
+	assertAnswersAsTheRelease(t, updatetest.ReleaseBinary(releaseTag), releaseTag)
+}
+
+// TestReleaseExecutableAnswersVersionJSONAndEchoesTheTag executes the release's executable, so it
+// does not run in parallel, for the reason TestReleaseBinaryAnswersVersionJSONAndEchoesTheTag gives.
+func TestReleaseExecutableAnswersVersionJSONAndEchoesTheTag(t *testing.T) {
+	assertAnswersAsTheRelease(t, updatetest.ReleaseExecutable(t, releaseTag), releaseTag)
+}
+
+// assertAnswersAsTheRelease writes body as an executable and fails t unless it answers
+// "version --json" with the schema-1 version JSON of tag for the running platform, and any other
+// invocation with tag.
+func assertAnswersAsTheRelease(t *testing.T, body []byte, tag string) {
+	t.Helper()
+	name := testBinary
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, body, 0o700); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	out, err := exec.CommandContext(t.Context(), path, "version", "--json").Output()
+	if err != nil {
+		t.Fatalf("version --json: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decoding %q: %v", out, err)
+	}
+	want := map[string]any{
+		"schema":  float64(1),
+		"version": tag,
+		"commit":  "0123456789abcdef0123456789abcdef01234567",
+		"date":    "2026-01-02T03:04:05Z",
+		"go":      runtime.Version(),
+		"os":      runtime.GOOS,
+		"arch":    runtime.GOARCH,
+		"dev":     false,
+	}
+	if len(got) != len(want) {
+		t.Errorf("version --json = %v, want exactly the keys of %v", got, want)
+	}
+	for k, w := range want {
+		if g, ok := got[k]; !ok || g != w {
+			t.Errorf("version --json key %q = %v (present %v), want %v", k, g, ok, w)
+		}
+	}
+
+	out, err = exec.CommandContext(t.Context(), path).Output()
+	if err != nil {
+		t.Fatalf("no arguments: %v", err)
+	}
+	if string(out) != tag+"\n" {
+		t.Errorf("output without arguments = %q, want %q", out, tag+"\n")
 	}
 }
 
@@ -327,10 +415,13 @@ func TestServerReportsNothingForExpectedRoutes(t *testing.T) {
 
 func TestNewReleaseFailsOnAnUnbuildableArchive(t *testing.T) {
 	t.Parallel()
+	// A tar entry cannot hold a NUL byte in its name, and a zip entry cannot hold a name longer than
+	// 65535 bytes, so this binary name fails the archive of every host's default format.
+	binary := strings.Repeat("t", 1<<16) + "\x00"
 	f := &fatalTB{TB: t}
-	runFatal(f, func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, "to\x00ol") })
+	runFatal(f, func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, binary) })
 	if !f.failed || !strings.Contains(f.message, testTag) {
-		t.Errorf("NewRelease with a NUL in the binary name: failed = %v with %q, want a failure naming %s", f.failed, f.message, testTag)
+		t.Errorf("NewRelease with an unbuildable binary name: failed = %v, want a failure naming %s", f.failed, testTag)
 	}
 }
 
@@ -350,6 +441,7 @@ func TestNewReleaseAndNewServerAreTestHelpers(t *testing.T) {
 		call func(tb testing.TB)
 	}{
 		{"NewRelease", func(tb testing.TB) { updatetest.NewRelease(tb, testOwner, testRepo, testTag, testBinary) }},
+		{"ReleaseExecutable", func(tb testing.TB) { updatetest.ReleaseExecutable(tb, testTag) }},
 		{"NewServer", func(tb testing.TB) { updatetest.NewServer(tb, newRelease(t)) }},
 	} {
 		h := &helperTB{TB: t}

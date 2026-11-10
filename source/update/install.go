@@ -18,7 +18,7 @@ const (
 	windowsSharingViolation syscall.Errno = 32
 )
 
-// errNoStaged reports a nil [*Staged] passed to [Config.Install].
+// errNoStaged reports a nil [*Staged] passed to [Config.Install] or [Config.CheckStaged].
 var errNoStaged = errors.New("update: no staged binary to install")
 
 // Install replaces the executable [Config.Target] names with the staged binary, keeping the
@@ -50,13 +50,16 @@ var errNoStaged = errors.New("update: no staged binary to install")
 // The two renames are load-bearing: Windows lets a running executable be renamed but not
 // overwritten or removed, so the old binary moves aside before the new one moves in, and a single
 // rename over the executable, or a copy onto it, fails there. Install has one code path for every
-// operating system, and its behaviour on Windows is unverified.
+// operating system; on Windows it is tested replacing the file of a running process, whose backup
+// [Installed.Discard] and [Config.RemoveStaleBackup] then report locked until the process exits.
 //
 // Only the path the executable resolves to is replaced: a symbolic link to it keeps pointing at
 // the new binary, but another hard link to the same file keeps the previous binary.
 //
 // The [*Installed] lives in memory alone. A backup left behind by a process that ended before
-// settling it is invisible to this package, and the next Install replaces it.
+// settling it is invisible to this package, and the next Install replaces it; on Windows, where
+// Discard cannot remove the backup of the running executable, [Config.RemoveStaleBackup] removes
+// it once that process has exited.
 func (c Config) Install(staged *Staged) (*Installed, error) {
 	return c.install(staged, defaultSteps())
 }

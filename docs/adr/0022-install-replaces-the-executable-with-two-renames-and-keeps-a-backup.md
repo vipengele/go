@@ -1,6 +1,8 @@
 # Install replaces the executable with two renames and keeps a backup
 
-Status: extends ADR-0021, whose `*Staged` binary the install step consumes.
+Status: extends ADR-0021, whose `*Staged` binary the install step consumes. Its behaviour on
+Windows, the stale backup and the Windows verification are refined by ADR-0031
+(`0031-update-on-windows.md`).
 
 `Config.Install` takes the `*Staged` that `Config.Extract` returns and replaces the running tool's
 executable with it. The previous binary is kept as a backup until the caller discards it, and is put

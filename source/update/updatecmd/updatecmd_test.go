@@ -109,8 +109,9 @@ func (f fixture) binary(t *testing.T) string {
 }
 
 // releaseBinary is the content of the binary updatetest.NewRelease packs for tag.
-func releaseBinary(tag string) string {
-	return "#!/bin/sh\necho " + tag + "\n"
+func releaseBinary(t *testing.T, tag string) string {
+	t.Helper()
+	return string(updatetest.ReleaseExecutable(t, tag))
 }
 
 // run is one execution of the command: its streams and the error it returned.
@@ -442,23 +443,22 @@ func TestUpdateInterruptedAtThePromptDownloadsNothing(t *testing.T) {
 	}
 }
 
+// A test that reaches a real install runs the staged binary for its preflight and so is not
+// parallel: a process another test forks while this one's staged file is open for writing inherits
+// that descriptor until it execs, and the exec then fails with "text file busy" (ETXTBSY).
 func TestUpdateConfirmedAtThePromptInstalls(t *testing.T) {
-	t.Parallel()
-
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	r := runCommand(t, f.cfg, map[string]any{}, "y\n", true)
 
 	if r.err != nil {
 		t.Fatalf("Run error = %v, want nil", r.err)
 	}
-	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
-		t.Errorf("executable holds %q, want %q", got, want)
+	if got, want := f.binary(t), releaseBinary(t, "v1.1.0"); got != want {
+		t.Errorf("executable holds %.64q, want %.64q", got, want)
 	}
 }
 
 func TestUpdateWithYesInstallsAndRunsTheHooks(t *testing.T) {
-	t.Parallel()
-
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	var hooked []string
 	f.cfg.PostUpdate = []update.PostUpdate{func(path string) error {
@@ -470,8 +470,8 @@ func TestUpdateWithYesInstallsAndRunsTheHooks(t *testing.T) {
 	if r.err != nil {
 		t.Fatalf("Run error = %v, want nil", r.err)
 	}
-	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
-		t.Errorf("executable holds %q, want %q", got, want)
+	if got, want := f.binary(t), releaseBinary(t, "v1.1.0"); got != want {
+		t.Errorf("executable holds %.64q, want %.64q", got, want)
 	}
 	if len(hooked) != 1 || hooked[0] != f.exe {
 		t.Errorf("hook ran with %v, want [%s]", hooked, f.exe)
@@ -488,8 +488,6 @@ func TestUpdateWithYesInstallsAndRunsTheHooks(t *testing.T) {
 }
 
 func TestAFailingHookIsAWarning(t *testing.T) {
-	t.Parallel()
-
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	f.cfg.PostUpdate = []update.PostUpdate{func(string) error { return errors.New("completion broke") }}
 	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
@@ -500,14 +498,50 @@ func TestAFailingHookIsAWarning(t *testing.T) {
 	if !strings.Contains(r.stderr.String(), "completion broke") {
 		t.Errorf("stderr = %q, want the hook's failure", r.stderr.String())
 	}
-	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
-		t.Errorf("executable holds %q, want %q", got, want)
+	if got, want := f.binary(t), releaseBinary(t, "v1.1.0"); got != want {
+		t.Errorf("executable holds %.64q, want %.64q", got, want)
+	}
+}
+
+func TestAPreflightRefusalFailsTheUpdateAndLeavesTheTarget(t *testing.T) {
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.Preflight = []update.Preflight{func(context.Context, update.StagedBinary) error {
+		return errors.New("tool rejects this build")
+	}}
+	var hooked bool
+	f.cfg.PostUpdate = []update.PostUpdate{func(string) error {
+		hooked = true
+		return nil
+	}}
+	r := runCommand(t, f.cfg, map[string]any{"yes": true}, "", false)
+
+	var refused *update.PreflightError
+	if !errors.As(r.err, &refused) {
+		t.Fatalf("Run error = %v, want a *update.PreflightError", r.err)
+	}
+	if !strings.Contains(r.err.Error(), "tool rejects this build") {
+		t.Errorf("Run error = %q, want the hook's refusal", r.err.Error())
+	}
+	if hooked {
+		t.Error("post-update hook ran after a refused update")
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+	entries, err := os.ReadDir(filepath.Dir(f.exe))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != testName {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("target directory holds %v, want only %q", names, testName)
 	}
 }
 
 func TestABackupThatCannotBeRemovedIsAWarning(t *testing.T) {
-	t.Parallel()
-
 	f := newFixture(t, "v1.0.0", "v1.1.0")
 	backup := f.exe + ".old"
 	// A non-empty directory at the backup's path makes its removal fail, as root too.
@@ -534,8 +568,8 @@ func TestABackupThatCannotBeRemovedIsAWarning(t *testing.T) {
 	if !strings.Contains(r.stderr.String(), "updated atk v1.0.0 → v1.1.0") {
 		t.Errorf("stderr = %q, want the update reported", r.stderr.String())
 	}
-	if got, want := f.binary(t), releaseBinary("v1.1.0"); got != want {
-		t.Errorf("executable holds %q, want %q", got, want)
+	if got, want := f.binary(t), releaseBinary(t, "v1.1.0"); got != want {
+		t.Errorf("executable holds %.64q, want %.64q", got, want)
 	}
 }
 
@@ -557,16 +591,14 @@ func TestUpdateWhenUpToDateDoesNothing(t *testing.T) {
 }
 
 func TestToAnOlderReleaseDowngrades(t *testing.T) {
-	t.Parallel()
-
 	f := newFixture(t, "v2.0.0", "v1.0.0")
 	r := runCommand(t, f.cfg, map[string]any{"yes": true, "to": "1.0.0", "allow-downgrade": true}, "", false)
 
 	if r.err != nil {
 		t.Fatalf("Run error = %v, want nil", r.err)
 	}
-	if got, want := f.binary(t), releaseBinary("v1.0.0"); got != want {
-		t.Errorf("executable holds %q, want %q", got, want)
+	if got, want := f.binary(t), releaseBinary(t, "v1.0.0"); got != want {
+		t.Errorf("executable holds %.64q, want %.64q", got, want)
 	}
 	if n := f.srv.Requests(updatetest.TargetLatest) + f.srv.Requests(updatetest.TargetLatestAPI); n != 0 {
 		t.Errorf("--to asked for the latest release %d times, want 0", n)

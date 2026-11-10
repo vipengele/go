@@ -4,7 +4,9 @@ Status: accepted. It follows [0003-the-library-is-three-projects-cli-update-and-
 assigns install-script templates to `update`, and reconciles it with
 [0021-the-completion-installer-is-cli-spec-completioninstall-with-an-update-post-hook.md](0021-the-completion-installer-is-cli-spec-completioninstall-with-an-update-post-hook.md), which
 keeps the completion path table in `cli/spec` and leaves the full `install.sh` to each tool. The
-verification rule is that of [0020-a-download-returns-a-verified-archive-the-caller-never-sees-unverified.md](0020-a-download-returns-a-verified-archive-the-caller-never-sees-unverified.md).
+verification rule is that of [0020-a-download-returns-a-verified-archive-the-caller-never-sees-unverified.md](0020-a-download-returns-a-verified-archive-the-caller-never-sees-unverified.md). Its PowerShell
+counterpart for Windows and the GOOS each renderer resolves with are recorded in
+[0031-update-on-windows.md](0031-update-on-windows.md).
 
 A tool installs itself on a Unix machine with one POSIX-sh script. The public package
 `go.vipengele.org/update/installscript` renders that script from the tool's `update.Config`:
