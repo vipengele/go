@@ -74,9 +74,11 @@ golangci-lint run
   hang and then stops it.
 - `systemd/` — package `go.vipengele.org/daemon/systemd` (ADR-0030). `notify.go` holds `Notify`
   and the state constants, `watchdog.go` `WatchdogInterval`, `listeners.go` `Listeners` and
-  `UnknownName`. The seams are parameters of the unexported functions (`goos`, and `firstFD` for
-  `listeners`), never package variables; `Listeners` is called once per process. Tests re-exec the
-  test binary to pass descriptors through `ExtraFiles`.
+  `UnknownName`. The seams are parameters of the unexported functions (`goos`, the write timeout
+  for `notify`, and `firstFD` and `newFile` for `listeners`), never package variables; `Listeners`
+  is called once per process. The in-process tests hand `listeners` the `File()` copies of real
+  sockets through `newFile`, which is what coverage counts; the real-descriptor check re-execs the
+  test binary to pass descriptors through `ExtraFiles`, and its coverage is not counted.
 - `errors.go` — `PanicError` and the sentinel errors (`ErrRunnerExited`, `ErrStartTimeout`,
   `ErrReloadTimeout`, `ErrStopTimeout`, `ErrAlreadyRan`, `ErrRestartRequired`, `ErrAlreadyRunning`),
   `AlreadyRunningError`, which matches `ErrAlreadyRunning`, and the health sentinels

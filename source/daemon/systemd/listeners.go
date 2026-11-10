@@ -50,12 +50,20 @@ const maxListenFDs = 1 << 16
 // Listeners is called once per process. A second call would wrap whatever has since reused the
 // descriptor numbers the first one closed.
 func Listeners(lookup func(key string) (string, bool)) (map[string][]net.Listener, error) {
-	return listeners(runtime.GOOS, listenFDsStart, lookup)
+	return listeners(runtime.GOOS, listenFDsStart, inheritedFile, lookup)
+}
+
+// inheritedFile opens the inherited descriptor fd as an *os.File, nil when fd is not a valid
+// descriptor number.
+func inheritedFile(fd int) *os.File {
+	return os.NewFile(uintptr(fd), "LISTEN_FDS:"+strconv.Itoa(fd))
 }
 
 // listeners is Listeners for the operating system goos, with the descriptors numbered from
-// firstFD.
-func listeners(goos string, firstFD int, lookup func(key string) (string, bool)) (map[string][]net.Listener, error) {
+// firstFD and each opened by newFile.
+func listeners(
+	goos string, firstFD int, newFile func(fd int) *os.File, lookup func(key string) (string, bool),
+) (map[string][]net.Listener, error) {
 	if goos != "linux" {
 		return nil, nil
 	}
@@ -91,13 +99,13 @@ func listeners(goos string, firstFD int, lookup func(key string) (string, bool))
 	opened := make([]net.Listener, 0, n)
 	for i, name := range names {
 		fd := firstFD + i
-		l, err := adopt(fd)
+		l, err := adopt(newFile(fd))
 		if err != nil {
 			for _, o := range opened {
 				_ = o.Close()
 			}
 			rest := fd + 1 // [lydite:exclude_from_mutation][fd-1 only re-closes descriptors already closed above]
-			closeFDs(rest, firstFD+n)
+			closeFDs(newFile, rest, firstFD+n)
 			return nil, fmt.Errorf("systemd: listener %d (%s): %w", fd, name, err)
 		}
 		opened = append(opened, l)
@@ -125,15 +133,15 @@ func fdNames(value string, n int) []string {
 	return names
 }
 
-// adopt wraps the inherited descriptor fd in a net.Listener and closes fd, whether or not the
-// wrapping succeeds.
-func adopt(fd int) (net.Listener, error) {
-	f := os.NewFile(uintptr(fd), "LISTEN_FDS:"+strconv.Itoa(fd))
+// adopt wraps the inherited descriptor f, nil when it is not a valid descriptor, in a
+// net.Listener and closes f, whether or not the wrapping succeeds.
+func adopt(f *os.File) (net.Listener, error) {
 	if f == nil {
 		return nil, errors.New("not a valid descriptor")
 	}
 	l, err := net.FileListener(f)
-	closeErr := f.Close()
+	// The listener holds its own duplicate, so a failure to close f leaves nothing to act on.
+	_ = f.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -141,17 +149,14 @@ func adopt(fd int) (net.Listener, error) {
 		_ = l.Close()
 		return nil, errors.New("not a stream socket")
 	}
-	if closeErr != nil {
-		_ = l.Close()
-		return nil, closeErr
-	}
 	return l, nil
 }
 
-// closeFDs closes the inherited descriptors from first up to, not including, end.
-func closeFDs(first, end int) {
+// closeFDs closes the inherited descriptors from first up to, not including, end, each opened by
+// newFile.
+func closeFDs(newFile func(fd int) *os.File, first, end int) {
 	for fd := first; fd < end; fd++ {
-		if f := os.NewFile(uintptr(fd), ""); f != nil {
+		if f := newFile(fd); f != nil {
 			_ = f.Close()
 		}
 	}

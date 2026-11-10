@@ -314,6 +314,39 @@ func TestSystemdWatchdogTickRunningAtDisarmNeitherPingsNorRearms(t *testing.T) {
 	}
 }
 
+// firedClock is a Clock whose timers never fire on their own: AfterFunc records f, and its stop
+// reports false, as for a timer that has already fired and whose f is about to run.
+type firedClock struct {
+	now   time.Time
+	ticks []func()
+}
+
+func (c *firedClock) Now() time.Time { return c.now }
+
+func (c *firedClock) AfterFunc(_ time.Duration, f func()) func() bool {
+	c.ticks = append(c.ticks, f)
+	return func() bool { return false }
+}
+
+func TestSystemdWatchdogTickFiredBeforeDisarmNeitherChecksNorPingsNorRearms(t *testing.T) {
+	clock := &firedClock{}
+	var w watchdog
+	w.arm(clock, time.Second, func() bool {
+		t.Error("liveness checked after disarm")
+		return true
+	}, func() { t.Error("pinged after disarm") })
+	if len(clock.ticks) != 1 {
+		t.Fatalf("%d ticks armed, want 1", len(clock.ticks))
+	}
+
+	w.disarm()
+	clock.ticks[0]()
+
+	if len(clock.ticks) != 1 {
+		t.Errorf("%d ticks armed, want no tick armed after disarm", len(clock.ticks)-1)
+	}
+}
+
 func TestSystemdWatchdogDisarmBeforeArmIsANoOp(t *testing.T) {
 	clock := newManualClock()
 	var w watchdog

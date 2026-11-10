@@ -65,15 +65,11 @@ func notify(goos string, timeout time.Duration, lookup func(key string) (string,
 	if err != nil {
 		return false, fmt.Errorf("systemd: notify: %w", err)
 	}
-	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
-		_ = conn.Close()
-		return false, fmt.Errorf("systemd: notify: %w", err)
-	}
+	// Closing a datagram conn after the write cannot unsend the datagram, so its error is moot.
+	defer func() { _ = conn.Close() }()
+	// On a conn just dialed the deadline fails only once the conn is closed, and Write reports that.
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write([]byte(state)); err != nil {
-		_ = conn.Close()
-		return false, fmt.Errorf("systemd: notify: %w", err)
-	}
-	if err := conn.Close(); err != nil {
 		return false, fmt.Errorf("systemd: notify: %w", err)
 	}
 	return true, nil

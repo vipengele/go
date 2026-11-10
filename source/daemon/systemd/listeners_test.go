@@ -1,6 +1,7 @@
 package systemd
 
 import (
+	"errors"
 	"math"
 	"net"
 	"os"
@@ -55,7 +56,7 @@ func TestListenersIsEmptyWhenNotActivated(t *testing.T) {
 		"other process, names given": {"LISTEN_PID": other, "LISTEN_FDS": "1", "LISTEN_FDNAMES": "web"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := listeners("linux", unopenedFD, e.lookup)
+			got, err := listeners("linux", unopenedFD, inheritedFile, e.lookup)
 			if err != nil || got != nil {
 				t.Errorf("listeners = %v, %v; want nil, nil", got, err)
 			}
@@ -64,7 +65,7 @@ func TestListenersIsEmptyWhenNotActivated(t *testing.T) {
 }
 
 func TestListenersIsEmptyOffLinux(t *testing.T) {
-	got, err := listeners("darwin", unopenedFD, untouched(t))
+	got, err := listeners("darwin", unopenedFD, inheritedFile, untouched(t))
 	if err != nil || got != nil {
 		t.Errorf("listeners = %v, %v; want nil, nil", got, err)
 	}
@@ -89,7 +90,7 @@ func TestListenersRejectsMalformedValues(t *testing.T) {
 		"fds with a suffix": {"LISTEN_PID": self, "LISTEN_FDS": "1 "},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := listeners("linux", unopenedFD, e.lookup)
+			got, err := listeners("linux", unopenedFD, inheritedFile, e.lookup)
 			if err == nil || got != nil {
 				t.Errorf("listeners = %v, %v; want nil and an error", got, err)
 			}
@@ -99,7 +100,7 @@ func TestListenersRejectsMalformedValues(t *testing.T) {
 
 func TestListenersRejectsACountAboveTheCap(t *testing.T) {
 	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": strconv.Itoa(maxListenFDs + 1)}
-	got, err := listeners("linux", unopenedFD, e.lookup)
+	got, err := listeners("linux", unopenedFD, inheritedFile, e.lookup)
 	if err == nil || got != nil {
 		t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
 	}
@@ -112,7 +113,7 @@ func TestListenersRejectsACountAboveTheCap(t *testing.T) {
 // so the adoption fails on its first descriptor and closes the rest, none of them open either.
 func TestListenersAcceptsACountAtTheCap(t *testing.T) {
 	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": strconv.Itoa(maxListenFDs)}
-	got, err := listeners("linux", unopenedFD, e.lookup)
+	got, err := listeners("linux", unopenedFD, inheritedFile, e.lookup)
 	if err == nil || got != nil {
 		t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
 	}
@@ -126,7 +127,7 @@ func TestListenersAcceptsACountAtTheCap(t *testing.T) {
 
 func TestListenersFailsOnADescriptorThatIsNotOpen(t *testing.T) {
 	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": "1", "LISTEN_FDNAMES": "web"}
-	got, err := listeners("linux", unopenedFD, e.lookup)
+	got, err := listeners("linux", unopenedFD, inheritedFile, e.lookup)
 	if err == nil || got != nil {
 		t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
 	}
@@ -135,10 +136,158 @@ func TestListenersFailsOnADescriptorThatIsNotOpen(t *testing.T) {
 	}
 }
 
-// Listeners closes the descriptors it adopts, so a test that handed it a descriptor of its own
-// process would leave the *os.File owning that number to close it a second time, by then perhaps
-// a descriptor reused by something else. The descriptors are therefore passed to a child process
-// at 3 and up, as systemd passes them, and the child, TestListenersChild, adopts them.
+// fakeFDBase is the first of the descriptor numbers the in-process tests hand to listeners. Each
+// number is only a key of the files a test passes, so it never names a descriptor of the process.
+const fakeFDBase = 3
+
+// filesByFD returns a newFile for listeners that opens fakeFDBase+i as files[i], and nil for
+// any other number. listeners closes what it opens through the *os.File, which owns the
+// descriptor, so a second Close of one of them reports os.ErrClosed and never closes a
+// descriptor reused since.
+func filesByFD(files []*os.File) func(fd int) *os.File {
+	return func(fd int) *os.File {
+		if i := fd - fakeFDBase; i >= 0 && i < len(files) {
+			return files[i]
+		}
+		return nil
+	}
+}
+
+// skipWithoutSocketFiles skips the test where a socket cannot be opened as an *os.File.
+func skipWithoutSocketFiles(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("a socket has no *os.File on windows")
+	}
+}
+
+// assertFileClosed fails the test unless f has already been closed.
+func assertFileClosed(t *testing.T, i int, f *os.File) {
+	t.Helper()
+	if err := f.Close(); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("file %d: Close = %v, want os.ErrClosed", i, err)
+	}
+}
+
+func TestListenersAdoptsSocketsInProcess(t *testing.T) {
+	skipWithoutSocketFiles(t)
+	var files []*os.File
+	var addrs []string
+	for range 4 {
+		addr, f := listenTCP(t)
+		files = append(files, f)
+		addrs = append(addrs, addr)
+	}
+	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": "4", "LISTEN_FDNAMES": "web:admin:web"}
+	got, err := listeners("linux", fakeFDBase, filesByFD(files), e.lookup)
+	if err != nil {
+		t.Fatalf("listeners: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, ls := range got {
+			for _, l := range ls {
+				_ = l.Close()
+			}
+		}
+	})
+	want := map[string][]string{
+		"web":       {addrs[0], addrs[2]},
+		"admin":     {addrs[1]},
+		UnknownName: {addrs[3]},
+	}
+	gotAddrs := make(map[string][]string, len(got))
+	for name, ls := range got {
+		for _, l := range ls {
+			gotAddrs[name] = append(gotAddrs[name], l.Addr().String())
+		}
+	}
+	if !reflect.DeepEqual(gotAddrs, want) {
+		t.Fatalf("listeners = %v, want %v", gotAddrs, want)
+	}
+	for _, ls := range got {
+		for _, l := range ls {
+			assertAccepts(t, l)
+		}
+	}
+	for i, f := range files {
+		assertFileClosed(t, i, f)
+	}
+}
+
+// failInProcess runs listeners over a TCP listener, bad and another TCP listener, with a fourth
+// file past LISTEN_FDS, and checks that the adoption fails on bad, closes every file it was
+// given, and leaves the fourth open.
+func failInProcess(t *testing.T, bad *os.File) {
+	t.Helper()
+	_, first := listenTCP(t)
+	_, last := listenTCP(t)
+	past := pipe(t)
+	files := []*os.File{first, bad, last, past}
+	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": "3", "LISTEN_FDNAMES": "web:datagram:admin"}
+	got, err := listeners("linux", fakeFDBase, filesByFD(files), e.lookup)
+	if err == nil || got != nil {
+		t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
+	}
+	if !strings.Contains(err.Error(), "datagram") {
+		t.Errorf("err = %v, want it to name the descriptor datagram", err)
+	}
+	for i, f := range files[:3] {
+		assertFileClosed(t, i, f)
+	}
+	if _, err := past.Stat(); err != nil {
+		t.Errorf("file past LISTEN_FDS: %v, want it open", err)
+	}
+}
+
+func TestListenersFailsOnAUDPSocketInProcess(t *testing.T) {
+	skipWithoutSocketFiles(t)
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = udp.Close() })
+	f, err := udp.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	failInProcess(t, f)
+}
+
+func TestListenersFailsOnAUnixDatagramSocketInProcess(t *testing.T) {
+	skipWithoutSocketFiles(t)
+	gram := listenNotify(t, socketPath(t))
+	f, err := gram.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	failInProcess(t, f)
+}
+
+func TestListenersFailsOnAnInvalidDescriptorAndClosesTheRest(t *testing.T) {
+	skipWithoutSocketFiles(t)
+	_, first := listenTCP(t)
+	_, last := listenTCP(t)
+	files := []*os.File{first, nil, last}
+	e := env{"LISTEN_PID": strconv.Itoa(os.Getpid()), "LISTEN_FDS": "4", "LISTEN_FDNAMES": "web:missing"}
+	got, err := listeners("linux", fakeFDBase, filesByFD(files), e.lookup)
+	if err == nil || got != nil {
+		t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
+	}
+	if !strings.Contains(err.Error(), "missing") || !strings.Contains(err.Error(), "not a valid descriptor") {
+		t.Errorf("err = %v, want it to name the invalid descriptor missing", err)
+	}
+	assertFileClosed(t, 0, first)
+	assertFileClosed(t, 2, last)
+}
+
+// The tests above hand listeners *os.File values; the ones below check the adoption of real
+// inherited descriptors. Listeners closes the descriptors it adopts, so a test that handed it a
+// descriptor number of its own process would leave the *os.File owning that number to close it a
+// second time, by then perhaps a descriptor reused by something else. The descriptors are
+// therefore passed to a child process at 3 and up, as systemd passes them, and the child,
+// TestListenersChild, adopts them.
 
 // childScenario is the variable that makes TestListenersChild run, naming what it checks.
 const childScenario = "VIPENGELE_SYSTEMD_TEST_CHILD"
@@ -267,7 +416,7 @@ func TestListenersChild(t *testing.T) {
 	switch scenario {
 	case scenarioAdopt:
 		e := env{"LISTEN_PID": self, "LISTEN_FDS": "4", "LISTEN_FDNAMES": "web:admin:web"}
-		got, err := listeners("linux", 3, e.lookup)
+		got, err := listeners("linux", 3, inheritedFile, e.lookup)
 		if err != nil {
 			t.Fatalf("listeners: %v", err)
 		}
@@ -297,7 +446,7 @@ func TestListenersChild(t *testing.T) {
 
 	case scenarioFail:
 		e := env{"LISTEN_PID": self, "LISTEN_FDS": "3", "LISTEN_FDNAMES": "web:datagram:admin"}
-		got, err := listeners("linux", 3, e.lookup)
+		got, err := listeners("linux", 3, inheritedFile, e.lookup)
 		if err == nil || got != nil {
 			t.Fatalf("listeners = %v, %v; want nil and an error", got, err)
 		}
