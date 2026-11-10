@@ -1,0 +1,433 @@
+# Installs a command-line tool on Windows from its GitHub releases: the binary, then its PowerShell
+# completion. It runs on Windows PowerShell 5.1 and on PowerShell 7, saved to a file or piped as
+# `irm <url> | iex`.
+#
+# Environment:
+#   @@VERSION_ENV@@        the release to install, as v1.2.3 or 1.2.3; the latest when unset
+#   @@INSTALL_DIR_ENV@@    the directory the binary is placed in; %LOCALAPPDATA%\Programs\<name> when unset
+#   @@BASE_URL_ENV@@       the server releases are downloaded from; https://github.com when unset
+#   @@NO_COMPLETION_ENV@@  1 skips installing the PowerShell completion
+#   @@NO_MODIFY_PATH_ENV@@ 1 leaves PATH unchanged when the install directory is not on it
+@@SIGNED_BEGIN@@
+#   @@ALLOW_UNSIGNED_ENV@@ 1 installs on the checksum alone when minisign is not installed
+@@SIGNED_END@@
+#
+# The asset is verified against the release's checksums file before it is extracted or installed.
+@@SIGNED_BEGIN@@
+# The checksums file is verified first, against its minisign signature and the trusted keys.
+@@SIGNED_END@@
+#
+# Under `irm | iex` the script runs inside the caller's own session, where `exit` would close the
+# caller's window. The whole script is therefore one script block run with `&`: every variable,
+# function and preference it sets stays in that block's scope, and every failure is a terminating
+# error thrown with the message "<name>: error: ...". The error ends the block and reaches the caller
+# as an error record, leaving the session open; under `powershell -Command` it makes the process exit
+# 1. There is no param() block, because iex runs the text as a command, not as a script file.
+& {
+	$ErrorActionPreference = 'Stop'
+	$ProgressPreference = 'SilentlyContinue'
+	$PSNativeCommandUseErrorActionPreference = $false
+
+	$name = @@NAME@@
+	$owner = @@OWNER@@
+	$repo = @@REPO@@
+	$exe = $name + '.exe'
+
+	$tmp = ''
+	$stage = ''
+	$follow = $null
+	$noFollow = $null
+
+	function Say([string]$message) {
+		Write-Host ($name + ': ' + $message)
+	}
+
+	function Warn([string]$message) {
+		[Console]::Error.WriteLine($name + ': warning: ' + $message)
+	}
+
+	function Fail([string]$message) {
+		throw ($name + ': error: ' + $message)
+	}
+
+	# ErrorText returns the message of the innermost exception of an error record: a .NET method
+	# called from PowerShell wraps its exception in one that names the method.
+	function ErrorText($record) {
+		$e = $record.Exception
+		while ($e.InnerException) { $e = $e.InnerException }
+		return $e.Message
+	}
+
+	# InvokeTool runs a native command and returns its exit status and its output, standard error
+	# included, as one string. Standard error is captured with the error action Continue: under Stop,
+	# Windows PowerShell 5.1 turns a redirected line of it into a terminating error.
+	function InvokeTool([string]$path, [string[]]$arguments) {
+		$ErrorActionPreference = 'Continue'
+		$lines = & $path @arguments 2>&1 | ForEach-Object { [string]$_ }
+		return New-Object PSObject -Property @{ Code = $LASTEXITCODE; Output = ($lines -join "`n") }
+	}
+
+	# Fetch writes the body of $url to $path, following redirects, and returns the final HTTP
+	# status. It fails when no response was received.
+	function Fetch([string]$url, [string]$path) {
+		try {
+			$response = $follow.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+			try {
+				$status = [int]$response.StatusCode
+				if ($status -eq 200) {
+					$file = [System.IO.File]::Create($path)
+					try {
+						$null = $response.Content.CopyToAsync($file).GetAwaiter().GetResult()
+					} finally {
+						$file.Dispose()
+					}
+				}
+				return $status
+			} finally {
+				$response.Dispose()
+			}
+		} catch {
+			Fail ('downloading ' + $url + ' failed: ' + (ErrorText $_))
+		}
+	}
+
+	# LatestLocation returns the Location of the redirect $url answers, without following it.
+	function LatestLocation([string]$url) {
+		try {
+			$response = $noFollow.GetAsync($url).GetAwaiter().GetResult()
+			try {
+				$status = [int]$response.StatusCode
+				$location = ''
+				if ($response.Headers.Location) { $location = $response.Headers.Location.OriginalString }
+			} finally {
+				$response.Dispose()
+			}
+		} catch {
+			Fail ('requesting ' + $url + ' failed: ' + (ErrorText $_))
+		}
+		if (@(301, 302, 303, 307, 308) -notcontains $status) {
+			Fail ($url + ' answered HTTP ' + $status + ', not a redirect to the latest release')
+		}
+		if (-not $location) { Fail ($url + ' redirected without a Location') }
+		return $location
+	}
+
+	# ListedSha256 returns the digest the checksums file $path lists for $want, matched exactly, in
+	# lower case. A line is 64 hex digits, spaces or a '*', and the name, with a leading "./" dropped.
+	# It returns '' when $want is not listed and 'conflict' when it is listed with two different
+	# digests.
+	function ListedSha256([string]$path, [string]$want) {
+		$found = ''
+		foreach ($line in [System.IO.File]::ReadAllText($path).Split("`n")) {
+			if ($line.EndsWith("`r")) { $line = $line.Substring(0, $line.Length - 1) }
+			if ($line.Length -lt 64) { continue }
+			$digest = $line.Substring(0, 64)
+			if ($digest -notmatch '\A[0-9A-Fa-f]{64}\z') { continue }
+			$rest = $line.Substring(64)
+			$entry = $rest.TrimStart([char[]]' *')
+			if ($entry.Length -eq $rest.Length) { continue }
+			if ($entry.StartsWith('./', [System.StringComparison]::Ordinal)) { $entry = $entry.Substring(2) }
+			if ($entry -cne $want) { continue }
+			$digest = $digest.ToLowerInvariant()
+			if ($found -and $found -cne $digest) { return 'conflict' }
+			$found = $digest
+		}
+		return $found
+	}
+
+	# FindBinary returns the one file named $exe at any depth of $dir, and fails when there is none
+	# or more than one.
+	function FindBinary([string]$dir) {
+		$found = @(Get-ChildItem -LiteralPath $dir -Recurse -Force -File | Where-Object { $_.Name -ceq $exe })
+		if ($found.Count -eq 0) { Fail ($asset + ' holds no file named ' + $exe) }
+		if ($found.Count -gt 1) { Fail ($asset + ' holds more than one file named ' + $exe) }
+		return $found[0].FullName
+	}
+
+	# OnPath reports whether $list, a ';'-separated PATH, holds $dir. Each entry is compared with its
+	# environment variables expanded, without case, and with trailing '\' trimmed from both sides.
+	function OnPath([string]$list, [string]$dir) {
+		$want = $dir.TrimEnd('\')
+		foreach ($entry in $list.Split(';')) {
+			$entry = [Environment]::ExpandEnvironmentVariables($entry.Trim().Trim('"')).TrimEnd('\')
+			if ($entry -and $entry -eq $want) { return $true }
+		}
+		return $false
+	}
+
+	# Broadcast tells running programs, Explorer among them, that the user environment changed, so
+	# a terminal opened from them afterwards sees the new PATH. A failure is a warning: the registry
+	# already holds the change.
+	function Broadcast {
+		try {
+			$win32 = 'VipengeleInstallScript.Win32' -as [type]
+			if (-not $win32) {
+				Add-Type -Namespace 'VipengeleInstallScript' -Name 'Win32' -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+				$win32 = 'VipengeleInstallScript.Win32' -as [type]
+			}
+			$result = [UIntPtr]::Zero
+			# HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG and a 5-second bound per window.
+			$win32::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result) | Out-Null
+		} catch {
+			Warn ('cannot tell running programs that PATH changed: ' + (ErrorText $_))
+		}
+	}
+
+	# AddToPath appends $dir to the user PATH in the registry, unless it is listed there already,
+	# and to the PATH of this session. The value is read unexpanded and written back with its own
+	# kind, so the %VARIABLE% references of a REG_EXPAND_SZ PATH survive; a missing value is created
+	# as REG_EXPAND_SZ. [Environment]::SetEnvironmentVariable is not used: it writes REG_SZ.
+	function AddToPath([string]$dir) {
+		$key = 'HKCU:\Environment'
+		if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }
+		$item = Get-Item -LiteralPath $key
+		$raw = ''
+		$kind = 'ExpandString'
+		if (@($item.GetValueNames()) -contains 'Path') {
+			$raw = [string]$item.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+			if ($item.GetValueKind('Path') -eq [Microsoft.Win32.RegistryValueKind]::String) { $kind = 'String' }
+		}
+		if (OnPath $raw $dir) {
+			Say ($dir + ' is on the user PATH already')
+		} else {
+			$new = $dir
+			if ($raw.EndsWith(';')) {
+				$new = $raw + $dir
+			} elseif ($raw) {
+				$new = $raw + ';' + $dir
+			}
+			New-ItemProperty -LiteralPath $key -Name 'Path' -Value $new -PropertyType $kind -Force | Out-Null
+			Say ('added ' + $dir + ' to the user PATH; a terminal opened from now on finds ' + $name + ' by name')
+			Broadcast
+		}
+		if ($env:Path) {
+			$env:Path = $env:Path.TrimEnd(';') + ';' + $dir
+		} else {
+			$env:Path = $dir
+		}
+		Say ('added ' + $dir + ' to the PATH of this session')
+	}
+
+	# TestInteractive reports whether a prompt can be answered: the process runs in a user's
+	# session, its standard input is the console rather than a pipe or a file, and PowerShell was not
+	# started with -NonInteractive. Under `irm | iex` standard input is still the console, since
+	# the script arrives through the pipeline, not through standard input.
+	function TestInteractive {
+		if (-not [Environment]::UserInteractive) { return $false }
+		try {
+			if ([Console]::IsInputRedirected) { return $false }
+		} catch {
+			return $false
+		}
+		foreach ($arg in [Environment]::GetCommandLineArgs()) {
+			if ($arg -match '\A[-/]noni') { return $false }
+		}
+		return $true
+	}
+
+	try {
+		if ([System.IO.Path]::DirectorySeparatorChar -ne '\') {
+			Fail ('unsupported operating system: ' + [Environment]::OSVersion.Platform)
+		}
+		$os = 'windows'
+
+		# A 32-bit PowerShell on a 64-bit Windows reports x86 here and the machine in
+		# PROCESSOR_ARCHITEW6432.
+		$machine = $env:PROCESSOR_ARCHITEW6432
+		if (-not $machine) { $machine = $env:PROCESSOR_ARCHITECTURE }
+		switch ($machine) {
+			'AMD64' { $arch = 'amd64' }
+			'ARM64' { $arch = 'arm64' }
+			default { Fail ('unsupported architecture: ' + $machine) }
+		}
+
+		$base = $env:@@BASE_URL_ENV@@
+		if (-not $base) { $base = 'https://github.com' }
+		if ($base.EndsWith('/')) { $base = $base.Substring(0, $base.Length - 1) }
+
+		$installDir = $env:@@INSTALL_DIR_ENV@@
+		if (-not $installDir) {
+			if (-not $env:LOCALAPPDATA) {
+				Fail 'LOCALAPPDATA is not set; set @@INSTALL_DIR_ENV@@ to the directory to install into'
+			}
+			$installDir = [System.IO.Path]::Combine($env:LOCALAPPDATA, 'Programs', $name)
+		}
+		# .NET resolves a relative path against the process's directory, which is not the session's
+		# current location.
+		$installDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($installDir)
+
+		# Windows PowerShell 5.1 runs on .NET Framework, whose default protocols on an older Windows
+		# leave out the TLS 1.2 github.com requires. The setting is the session's, and only adds a
+		# protocol.
+		[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+		Add-Type -AssemblyName System.Net.Http
+		$follow = New-Object System.Net.Http.HttpClient
+		$handler = New-Object System.Net.Http.HttpClientHandler
+		$handler.AllowAutoRedirect = $false
+		$noFollow = New-Object System.Net.Http.HttpClient -ArgumentList $handler
+
+		$tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), $name + '-' + [Guid]::NewGuid().ToString('N'))
+		[System.IO.Directory]::CreateDirectory($tmp) | Out-Null
+
+		$tag = $env:@@VERSION_ENV@@
+		if ($tag) {
+			if (-not $tag.StartsWith('v', [System.StringComparison]::Ordinal)) { $tag = 'v' + $tag }
+		} else {
+			$latestUrl = $base + '/' + $owner + '/' + $repo + '/releases/latest'
+			$location = LatestLocation $latestUrl
+			$location = $location.Split('#')[0].Split('?')[0]
+			$tag = $location.Substring($location.LastIndexOf('/') + 1)
+			if (-not $tag) { Fail ($latestUrl + ' redirected to ' + $location + ', which names no release') }
+		}
+		if ($tag -cnotmatch '\A[0-9A-Za-z._+-]+\z') { Fail ('invalid release tag: ' + $tag) }
+		$version = $tag
+		if ($version.StartsWith('v', [System.StringComparison]::Ordinal)) { $version = $version.Substring(1) }
+
+		$asset = @@ASSET@@
+		$assetUrl = $base + '/' + $owner + '/' + $repo + '/releases/download/' + $tag + '/' + @@ASSET_URL@@
+		$checksums = @@CHECKSUMS@@
+		$checksumsUrl = $base + '/' + $owner + '/' + $repo + '/releases/download/' + $tag + '/' + @@CHECKSUMS_URL@@
+
+		Say ('installing ' + $tag + ' for ' + $os + '/' + $arch)
+
+		$assetFile = [System.IO.Path]::Combine($tmp, 'asset')
+		$status = Fetch $assetUrl $assetFile
+		if ($status -eq 404) { Fail ('release ' + $tag + ' has no asset ' + $asset) }
+		if ($status -ne 200) { Fail ('downloading ' + $assetUrl + ' answered HTTP ' + $status) }
+
+		$checksumsFile = [System.IO.Path]::Combine($tmp, 'checksums')
+		$status = Fetch $checksumsUrl $checksumsFile
+		if ($status -eq 404) { Fail ('release ' + $tag + ' has no checksums file ' + $checksums) }
+		if ($status -ne 200) { Fail ('downloading ' + $checksumsUrl + ' answered HTTP ' + $status) }
+
+@@SIGNED_BEGIN@@
+		$signature = $checksums + '.minisig'
+		$signatureUrl = $checksumsUrl + '.minisig'
+		$signatureFile = [System.IO.Path]::Combine($tmp, 'checksums.minisig')
+		$status = Fetch $signatureUrl $signatureFile
+		if ($status -eq 404) { Fail ('release ' + $tag + ' has no signature ' + $signature) }
+		if ($status -ne 200) { Fail ('downloading ' + $signatureUrl + ' answered HTTP ' + $status) }
+
+		# The checksums file is believed only once its signature verifies under one of the trusted
+		# keys. Without minisign the signature cannot be checked, and the checksum alone is enough only
+		# when the user says so, through @@ALLOW_UNSIGNED_ENV@@=1 or a "y" or "yes" typed at the prompt;
+		# with neither, the install stops. The prompt is offered only when TestInteractive finds
+		# someone to answer it.
+		$minisign = Get-Command -Name 'minisign' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+		if ($minisign) {
+			$verified = $false
+			foreach ($key in @(@@TRUSTED_KEYS@@)) {
+				$run = InvokeTool $minisign.Path @('-V', '-q', '-P', $key, '-m', $checksumsFile, '-x', $signatureFile)
+				if ($run.Code -eq 0) {
+					$verified = $true
+					break
+				}
+			}
+			if (-not $verified) {
+				Fail ('the signature ' + $signature + ' does not verify ' + $checksums + ' under any trusted key; nothing was installed')
+			}
+		} else {
+			Warn ('minisign is not installed, so the signature of ' + $checksums + ' cannot be checked')
+			if ($env:@@ALLOW_UNSIGNED_ENV@@ -eq '1') {
+				Warn '@@ALLOW_UNSIGNED_ENV@@=1: installing on the checksum alone'
+			} elseif (TestInteractive) {
+				$answer = ''
+				try {
+					$answer = [string](Read-Host ($name + ': install ' + $tag + ' verified by its checksum alone? [y/N]'))
+				} catch {
+					$answer = ''
+				}
+				if ($answer.Trim() -notmatch '\A(y|yes)\z') {
+					Fail 'the install was declined; nothing was installed. Install minisign to check the signature, or set @@ALLOW_UNSIGNED_ENV@@=1 to install on the checksum alone'
+				}
+			} else {
+				Fail 'the signature cannot be checked and there is no terminal to ask; nothing was installed. Install minisign to check the signature, or set @@ALLOW_UNSIGNED_ENV@@=1 to install on the checksum alone'
+			}
+		}
+
+@@SIGNED_END@@
+		$expected = ListedSha256 $checksumsFile $asset
+		if (-not $expected) { Fail ($checksums + ' lists no checksum for ' + $asset) }
+		if ($expected -ceq 'conflict') { Fail ($checksums + ' lists two different checksums for ' + $asset) }
+		$actual = (Get-FileHash -LiteralPath $assetFile -Algorithm SHA256).Hash.ToLowerInvariant()
+		if ($actual -cne $expected) {
+			Fail ('checksum mismatch for ' + $asset + ': ' + $checksums + ' lists ' + $expected + ', the download is ' + $actual)
+		}
+
+@@INSTALL_STEP@@
+
+		# Windows lets a running executable be renamed but not overwritten or deleted, so an existing
+		# binary moves aside to <exe>.old before the new one moves in, and <exe>.old is removed once it
+		# is no longer running.
+		$target = [System.IO.Path]::Combine($installDir, $exe)
+		$old = $target + '.old'
+		$stagePath = [System.IO.Path]::Combine($installDir, '.' + $exe + '.' + [Guid]::NewGuid().ToString('N'))
+		try {
+			[System.IO.Directory]::CreateDirectory($installDir) | Out-Null
+			$stage = $stagePath
+			[System.IO.File]::Copy($binary, $stage)
+		} catch {
+			Fail ('cannot write to ' + $installDir + ': ' + (ErrorText $_))
+		}
+		if ([System.IO.File]::Exists($target)) {
+			if ([System.IO.File]::Exists($old)) {
+				try {
+					[System.IO.File]::Delete($old)
+				} catch {
+					Fail ('cannot remove ' + $old + ', which is still running: ' + (ErrorText $_))
+				}
+			}
+			try {
+				[System.IO.File]::Move($target, $old)
+			} catch {
+				Fail ('cannot move ' + $target + ' aside: ' + (ErrorText $_))
+			}
+			try {
+				[System.IO.File]::Move($stage, $target)
+			} catch {
+				$reason = ErrorText $_
+				try {
+					[System.IO.File]::Move($old, $target)
+				} catch {
+					Fail ('cannot move the new binary to ' + $target + ': ' + $reason + '; the previous binary is at ' + $old)
+				}
+				Fail ('cannot move the new binary to ' + $target + ': ' + $reason)
+			}
+			$stage = ''
+			try {
+				[System.IO.File]::Delete($old)
+			} catch {
+				Say ('the previous binary is still running; ' + $old + ' is removed by the next install')
+			}
+		} else {
+			try {
+				[System.IO.File]::Move($stage, $target)
+			} catch {
+				Fail ('cannot move the new binary to ' + $target + ': ' + (ErrorText $_))
+			}
+			$stage = ''
+		}
+		Say ('installed ' + $target)
+
+		if (-not (OnPath $env:Path $installDir)) {
+			if ($env:@@NO_MODIFY_PATH_ENV@@ -eq '1') {
+				Warn ($installDir + ' is not on PATH; add it to run ' + $name + ' by name')
+			} else {
+				AddToPath $installDir
+			}
+		}
+
+		$CompletionBinary = $target
+		if ($env:@@NO_COMPLETION_ENV@@ -ne '1') {
+@@SNIPPET@@
+		}
+	} finally {
+		if ($stage) { Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue }
+		if ($tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+		if ($follow) { $follow.Dispose() }
+		if ($noFollow) { $noFollow.Dispose() }
+	}
+}

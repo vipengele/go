@@ -8,7 +8,7 @@
 // production default; a nil Source is the [GitHubSource] for the Identity's Owner and Repo.
 // [Config.Resolved] validates a Config and returns that fully defaulted copy, so a second reader of
 // the defaults, such as package [go.vipengele.org/update/installscript], which renders the tool's
-// Unix install script, never derives them itself.
+// sh and PowerShell install scripts, never derives them itself.
 //
 // The default [GitHubSource] authenticates its REST API requests with a token: Config.Token, which
 // when nil reads GH_TOKEN and then GITHUB_TOKEN through Getenv, and which opts out by returning "".
@@ -42,9 +42,12 @@
 //
 // [Config.Extract] turns the verified [*Archive] into a [*Staged] binary: a new file, mode 0700 and
 // synced, in a directory the caller supplies, so that a rename into place stays on one filesystem.
+// It is named TempPrefix, a random suffix and the extension of the binary's file name, ".exe" on a
+// Windows GOOS, so that Windows can run it.
 // The format comes from the Config, never from the archive's bytes: an AssetTemplate without {ext}
 // names a raw binary, and otherwise the AssetExt is "tar.gz" or "tgz" for a gzip-compressed tar, or
-// "zip". Every entry of an archive is checked before anything is written, and one unsafe entry (an
+// "zip". An empty AssetExt is [asset.DefaultExtFor] the resolved GOOS: "zip" for "windows" and
+// "tar.gz" for every other GOOS. Every entry of an archive is checked before anything is written, and one unsafe entry (an
 // absolute or ".." path, a link, a device) rejects the whole archive with an [*UnsafeEntryError].
 // The binary is the regular file named BinaryName, with ".exe" on a Windows GOOS, at any depth. The
 // bytes written are bounded by MaxExtractBytes. Extract closes the archive, removing its temporary
@@ -72,12 +75,21 @@
 // backup until [Installed.Discard] removes it or [Installed.Rollback] puts it back, and whichever is
 // called first decides. A lack of permission is a [*PermissionError] with a hint for the user, which
 // [Config.CheckWritable] can report before anything is downloaded. A [PostUpdate] hook receives
-// [Installed.Path]; Install runs none itself.
+// [Installed.Path]; Install runs none itself. [Config.RemoveStaleBackup] removes a backup left
+// beside the executable.
+//
+// [Config.CheckStaged] preflights a [*Staged] binary before it is installed: it runs the binary
+// with "version --json", killing it after PreflightTimeout, 10 seconds by default, and refuses it
+// with a [*PreflightError] unless it answers with schema 1 or greater, the selected tag as its
+// version and the Config's GOOS and GOARCH. The tool's [Preflight] hooks, Config.Preflight, then
+// run in order on the [StagedBinary] it reported, and the first error vetoes the install.
+// CheckStaged neither keeps nor discards the staged binary; its caller settles it.
 //
 // [Config.Apply] is the whole update of a [Selection] in one call: CheckManaged and CheckWritable,
-// both before any request, then CheckDowngrade, Download, Extract into Target's directory and
-// Install, and last records the installed version in the State, stopping at the first error. It
-// returns the [*Installed] with the backup still on disk; the caller runs its
+// both before any request, then CheckDowngrade, Download, Extract into Target's directory,
+// CheckStaged and Install, and last records the installed version in the State, stopping at the
+// first error. A binary CheckStaged refuses is discarded, and the installed executable and the
+// State are left as they were. It returns the [*Installed] with the backup still on disk; the caller runs its
 // PostUpdate hooks, whose failure is reported and does not undo the update, and then settles it
 // with Discard or Rollback.
 //
@@ -136,11 +148,41 @@
 // check starts, so a run whose stderr is not a terminal starts no check and writes nothing. The
 // hooks write nothing else and the post-run hook always returns nil. The tool's own update command
 // must carry the [spec.SkipUpdateCheck] annotation, or the pre-run hook starts a check in the very
-// command that installs the update.
+// command that installs the update. On Windows the pre-run hook also removes a stale backup, on
+// every command, as described below.
 //
 // [Config.CheckRelease] refuses a development build: it returns a [*DevBuildError], matched with
 // [errors.As], when the Config's Version is not a release version, so an update command can stop
 // before it downloads anything.
+//
+// # Windows
+//
+// Windows lets a running executable be renamed but not removed, so [Installed.Discard] cannot
+// remove the backup of the process that ran the update and returns a [*BackupLockedError], which
+// the caller may ignore. [Config.RemoveStaleBackup] removes that backup once the process has exited,
+// and the pre-run hook of [Config.UpdateCheckHooks] calls it on every command, those carrying
+// [spec.SkipUpdateCheck] included, when the host is Windows, dropping its error. While an update is
+// unsettled its backup is the updating process's running file there, so the hook never takes it
+// from [Installed.Rollback]. On any other host the hook removes no backup: an open file can be
+// removed there, and Discard always removes the backup itself. [Config.Start] does no executable
+// I/O on any host.
+//
+// Install has one code path for every operating system. The package's tests run on Windows on a
+// gated CI job, one of them replacing the file of a running process in a directory whose path
+// holds a space.
+//
+// The Windows support has limits:
+//
+//   - An antivirus scanner or a search indexer that holds a file open can fail a rename. A failed
+//     first rename leaves the executable untouched; a failed second rename renames the backup
+//     back, and the user runs the update again. A lock that keeps the backup from being removed
+//     leaves <exe>.old behind until the next run of the tool removes it, through the check hook or
+//     a call of RemoveStaleBackup. Install does not retry.
+//   - Paths holding spaces are supported.
+//   - The sh install script refuses a zip asset, the Windows default; a Windows user installs with
+//     the PowerShell script of [go.vipengele.org/update/installscript.RenderPowerShell].
+//   - The PowerShell script needs Windows PowerShell 5.1 or later, and a tar.gz or tgz asset needs
+//     the tar.exe of Windows 10 and later.
 //
 // The package depends on no command-line framework.
 package update

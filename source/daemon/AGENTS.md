@@ -105,20 +105,28 @@ the Windows service control manager) behind the `Manager` interface: `Prepare`, 
 `Uninstall`, `Start`, `Stop` and `Status`, each taking only a context. Read its `doc.go` first and
 `docs/adr/0024-service-drivers-are-selected-at-runtime.md`.
 
-- `manager.go` — `Manager` and `New(cfg, opts...)`, which validates the `Config` against the target
-  GOOS and then switches on it to select the driver.
-- `option.go` — `Option` and `WithGOOS`; `""` means `runtime.GOOS`, `"windows"` applies the Windows
-  rules and every other value the POSIX rules.
+- `manager.go` — `Manager` and `New(cfg, opts...)`, which checks, in order, the `WithIdentity`
+  identity (`ErrInvalidConfig`), whether the process runs in a container (`*ContainerError`), the
+  `Config` against the target GOOS, the `WithSystemdHardening` override, and then switches on the
+  GOOS to select the driver (systemd on linux, `ErrUnsupported` elsewhere).
+- `option.go` — `Option`, `WithGOOS`, `WithIdentity`, `WithContainer` and
+  `WithSystemdHardening`; `""` means `runtime.GOOS`, `"windows"` applies the Windows rules and every other value the POSIX rules.
+  `WithContainer` replaces container detection and wins over the environment and `WithIdentity`;
+  without it, `New` asks `paths.InContainerFor` with the identity and `paths.InContainer` without
+  one.
 - `config.go` — `Config` (`Name`, `Description`, `Binary`, `Args`, `Env`, `WorkingDir`, `User`,
   `Scope`) and `Validate`.
 - `state.go` — `State` (unknown, not installed, stopped, starting, running, failed) and `Status`.
 - `errors.go` — the sentinel errors, `ErrInvalidConfig`, `ErrUnsupported`, `ErrNotInstalled`,
-  `ErrPrivilegesRequired` and `ErrManagerUnreachable` among them.
+  `ErrPrivilegesRequired`, `ErrManagerUnreachable` and `ErrContainer` among them, and
+  `ContainerError`, which matches `ErrContainer` and carries the `Instead` advice.
 - `hardening.go` — `Hardening`, `DefaultHardening(Scope)` and its validation; set with
   `WithSystemdHardening`, which `New` validates on every GOOS and the other drivers ignore
   (`docs/adr/0028-driver-specific-settings-are-options-not-config-fields.md`).
 - `systemd.go`, `systemd_unit.go`, `systemd_status.go` — the systemd driver: the unexported
   `systemd` struct, the unit rendering and `Status`.
+- `export_test.go` — `WithLookupEnv`, the test-only seam for the environment container detection
+  reads.
 
 Conventions of the package:
 
@@ -131,7 +139,10 @@ Conventions of the package:
   package-level table: `gochecknoglobals` is enabled.
 - `Validate` returns `errors.Join` of `ErrInvalidConfig`-wrapped violations in a fixed order: fields
   in declaration order, `Args` by index, `Env` by sorted key.
-- Standard library only.
+- Every test passes `WithContainer` (or `WithLookupEnv` with a forced `<PREFIX>_CONTAINER`, or a
+  `container` variable) so that no test result depends on the host being a container.
+- Standard library only, apart from `go.vipengele.org/cli/spec` and `cli/spec/paths`, for
+  `spec.Identity` and container detection.
 
 The systemd driver:
 

@@ -35,6 +35,8 @@ const (
 	defaultMaxExtractBytes int64 = 512 << 20
 	// defaultDownloadTimeout is the [Config.DownloadTimeout] a zero value resolves to.
 	defaultDownloadTimeout = 5 * time.Minute
+	// defaultPreflightTimeout is the [Config.PreflightTimeout] a zero value resolves to.
+	defaultPreflightTimeout = 10 * time.Second
 	// defaultCheckInterval is the [Config.CheckInterval] a zero value resolves to.
 	defaultCheckInterval = 24 * time.Hour
 	// minCheckInterval is the shortest [Config.CheckInterval] that is valid.
@@ -78,15 +80,21 @@ type Config struct {
 	// DownloadTimeout bounds the whole of a single download. Zero means 5 minutes; a negative value
 	// is invalid.
 	DownloadTimeout time.Duration
+	// PreflightTimeout bounds the run of the staged binary's "version --json" by
+	// [Config.CheckStaged]; the binary is killed when it expires. Zero means 10 seconds; a negative
+	// value is invalid.
+	PreflightTimeout time.Duration
 	// AssetTemplate names the release asset that holds the binary for a platform, written in the
 	// template language of package asset: {name}, {version}, {tag}, {os}, {arch} and {ext}. Empty
 	// means [asset.DefaultTemplate].
 	AssetTemplate string
 	// AssetExt is the archive extension {ext} stands for, without a leading ".", and it decides the
 	// archive format: "tar.gz" or "tgz" is a gzip-compressed tar, "zip" a zip, matched exactly in
-	// lower case. Empty means [asset.DefaultExt]. An AssetTemplate without {ext} names a raw binary
-	// and ignores AssetExt. It carries no per-OS rules: a tool whose assets differ by platform
-	// writes the difference into AssetTemplate, and a raw-binary tool leaves {ext} out of it.
+	// lower case. Empty means [asset.DefaultExtFor] the resolved GOOS: "zip" for "windows",
+	// "tar.gz" for every other GOOS; a non-empty AssetExt is used on every GOOS. An AssetTemplate
+	// without {ext} names a raw binary and ignores AssetExt. It carries no other per-OS rules: a
+	// tool whose assets differ by platform writes the difference into AssetTemplate, and a
+	// raw-binary tool leaves {ext} out of it.
 	AssetExt string
 	// ChecksumsAsset is the name of the release asset that lists every asset's checksum, written
 	// in the template language of package asset: it takes every placeholder but {ext}. Empty means
@@ -121,6 +129,12 @@ type Config struct {
 	// PostUpdate lists the hooks [RunPostUpdate] runs, in order, once the installed binary has
 	// replaced the old one. Empty means none.
 	PostUpdate []PostUpdate
+	// Preflight lists the tool's own checks of a staged binary, which [Config.CheckStaged] runs in
+	// order once the binary has answered "version --json" as the selected release for the
+	// platform. The first hook to return an error vetoes the install and the later hooks do not
+	// run. The binary may still be refused after a hook passes, so a hook is side-effect-free or
+	// cleans up after itself. Empty means none.
+	Preflight []Preflight
 	// Version is the running program's version. A version that is not a release version, as
 	// version.IsRelease in go.vipengele.org/cli/spec/version defines it (empty, "dev", a
 	// pseudo-version, or any version with build metadata such as "+dirty"), never checks for an
@@ -174,8 +188,9 @@ type Config struct {
 	// after the built-in ones. Nil means the built-in detectors alone; a nil entry is invalid.
 	Detectors []Detector
 	// InContainer reports whether the process runs inside a container. Nil means
-	// [paths.InContainer] for the resolved GOOS, reading the environment through Getenv and the
-	// real filesystem.
+	// [paths.InContainerFor] the Identity: the <EnvPrefix>_CONTAINER override when set, else the
+	// [paths.InContainer] heuristic for the resolved GOOS, reading the environment through Getenv
+	// and the real filesystem.
 	InContainer func() bool
 	// IsTerminal reports whether stderr is a terminal. Nil means the real standard streams, as
 	// [terminal.Detect] probes them.
@@ -188,7 +203,7 @@ type Config struct {
 // AssetTemplate, ChecksumsAsset or AssetExt must be valid: AssetTemplate by [asset.Validate],
 // ChecksumsAsset by [asset.ValidateChecksums], and AssetExt holding none of "/", "\", "{" and
 // "}" and not starting with ".", and, when the AssetTemplate holds {ext}, being "tar.gz", "tgz" or
-// "zip". MaxDownloadBytes, MaxExtractBytes and DownloadTimeout must not be negative, no entry of
+// "zip". MaxDownloadBytes, MaxExtractBytes, DownloadTimeout and PreflightTimeout must not be negative, no entry of
 // Detectors may be nil, CheckInterval must be zero or at least 1 hour, and CheckWait must be
 // between zero and 2 seconds. Each of those is a [validate.FieldError] wrapping
 // [validate.ErrInvalid], the one for a nil detector naming its index as Detectors[i], and the
@@ -206,10 +221,11 @@ func (c Config) Validate() error {
 		c.Identity.Validate(),
 		checkTemplate("AssetTemplate", c.AssetTemplate, asset.Validate),
 		checkTemplate("ChecksumsAsset", c.ChecksumsAsset, asset.ValidateChecksums),
-		checkAssetExt(c.AssetTemplate, c.AssetExt),
+		checkAssetExt(c.AssetTemplate, c.AssetExt, c.GOOS),
 		checkNotNegative("MaxDownloadBytes", c.MaxDownloadBytes),
 		checkNotNegative("MaxExtractBytes", c.MaxExtractBytes),
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
+		checkNotNegative("PreflightTimeout", int64(c.PreflightTimeout)),
 		checkDetectors(c.Detectors),
 		checkSignaturePolicy(c.TrustedKeys, c.AllowUnsigned),
 		checkChannel(c.Channel),
@@ -382,10 +398,12 @@ const (
 	formatZip
 )
 
-// deriveFormat returns the format of the asset an AssetTemplate and an AssetExt name, with an empty
-// one standing for its default. A template without {ext} is raw whatever the extension. Otherwise
-// the extension decides, matched exactly; ok is false for one that names no supported format.
-func deriveFormat(tmpl, ext string) (f assetFormat, ok bool) {
+// deriveFormat returns the format of the asset an AssetTemplate and an AssetExt name for the target
+// operating system goos, with an empty one standing for its default: an empty goos is
+// [runtime.GOOS], and an empty ext is [asset.DefaultExtFor] goos. A template without {ext} is raw
+// whatever the extension. Otherwise the extension decides, matched exactly; ok is false for one
+// that names no supported format.
+func deriveFormat(tmpl, ext, goos string) (f assetFormat, ok bool) {
 	if tmpl == "" {
 		tmpl = asset.DefaultTemplate
 	}
@@ -393,7 +411,10 @@ func deriveFormat(tmpl, ext string) (f assetFormat, ok bool) {
 		return formatRaw, true
 	}
 	if ext == "" {
-		ext = asset.DefaultExt
+		if goos == "" {
+			goos = runtime.GOOS
+		}
+		ext = asset.DefaultExtFor(goos)
 	}
 	switch ext {
 	case "tar.gz", "tgz":
@@ -409,15 +430,15 @@ func deriveFormat(tmpl, ext string) (f assetFormat, ok bool) {
 // a Config [Config.resolve] returned, which has passed [Config.Validate]: any extension a
 // validated Config carries names a format.
 func (c Config) format() assetFormat {
-	f, _ := deriveFormat(c.AssetTemplate, c.AssetExt)
+	f, _ := deriveFormat(c.AssetTemplate, c.AssetExt, c.GOOS)
 	return f
 }
 
 // checkAssetExt rejects an extension that would change the asset name's structure: a path
 // separator, a brace that could open a placeholder, or a leading "." the template already writes.
 // It also rejects an extension that names no supported format when the template, which an empty
-// value defaults, holds {ext}.
-func checkAssetExt(tmpl, ext string) error {
+// value defaults, holds {ext}; an empty ext stands for the default for goos.
+func checkAssetExt(tmpl, ext, goos string) error {
 	if strings.ContainsAny(ext, `/\{}`) || strings.HasPrefix(ext, ".") {
 		return &validate.FieldError{
 			Field: "AssetExt",
@@ -425,7 +446,7 @@ func checkAssetExt(tmpl, ext string) error {
 			Err:   fmt.Errorf("%w: must not contain '/', '\\', '{' or '}' or start with '.'", validate.ErrInvalid),
 		}
 	}
-	if _, ok := deriveFormat(tmpl, ext); !ok {
+	if _, ok := deriveFormat(tmpl, ext, goos); !ok {
 		return &validate.FieldError{
 			Field: "AssetExt",
 			Value: ext,
@@ -473,11 +494,11 @@ func (c Config) resolve() (Config, error) {
 	if r.DownloadTimeout == 0 {
 		r.DownloadTimeout = defaultDownloadTimeout
 	}
+	if r.PreflightTimeout == 0 {
+		r.PreflightTimeout = defaultPreflightTimeout
+	}
 	if r.AssetTemplate == "" {
 		r.AssetTemplate = asset.DefaultTemplate
-	}
-	if r.AssetExt == "" {
-		r.AssetExt = asset.DefaultExt
 	}
 	if r.ChecksumsAsset == "" {
 		r.ChecksumsAsset = asset.DefaultChecksumsTemplate
@@ -490,6 +511,9 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.GOOS == "" {
 		r.GOOS = runtime.GOOS
+	}
+	if r.AssetExt == "" {
+		r.AssetExt = asset.DefaultExtFor(r.GOOS)
 	}
 	if r.GOARCH == "" {
 		r.GOARCH = runtime.GOARCH
@@ -529,7 +553,7 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.InContainer == nil {
 		probes := paths.Probes{GOOS: r.GOOS, LookupEnv: lookupEnvOf(r.Getenv)}
-		r.InContainer = func() bool { return paths.InContainer(probes) }
+		r.InContainer = func() bool { return paths.InContainerFor(r.Identity, probes) }
 	}
 	if r.CheckInterval == 0 {
 		r.CheckInterval = defaultCheckInterval

@@ -162,10 +162,16 @@ func TestBuildArchiveRejectsUnknownExt(t *testing.T) {
 	}
 }
 
-func TestExtTarGzIsTheUpdaterDefault(t *testing.T) {
+func TestExtsAreTheUpdaterDefaults(t *testing.T) {
 	t.Parallel()
-	if updatetest.ExtTarGz != asset.DefaultExt {
-		t.Errorf("ExtTarGz = %q, want asset.DefaultExt %q", updatetest.ExtTarGz, asset.DefaultExt)
+	for _, tc := range []struct{ goos, ext string }{
+		{"linux", updatetest.ExtTarGz},
+		{"darwin", updatetest.ExtTarGz},
+		{"windows", updatetest.ExtZip},
+	} {
+		if want := asset.DefaultExtFor(tc.goos); tc.ext != want {
+			t.Errorf("extension for %s = %q, want asset.DefaultExtFor %q", tc.goos, tc.ext, want)
+		}
 	}
 }
 

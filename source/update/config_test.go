@@ -56,7 +56,8 @@ func seededKeyLine(seed byte) string {
 // validConfig is a Config with every required field set and every optional field at its zero
 // value, except the two seams the default StateDir is resolved through: Getenv reports every
 // variable unset and UserHomeDir returns home, so that no test reads the host's environment or
-// home directory.
+// home directory. Executable names a path under home that no managed-install detector matches and
+// InContainer reports false, so no test reads the host's binary location or container state.
 func validConfig(home string) Config {
 	return Config{
 		Identity:    validIdentity(),
@@ -64,6 +65,8 @@ func validConfig(home string) Config {
 		Source:      &stubSource{},
 		Getenv:      envOf(nil),
 		UserHomeDir: func() (string, error) { return home, nil },
+		Executable:  func() (string, error) { return filepath.Join(home, "bin", "atk"), nil },
+		InContainer: func() bool { return false },
 	}
 }
 
@@ -160,8 +163,8 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if r.AssetTemplate != asset.DefaultTemplate {
 		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, asset.DefaultTemplate)
 	}
-	if r.AssetExt != asset.DefaultExt {
-		t.Errorf("AssetExt = %q, want %q", r.AssetExt, asset.DefaultExt)
+	if want := asset.DefaultExtFor(runtime.GOOS); r.AssetExt != want {
+		t.Errorf("AssetExt = %q, want %q", r.AssetExt, want)
 	}
 	if r.ChecksumsAsset != asset.DefaultChecksumsTemplate {
 		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, asset.DefaultChecksumsTemplate)
@@ -180,6 +183,9 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	}
 	if want := 5 * time.Minute; r.DownloadTimeout != want {
 		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, want)
+	}
+	if want := 10 * time.Second; r.PreflightTimeout != want {
+		t.Errorf("PreflightTimeout = %v, want %v", r.PreflightTimeout, want)
 	}
 	if r.EvalSymlinks == nil {
 		t.Fatal("EvalSymlinks = nil, want filepath.EvalSymlinks")
@@ -315,11 +321,14 @@ func TestResolveDefaultInContainerFollowsTheSeams(t *testing.T) {
 		{"linux with a podman container variable", "linux", map[string]string{"container": "podman"}, true},
 		{"darwin with a container variable", "darwin", kubernetes, false},
 		{"windows with a container variable", "windows", kubernetes, false},
+		{"override off beats a container variable", "linux", map[string]string{"ATK_CONTAINER": "0", "KUBERNETES_SERVICE_HOST": "10.0.0.1"}, false},
+		{"override on alone", "linux", map[string]string{"ATK_CONTAINER": "1"}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig(t.TempDir())
+			c.InContainer = nil
 			c.GOOS = tc.goos
 			c.Getenv = envOf(tc.env)
 
@@ -394,6 +403,7 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	c.MaxDownloadBytes = 1024
 	c.MaxExtractBytes = 2048
 	c.DownloadTimeout = 7 * time.Second
+	c.PreflightTimeout = 3 * time.Second
 	c.AssetTemplate = "{name}-{os}-{arch}.{ext}"
 	c.AssetExt = "zip"
 	c.ChecksumsAsset = "SHA256SUMS"
@@ -433,6 +443,9 @@ func TestResolveHonoursEveryOverride(t *testing.T) {
 	}
 	if r.DownloadTimeout != 7*time.Second {
 		t.Errorf("DownloadTimeout = %v, want %v", r.DownloadTimeout, 7*time.Second)
+	}
+	if r.PreflightTimeout != 3*time.Second {
+		t.Errorf("PreflightTimeout = %v, want %v", r.PreflightTimeout, 3*time.Second)
 	}
 	if r.AssetTemplate != "{name}-{os}-{arch}.{ext}" {
 		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, "{name}-{os}-{arch}.{ext}")
@@ -652,6 +665,8 @@ func TestResolveReportsHomeDirError(t *testing.T) {
 func TestResolveDoesNotModifyItsReceiver(t *testing.T) {
 	t.Parallel()
 	c := validConfig(t.TempDir())
+	c.Executable = nil
+	c.InContainer = nil
 	before := plainFieldsOf(c)
 
 	if _, err := c.resolve(); err != nil {
@@ -784,11 +799,14 @@ func TestResolvedFillsDefaultsFromTheIdentity(t *testing.T) {
 	if r.AssetTemplate != asset.DefaultTemplate {
 		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, asset.DefaultTemplate)
 	}
-	if r.AssetExt != asset.DefaultExt {
-		t.Errorf("AssetExt = %q, want %q", r.AssetExt, asset.DefaultExt)
+	if want := asset.DefaultExtFor(runtime.GOOS); r.AssetExt != want {
+		t.Errorf("AssetExt = %q, want %q", r.AssetExt, want)
 	}
 	if r.ChecksumsAsset != asset.DefaultChecksumsTemplate {
 		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, asset.DefaultChecksumsTemplate)
+	}
+	if r.PreflightTimeout != 10*time.Second {
+		t.Errorf("PreflightTimeout = %v, want %v", r.PreflightTimeout, 10*time.Second)
 	}
 }
 
@@ -923,6 +941,7 @@ func TestValidateRejectsNegativeDownloadLimits(t *testing.T) {
 		{"negative MaxDownloadBytes", func(c *Config) { c.MaxDownloadBytes = -1 }, "MaxDownloadBytes"},
 		{"negative MaxExtractBytes", func(c *Config) { c.MaxExtractBytes = -1 }, "MaxExtractBytes"},
 		{"negative DownloadTimeout", func(c *Config) { c.DownloadTimeout = -time.Second }, "DownloadTimeout"},
+		{"negative PreflightTimeout", func(c *Config) { c.PreflightTimeout = -time.Nanosecond }, "PreflightTimeout"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -955,7 +974,9 @@ func TestValidateAcceptsZeroAndPositiveDownloadLimits(t *testing.T) {
 			c.MaxDownloadBytes = 1
 			c.MaxExtractBytes = 1
 			c.DownloadTimeout = time.Nanosecond
+			c.PreflightTimeout = time.Nanosecond
 		}},
+		{"long PreflightTimeout", func(c *Config) { c.PreflightTimeout = 24 * time.Hour }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1153,31 +1174,75 @@ func TestDeriveFormat(t *testing.T) {
 		name   string
 		tmpl   string
 		ext    string
+		goos   string
 		want   assetFormat
 		wantOK bool
 	}{
-		{"tar.gz", "{name}.{ext}", "tar.gz", formatTarGz, true},
-		{"tgz", "{name}.{ext}", "tgz", formatTarGz, true},
-		{"zip", "{name}.{ext}", "zip", formatZip, true},
-		{"empty template and extension", "", "", formatTarGz, true},
-		{"empty extension", "{name}.{ext}", "", formatTarGz, true},
-		{"empty template with zip", "", "zip", formatZip, true},
-		{"template without {ext}", "{name}-{os}-{arch}", "zip", formatRaw, true},
-		{"template without {ext} and an unsupported extension", "{name}", "tar.xz", formatRaw, true},
-		{"template without {ext} and an empty extension", "{name}", "", formatRaw, true},
-		{"unparseable template", "{name", "tar.xz", formatRaw, true},
-		{"tar.xz", "{name}.{ext}", "tar.xz", 0, false},
-		{"tar.zst", "{name}.{ext}", "tar.zst", 0, false},
-		{"upper-case TGZ", "{name}.{ext}", "TGZ", 0, false},
-		{"upper-case ZIP", "{name}.{ext}", "ZIP", 0, false},
-		{"unsupported extension on the default template", "", "tar.xz", 0, false},
+		{"tar.gz", "{name}.{ext}", "tar.gz", "linux", formatTarGz, true},
+		{"tgz", "{name}.{ext}", "tgz", "linux", formatTarGz, true},
+		{"zip", "{name}.{ext}", "zip", "linux", formatZip, true},
+		{"tar.gz on windows", "{name}.{ext}", "tar.gz", "windows", formatTarGz, true},
+		{"empty template and extension on linux", "", "", "linux", formatTarGz, true},
+		{"empty template and extension on darwin", "", "", "darwin", formatTarGz, true},
+		{"empty template and extension on windows", "", "", "windows", formatZip, true},
+		{"empty extension on linux", "{name}.{ext}", "", "linux", formatTarGz, true},
+		{"empty extension on windows", "{name}.{ext}", "", "windows", formatZip, true},
+		{"empty template with zip", "", "zip", "linux", formatZip, true},
+		{"template without {ext}", "{name}-{os}-{arch}", "zip", "linux", formatRaw, true},
+		{"template without {ext} and an unsupported extension", "{name}", "tar.xz", "linux", formatRaw, true},
+		{"template without {ext} and an empty extension on windows", "{name}", "", "windows", formatRaw, true},
+		{"unparseable template", "{name", "tar.xz", "linux", formatRaw, true},
+		{"tar.xz", "{name}.{ext}", "tar.xz", "linux", 0, false},
+		{"tar.zst", "{name}.{ext}", "tar.zst", "windows", 0, false},
+		{"upper-case TGZ", "{name}.{ext}", "TGZ", "linux", 0, false},
+		{"upper-case ZIP", "{name}.{ext}", "ZIP", "windows", 0, false},
+		{"unsupported extension on the default template", "", "tar.xz", "linux", 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := deriveFormat(tc.tmpl, tc.ext)
+			got, ok := deriveFormat(tc.tmpl, tc.ext, tc.goos)
 			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("deriveFormat(%q, %q) = %v, %v, want %v, %v", tc.tmpl, tc.ext, got, ok, tc.want, tc.wantOK)
+				t.Errorf("deriveFormat(%q, %q, %q) = %v, %v, want %v, %v", tc.tmpl, tc.ext, tc.goos, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestDeriveFormatDefaultsAnEmptyGOOSToTheRuntime(t *testing.T) {
+	t.Parallel()
+	want, _ := deriveFormat("", "", runtime.GOOS)
+	if got, ok := deriveFormat("", "", ""); got != want || !ok {
+		t.Errorf("deriveFormat(\"\", \"\", \"\") = %v, %v, want %v, true", got, ok, want)
+	}
+}
+
+func TestResolveDefaultsAssetExtForTheGOOS(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		goos string
+		ext  string
+		want string
+	}{
+		{"unset on windows", "windows", "", "zip"},
+		{"unset on linux", "linux", "", "tar.gz"},
+		{"unset on darwin", "darwin", "", "tar.gz"},
+		{"tar.gz on windows", "windows", "tar.gz", "tar.gz"},
+		{"tgz on windows", "windows", "tgz", "tgz"},
+		{"zip on linux", "linux", "zip", "zip"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(t.TempDir())
+			c.GOOS, c.AssetExt = tc.goos, tc.ext
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if r.AssetExt != tc.want {
+				t.Errorf("AssetExt = %q, want %q", r.AssetExt, tc.want)
 			}
 		})
 	}
@@ -1219,7 +1284,13 @@ func TestResolvedConfigFormat(t *testing.T) {
 		set  func(*Config)
 		want assetFormat
 	}{
-		{"defaults", func(*Config) {}, formatTarGz},
+		{"defaults on linux", func(c *Config) { c.GOOS = "linux" }, formatTarGz},
+		{"defaults on darwin", func(c *Config) { c.GOOS = "darwin" }, formatTarGz},
+		{"defaults on windows", func(c *Config) { c.GOOS = "windows" }, formatZip},
+		{"tar.gz on windows", func(c *Config) {
+			c.GOOS = "windows"
+			c.AssetExt = "tar.gz"
+		}, formatTarGz},
 		{"tgz", func(c *Config) { c.AssetExt = "tgz" }, formatTarGz},
 		{"zip", func(c *Config) { c.AssetExt = "zip" }, formatZip},
 		{"raw template", func(c *Config) { c.AssetTemplate = "{name}-{os}-{arch}" }, formatRaw},

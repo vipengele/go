@@ -35,6 +35,27 @@ func execute(t *testing.T, nameTemplate string, data goreleaserData) string {
 	return b.String()
 }
 
+func TestDefaultExtFor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		goos string
+		want string
+	}{
+		{"windows", "zip"},
+		{"linux", "tar.gz"},
+		{"darwin", "tar.gz"},
+		{"freebsd", "tar.gz"},
+		{"plan9", "tar.gz"},
+		{"", "tar.gz"},
+		{"Windows", "tar.gz"},
+	}
+	for _, tc := range tests {
+		if got := DefaultExtFor(tc.goos); got != tc.want {
+			t.Errorf("DefaultExtFor(%q) = %q, want %q", tc.goos, got, tc.want)
+		}
+	}
+}
+
 func TestRender(t *testing.T) {
 	t.Parallel()
 
@@ -276,7 +297,8 @@ func TestGoReleaserArchive(t *testing.T) {
 				t.Errorf("GoReleaserArchive(%q, %q) = %q, want %q", tc.tmpl, tc.binary, got, tc.want)
 			}
 
-			fields := Fields{Name: tc.binary, Tag: "v1.2.3", OS: "linux", Arch: "arm64", Ext: DefaultExt}
+			ext := DefaultExtFor("linux")
+			fields := Fields{Name: tc.binary, Tag: "v1.2.3", OS: "linux", Arch: "arm64", Ext: ext}
 			rendered, err := Render(tc.tmpl, fields)
 			if err != nil {
 				t.Fatalf("Render(%q) error: %v", tc.tmpl, err)
@@ -289,7 +311,7 @@ func TestGoReleaserArchive(t *testing.T) {
 				Arch:        "arm64",
 			})
 			if strings.Contains(tc.tmpl, "{ext}") {
-				published += "." + DefaultExt
+				published += "." + ext
 			}
 			if published != rendered {
 				t.Errorf("GoReleaser publishes %q, Render looks for %q", published, rendered)

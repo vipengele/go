@@ -77,6 +77,9 @@ golangci-lint run
   darwin). Runtime never uses `XDG_RUNTIME_DIR`, which the system removes at logout. Resolving
   creates and stats nothing; `Dirs.Ensure` creates directories 0700 on demand and reports a kind
   that was not resolved. `InContainer` is a heuristic over injectable `Probes` and changes no path.
+  `InContainerFor(id, Probes)` lets `<PREFIX>_CONTAINER` override it on any OS: unset or empty defers
+  to the heuristic, a `strconv.ParseBool` value decides, any other non-empty value (`yes`) is true,
+  and an invalid `EnvPrefix` uses the heuristic.
 - `terminal/` — `terminal.Detect(stdin, stdout, stderr)` returns the `func(spec.Stream) bool` for
   `Env.Terminal`; `DetectWith(Probes, ...)` takes the probes as a seam. Each stream is probed lazily
   and at most once, and anything that is not an `*os.File` is not a terminal. It is the only importer
@@ -93,7 +96,11 @@ golangci-lint run
   `docs/adr/0015-table-helper-lives-in-cli-spec-table.md`.
 - `completioninstall/` — `Install(Options)` writes the script `<exe> completion <shell>` prints to the
   per-shell file `Target(shell, name, Env)` chooses (zsh, bash, fish, powershell), and `Snippet(name)`
-  renders the same table as POSIX sh; a test holds the two equal. Files only: no rc file or profile
+  renders the same table as POSIX sh; a test holds the two equal. `PowerShellSnippet(name)` renders a
+  PowerShell fragment (5.1-compatible) that writes `& $CompletionBinary completion powershell` to the
+  powershell path, prints the `. '<file>'` line for `$PROFILE`, never edits it, and warns instead of
+  failing; the embedding script sets `$CompletionBinary` to the installed tool, and like `Snippet` it
+  carries no opt-out guard, the embedding script guards it with its own `<EnvPrefix>_NO_COMPLETION`. Files only: no rc file or profile
   is edited, a `Note` says what the user adds. Needs `core.WithCompletion()` in the tool, else
   `Install` errors. Opt-out is `<PREFIX>_NO_COMPLETION=1` or `Options.Disabled`
   (`NoCompletionFlag`); every side effect is an `Options` seam. See

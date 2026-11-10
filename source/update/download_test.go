@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/asset"
 	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
@@ -1101,7 +1102,7 @@ func TestDownloadMissingAsset(t *testing.T) {
 				dir := t.TempDir()
 				name := updatetest.DefaultChecksumsName
 				if missing == "archive" {
-					name = updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, updatetest.ExtTarGz)
+					name = updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, asset.DefaultExtFor(runtime.GOOS))
 				}
 				k := newKitRelease(t, dir, append([]updatetest.Option{updatetest.MissingAsset(name)}, m.opts...)...)
 
@@ -1469,8 +1470,8 @@ func TestUpdateInstallsASignedRelease(t *testing.T) {
 			if err := k.installAll(context.Background()); err != nil {
 				t.Fatalf("update error = %v", err)
 			}
-			if got, err := os.ReadFile(exe); err != nil || string(got) != "#!/bin/sh\necho "+dlTag+"\n" {
-				t.Errorf("executable = %q, %v; want the release's binary", got, err)
+			if got, err := os.ReadFile(exe); err != nil || string(got) != string(updatetest.ReleaseExecutable(t, dlTag)) {
+				t.Errorf("executable = %.64q, %v; want the release's binary", got, err)
 			}
 			assertDirEmpty(t, tmp)
 			k.assertRequests(t, 1, 1)

@@ -46,8 +46,11 @@ func WithDownloadOptions(opts ...DownloadOption) ApplyOption {
 //  5. [Config.Target], the file the update replaces.
 //  6. [Config.Extract] of the archive into Target's directory, so that the rename into place
 //     stays on one filesystem.
-//  7. [Config.Install] of the staged binary.
-//  8. The record: under the Locker, the State is loaded, its HighestApplied raised to sel's Tag
+//  7. [Config.CheckStaged] of the staged binary against sel, which runs it with "version --json"
+//     and then the [Config.Preflight] hooks, so a binary that is not the selected release for the
+//     platform, or that a hook vetoes, is never installed.
+//  8. [Config.Install] of the staged binary.
+//  9. The record: under the Locker, the State is loaded, its HighestApplied raised to sel's Tag
 //     when the Tag is newer in the order of [version.Newer], and the whole State saved back, so
 //     its other fields are kept.
 //
@@ -55,10 +58,13 @@ func WithDownloadOptions(opts ...DownloadOption) ApplyOption {
 // guard fails closed: a State that cannot be loaded refuses the install with the StateStore's
 // error, rather than guess at the floor. The record fails open: a failed lock, load or save is
 // ignored and Apply still returns the [*Installed], since the installed binary's Version floors
-// the next update as the watermark would. Nothing at the executable's path changes before step 7,
-// and no file Apply creates is left behind by a failure: Extract closes the archive and Install
-// removes the staged binary, whether they succeed or fail, and Apply closes the archive itself
-// when Target fails.
+// the next update as the watermark would. Nothing at the executable's path changes before step 8,
+// so a binary CheckStaged refuses leaves the installed executable as it was and HighestApplied
+// unchanged. No file Apply creates is left behind by a failure: Extract closes the archive and
+// Install removes the staged binary, whether they succeed or fail, Apply closes the archive itself
+// when Target fails, and it discards the staged binary itself when CheckStaged fails, joining an
+// error removing it onto CheckStaged's. When ctx is done during CheckStaged, the error is ctx's
+// own, not a [*PreflightError].
 //
 // The returned [*Installed] still holds the backup. The caller runs its [PostUpdate] hooks with
 // [Installed.Path] and then settles the update with [Installed.Discard] or [Installed.Rollback];
@@ -105,6 +111,14 @@ func (c Config) apply(ctx context.Context, sel Selection, s fsSteps, opts ...App
 
 	staged, err := r.Extract(ctx, arc, filepath.Dir(target))
 	if err != nil {
+		return nil, err
+	}
+
+	if _, err := r.checkStaged(ctx, staged, sel, s); err != nil {
+		if discardErr := staged.Discard(); discardErr != nil {
+			return nil, errors.Join(err, discardErr)
+		}
+
 		return nil, err
 	}
 

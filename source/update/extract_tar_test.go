@@ -157,6 +157,7 @@ func tarGzConfig(t *testing.T) Config {
 
 	c := validConfig(t.TempDir())
 	c.GOOS = "linux"
+	c.AssetExt = "tar.gz"
 
 	return c
 }

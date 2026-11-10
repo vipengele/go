@@ -3,7 +3,8 @@
 Status: accepted. It refines the "state store with a file lock" row of the project table in
 `0003-the-library-is-three-projects-cli-update-and-daemon.md`, whose lock leaves `cli`, and
 `0018-the-state-store-is-its-own-project-cli-state.md`, whose store takes no lock. ADR-0009 is not
-amended: it binds the platform-paths resolver only.
+amended: it binds the platform-paths resolver only. Its Windows verification is refined by
+ADR-0030 (`0030-windows-tests-run-for-projects-with-windows-files.md`).
 
 Two processes that write the same state file, or two instances of the same daemon, need a lock the
 operating system releases when its holder exits. `daemon` needs it for the single-instance guard and

@@ -155,6 +155,87 @@ func TestExtractUsesTempPrefix(t *testing.T) {
 	}
 }
 
+func TestExtractStagedNameCarriesTheBinaryExtension(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		goos    string
+		archive func(t *testing.T) []byte
+		config  func(t *testing.T) Config
+		want    string
+	}{
+		{
+			name:    "raw on windows",
+			goos:    "windows",
+			archive: func(*testing.T) []byte { return []byte("bin") },
+			config:  rawConfig,
+			want:    ".exe",
+		},
+		{
+			name:    "raw on linux",
+			goos:    "linux",
+			archive: func(*testing.T) []byte { return []byte("bin") },
+			config:  rawConfig,
+			want:    "",
+		},
+		{
+			name:    "tar.gz on windows",
+			goos:    "windows",
+			archive: func(t *testing.T) []byte { return tarGzOf(t, tarFile("atk.exe", "bin")) },
+			config:  tarGzConfig,
+			want:    ".exe",
+		},
+		{
+			name:    "tar.gz on linux",
+			goos:    "linux",
+			archive: func(t *testing.T) []byte { return tarGzOf(t, tarFile("atk", "bin")) },
+			config:  tarGzConfig,
+			want:    "",
+		},
+		{
+			name:    "zip on windows",
+			goos:    "windows",
+			archive: func(t *testing.T) []byte { return zipOf(t, zipFile("atk.exe", []byte("bin"))) },
+			config:  zipConfig,
+			want:    ".exe",
+		},
+		{
+			name:    "zip on linux",
+			goos:    "linux",
+			archive: func(t *testing.T) []byte { return zipOf(t, zipFile("atk", []byte("bin"))) },
+			config:  zipConfig,
+			want:    "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			a, _ := newExtractArchive(t, tc.archive(t))
+			c := tc.config(t)
+			c.GOOS = tc.goos
+
+			s, err := c.Extract(context.Background(), a, t.TempDir())
+			if err != nil {
+				t.Fatalf("Extract: %v", err)
+			}
+
+			keepAtCleanup(t, s)
+
+			base := filepath.Base(s.Name())
+			if got := filepath.Ext(base); got != tc.want {
+				t.Errorf("Name = %q, extension %q, want %q", base, got, tc.want)
+			}
+
+			if !strings.HasPrefix(base, "atk-update-") {
+				t.Errorf("Name = %q, want the prefix %q", base, "atk-update-")
+			}
+		})
+	}
+}
+
 func TestExtractFails(t *testing.T) {
 	t.Parallel()
 
@@ -178,7 +259,7 @@ func TestExtractFails(t *testing.T) {
 		{
 			name:    "over the limit",
 			content: "12345",
-			config:  func(c Config) Config { c.MaxExtractBytes = 4; return c },
+			config:  func(c Config) Config { c.MaxExtractBytes = 4; c.GOOS = "linux"; return c },
 			check:   wantExtractLimit("atk", 4),
 		},
 		{
@@ -536,6 +617,92 @@ func TestStagedKeepReportsCloseError(t *testing.T) {
 	if err := s.Keep(); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("Keep = %v, want os.ErrClosed", err)
 	}
+}
+
+func TestStagedCloseFileThenDiscard(t *testing.T) {
+	t.Parallel()
+
+	s, dir := newStaged(t, os.Remove)
+
+	if err := s.closeFile(); err != nil {
+		t.Fatalf("closeFile: %v", err)
+	}
+
+	if err := s.closeFile(); err != nil {
+		t.Errorf("second closeFile = %v, want nil", err)
+	}
+
+	if err := s.Discard(); err != nil {
+		t.Fatalf("Discard after closeFile: %v", err)
+	}
+
+	assertDirEmpty(t, dir)
+}
+
+func TestStagedCloseFileThenKeep(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newStaged(t, os.Remove)
+
+	if err := s.closeFile(); err != nil {
+		t.Fatalf("closeFile: %v", err)
+	}
+
+	if err := s.Keep(); err != nil {
+		t.Fatalf("Keep after closeFile: %v", err)
+	}
+
+	if err := s.Discard(); err != nil {
+		t.Errorf("Discard after Keep = %v, want nil", err)
+	}
+
+	if _, err := os.Stat(s.Name()); err != nil {
+		t.Errorf("Stat after closeFile, Keep and Discard = %v, want the file kept", err)
+	}
+}
+
+func TestStagedCloseFileAfterSettling(t *testing.T) {
+	t.Parallel()
+
+	kept, _ := newStaged(t, os.Remove)
+
+	if err := kept.Keep(); err != nil {
+		t.Fatalf("Keep: %v", err)
+	}
+
+	if err := kept.closeFile(); err != nil {
+		t.Errorf("closeFile after Keep = %v, want nil", err)
+	}
+
+	discarded, _ := newStaged(t, os.Remove)
+
+	if err := discarded.Discard(); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+
+	if err := discarded.closeFile(); err != nil {
+		t.Errorf("closeFile after Discard = %v, want nil", err)
+	}
+}
+
+func TestStagedCloseFileReportsCloseError(t *testing.T) {
+	t.Parallel()
+
+	s, dir := newStaged(t, os.Remove)
+
+	if err := s.f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := s.closeFile(); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("closeFile = %v, want os.ErrClosed", err)
+	}
+
+	if err := s.Discard(); err != nil {
+		t.Errorf("Discard after closeFile = %v, want nil", err)
+	}
+
+	assertDirEmpty(t, dir)
 }
 
 func TestBinaryFileName(t *testing.T) {

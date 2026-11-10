@@ -12,10 +12,11 @@ import (
 	"time"
 )
 
-// ExtTarGz is the extension of a gzip-compressed tar archive, the updater's default AssetExt.
+// ExtTarGz is the extension of a gzip-compressed tar archive, the updater's default AssetExt for
+// every GOOS but windows.
 const ExtTarGz = "tar.gz"
 
-// ExtZip is the extension of a zip archive.
+// ExtZip is the extension of a zip archive, the updater's default AssetExt for GOOS windows.
 const ExtZip = "zip"
 
 // ErrUnsupportedExt reports an archive extension [BuildArchive] has no format for.

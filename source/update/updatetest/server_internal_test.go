@@ -224,3 +224,12 @@ func TestCloseReleasesASlowRequestWithNoAnswer(t *testing.T) {
 		t.Error("request answered after the server closed, want no answer")
 	}
 }
+
+func TestBinaryFileNameAddsExeOnlyOnWindows(t *testing.T) {
+	t.Parallel()
+	for goos, want := range map[string]string{"windows": "atk.exe", "linux": "atk", "darwin": "atk"} {
+		if got := binaryFileName("atk", goos); got != want {
+			t.Errorf("binaryFileName(%q, %q) = %q, want %q", "atk", goos, got, want)
+		}
+	}
+}
