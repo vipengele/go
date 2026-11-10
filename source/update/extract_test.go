@@ -259,7 +259,7 @@ func TestExtractFails(t *testing.T) {
 		{
 			name:    "over the limit",
 			content: "12345",
-			config:  func(c Config) Config { c.MaxExtractBytes = 4; return c },
+			config:  func(c Config) Config { c.MaxExtractBytes = 4; c.GOOS = "linux"; return c },
 			check:   wantExtractLimit("atk", 4),
 		},
 		{

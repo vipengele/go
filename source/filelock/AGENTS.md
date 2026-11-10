@@ -54,5 +54,7 @@ breaks the build or links two `tryLock`s. Change the lists in both files togethe
 
 - `depguard` in `.golangci.yml` allows the standard library, `golang.org/x/sys` and this module,
   nothing else. Every dependent inherits what is added here.
-- CI only cross-compiles and vets the Windows implementation. Its behaviour is untested: nothing
-  runs `lock_windows.go`, and the shared behaviour tests are what to run on a Windows machine.
+- `lock_windows.go` makes this project one CI tests on Windows: its suite runs on the gated
+  `windows-latest` job, and `GOOS=windows go vet` runs in `ci-build.yml` and `release.yml`
+  (ADR-0030). There `filelock_test.go` and the examples run, the examples taking real `LockFileEx`
+  locks; `lock_process_test.go` and `lock_unix_test.go` carry the unix tag and do not.

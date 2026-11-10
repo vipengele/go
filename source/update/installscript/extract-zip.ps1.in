@@ -1,0 +1,10 @@
+		# Expand-Archive of Windows PowerShell 5.1 refuses a file whose name does not end in .zip.
+		$zip = [System.IO.Path]::Combine($tmp, 'asset.zip')
+		[System.IO.File]::Move($assetFile, $zip)
+		$extract = [System.IO.Path]::Combine($tmp, 'extract')
+		try {
+			Expand-Archive -LiteralPath $zip -DestinationPath $extract
+		} catch {
+			Fail ('extracting ' + $asset + ' failed: ' + (ErrorText $_))
+		}
+		$binary = FindBinary $extract

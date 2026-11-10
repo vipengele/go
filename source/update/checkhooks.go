@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"fmt"
+	"runtime"
 
 	"go.vipengele.org/cli/spec"
 )
@@ -18,7 +19,17 @@ type checkKey struct{}
 // as given, so a nil IsTerminal is answered from the Invocation's Env, not from the process's
 // standard streams.
 //
-// The pre-run hook leaves a command that carries the [spec.SkipUpdateCheck] annotation alone.
+// On Windows the pre-run hook first calls [Config.RemoveStaleBackup] on every command, the ones
+// carrying the [spec.SkipUpdateCheck] annotation included, so a backup an update left behind
+// because the process that ran it held the file open is removed by the next run of the tool. Its
+// error is dropped: a locked or missing backup never fails a command. The backup of an update not
+// yet settled by [Installed.Discard] or [Installed.Rollback] is the updating process's running
+// file there, so the removal fails and Rollback keeps it. On any other host the hook removes no
+// backup: an open file can be removed, so a run started between Install and Rollback, by a
+// PostUpdate hook or by the user, would take the backup Rollback needs, and there Discard always
+// removes the backup.
+//
+// The hook then leaves a command that carries the [spec.SkipUpdateCheck] annotation alone.
 // Otherwise it calls [Config.Start] and returns a context that carries the check; a Start error
 // is dropped, since a check never fails a command, and then no check runs.
 //
@@ -38,6 +49,7 @@ func (c Config) UpdateCheckHooks() (
 		return nil, nil, err
 	}
 	pre = func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
+		_ = c.removeStaleBackupOnHost(runtime.GOOS)
 		if _, skip := cmd.Annotation(spec.SkipUpdateCheck); skip {
 			return ctx, nil
 		}

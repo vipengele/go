@@ -15,3 +15,6 @@ func WriteFileWith(s Steps, path string, data []byte, mode os.FileMode) error {
 
 // SyncDir exposes syncDir to the external tests.
 func SyncDir(dir string) error { return syncDir(dir) }
+
+// SyncDirFor exposes syncDirFor to the external tests.
+func SyncDirFor(goos string) func(dir string) error { return syncDirFor(goos) }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.vipengele.org/commons/validate"
+	"go.vipengele.org/update/asset"
 	"go.vipengele.org/update/internal/minisigntest"
 	"go.vipengele.org/update/updatetest"
 )
@@ -128,8 +129,8 @@ func (f applyFixture) apply(t *testing.T, opts ...ApplyOption) {
 
 	t.Cleanup(func() { _ = installed.Discard() })
 
-	if got, want := readFile(t, f.exe), string(updatetest.ReleaseBinary(dlTag)); got != want {
-		t.Errorf("executable holds %q, want the release's binary %q", got, want)
+	if got, want := readFile(t, f.exe), string(updatetest.ReleaseExecutable(t, dlTag)); got != want {
+		t.Errorf("executable holds %.64q, want the release's binary %.64q", got, want)
 	}
 }
 
@@ -182,10 +183,9 @@ func TestApplyInstallsTheRelease(t *testing.T) {
 		t.Errorf("Backup = %q, want %q", installed.Backup(), want)
 	}
 
-	// The binary updatetest.NewRelease packs prints the release's tag.
-	want := string(updatetest.ReleaseBinary(dlTag))
+	want := string(updatetest.ReleaseExecutable(t, dlTag))
 	if got := readFile(t, f.exe); got != want {
-		t.Errorf("executable holds %q, want the release's binary %q", got, want)
+		t.Errorf("executable holds %.64q, want the release's binary %.64q", got, want)
 	}
 
 	if got := readFile(t, installed.Backup()); got != "old" {
@@ -312,7 +312,7 @@ func TestApplyRefusesAReleaseSignedByAnUntrustedKey(t *testing.T) {
 func TestApplyMissingArchive(t *testing.T) {
 	t.Parallel()
 
-	name := updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, updatetest.ExtTarGz)
+	name := updatetest.ArchiveName(validIdentity().Name, runtime.GOOS, runtime.GOARCH, asset.DefaultExtFor(runtime.GOOS))
 	f := newApplyFixture(t, updatetest.MissingAsset(name))
 
 	installed, err := f.cfg.Apply(context.Background(), f.sel)
@@ -665,10 +665,6 @@ func TestApplyIgnoresAFailedLockOfTheRecord(t *testing.T) {
 // execs, so a staged file some parallel test still holds open for writing would fail this exec
 // with ETXTBSY.
 func TestApplyRunsTheStagedBinary(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the release's binary is a POSIX shell script")
-	}
-
 	f := newApplyFixture(t)
 
 	var seen []StagedBinary
@@ -699,8 +695,8 @@ func TestApplyRunsTheStagedBinary(t *testing.T) {
 		t.Errorf("StagedBinary.Path = %q, want one in %q", seen[0].Path, f.dir)
 	}
 
-	if got, want := readFile(t, f.exe), string(updatetest.ReleaseBinary(dlTag)); got != want {
-		t.Errorf("executable holds %q, want the release's binary %q", got, want)
+	if got, want := readFile(t, f.exe), string(updatetest.ReleaseExecutable(t, dlTag)); got != want {
+		t.Errorf("executable holds %.64q, want the release's binary %.64q", got, want)
 	}
 }
 

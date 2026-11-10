@@ -1,14 +1,17 @@
 ---
-about: "CI vets Windows files by cross-compile only, in ci-build.yml; release.yml's test job does not cross-vet, and no CI step runs Windows"
+about: "Windows code is vetted by cross-compile in ci-build.yml and release.yml, and tested on the gated test-windows job in ci-test.yml for affected projects holding a *_windows.go or *_windows_test.go file; a release runs no Windows tests"
 saw:
   - .github/workflows/ci-build.yml
+  - .github/workflows/ci-test.yml
   - .github/workflows/release.yml
-  - docs/adr/0019-the-file-lock-is-its-own-project-filelock.md
-  - source/filelock/lock_windows.go
+  - docs/adr/0030-windows-tests-run-for-projects-with-windows-files.md
 ---
 
-- `ci-build.yml` runs `GOOS=windows go vet ./...` after golangci-lint for any project whose
-  directory holds a `*_windows.go` file (a detection step sets an output; the vet step is skipped
-  otherwise). Only `source/filelock/lock_windows.go` matches today. Nothing executes Windows code.
-- `release.yml`'s `test` job runs `go build` and `go vet` for the tagged project on Linux only, so a
-  release does not repeat the Windows vet; it relies on `ci-build` having run on the merge.
+- `ci-build.yml` and release.yml's `test` job run `GOOS=windows go vet ./...` when the project holds
+  a `*_windows.go` or `*_windows_test.go` file (a `find` detect step sets an output).
+- `ci-test.yml`'s `detect` job has a `windows` step that filters the affected projects to those with
+  such a file into the `windows-projects` output; `test-windows` (windows-latest, bash,
+  `CGO_ENABLED=1` for -race, 30-minute timeout) runs `go test -race -shuffle=on ./...` per project
+  and is skipped by `if: ... != '[]'` when none qualifies. A skipped job leaves the reusable
+  workflow a success, so `ci-gate` passes it; a failing one blocks the merge.
+- A file named `*_windows_test.go` alone is enough to put a project on the Windows runner.

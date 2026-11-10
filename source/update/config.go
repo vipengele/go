@@ -90,9 +90,11 @@ type Config struct {
 	AssetTemplate string
 	// AssetExt is the archive extension {ext} stands for, without a leading ".", and it decides the
 	// archive format: "tar.gz" or "tgz" is a gzip-compressed tar, "zip" a zip, matched exactly in
-	// lower case. Empty means [asset.DefaultExt]. An AssetTemplate without {ext} names a raw binary
-	// and ignores AssetExt. It carries no per-OS rules: a tool whose assets differ by platform
-	// writes the difference into AssetTemplate, and a raw-binary tool leaves {ext} out of it.
+	// lower case. Empty means [asset.DefaultExtFor] the resolved GOOS: "zip" for "windows",
+	// "tar.gz" for every other GOOS; a non-empty AssetExt is used on every GOOS. An AssetTemplate
+	// without {ext} names a raw binary and ignores AssetExt. It carries no other per-OS rules: a
+	// tool whose assets differ by platform writes the difference into AssetTemplate, and a
+	// raw-binary tool leaves {ext} out of it.
 	AssetExt string
 	// ChecksumsAsset is the name of the release asset that lists every asset's checksum, written
 	// in the template language of package asset: it takes every placeholder but {ext}. Empty means
@@ -219,7 +221,7 @@ func (c Config) Validate() error {
 		c.Identity.Validate(),
 		checkTemplate("AssetTemplate", c.AssetTemplate, asset.Validate),
 		checkTemplate("ChecksumsAsset", c.ChecksumsAsset, asset.ValidateChecksums),
-		checkAssetExt(c.AssetTemplate, c.AssetExt),
+		checkAssetExt(c.AssetTemplate, c.AssetExt, c.GOOS),
 		checkNotNegative("MaxDownloadBytes", c.MaxDownloadBytes),
 		checkNotNegative("MaxExtractBytes", c.MaxExtractBytes),
 		checkNotNegative("DownloadTimeout", int64(c.DownloadTimeout)),
@@ -396,10 +398,12 @@ const (
 	formatZip
 )
 
-// deriveFormat returns the format of the asset an AssetTemplate and an AssetExt name, with an empty
-// one standing for its default. A template without {ext} is raw whatever the extension. Otherwise
-// the extension decides, matched exactly; ok is false for one that names no supported format.
-func deriveFormat(tmpl, ext string) (f assetFormat, ok bool) {
+// deriveFormat returns the format of the asset an AssetTemplate and an AssetExt name for the target
+// operating system goos, with an empty one standing for its default: an empty goos is
+// [runtime.GOOS], and an empty ext is [asset.DefaultExtFor] goos. A template without {ext} is raw
+// whatever the extension. Otherwise the extension decides, matched exactly; ok is false for one
+// that names no supported format.
+func deriveFormat(tmpl, ext, goos string) (f assetFormat, ok bool) {
 	if tmpl == "" {
 		tmpl = asset.DefaultTemplate
 	}
@@ -407,7 +411,10 @@ func deriveFormat(tmpl, ext string) (f assetFormat, ok bool) {
 		return formatRaw, true
 	}
 	if ext == "" {
-		ext = asset.DefaultExt
+		if goos == "" {
+			goos = runtime.GOOS
+		}
+		ext = asset.DefaultExtFor(goos)
 	}
 	switch ext {
 	case "tar.gz", "tgz":
@@ -423,15 +430,15 @@ func deriveFormat(tmpl, ext string) (f assetFormat, ok bool) {
 // a Config [Config.resolve] returned, which has passed [Config.Validate]: any extension a
 // validated Config carries names a format.
 func (c Config) format() assetFormat {
-	f, _ := deriveFormat(c.AssetTemplate, c.AssetExt)
+	f, _ := deriveFormat(c.AssetTemplate, c.AssetExt, c.GOOS)
 	return f
 }
 
 // checkAssetExt rejects an extension that would change the asset name's structure: a path
 // separator, a brace that could open a placeholder, or a leading "." the template already writes.
 // It also rejects an extension that names no supported format when the template, which an empty
-// value defaults, holds {ext}.
-func checkAssetExt(tmpl, ext string) error {
+// value defaults, holds {ext}; an empty ext stands for the default for goos.
+func checkAssetExt(tmpl, ext, goos string) error {
 	if strings.ContainsAny(ext, `/\{}`) || strings.HasPrefix(ext, ".") {
 		return &validate.FieldError{
 			Field: "AssetExt",
@@ -439,7 +446,7 @@ func checkAssetExt(tmpl, ext string) error {
 			Err:   fmt.Errorf("%w: must not contain '/', '\\', '{' or '}' or start with '.'", validate.ErrInvalid),
 		}
 	}
-	if _, ok := deriveFormat(tmpl, ext); !ok {
+	if _, ok := deriveFormat(tmpl, ext, goos); !ok {
 		return &validate.FieldError{
 			Field: "AssetExt",
 			Value: ext,
@@ -493,9 +500,6 @@ func (c Config) resolve() (Config, error) {
 	if r.AssetTemplate == "" {
 		r.AssetTemplate = asset.DefaultTemplate
 	}
-	if r.AssetExt == "" {
-		r.AssetExt = asset.DefaultExt
-	}
 	if r.ChecksumsAsset == "" {
 		r.ChecksumsAsset = asset.DefaultChecksumsTemplate
 	}
@@ -507,6 +511,9 @@ func (c Config) resolve() (Config, error) {
 	}
 	if r.GOOS == "" {
 		r.GOOS = runtime.GOOS
+	}
+	if r.AssetExt == "" {
+		r.AssetExt = asset.DefaultExtFor(r.GOOS)
 	}
 	if r.GOARCH == "" {
 		r.GOARCH = runtime.GOARCH

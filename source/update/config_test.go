@@ -163,8 +163,8 @@ func TestResolveDefaultsEveryZeroField(t *testing.T) {
 	if r.AssetTemplate != asset.DefaultTemplate {
 		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, asset.DefaultTemplate)
 	}
-	if r.AssetExt != asset.DefaultExt {
-		t.Errorf("AssetExt = %q, want %q", r.AssetExt, asset.DefaultExt)
+	if want := asset.DefaultExtFor(runtime.GOOS); r.AssetExt != want {
+		t.Errorf("AssetExt = %q, want %q", r.AssetExt, want)
 	}
 	if r.ChecksumsAsset != asset.DefaultChecksumsTemplate {
 		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, asset.DefaultChecksumsTemplate)
@@ -799,8 +799,8 @@ func TestResolvedFillsDefaultsFromTheIdentity(t *testing.T) {
 	if r.AssetTemplate != asset.DefaultTemplate {
 		t.Errorf("AssetTemplate = %q, want %q", r.AssetTemplate, asset.DefaultTemplate)
 	}
-	if r.AssetExt != asset.DefaultExt {
-		t.Errorf("AssetExt = %q, want %q", r.AssetExt, asset.DefaultExt)
+	if want := asset.DefaultExtFor(runtime.GOOS); r.AssetExt != want {
+		t.Errorf("AssetExt = %q, want %q", r.AssetExt, want)
 	}
 	if r.ChecksumsAsset != asset.DefaultChecksumsTemplate {
 		t.Errorf("ChecksumsAsset = %q, want %q", r.ChecksumsAsset, asset.DefaultChecksumsTemplate)
@@ -1174,31 +1174,75 @@ func TestDeriveFormat(t *testing.T) {
 		name   string
 		tmpl   string
 		ext    string
+		goos   string
 		want   assetFormat
 		wantOK bool
 	}{
-		{"tar.gz", "{name}.{ext}", "tar.gz", formatTarGz, true},
-		{"tgz", "{name}.{ext}", "tgz", formatTarGz, true},
-		{"zip", "{name}.{ext}", "zip", formatZip, true},
-		{"empty template and extension", "", "", formatTarGz, true},
-		{"empty extension", "{name}.{ext}", "", formatTarGz, true},
-		{"empty template with zip", "", "zip", formatZip, true},
-		{"template without {ext}", "{name}-{os}-{arch}", "zip", formatRaw, true},
-		{"template without {ext} and an unsupported extension", "{name}", "tar.xz", formatRaw, true},
-		{"template without {ext} and an empty extension", "{name}", "", formatRaw, true},
-		{"unparseable template", "{name", "tar.xz", formatRaw, true},
-		{"tar.xz", "{name}.{ext}", "tar.xz", 0, false},
-		{"tar.zst", "{name}.{ext}", "tar.zst", 0, false},
-		{"upper-case TGZ", "{name}.{ext}", "TGZ", 0, false},
-		{"upper-case ZIP", "{name}.{ext}", "ZIP", 0, false},
-		{"unsupported extension on the default template", "", "tar.xz", 0, false},
+		{"tar.gz", "{name}.{ext}", "tar.gz", "linux", formatTarGz, true},
+		{"tgz", "{name}.{ext}", "tgz", "linux", formatTarGz, true},
+		{"zip", "{name}.{ext}", "zip", "linux", formatZip, true},
+		{"tar.gz on windows", "{name}.{ext}", "tar.gz", "windows", formatTarGz, true},
+		{"empty template and extension on linux", "", "", "linux", formatTarGz, true},
+		{"empty template and extension on darwin", "", "", "darwin", formatTarGz, true},
+		{"empty template and extension on windows", "", "", "windows", formatZip, true},
+		{"empty extension on linux", "{name}.{ext}", "", "linux", formatTarGz, true},
+		{"empty extension on windows", "{name}.{ext}", "", "windows", formatZip, true},
+		{"empty template with zip", "", "zip", "linux", formatZip, true},
+		{"template without {ext}", "{name}-{os}-{arch}", "zip", "linux", formatRaw, true},
+		{"template without {ext} and an unsupported extension", "{name}", "tar.xz", "linux", formatRaw, true},
+		{"template without {ext} and an empty extension on windows", "{name}", "", "windows", formatRaw, true},
+		{"unparseable template", "{name", "tar.xz", "linux", formatRaw, true},
+		{"tar.xz", "{name}.{ext}", "tar.xz", "linux", 0, false},
+		{"tar.zst", "{name}.{ext}", "tar.zst", "windows", 0, false},
+		{"upper-case TGZ", "{name}.{ext}", "TGZ", "linux", 0, false},
+		{"upper-case ZIP", "{name}.{ext}", "ZIP", "windows", 0, false},
+		{"unsupported extension on the default template", "", "tar.xz", "linux", 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := deriveFormat(tc.tmpl, tc.ext)
+			got, ok := deriveFormat(tc.tmpl, tc.ext, tc.goos)
 			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("deriveFormat(%q, %q) = %v, %v, want %v, %v", tc.tmpl, tc.ext, got, ok, tc.want, tc.wantOK)
+				t.Errorf("deriveFormat(%q, %q, %q) = %v, %v, want %v, %v", tc.tmpl, tc.ext, tc.goos, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestDeriveFormatDefaultsAnEmptyGOOSToTheRuntime(t *testing.T) {
+	t.Parallel()
+	want, _ := deriveFormat("", "", runtime.GOOS)
+	if got, ok := deriveFormat("", "", ""); got != want || !ok {
+		t.Errorf("deriveFormat(\"\", \"\", \"\") = %v, %v, want %v, true", got, ok, want)
+	}
+}
+
+func TestResolveDefaultsAssetExtForTheGOOS(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		goos string
+		ext  string
+		want string
+	}{
+		{"unset on windows", "windows", "", "zip"},
+		{"unset on linux", "linux", "", "tar.gz"},
+		{"unset on darwin", "darwin", "", "tar.gz"},
+		{"tar.gz on windows", "windows", "tar.gz", "tar.gz"},
+		{"tgz on windows", "windows", "tgz", "tgz"},
+		{"zip on linux", "linux", "zip", "zip"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(t.TempDir())
+			c.GOOS, c.AssetExt = tc.goos, tc.ext
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if r.AssetExt != tc.want {
+				t.Errorf("AssetExt = %q, want %q", r.AssetExt, tc.want)
 			}
 		})
 	}
@@ -1240,7 +1284,13 @@ func TestResolvedConfigFormat(t *testing.T) {
 		set  func(*Config)
 		want assetFormat
 	}{
-		{"defaults", func(*Config) {}, formatTarGz},
+		{"defaults on linux", func(c *Config) { c.GOOS = "linux" }, formatTarGz},
+		{"defaults on darwin", func(c *Config) { c.GOOS = "darwin" }, formatTarGz},
+		{"defaults on windows", func(c *Config) { c.GOOS = "windows" }, formatZip},
+		{"tar.gz on windows", func(c *Config) {
+			c.GOOS = "windows"
+			c.AssetExt = "tar.gz"
+		}, formatTarGz},
 		{"tgz", func(c *Config) { c.AssetExt = "tgz" }, formatTarGz},
 		{"zip", func(c *Config) { c.AssetExt = "zip" }, formatZip},
 		{"raw template", func(c *Config) { c.AssetTemplate = "{name}-{os}-{arch}" }, formatRaw},

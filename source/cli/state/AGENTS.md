@@ -19,11 +19,17 @@ golangci-lint run
 - `WriteFile(path, data, mode)` and `Replace(tmp, final, mode)` (`write.go`) — temp file in the
   destination's directory, chmod, sync, rename, directory sync. `Replace` opens `tmp` by path when
   called, so it chmods and syncs whatever inode the path names then, not a handle the caller held.
+  It opens `tmp` for reading and writing before the chmod, because Windows flushes a file only
+  through a handle with write access; `tmp` must be readable and writable by its owner when
+  `Replace` is called. The directory sync is `syncDirFor(runtime.GOOS)`: `syncDir` everywhere but
+  Windows, which cannot sync a directory and gets a no-op.
   The temp file is removed on every failure the package reports; a killed process can leave
   `.<base>.tmp-*` behind and nothing sweeps it.
 - `steps` (`write.go`) — one function field per filesystem operation, in write order. Tests swap a
   field to make that step fail and check the temp file and the destination afterwards
-  (`export_test.go`, `write_test.go`); `write_linux_test.go` holds the Linux-only cases.
+  (`export_test.go`, `write_test.go`); `write_linux_test.go` holds the Linux-only cases, and
+  `write_windows_test.go` the Windows-only ones, which also put the project on the gated
+  `test-windows` CI job (ADR-0030).
 - `LoadJSON[T]`, `LoadYAML[T]` (`json.go`, `yaml.go`, shared `load` in `load.go`) — return the
   value, a `LoadStatus` (`Missing`, `Loaded`, `Corrupt`, `Unreadable`) and an error. Anything but
   `Loaded` returns the zero `T`. `Missing` has a nil error; `Corrupt` matches `ErrCorrupt` with
