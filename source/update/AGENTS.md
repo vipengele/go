@@ -133,6 +133,9 @@ golangci-lint run
   `{ext}`. With `{ext}` in the template, `Config.AssetExt` is `tar.gz`, `tgz` or `zip` (`Validate`
   rejects any other), and GoReleaser's archive `format` must produce that extension, or the published
   name and the one `Select` looks for differ. A raw-binary tool leaves `{ext}` out of its template.
+  `goreleaser.Render` emits that mapping per GOOS: each platform's format is `AssetExt` when set,
+  else `DefaultExtFor` its GOOS, or `binary` for a raw template; `formats` is the first GOOS's and
+  `format_overrides` carries each GOOS whose format differs.
   `DefaultExtFor(goos)` is the one source of the default extension: `zip` for `windows`, `tar.gz`
   for every other GOOS (ADR-0031); a non-empty `AssetExt` is used on every GOOS.
 - `errors.go` — `StatusError`, `RateLimitError` (a 403 or 429 from the REST API with
@@ -233,6 +236,39 @@ golangci-lint run
     the script runs with no controlling terminal, so opening `/dev/tty` fails. The harness renders
     the script before the server's key exists, so a test of a keyed script re-renders it with
     `Server.PublicKey()` (`newSignedHarness`).
+- `goreleaser/` — `Render(cfg update.Config, opts Options) ([]byte, error)`: the GoReleaser v2 config
+  that publishes the names `Select` looks for (`goreleaser.yaml.in`, embedded; ADR-0032).
+  - `Options`: `Main` (required), `Dir` (empty leaves `dir` out), `Platforms` (`[]Platform{GOOS,
+    GOARCH}`; default linux and darwin on amd64 and arm64), `LinkVars` (zero fields take
+    `DefaultLinkVars()`, the `cli/core/buildinfo` paths) and `SigningKeyPath` (default
+    `minisign.key`, unused under `AllowUnsigned`).
+  - Inputs come from `Config.Resolved` and are never re-derived, so `Render` inherits its
+    requirements (a valid `Config`, one signature policy, a resolvable `StateDir`). The one
+    exception is the extension: `Resolved` defaults it for the `Config`'s own GOOS (the host's by
+    default), so `Render` reads `cfg.AssetExt` as set and, when empty, takes
+    `asset.DefaultExtFor` of each platform's GOOS (ADR-0031). The output never depends on
+    `cfg.GOOS` or the host (`TestRenderIndependentOfGOOS`).
+  - Emits `version: 2`, `project_name`, one build (`CGO_ENABLED=0`, ldflags `-s -w` and a `-X` each
+    of the link vars set to `{{ .Tag }}`, `{{ .FullCommit }}`, `{{ .Date }}`; goos, goarch and
+    `ignore` build exactly `Platforms`), one archive (`asset.GoReleaserArchive`; `formats` the
+    format of the first GOOS of `Platforms` and, only when some GOOS differs, `format_overrides`
+    entries `{goos, formats}` for each that does: default `AssetExt` with windows gives `tar.gz`
+    and a windows `zip` override), `checksum`
+    (`asset.GoReleaserChecksum`, sha256) and, unless `AllowUnsigned`, the ADR-0024 `signs` block. No
+    changelog, release, before or snapshot. `.Tag`, not `.Version`, because `.Version` drops the `v`
+    and `version.IsRelease` then reads the binary as a dev build. Needs GoReleaser v2.6 (`formats`,
+    in the archive and in `format_overrides`).
+  - Refusals, each wrapping a sentinel: `ErrNoMain`, `ErrEmptyPlatform`, `ErrDuplicatePlatform`,
+    `ErrPlatformChecksums` (`{os}` or `{arch}` in `ChecksumsAsset`), `ErrRawWindowsAsset` (raw
+    template with a windows platform: GoReleaser appends `.exe`), `ErrSharedAssetName` (the
+    `AssetTemplate` renders one name for two platforms), `ErrInvalidLinkVar` (whitespace,
+    quote or `=`), `ErrNotUTF8`. Errors of `Resolved` and the `asset` functions pass through.
+  - Mechanism as `installscript`: `@@TOKEN@@` tokens in `goreleaser.yaml.in`, one `Replacer` pass,
+    every value a `yamlQuote`d scalar; binary, link vars and key path pass through `templateLiteral`
+    (`{` and `$` as template actions). The `@@DIR_BEGIN@@`, `@@OVERRIDES_BEGIN@@` and `@@SIGNED_BEGIN@@`
+    regions are optional. Production code imports no YAML library; tests use `yaml/v3`.
+  - Tests round-trip the parsed YAML through `Config.Select`. `ExampleRender`'s `Output` mirrors the
+    template, so editing the template means updating the example.
 - `internal/minisign/` — the minisign verifier: `ParsePublicKey` (with or without the `untrusted
   comment:` line; `.Line` is the bare key line), `ParseSignature` and `Verify`, accepting both the
   hashed `ED` and the legacy `Ed` signature forms. Its `testdata/` holds an interop vector (a key and

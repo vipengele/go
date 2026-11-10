@@ -1,0 +1,32 @@
+# GoReleaser v2.6 or later. Rendered by go.vipengele.org/update/goreleaser from the tool's
+# update.Config: the build, archive, checksum and signature names below are the ones update
+# selects, verifies and extracts.
+version: 2
+project_name: @@PROJECT_NAME@@
+builds:
+  - binary: @@BINARY@@
+    main: @@MAIN@@
+@@DIR_BEGIN@@
+    dir: @@DIR@@
+@@DIR_END@@
+    env: ["CGO_ENABLED=0"]
+    ldflags: @@LDFLAGS@@
+    goos: @@GOOS@@
+    goarch: @@GOARCH@@
+    ignore: @@IGNORE@@
+archives:
+  - name_template: @@ARCHIVE_NAME@@
+    formats: @@FORMATS@@
+@@OVERRIDES_BEGIN@@
+    format_overrides: @@FORMAT_OVERRIDES@@
+@@OVERRIDES_END@@
+checksum:
+  name_template: @@CHECKSUM_NAME@@
+  algorithm: sha256
+@@SIGNED_BEGIN@@
+signs:
+  - artifacts: checksum
+    cmd: minisign
+    args: ["-S", "-s", @@SIGNING_KEY@@, "-m", "${artifact}", "-x", "${signature}"]
+    signature: "${artifact}.minisig"
+@@SIGNED_END@@
