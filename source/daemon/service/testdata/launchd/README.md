@@ -13,4 +13,6 @@
 
 The `print*` fixtures are transcribed from public macOS output, not captured from a machine:
 they pin how `Status` reads the shapes shown here, not how a given macOS release writes them.
-The check against a real launchd is the macOS supervisor harness tracked in issue #82.
+They are not a check against a real launchd: nothing in this repository runs them against macOS,
+because there is no macOS CI runner, so a change in the output format of `launchctl` is caught
+only by running the driver on a Mac.
