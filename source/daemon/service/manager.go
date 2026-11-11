@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
 	"go.vipengele.org/cli/spec/paths"
 )
@@ -43,7 +44,9 @@ type Manager interface {
 //  3. An invalid cfg, then an invalid Hardening from WithSystemdHardening,
 //     then an invalid watchdog from WithSystemdNotify, then an invalid log
 //     path from WithLaunchdLogs, returns an error wrapping ErrInvalidConfig.
-//  4. A GOOS without a driver returns an error wrapping ErrUnsupported.
+//  4. A GOOS without a driver returns an error wrapping ErrUnsupported. The
+//     drivers are systemd on linux and launchd on darwin; every other GOOS,
+//     windows included, has none.
 func New(cfg Config, opts ...Option) (Manager, error) {
 	var o options
 	for _, opt := range opts {
@@ -91,11 +94,32 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 			lingerDir: "/var/lib/systemd/linger",
 		}, nil
 	case "darwin":
-		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
+		return &launchd{
+			cfg:       cfg,
+			logs:      o.launchd,
+			run:       execRunner,
+			euid:      os.Geteuid(),
+			uid:       os.Getuid(),
+			lookupEnv: os.LookupEnv,
+			sleep:     sleepContext,
+		}, nil
 	case "windows":
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
+	}
+}
+
+// sleepContext waits d and returns nil, or returns ctx's error as soon as ctx
+// ends first. The timer is stopped on both paths.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

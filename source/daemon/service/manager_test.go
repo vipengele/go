@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -28,7 +30,7 @@ func TestNewInvalidConfig(t *testing.T) {
 }
 
 func TestNewUnsupported(t *testing.T) {
-	for _, goos := range []string{"darwin", "windows", "plan9"} {
+	for _, goos := range []string{"windows", "freebsd", "plan9"} {
 		t.Run(goos, func(t *testing.T) {
 			m, err := New(validConfig(goos), WithGOOS(goos), notInContainer())
 			if !errors.Is(err, ErrUnsupported) {
@@ -54,6 +56,87 @@ func TestNewLinuxReturnsTheSystemdDriver(t *testing.T) {
 	}
 	if m == nil {
 		t.Fatal("Manager = nil, want the systemd driver")
+	}
+}
+
+func TestNewDarwinReturnsTheLaunchdDriver(t *testing.T) {
+	for name, scope := range map[string]Scope{"system": ScopeSystem, "user": ScopeUser} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig("darwin")
+			cfg.Scope = scope
+			if scope == ScopeUser {
+				cfg.User = ""
+			}
+			m, err := New(cfg, WithGOOS("darwin"), WithLaunchdLogs("/var/log/a.out", "/var/log/a.err"), notInContainer())
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			l, ok := m.(*launchd)
+			if !ok {
+				t.Fatalf("Manager = %T, want *launchd", m)
+			}
+			if !reflect.DeepEqual(l.cfg, cfg) {
+				t.Fatalf("cfg = %+v, want %+v", l.cfg, cfg)
+			}
+			if want := (launchdLogs{stdout: "/var/log/a.out", stderr: "/var/log/a.err"}); l.logs != want {
+				t.Fatalf("logs = %+v, want %+v", l.logs, want)
+			}
+			if l.euid != os.Geteuid() || l.uid != os.Getuid() {
+				t.Fatalf("euid, uid = %d, %d, want %d, %d", l.euid, l.uid, os.Geteuid(), os.Getuid())
+			}
+			if l.run == nil || l.lookupEnv == nil || l.sleep == nil {
+				t.Fatal("run, lookupEnv and sleep must all be set")
+			}
+			if l.daemonDir != "" {
+				t.Fatalf("daemonDir = %q, want empty for /Library/LaunchDaemons", l.daemonDir)
+			}
+		})
+	}
+}
+
+func TestNewDarwinKeepsDefaultLaunchdLogs(t *testing.T) {
+	m, err := New(validConfig("darwin"), WithGOOS("darwin"), notInContainer())
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	l, ok := m.(*launchd)
+	if !ok {
+		t.Fatalf("Manager = %T, want *launchd", m)
+	}
+	if l.logs != (launchdLogs{}) {
+		t.Fatalf("logs = %+v, want empty so the driver's defaults apply", l.logs)
+	}
+}
+
+func TestSleepContextWaits(t *testing.T) {
+	const d = 20 * time.Millisecond
+	start := time.Now()
+	if err := sleepContext(context.Background(), d); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if elapsed := time.Since(start); elapsed < d {
+		t.Fatalf("returned after %v, want at least %v", elapsed, d)
+	}
+}
+
+func TestSleepContextReturnsWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := sleepContext(ctx, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Minute {
+		t.Fatalf("returned after %v, want it to return on cancellation", elapsed)
+	}
+}
+
+func TestSleepContextReturnsTheDeadlineError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	if err := sleepContext(ctx, time.Hour); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
 }
 
@@ -197,15 +280,15 @@ func assertContainerError(t *testing.T, m Manager, err error) {
 	}
 }
 
-// assertNotRefused fails unless New returned the linux driver: the container
-// check let it through.
+// assertNotRefused fails unless New returned a driver: the container check let
+// it through.
 func assertNotRefused(t *testing.T, m Manager, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
 	if m == nil {
-		t.Fatal("Manager = nil, want the systemd driver")
+		t.Fatal("Manager = nil, want a driver")
 	}
 }
 
@@ -266,7 +349,7 @@ func TestNewValidatesSystemdNotifyOnEveryGOOS(t *testing.T) {
 				if errors.Is(err, ErrInvalidConfig) {
 					t.Fatalf("err = %v, want no ErrInvalidConfig", err)
 				}
-				if goos == "linux" {
+				if goos != "windows" {
 					assertNotRefused(t, m, err)
 				}
 			})
@@ -350,7 +433,7 @@ func TestNewWithContainerFalseLeavesResults(t *testing.T) {
 	if !errors.Is(invalid, ErrInvalidConfig) {
 		t.Fatalf("invalid config: err = %v, want ErrInvalidConfig", invalid)
 	}
-	_, unsupported := New(validConfig("darwin"), WithGOOS("darwin"), notInContainer())
+	_, unsupported := New(validConfig("freebsd"), WithGOOS("freebsd"), notInContainer())
 	if !errors.Is(unsupported, ErrUnsupported) {
 		t.Fatalf("valid config: err = %v, want ErrUnsupported", unsupported)
 	}
@@ -392,7 +475,7 @@ func TestNewValidatesLaunchdLogsOnEveryGOOS(t *testing.T) {
 				if errors.Is(err, ErrInvalidConfig) {
 					t.Fatalf("err = %v, want no ErrInvalidConfig", err)
 				}
-				if goos == "linux" {
+				if goos != "windows" {
 					assertNotRefused(t, m, err)
 				}
 			})
@@ -401,7 +484,7 @@ func TestNewValidatesLaunchdLogsOnEveryGOOS(t *testing.T) {
 }
 
 func TestNewValidatesLaunchdLogsBeforeTheGOOSSwitch(t *testing.T) {
-	_, err := New(validConfig("darwin"), WithGOOS("darwin"), WithLaunchdLogs("tool.out", ""), notInContainer())
+	_, err := New(validConfig("freebsd"), WithGOOS("freebsd"), WithLaunchdLogs("tool.out", ""), notInContainer())
 	if !errors.Is(err, ErrInvalidConfig) || errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrInvalidConfig and not ErrUnsupported", err)
 	}
