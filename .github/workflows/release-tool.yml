@@ -1,0 +1,347 @@
+# release-tool — builds, signs and publishes one release of a tool built on
+# go.vipengele.org/update (ADR-0033).
+#
+# A tool's own release workflow calls this one on a push of a `vX.Y.Z` tag,
+# pinned at `@source/update/vX.Y.Z`, the version of its update require, so this
+# workflow and the goreleaser.Render output it builds from come from the same
+# release. GoReleaser builds from the tool's committed `.goreleaser.yaml`,
+# writes `checksums.txt` and signs it with minisign (ADR-0024); the GitHub
+# Release carries the archives, the checksums file and its signature, and its
+# notes are `<release-notes-dir>/<tag>.md`.
+#
+# Two jobs, and the seam between them is the safety property. `build` holds the
+# signing key and runs the tool's build config under `contents: read`. `publish`
+# holds the write token, never checks out and runs nothing of the tool's: it
+# creates the release from the artifact `build` uploaded.
+#
+# `dry-run` tags HEAD locally as `v0.0.0-dryrun`, signs with an ephemeral key
+# whose public half travels with the artifact, and skips `publish`. Everything
+# else, the notes check, GoReleaser's dirty-tree check, the key handling and the
+# pre-release computation, runs as in a real release. The self-test,
+# release-tool-selftest.yml, is a dry run against
+# source/update/testdata/releasefixture.
+#
+# Every path input is relative to `working-directory`. A caller's `env` does not
+# reach a called workflow, so GOWORK and GORELEASER_CURRENT_TAG are set here.
+name: release-tool
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: The tool's directory, relative to the repository root. Every other path input is relative to it.
+        type: string
+        default: .
+      go-version-file:
+        description: The go.mod (or .go-version) setup-go reads the Go version from.
+        type: string
+        default: go.mod
+      goreleaser-config:
+        description: The committed config goreleaser.Render wrote.
+        type: string
+        default: .goreleaser.yaml
+      release-notes-dir:
+        description: The directory holding `<tag>.md`, the notes of each release.
+        type: string
+        default: docs/release-notes
+      signing-key-path:
+        description: Where the minisign secret key is written; the path the config's signs block passes to `minisign -s`.
+        type: string
+        default: minisign.key
+      sign:
+        description: Sign checksums.txt with minisign. A tool whose update.Config sets AllowUnsigned passes false.
+        type: boolean
+        default: true
+      environment:
+        description: The environment of the build job, whose secrets hold MINISIGN_KEY. Empty runs the job in none.
+        type: string
+        default: ''
+      dry-run:
+        description: Build and sign as v0.0.0-dryrun with an ephemeral key, and publish nothing.
+        type: boolean
+        default: false
+      goreleaser-version:
+        description: The GoReleaser release to install, v2.6 or later.
+        type: string
+        default: v2.20.1
+    secrets:
+      MINISIGN_KEY:
+        description: The minisign secret key, made by `minisign -G -W`. Required when sign is true and dry-run is false.
+        required: false
+    outputs:
+      tag:
+        description: The tag built, `v0.0.0-dryrun` in a dry run.
+        value: ${{ jobs.build.outputs.tag }}
+      prerelease:
+        description: '"true" when the tag has a semver pre-release suffix, else "false".'
+        value: ${{ jobs.build.outputs.prerelease }}
+
+permissions: {}
+
+env:
+  GOWORK: "off"
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # The key is a secret of this environment, resolved inside the called job:
+    # a caller job that `uses:` a workflow cannot declare one. An empty name
+    # runs the job in no environment, so a dry run and an unsigned tool need
+    # none; the self-test calls with the default and exercises that.
+    environment: ${{ inputs.environment }}
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A real release builds the pushed tag; a dry run makes a local tag no
+      # push ever sees. The pre-release flag follows the semver suffix alone
+      # (ADR-0027): `v1.2.0-rc.1` is a pre-release, `v0.3.0` and `v1.2.0+meta`
+      # are not.
+      - name: The tag is a release version
+        id: tag
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == "true" ]]; then
+            tag="v0.0.0-dryrun"
+            git -c tag.gpgsign=false tag "$tag"
+          else
+            if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+              echo "::error::${GITHUB_REF} is not a tag ref refs/tags/v*; a release runs on the push of its vX.Y.Z tag"
+              exit 1
+            fi
+            tag="$GITHUB_REF_NAME"
+          fi
+          id='[0-9A-Za-z-]+'
+          num='(0|[1-9][0-9]*)'
+          if [[ ! "$tag" =~ ^v${num}\.${num}\.${num}(-${id}(\.${id})*)?(\+${id}(\.${id})*)?$ ]]; then
+            echo "::error::${tag} is not a semver tag vX.Y.Z[-pre][+build]"
+            exit 1
+          fi
+          prerelease=false
+          if [[ -n "${BASH_REMATCH[4]}" ]]; then prerelease=true; fi
+          echo "GORELEASER_CURRENT_TAG=${tag}" >> "$GITHUB_ENV"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+      # Everything that can fail before a build fails here: the GitHub Release
+      # body is a file a human wrote and reviewed.
+      - name: The config and the notes exist
+        env:
+          CONFIG: ${{ inputs.goreleaser-config }}
+          NOTES_DIR: ${{ inputs.release-notes-dir }}
+          SIGN: ${{ inputs.sign }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          status=0
+          if [[ ! -f "$CONFIG" ]]; then
+            echo "::error::${CONFIG} does not exist in $(pwd); commit the config goreleaser.Render writes, or name it in goreleaser-config"
+            status=1
+          elif [[ "$SIGN" == "true" ]] && ! grep -q '^signs:' "$CONFIG"; then
+            echo "::error::sign is true but ${CONFIG} has no signs block; a tool whose update.Config sets AllowUnsigned passes sign: false"
+            status=1
+          fi
+          if [[ ! -f "${NOTES_DIR}/${TAG}.md" ]]; then
+            echo "::error::${NOTES_DIR}/${TAG}.md does not exist in $(pwd); write the notes for ${TAG} before tagging"
+            status=1
+          fi
+          exit "$status"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache: false
+
+      # The release asset of jedisct1/minisign, checked against a pinned digest.
+      # Ubuntu's package lags the upstream release by years and changes with
+      # the runner image; the tarball is the same bytes on every run. The digest
+      # is of the asset whose minisign signature verifies under the author's
+      # key RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3.
+      - name: Install minisign
+        if: ${{ inputs.sign }}
+        working-directory: ${{ runner.temp }}
+        env:
+          MINISIGN_VERSION: "0.12"
+          MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+        run: |
+          set -euo pipefail
+          archive="minisign-${MINISIGN_VERSION}-linux.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" "https://github.com/jedisct1/minisign/releases/download/${MINISIGN_VERSION}/${archive}"
+          echo "${MINISIGN_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir -p minisign-bin
+          tar -xzf "$archive" --strip-components=2 -C minisign-bin minisign-linux/x86_64/minisign
+          echo "${RUNNER_TEMP}/minisign-bin" >> "$GITHUB_PATH"
+
+      # The key is an untracked file in the work tree, and GoReleaser refuses
+      # to release from a dirty tree, so without the exclude every real release
+      # fails; --snapshot would skip the check and hide it. The exclude is
+      # written before the key exists.
+      - name: Exclude the key from the work tree
+        if: ${{ inputs.sign }}
+        env:
+          KEY_PATH: ${{ inputs.signing-key-path }}
+        run: |
+          set -euo pipefail
+          key="$(realpath -m -- "$KEY_PATH")"
+          rel="$(realpath -m --relative-to="$GITHUB_WORKSPACE" -- "$key")"
+          if [[ "$rel" == ".." || "$rel" == ../* ]]; then
+            echo "::error::signing-key-path ${KEY_PATH} resolves to ${key}, outside the repository"
+            exit 1
+          fi
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          echo "/${rel}" >> "$exclude"
+          echo "RELEASE_TOOL_KEY_FILE=${key}" >> "$GITHUB_ENV"
+
+      # A dry run signs with a key pair made for this run alone; its public half
+      # is written outside the work tree and travels with the artifact. A real
+      # release reads the key from the secret, which never reaches a command
+      # line or the log.
+      - name: Write the signing key
+        if: ${{ inputs.sign }}
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$(dirname "$RELEASE_TOOL_KEY_FILE")"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            mkdir -p "${RUNNER_TEMP}/release-tool-key"
+            minisign -G -W -p "${RUNNER_TEMP}/release-tool-key/minisign.pub" -s "$RELEASE_TOOL_KEY_FILE"
+          else
+            if [[ -z "$MINISIGN_KEY" ]]; then
+              echo "::error::sign is true but the MINISIGN_KEY secret is not set; set it in the protected environment or pass sign: false"
+              exit 1
+            fi
+            printf '%s\n' "$MINISIGN_KEY" > "$RELEASE_TOOL_KEY_FILE"
+          fi
+
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: ${{ inputs.goreleaser-version }}
+          install-only: true
+
+      # The real tag, never --snapshot, and validation on: the dirty-tree check
+      # applies in both modes. --skip=sign under sign: false keeps a config that
+      # still carries a signs block from reaching for a key that is not there.
+      - name: GoReleaser
+        env:
+          CONFIG: ${{ inputs.goreleaser-config }}
+          SIGN: ${{ inputs.sign }}
+        run: |
+          set -euo pipefail
+          skip="publish"
+          if [[ "$SIGN" != "true" ]]; then skip="publish,sign"; fi
+          goreleaser release --clean --skip="$skip" --config "$CONFIG"
+
+      - name: Delete the signing key
+        if: ${{ always() && inputs.sign }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [[ -n "${RELEASE_TOOL_KEY_FILE:-}" ]]; then rm -f -- "$RELEASE_TOOL_KEY_FILE"; fi
+
+      # The artifact `release-dist` holds:
+      #   dist/         every regular file at the top of GoReleaser's dist: the
+      #                 archives, checksums.txt, checksums.txt.minisig when
+      #                 signed, and GoReleaser's artifacts.json, metadata.json,
+      #                 config.yaml and CHANGELOG.md. The per-build directories
+      #                 of bare binaries are left out.
+      #   notes.md      a copy of <release-notes-dir>/<tag>.md.
+      #   minisign.pub  the ephemeral public key, in a dry run only.
+      - name: Stage the artifact
+        env:
+          NOTES_DIR: ${{ inputs.release-notes-dir }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          SIGN: ${{ inputs.sign }}
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/release-tool-artifact"
+          rm -rf "$stage"
+          mkdir -p "${stage}/dist"
+          find dist -mindepth 1 -maxdepth 1 -type f -exec cp -- {} "${stage}/dist/" \;
+          cp -- "${NOTES_DIR}/${TAG}.md" "${stage}/notes.md"
+          if [[ "$DRY_RUN" == "true" && "$SIGN" == "true" ]]; then
+            cp -- "${RUNNER_TEMP}/release-tool-key/minisign.pub" "${stage}/minisign.pub"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/release-tool-artifact
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: publish
+    needs: build
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/release-dist
+
+      # The assets are the files of dist/ less GoReleaser's own bookkeeping,
+      # the same top-level files releasetest.Verify reads as the release. A
+      # selection by artifacts.json type would have to tell a raw binary asset
+      # from a build's binary, which share the type "Binary".
+      #
+      # A re-run finishes a partial release: an existing release is left as it
+      # is, and a draft, which an interrupted asset upload leaves behind, gets
+      # its assets and is published.
+      - name: GitHub Release
+        working-directory: ${{ runner.temp }}/release-dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          assets=()
+          while IFS= read -r -d '' file; do
+            case "${file##*/}" in
+              artifacts.json|metadata.json|config.yaml|CHANGELOG.md) ;;
+              *) assets+=("$file") ;;
+            esac
+          done < <(find dist -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
+          if (( ${#assets[@]} == 0 )); then
+            echo "::error::the artifact release-dist holds no release assets"
+            exit 1
+          fi
+          prerelease=()
+          if [[ "$PRERELEASE" == "true" ]]; then prerelease=(--prerelease); fi
+
+          if draft="$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$draft" != "true" ]]; then
+              echo "release ${TAG} already exists"
+              exit 0
+            fi
+            gh release upload "$TAG" --repo "$REPO" --clobber "${assets[@]}"
+            gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease="$PRERELEASE"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --verify-tag \
+            --notes-file notes.md \
+            "${prerelease[@]}" \
+            "${assets[@]}"
