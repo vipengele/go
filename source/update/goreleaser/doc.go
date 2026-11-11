@@ -51,6 +51,6 @@
 // cannot carry, and a value that is not valid UTF-8.
 //
 // The workflow that runs GoReleaser over the rendered file, signs the checksums and publishes the
-// release is .github/workflows/release-tool.yml of this repository, pinned by a tool at the tag of
-// its update require (ADR-0033).
+// release is .github/workflows/release-tool.yml of this repository, pinned by a tool at the commit SHA of the
+// tag of its update require (ADR-0033).
 package goreleaser

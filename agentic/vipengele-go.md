@@ -43,8 +43,9 @@ under `source/`; the repository's own tooling that is not a Go project lives und
   `.github/workflows/release-tool*.yml` selects `update`, which owns those workflows.
 - `.github/workflows/release-tool.yml` — the reusable workflow through which a tool built on
   `go.vipengele.org/update` releases: GoReleaser over its committed config, a minisign signature over
-  `checksums.txt` and a GitHub Release. A tool pins it at `@source/update/vX.Y.Z`, the version of its
-  `update` require, so a change to it reaches tools only through an `update` release.
+  `checksums.txt` and a GitHub Release. A tool pins it by the commit SHA of the tag
+  `source/update/vX.Y.Z`, the version of its `update` require, written `@<sha> # source/update/vX.Y.Z`,
+  so a change to it reaches tools only through an `update` release.
   `release-tool-selftest.yml` is its dry run against `source/update/testdata/releasefixture`; it is
   not a merge gate (ADR-0033). This repository's own releases stay with `release.yml`.
 - `.github/actions/verify-sibling-deps` — checks every project's `go.mod`. A project is in strict

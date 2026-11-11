@@ -272,8 +272,8 @@ golangci-lint run
 - `.github/workflows/release-tool.yml` (repo root, ADR-0033) — the reusable workflow through which a
   tool releases: GoReleaser over the tool's committed `.goreleaser.yaml`, minisign over the checksums
   and a GitHub Release from `docs/release-notes/<tag>.md`. It belongs to this project (a change to
-  `.github/workflows/release-tool*.yml` selects `update`) and a tool pins it at `update`'s tag,
-  `@source/update/vX.Y.Z`, so a change to it reaches tools only through an `update` release.
+  `.github/workflows/release-tool*.yml` selects `update`) and a tool pins it by the commit SHA of `update`'s
+  tag `source/update/vX.Y.Z`, written `@<sha> # source/update/vX.Y.Z`, so a change to it reaches tools only through an `update` release.
   - `release-tool-selftest.yml` runs it with `dry-run` against `testdata/releasefixture`, a fixture
     tool whose committed `.goreleaser.yaml` is the golden of `internal/releasetest`:
     `go test ./internal/releasetest -update` regenerates it. `testdata/releaseverify` verifies the

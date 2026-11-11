@@ -9,16 +9,20 @@ ADR-0032 renders the GoReleaser config and leaves the workflow that runs it outs
 A tool written on `go.vipengele.org/update` releases through
 `.github/workflows/release-tool.yml`, a reusable workflow of this repository, which its own
 `release.yml` calls as
-`vipengele/go/.github/workflows/release-tool.yml@source/update/vX.Y.Z` on a push of a `vX.Y.Z` tag.
-It builds with GoReleaser from the tool's committed config, writes `checksums.txt`, signs it with
+`vipengele/go/.github/workflows/release-tool.yml@<sha> # source/update/vX.Y.Z` on a push of a
+`vX.Y.Z` tag. It builds with GoReleaser from the tool's committed config, writes `checksums.txt`, signs it with
 minisign and publishes a GitHub Release whose notes are `docs/release-notes/<tag>.md`.
 
 ## The rules
 
-- **The workflow is pinned at the `update` tag.** A consumer pins `@source/update/vX.Y.Z`, the
-  version of its `go.vipengele.org/update` require. The workflow lives in the `update` project (a
+- **The workflow is pinned at the commit of the `update` tag.** A consumer pins the commit SHA that
+  the tag `source/update/vX.Y.Z` points to, with the tag as a trailing comment:
+  `uses: vipengele/go/.github/workflows/release-tool.yml@<sha> # source/update/vX.Y.Z`. The version
+  is that of its `go.vipengele.org/update` require. The workflow lives in the `update` project (a
   change to `.github/workflows/release-tool*.yml` selects it) and is released with it, so the
-  workflow and `goreleaser.Render` that it builds the output of cannot drift apart.
+  workflow and `goreleaser.Render` that it builds the output of cannot drift apart. The pin is a SHA
+  because the called `build` job holds the tool's signing key: a tag can be moved to other code, a
+  SHA cannot, and it is the same rule as the SHA-pinned actions.
 - **The config is committed.** The tool commits the rendered `.goreleaser.yaml` and keeps it fresh
   with a golden test over `goreleaser.Render`. The input `goreleaser-config` names it, default
   `.goreleaser.yaml`, and a missing file fails the run.
@@ -82,6 +86,8 @@ because the `env` of a caller does not reach a called workflow; the workflow own
 
 - **A workflow fix reaches a tool only through an `update` release**, and the tool then raises both
   its require and its pin. Nothing can be pinned until `update`'s first release.
+- **A tag ruleset that refuses updating or deleting `source/*` tags protects the tags the SHAs are
+  read from.** It is a repository setting a human applies.
 - **The signing key is the one long-lived credential**, because the minisign scheme requires one
   (ADR-0024). Its exposure is limited to the `build` job, which runs under `contents: read`.
 - **The self-test is not a merge gate.** Only `ci-gate` is required (`ci-orchestration.yml`); the

@@ -2,9 +2,11 @@
 # go.vipengele.org/update (ADR-0033).
 #
 # A tool's own release workflow calls this one on a push of a `vX.Y.Z` tag,
-# pinned at `@source/update/vX.Y.Z`, the version of its update require, so this
-# workflow and the goreleaser.Render output it builds from come from the same
-# release. GoReleaser builds from the tool's committed `.goreleaser.yaml`,
+# pinned at the commit SHA of the tag `source/update/vX.Y.Z`, the version of its
+# update require (`@<sha> # source/update/vX.Y.Z`), so this workflow and the
+# goreleaser.Render output it builds from come from the same release. The build
+# job holds the tool's signing key: a tag can be moved, a SHA cannot.
+# GoReleaser builds from the tool's committed `.goreleaser.yaml`,
 # writes `checksums.txt` and signs it with minisign (ADR-0024); the GitHub
 # Release carries the archives, the checksums file and its signature, and its
 # notes are `<release-notes-dir>/<tag>.md`.
