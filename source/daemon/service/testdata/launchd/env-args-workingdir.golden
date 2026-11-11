@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.example.demo</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/demo</string>
+		<string>serve</string>
+		<string>--port=8080</string>
+		<string></string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>APP_MODE</key>
+		<string>prod</string>
+		<key>LOG_LEVEL</key>
+		<string>debug</string>
+		<key>_FEATURE</key>
+		<string>on</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/var/lib/demo</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/org.example.demo/org.example.demo.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/org.example.demo/org.example.demo.log</string>
+</dict>
+</plist>

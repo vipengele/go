@@ -1,0 +1,6 @@
+disabled services = {
+	"com.apple.ScreenReaderUIServer" => disabled
+	"com.example.demo" => enabled
+	"com.example.off" => disabled
+	"com.apple.Siri.agent" => enabled
+}

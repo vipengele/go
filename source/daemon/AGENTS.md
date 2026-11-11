@@ -112,17 +112,22 @@ golangci-lint run
 
 ## The `service` package
 
-`go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd, launchd,
-the Windows service control manager) behind the `Manager` interface: `Prepare`, `Install`,
+`go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd on linux,
+launchd on darwin; no other GOOS has a driver) behind the `Manager` interface: `Prepare`, `Install`,
 `Uninstall`, `Start`, `Stop` and `Status`, each taking only a context. Read its `doc.go` first and
 `docs/adr/0024-service-drivers-are-selected-at-runtime.md`.
 
 - `manager.go` — `Manager` and `New(cfg, opts...)`, which checks, in order, the `WithIdentity`
   identity (`ErrInvalidConfig`), whether the process runs in a container (`*ContainerError`), the
-  `Config` against the target GOOS, the `WithSystemdHardening` override, the `WithSystemdNotify` validation, and then switches on the
-  GOOS to select the driver (systemd on linux, `ErrUnsupported` elsewhere).
+  `Config` against the target GOOS, the `WithSystemdHardening` override, the `WithSystemdNotify`
+  watchdog and the `WithLaunchdLogs` paths (`ErrInvalidConfig`), and then switches on the GOOS to
+  select the driver: systemd on linux, launchd on darwin, `ErrUnsupported` on every other GOOS,
+  windows included. `sleepContext`, the launchd driver's `sleep`, waits on a timer or the context.
 - `option.go` — `Option`, `WithGOOS`, `WithIdentity`, `WithContainer`,
-  `WithSystemdHardening` and `WithSystemdNotify`; `""` means `runtime.GOOS`, `"windows"` applies the Windows rules and every other value the POSIX rules.
+  `WithSystemdHardening`, `WithSystemdNotify` and `WithLaunchdLogs`; `""` means `runtime.GOOS`,
+  `"windows"` applies the Windows rules and every other value the POSIX rules. `WithLaunchdLogs`
+  paths are validated on every GOOS (POSIX absolute, no control characters, valid UTF-8) and the
+  systemd driver ignores them.
   `WithContainer` replaces container detection and wins over the environment and `WithIdentity`;
   without it, `New` asks `paths.InContainerFor` with the identity and `paths.InContainer` without
   one.
@@ -133,10 +138,15 @@ the Windows service control manager) behind the `Manager` interface: `Prepare`, 
   `ErrPrivilegesRequired`, `ErrManagerUnreachable` and `ErrContainer` among them, and
   `ContainerError`, which matches `ErrContainer` and carries the `Instead` advice.
 - `hardening.go` — `Hardening`, `DefaultHardening(Scope)` and its validation; set with
-  `WithSystemdHardening`, which `New` validates on every GOOS and the other drivers ignore
-  (`docs/adr/0028-driver-specific-settings-are-options-not-config-fields.md`).
+  `WithSystemdHardening`, which `New` validates on every GOOS and the non-systemd drivers, launchd
+  among them, ignore (`docs/adr/0028-driver-specific-settings-are-options-not-config-fields.md`).
 - `systemd.go`, `systemd_unit.go`, `systemd_status.go` — the systemd driver: the unexported
-  `systemd` struct, the unit rendering and `Status`.
+  `systemd` struct, the unit rendering and `Status`. `systemd.go` also holds what both drivers
+  share: `execRunner`, whose allowlist is `systemctl`, `launchctl` and `id`, `exitCode`,
+  `writeFileAtomic` and `checkAccount`.
+- `launchd.go`, `launchd_plist.go`, `launchd_status.go` — the launchd driver: the unexported
+  `launchd` struct with `Prepare`, `Install`, `Uninstall`, `Start` and `Stop`, the property list
+  rendering with the default log paths, and `Status`.
 - `export_test.go` — `WithLookupEnv`, the test-only seam for the environment container detection
   reads.
 
@@ -204,12 +214,59 @@ The systemd driver:
   `StateUnknown` with a `Detail` and `ErrManagerUnreachable`. Lingering is never turned on; for a
   user unit `Detail` says it is off when `/var/lib/systemd/linger/<user>` is absent. A missing
   `systemctl` is `ErrUnsupported`; `New` never probes.
-- Test seam: the unexported `systemd` struct holds its operating-system touch points as fields
-  (`runner func(ctx, argv) ([]byte, error)`, `euid`, `lookupEnv`, `lingerDir`, `systemDir`). `New`
-  fills in the real ones and tests build the struct with fakes. There is no exported seam and no
-  package-level variable (`gochecknoglobals` and `depguard` apply to tests).
-- Goldens are `testdata/systemd/*.golden`; `go test ./service -update` (from `source/daemon`)
-  rewrites them. The flag is registered in `TestMain` in `main_test.go`.
+- Test seam: each driver struct holds its operating-system touch points as fields: `systemd` has
+  `run func(ctx, argv) ([]byte, error)`, `euid`, `lookupEnv`, `lingerDir` and `systemDir`;
+  `launchd` has `run`, `euid`, `uid`, `lookupEnv`, `sleep func(ctx, d) error` and `daemonDir`.
+  `New` fills in the real ones and tests build the structs with fakes. There is no exported seam and
+  no package-level variable (`gochecknoglobals` and `depguard` apply to tests).
+- Goldens are `testdata/systemd/*.golden` and `testdata/launchd/*.golden`; `go test ./service
+  -update` (from `source/daemon`) rewrites them. The flag is registered in `TestMain` in
+  `main_test.go`. `testdata/launchd/print-*.txt` are `launchctl print` and `print-disabled` outputs
+  transcribed from public macOS output, not captured on a machine (`testdata/launchd/README.md`).
+
+The launchd driver:
+
+- Scopes. The label is `Config.Name`. `ScopeSystem` is a LaunchDaemon in the `system` domain,
+  `/Library/LaunchDaemons/<Name>.plist`, with `UserName` from `Config.User` (root when empty);
+  `Prepare`, `Install`, `Uninstall`, `Start` and `Stop` need root (`ErrPrivilegesRequired`).
+  `ScopeUser` is a LaunchAgent in `gui/<uid>`, `$HOME/Library/LaunchAgents/<Name>.plist`, needing no
+  root. A user service is an agent because only an agent reaches the user's Keychain; the `gui`
+  domain exists only while the user is logged in to the GUI (not over ssh or `sudo -u`), and
+  `launchctl print gui/<uid>` failing is `ErrManagerUnreachable`. System-wide agents in
+  `/Library/LaunchAgents` are not supported. There is no lingering: an agent runs only while its
+  user is logged in to the GUI.
+- `Install` is: privileges, account check (`id -u -- <user>` for a daemon with a `User`), the gui
+  domain check for an agent, `Prepare` (the plist directory and the log directories, 0750), atomic
+  plist write (0644), `launchctl enable`, `bootout`, a poll of `launchctl print` every 250 ms for up
+  to 5 s until the job is unloaded, `bootstrap`. Booting out and bootstrapping again is the launchd
+  form of systemd's enable-then-restart: a changed plist or binary takes effect. A failing
+  `bootstrap` leaves the plist installed and the job unloaded; `Start` loads it. Nothing is rolled
+  back.
+- `Stop` is `bootout` plus the unload wait, because `KeepAlive` relaunches a killed process; the job
+  stays installed and enabled. `Start` is `kickstart` when the job is loaded and `bootstrap` when it
+  is not. `Uninstall` is `bootout`, `disable` and the plist removal; a failing `bootout` or `disable`
+  does not keep the plist, and the logs stay. `Start`, `Stop` and `Uninstall` without a plist are
+  `ErrNotInstalled`; a missing `launchctl` is `ErrUnsupported`.
+- Exit codes: 113 is a service the domain does not hold, 3 (`ESRCH`) the same from `bootout` and
+  older releases, and both count as not loaded; 5 (`EIO`) from `bootstrap` names a race with an
+  unfinished bootout. These come from public reports and are not checked on hardware: there is no
+  macOS runner.
+- `Status` reads `launchctl print <domain>/<label>` and `launchctl print-disabled <domain>`. No
+  plist is `StateNotInstalled` with no command run; exit 113 or 3 is `StateStopped`;
+  `state = running` with a `pid` is `StateRunning`, any other loaded state `StateStarting`. `runs` minus one counts as
+  restarts only when the last run failed (a non-zero `last exit code` or a `last terminating
+  signal`), so a relaunch after a clean exit reads Starting, a crash loop Failed with a `Detail`
+  naming the log file or files. Nested blocks of the `print` output are skipped. Output `Status`
+  cannot read is `StateUnknown` with a `Detail` and no error; a failing `print-disabled` keeps the
+  state with `Enabled` false, a `Detail` and the error.
+- Plist keys, in order: `Label`, `ProgramArguments`, `EnvironmentVariables` (sorted, absent when
+  empty), `WorkingDirectory` (absent when empty), `UserName` (daemon only, absent when empty),
+  `RunAtLoad`, `KeepAlive` (plain `true`, so a self-update's exit 0 is relaunched), `ThrottleInterval`
+  5 (as `RestartSec=5`), `StandardOutPath`, `StandardErrorPath`. Every string goes through
+  `xml.EscapeText`. Logs default to one file for both streams, `$HOME/Library/Logs/<Name>/<Name>.log`
+  for an agent and `/Library/Logs/<Name>/<Name>.log` for a daemon; `WithLaunchdLogs` overrides each
+  stream. The plist is 0644 and readable by every local account, so `Config.Env` must not carry
+  secrets there either.
 
 ## Conventions
 

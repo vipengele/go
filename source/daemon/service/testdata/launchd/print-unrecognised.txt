@@ -1,0 +1,4 @@
+gui/501/com.example.demo = {
+	the output of a launchctl release whose fields Status does not know
+	condition => unrecognised
+}
