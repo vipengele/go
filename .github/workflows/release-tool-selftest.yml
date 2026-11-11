@@ -6,8 +6,9 @@
 # .goreleaser.yaml, signs checksums.txt with an ephemeral key and publishes
 # nothing. `verify` downloads the artifact and runs releaseverify, which checks
 # the assets with releasetest.Verify under the fixture's update.Config, the
-# public key from the artifact and the dry-run tag. `actionlint` checks both
-# workflow files.
+# public key from the artifact and the dry-run tag. `publish-script` runs the
+# script of `publish`'s GitHub Release step against a stub `gh`, which a dry run
+# never reaches. `actionlint` checks both workflow files.
 #
 # The paths are the workflow, this file, the fixture and its verifier, the
 # package Verify lives in and the package that renders the committed config: a
@@ -97,7 +98,137 @@ jobs:
           TAG: ${{ needs.dry-run.outputs.tag }}
         run: |
           set -euo pipefail
-          go run ./testdata/releaseverify "${DIST}/dist" "${DIST}/minisign.pub" "$TAG"
+          go run ./testdata/releaseverify "${DIST}/dist" "$TAG" < "${DIST}/minisign.pub"
+
+  # `publish` creates the real GitHub Release and runs on no dry run, so its
+  # GitHub Release step's script runs here, read from release-tool.yml by step
+  # name, against a stub `gh` in a working directory laid out like the
+  # downloaded artifact. The stub logs each call, one per line with every
+  # argument shell-quoted, and answers `release view` as GH_RELEASE says: no
+  # release, a draft or a published release. Each case compares the whole log
+  # with the calls the script must make, so a changed asset filter, flag or
+  # branch fails it.
+  publish-script:
+    name: publish-script
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # yq is mikefarah's yq v4, on PATH in the ubuntu-latest image.
+      - name: The GitHub Release script makes the calls each release state needs
+        env:
+          WORKFLOW: .github/workflows/release-tool.yml
+          STEP: GitHub Release
+        run: |
+          set -euo pipefail
+          command -v yq
+          yq --version
+
+          script="${RUNNER_TEMP}/publish.sh"
+          yq -e '.jobs.publish.steps[] | select(.name == strenv(STEP)) | .run' \
+            "$WORKFLOW" > "$script"
+
+          stub="${RUNNER_TEMP}/gh-stub"
+          mkdir -p "$stub"
+          cat > "${stub}/gh" <<'STUB'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          { printf '%q ' "$@"; printf '\n'; } >> "$GH_LOG"
+          if [[ "${1-} ${2-}" == "release view" ]]; then
+            case "$GH_RELEASE" in
+              none) exit 1 ;;
+              draft) echo true ;;
+              published) echo false ;;
+            esac
+          fi
+          STUB
+          chmod +x "${stub}/gh"
+
+          tag=v1.2.3
+          repo=owner/name
+          assets=(
+            dist/checksums.txt
+            dist/checksums.txt.minisig
+            dist/tool_1.2.3_linux_amd64.tar.gz
+            dist/tool_1.2.3_windows_amd64.zip
+          )
+
+          # call prints the log line of one gh call with these arguments.
+          call() { printf '%q ' "$@"; printf '\n'; }
+          view="$(call release view "$tag" --repo "$repo" --json isDraft --jq .isDraft)"
+
+          status=0
+          # run_case NAME GH_RELEASE PRERELEASE WITH_ASSETS WANT_EXIT WANT_LOG runs
+          # the script in a fresh artifact layout and compares its exit status
+          # (0 or nonzero) and its gh calls with the expected ones. WITH_ASSETS
+          # false leaves dist/ with GoReleaser's bookkeeping and a build
+          # directory only.
+          run_case() {
+            local name="$1" release="$2" prerelease="$3" with_assets="$4" want_exit="$5" want_log="$6"
+            local dir="${RUNNER_TEMP}/case-${name}" f got_exit=0 ok=true
+            rm -rf "$dir"
+            mkdir -p "${dir}/dist/tool_linux_amd64_v1"
+            echo notes > "${dir}/notes.md"
+            for f in artifacts.json metadata.json config.yaml CHANGELOG.md tool_linux_amd64_v1/tool; do
+              echo bookkeeping > "${dir}/dist/${f}"
+            done
+            if [[ "$with_assets" == "true" ]]; then
+              for f in "${assets[@]}"; do echo asset > "${dir}/${f}"; done
+            fi
+            : > "${dir}/gh.log"
+
+            (
+              cd "$dir"
+              PATH="${stub}:${PATH}" GH_LOG="${dir}/gh.log" GH_RELEASE="$release" \
+                GH_TOKEN=dummy REPO="$repo" TAG="$tag" PRERELEASE="$prerelease" \
+                bash "$script"
+            ) > "${dir}/out" 2>&1 || got_exit=$?
+
+            if [[ "$want_exit" == "0" && "$got_exit" != "0" ]]; then
+              echo "::error::${name}: the script exits ${got_exit}, not 0"
+              ok=false
+            elif [[ "$want_exit" == "nonzero" && "$got_exit" == "0" ]]; then
+              echo "::error::${name}: the script exits 0, not non-zero"
+              ok=false
+            fi
+            if [[ "$(cat "${dir}/gh.log")" != "$want_log" ]]; then
+              echo "::error::${name}: the gh calls differ from the expected ones (< expected, > made)"
+              diff <(printf '%s\n' "$want_log") "${dir}/gh.log" | sed 's/^/  | /' || true
+              ok=false
+            fi
+            if [[ "$ok" == "true" ]]; then
+              echo "ok: ${name}"
+            else
+              echo "  script output:"
+              sed 's/^/  | /' "${dir}/out"
+              status=1
+            fi
+          }
+
+          run_case no-release none false true 0 "${view}
+          $(call release create "$tag" --repo "$repo" --verify-tag --notes-file notes.md "${assets[@]}")"
+
+          run_case no-release-prerelease none true true 0 "${view}
+          $(call release create "$tag" --repo "$repo" --verify-tag --notes-file notes.md --prerelease "${assets[@]}")"
+
+          run_case published published false true 0 "${view}"
+
+          run_case draft draft false true 0 "${view}
+          $(call release upload "$tag" --repo "$repo" --clobber "${assets[@]}")
+          $(call release edit "$tag" --repo "$repo" --draft=false --prerelease=false)"
+
+          run_case draft-prerelease draft true true 0 "${view}
+          $(call release upload "$tag" --repo "$repo" --clobber "${assets[@]}")
+          $(call release edit "$tag" --repo "$repo" --draft=false --prerelease=true)"
+
+          # The empty-assets guard runs before `gh release view`: no gh call.
+          run_case no-assets none false false nonzero ""
+
+          exit "$status"
 
   actionlint:
     name: actionlint
