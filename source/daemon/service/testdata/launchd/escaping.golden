@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>esc&amp;&lt;&gt;&#34;&#39;</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/a&amp;b/&lt;bin&gt;&#34;&#39;</string>
+		<string>&amp; &lt; &gt; &#34; &#39;</string>
+		<string></string>
+		<string>--x=&#34;1&#34;</string>
+		<string>it&#39;s</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>K&amp;&lt;&gt;&#34;&#39;</key>
+		<string>&amp; &lt; &gt; &#34; &#39;</string>
+		<key>PLAIN</key>
+		<string>&lt;v&gt;</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/srv/&amp;&lt;&gt;&#34;&#39;</string>
+	<key>UserName</key>
+	<string>u&amp;&lt;&gt;&#34;&#39;</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>/var/log/&amp;&lt;&gt;&#34;&#39;.out</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/&amp;&lt;&gt;&#34;&#39;.err</string>
+</dict>
+</plist>
