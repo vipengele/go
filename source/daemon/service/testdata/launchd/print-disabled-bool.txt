@@ -1,0 +1,6 @@
+disabled services = {
+	"com.apple.ftpd" => true
+	"com.example.demo" => false
+	"com.example.off" => true
+	"com.apple.mdmclient.daemon.runatboot" => true
+}

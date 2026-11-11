@@ -1,0 +1,76 @@
+gui/501/com.example.demo = {
+	active count = 0
+	path = /Users/me/Library/LaunchAgents/com.example.demo.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /Users/me/bin/demo
+	arguments = {
+		/Users/me/bin/demo
+	}
+
+	stdout path = /Users/me/Library/Logs/com.example.demo/com.example.demo.log
+	stderr path = /Users/me/Library/Logs/com.example.demo/com.example.demo.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /private/tmp/com.apple.launchd.k3Jw2bQx1N/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		XPC_SERVICE_NAME => com.example.demo
+	}
+
+	endpoints = {
+		"com.example.demo.xpc" = {
+			port = 0x1a03
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 1
+			state = running
+			pid = 99
+		}
+	}
+
+	event triggers = {
+		com.example.demo.watch => {
+			keepalive = 1
+			service = com.example.demo
+			stream = com.apple.fsevents.matching
+			monitor = com.apple.UserEventAgent-Aqua
+			state = running
+			pid = 98
+		}
+	}
+
+	domain = gui/501 [100008]
+	asid = 100008
+	minimum runtime = 10
+	exit timeout = 5
+	throttle interval = 5
+	runs = 1
+	immediate reason = speculative
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	last exit code = 0
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	submitted job. ignore execute allowed
+	jetsam thread limit = 32
+	cpumon = default
+	job state = exited
+
+	properties = keepalive | runatload | inferred program
+}
