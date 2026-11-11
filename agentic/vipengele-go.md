@@ -39,7 +39,14 @@ under `source/`; the repository's own tooling that is not a Go project lives und
 - `.github/actions/changed-projects` — the projects a change affects, dependents included; CI
   builds only those. A project's identifier is its path relative to `source/` (`cli/core`), a file
   belongs to the project with the longest matching directory, and a require of
-  `go.vipengele.org/<path>` is an edge to the project owning `<path>`.
+  `go.vipengele.org/<path>` is an edge to the project owning `<path>`. A change to
+  `.github/workflows/release-tool*.yml` selects `update`, which owns those workflows.
+- `.github/workflows/release-tool.yml` — the reusable workflow through which a tool built on
+  `go.vipengele.org/update` releases: GoReleaser over its committed config, a minisign signature over
+  `checksums.txt` and a GitHub Release. A tool pins it at `@source/update/vX.Y.Z`, the version of its
+  `update` require, so a change to it reaches tools only through an `update` release.
+  `release-tool-selftest.yml` is its dry run against `source/update/testdata/releasefixture`; it is
+  not a merge gate (ADR-0033). This repository's own releases stay with `release.yml`.
 - `.github/actions/verify-sibling-deps` — checks every project's `go.mod`. A project is in strict
   mode while some `docs/release-notes/<path>/v<version>.md` has no tag `source/<path>/v<version>`:
   it then fails any `replace` of a sibling and any sibling version with no tag. Otherwise it accepts
