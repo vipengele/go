@@ -10,10 +10,13 @@
 //     and for each that [update.Config.Select] picks an archive, a checksums file and a signature
 //     present in the dist directory, with the tag as the release's tag, so an AssetTemplate that
 //     holds {tag} or {version} names an archive carrying the tag;
-//   - the minisign signature of each checksums file Select picks, against the public key file it is
+//   - the minisign signature of each checksums file Select picks, against the public key it is
 //     given, through package go.vipengele.org/update/internal/minisign;
 //   - every SHA-256 digest each checksums file lists, against the file of that name in the dist
 //     directory, and that each selected archive is listed.
+//
+// Every file read from the dist directory is opened through an [os.Root] on it, so a name in a
+// checksums file, or a symlink in the directory, cannot lead a read outside it.
 //
 // The platforms come from artifacts.json, not from the names in the checksums file: a name does not
 // say which platform it was built for without parsing it against the AssetTemplate, and a platform

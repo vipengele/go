@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -67,33 +68,32 @@ type metadata struct {
 }
 
 // Verify checks the GoReleaser dist directory dir as the release tagged tag of the tool cfg
-// describes, with its checksums file signed by the minisign public key in the file pubkeyFile. It
-// returns nil when every check the package documentation lists passes, and otherwise the first
-// failure, wrapping the [update.Config.Select] or [minisign.Verify] error or one of the package's
-// sentinel errors.
-func Verify(dir, pubkeyFile, tag string, cfg update.Config) error {
+// describes, with its checksums file signed by the minisign public key key. It returns nil when
+// every check the package documentation lists passes, and otherwise the first failure, wrapping
+// the [update.Config.Select] or [minisign.Verify] error or one of the package's sentinel errors.
+// Every file Verify reads from dir, whatever name the checksums file or [update.Config.Select]
+// gives it, is opened through an [os.Root] on dir, so none can lie outside it.
+func Verify(dir string, key minisign.PublicKey, tag string, cfg update.Config) error {
 	if cfg.AllowUnsigned {
 		return fmt.Errorf("releasetest: %w", ErrUnsigned)
 	}
 
-	key, err := readPublicKey(pubkeyFile)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("releasetest: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	if err := checkTag(root, tag); err != nil {
+		return err
+	}
+
+	platforms, err := builtPlatforms(root)
 	if err != nil {
 		return err
 	}
 
-	if err := checkTag(dir, tag); err != nil {
-		return err
-	}
-
-	platforms, err := builtPlatforms(dir)
-	if err != nil {
-		return err
-	}
-
-	rel, err := distRelease(dir, tag)
-	if err != nil {
-		return err
-	}
+	rel := distRelease(dir, root, tag)
 
 	// archives maps the name of each checksums file Select picks to the archives selected with it.
 	archives := make(map[string][]string)
@@ -103,9 +103,6 @@ func Verify(dir, pubkeyFile, tag string, cfg update.Config) error {
 		sel, err := target.Select(rel)
 		if err != nil {
 			return fmt.Errorf("releasetest: selecting the assets of %s/%s: %w", p.goos, p.goarch, err)
-		}
-		if sel.Signature.Name != sel.Checksums.Name+signatureSuffix {
-			return fmt.Errorf("releasetest: %s/%s selects the signature %q, want %q", p.goos, p.goarch, sel.Signature.Name, sel.Checksums.Name+signatureSuffix)
 		}
 		archives[sel.Checksums.Name] = append(archives[sel.Checksums.Name], sel.Archive.Name)
 	}
@@ -117,7 +114,7 @@ func Verify(dir, pubkeyFile, tag string, cfg update.Config) error {
 	slices.Sort(names)
 
 	for _, name := range names {
-		if err := verifyChecksums(dir, name, key, archives[name]); err != nil {
+		if err := verifyChecksums(root, name, key, archives[name]); err != nil {
 			return err
 		}
 	}
@@ -125,25 +122,12 @@ func Verify(dir, pubkeyFile, tag string, cfg update.Config) error {
 	return nil
 }
 
-// readPublicKey reads and parses the minisign public key file path, as minisign.pub holds it.
-func readPublicKey(path string) (minisign.PublicKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return minisign.PublicKey{}, fmt.Errorf("releasetest: reading the public key: %w", err)
-	}
-	key, err := minisign.ParsePublicKey(string(data))
-	if err != nil {
-		return minisign.PublicKey{}, fmt.Errorf("releasetest: %s: %w", path, err)
-	}
-	return key, nil
-}
-
-// checkTag fails unless dir's metadata.json names tag. The archive names alone cannot attest the
+// checkTag fails unless the metadata.json in root names tag. The archive names alone cannot attest the
 // tag: an AssetTemplate without {tag} or {version}, the default included, names the archives of
 // every release alike.
-func checkTag(dir, tag string) error {
+func checkTag(root *os.Root, tag string) error {
 	var meta metadata
-	if err := readJSON(filepath.Join(dir, metadataFile), &meta); err != nil {
+	if err := readJSON(root, metadataFile, &meta); err != nil {
 		return err
 	}
 	if meta.Tag != tag {
@@ -152,11 +136,11 @@ func checkTag(dir, tag string) error {
 	return nil
 }
 
-// builtPlatforms returns the platforms dir's artifacts.json lists a binary for, each once, in the
+// builtPlatforms returns the platforms the artifacts.json in root lists a binary for, each once, in the
 // order first listed.
-func builtPlatforms(dir string) ([]platform, error) {
+func builtPlatforms(root *os.Root) ([]platform, error) {
 	var artifacts []artifact
-	if err := readJSON(filepath.Join(dir, artifactsFile), &artifacts); err != nil {
+	if err := readJSON(root, artifactsFile, &artifacts); err != nil {
 		return nil, err
 	}
 	var platforms []platform
@@ -178,51 +162,49 @@ func builtPlatforms(dir string) ([]platform, error) {
 	return platforms, nil
 }
 
-// readJSON decodes the JSON file path into v.
-func readJSON(path string, v any) error {
-	data, err := os.ReadFile(path)
+// readJSON decodes the JSON file name in root into v.
+func readJSON(root *os.Root, name string, v any) error {
+	data, err := root.ReadFile(name)
 	if err != nil {
 		return fmt.Errorf("releasetest: %w", err)
 	}
 	if err := json.Unmarshal(data, v); err != nil {
-		return fmt.Errorf("releasetest: %s: %w", path, err)
+		return fmt.Errorf("releasetest: %s: %w", name, err)
 	}
 	return nil
 }
 
-// distRelease returns the release tagged tag whose assets are the regular files at the top of
-// dir, where GoReleaser writes the archives, the checksums file and its signature.
-func distRelease(dir, tag string) (update.Release, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return update.Release{}, fmt.Errorf("releasetest: %w", err)
-	}
+// distRelease returns the release tagged tag whose assets are the entries at the top of root, the
+// directory dir, other than directories: where GoReleaser writes the archives, the checksums file
+// and its signature. A symlink is an asset like any file, and reading it through root fails when it
+// leads out of the directory. A directory that cannot be listed has no assets, so Select reports
+// the first one it looks for as missing.
+func distRelease(dir string, root *os.Root, tag string) update.Release {
+	names, _ := fs.Glob(root.FS(), "*")
 	rel := update.Release{Tag: tag, Assets: []update.Asset{}}
-	for _, e := range entries {
-		if !e.Type().IsRegular() {
+	for _, name := range names {
+		info, err := root.Lstat(name)
+		if err != nil || info.IsDir() {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			return update.Release{}, fmt.Errorf("releasetest: %w", err)
-		}
 		rel.Assets = append(rel.Assets, update.Asset{
-			Name: e.Name(),
-			URL:  filepath.Join(dir, e.Name()),
+			Name: name,
+			URL:  filepath.Join(dir, name),
 			Size: info.Size(),
 		})
 	}
-	return rel, nil
+	return rel
 }
 
-// verifyChecksums verifies the checksums file name in dir: its signature with key, every digest
-// it lists, and that it lists each of archives.
-func verifyChecksums(dir, name string, key minisign.PublicKey, archives []string) error {
-	data, err := os.ReadFile(filepath.Join(dir, name))
+// verifyChecksums verifies the checksums file name in root: its signature with key, every digest
+// it lists, and that it lists each of archives. A listed name that is not a file in root fails as a
+// digest mismatch.
+func verifyChecksums(root *os.Root, name string, key minisign.PublicKey, archives []string) error {
+	data, err := root.ReadFile(name)
 	if err != nil {
 		return fmt.Errorf("releasetest: %w", err)
 	}
-	sig, err := os.ReadFile(filepath.Join(dir, name+signatureSuffix))
+	sig, err := root.ReadFile(name + signatureSuffix)
 	if err != nil {
 		return fmt.Errorf("releasetest: %w", err)
 	}
@@ -242,7 +224,7 @@ func verifyChecksums(dir, name string, key minisign.PublicKey, archives []string
 	slices.Sort(listed)
 
 	for _, file := range listed {
-		if err := checkDigest(filepath.Join(dir, file), digests[file]); err != nil {
+		if err := checkDigest(root, file, digests[file]); err != nil {
 			return fmt.Errorf("releasetest: %s lists %q: %w", name, file, err)
 		}
 	}
@@ -255,9 +237,9 @@ func verifyChecksums(dir, name string, key minisign.PublicKey, archives []string
 	return nil
 }
 
-// checkDigest fails unless the file path exists and its SHA-256 digest is want.
-func checkDigest(path string, want []byte) error {
-	f, err := os.Open(path)
+// checkDigest fails unless the file name exists in root and its SHA-256 digest is want.
+func checkDigest(root *os.Root, name string, want []byte) error {
+	f, err := root.Open(name)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDigestMismatch, err)
 	}

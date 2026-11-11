@@ -9,7 +9,7 @@ import (
 // fixturePublicKey is a minisign public key entry whose secret half nobody holds. It is in
 // TrustedKeys so that the Config is a signed one: goreleaser.Render then emits the signs block,
 // and Verify refuses a Config that allows unsigned releases. The rendered .goreleaser.yaml does
-// not contain the key, and Verify checks the signature against the public key file it is given,
+// not contain the key, and Verify checks the signature against the public key it is given,
 // not against TrustedKeys.
 const fixturePublicKey = `untrusted comment: minisign public key: 1096E18282B5BA98
 RWSYurWCguGWELDj+MML/4/868JEjT2tjElVXZ3VvAcydaJNoPoNtaCx`

@@ -69,7 +69,9 @@ run in both modes. The self-test, `.github/workflows/release-tool-selftest.yml`,
 with `dry-run`, against the fixture tool in `source/update/testdata/releasefixture`, and
 `source/update/testdata/releaseverify` (over `internal/releasetest`) checks that the assets verify
 with the tool's own `update.Config`. It cannot set `GORELEASER_CURRENT_TAG` or `GOWORK` itself,
-because the `env` of a caller does not reach a called workflow; the workflow owns both.
+because the `env` of a caller does not reach a called workflow; the workflow owns both. The
+self-test's caller job grants `contents: write` because GitHub checks the skipped `publish` job's
+permissions at startup, and the `build` job still runs under `contents: read`.
 
 ## Considered options
 

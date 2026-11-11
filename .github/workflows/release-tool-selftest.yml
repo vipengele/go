@@ -31,12 +31,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # No secrets: a dry run signs with a key it makes for the run, and the
-  # workflow skips `publish`.
+  # No secrets: a dry run signs with a key it makes for the run. GitHub checks
+  # every called job's permissions against the caller's grant at startup, `if:`
+  # included, so the caller grants `contents: write`, which `publish` declares.
+  # `publish` never runs, because `dry-run` is true. `build` declares
+  # `contents: read` itself, so the job that runs the fixture's build config
+  # holds no write token. On a pull request from a fork GitHub downgrades the
+  # token to read anyway.
   dry-run:
     name: dry-run
     permissions:
-      contents: read
+      contents: write
     uses: ./.github/workflows/release-tool.yml
     with:
       dry-run: true
