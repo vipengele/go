@@ -18,8 +18,8 @@ const (
 
 	// launchctl exit codes the driver tells apart. launchctl reports a
 	// service the domain does not hold as 113 or, on older releases and from
-	// bootout, as ESRCH; a bootstrap that races the bootout of the same label
-	// fails with EIO.
+	// bootout, as ESRCH, and both count as not loaded; a bootstrap that races
+	// the bootout of the same label fails with EIO.
 	launchctlNoSuchProcess = 3
 	launchctlIOError       = 5
 	launchctlNotFound      = 113
@@ -190,14 +190,21 @@ func (l *launchd) checkDomain(ctx context.Context) error {
 		ErrManagerUnreachable, l.domain(), l.label(), err)
 }
 
+// notLoaded reports whether err is launchctl's answer for a service the
+// domain does not hold: exit 113, or exit 3 (ESRCH).
+func notLoaded(err error) bool {
+	code, ok := exitCode(err)
+	return ok && (code == launchctlNoSuchProcess || code == launchctlNotFound)
+}
+
 // loaded reports whether the domain holds the job, asking
-// `launchctl print <domain>/<label>`: exit 0 is loaded, exit 113 is not.
+// `launchctl print <domain>/<label>`: exit 0 is loaded, exit 3 or 113 is not.
 func (l *launchd) loaded(ctx context.Context) (bool, error) {
 	_, err := l.launchctl(ctx, "print", l.target())
 	if err == nil {
 		return true, nil
 	}
-	if code, ok := exitCode(err); ok && code == launchctlNotFound {
+	if notLoaded(err) {
 		return false, nil
 	}
 	return false, fmt.Errorf("service: print %s: %w", l.target(), err)
@@ -210,7 +217,7 @@ func (l *launchd) bootout(ctx context.Context) error {
 	if err == nil {
 		return nil
 	}
-	if code, ok := exitCode(err); ok && (code == launchctlNoSuchProcess || code == launchctlNotFound) {
+	if notLoaded(err) {
 		return nil
 	}
 	return fmt.Errorf("service: bootout %s: %w", l.target(), err)

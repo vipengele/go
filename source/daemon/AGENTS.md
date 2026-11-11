@@ -252,8 +252,8 @@ The launchd driver:
   unfinished bootout. These come from public reports and are not checked on hardware: there is no
   macOS runner.
 - `Status` reads `launchctl print <domain>/<label>` and `launchctl print-disabled <domain>`. No
-  plist is `StateNotInstalled` with no command run; exit 113 is `StateStopped`; `state = running`
-  with a `pid` is `StateRunning`, any other loaded state `StateStarting`. `runs` minus one counts as
+  plist is `StateNotInstalled` with no command run; exit 113 or 3 is `StateStopped`;
+  `state = running` with a `pid` is `StateRunning`, any other loaded state `StateStarting`. `runs` minus one counts as
   restarts only when the last run failed (a non-zero `last exit code` or a `last terminating
   signal`), so a relaunch after a clean exit reads Starting, a crash loop Failed with a `Detail`
   naming the log file or files. Nested blocks of the `print` output are skipped. Output `Status`

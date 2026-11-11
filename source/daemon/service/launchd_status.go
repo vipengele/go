@@ -11,8 +11,8 @@ import (
 // Status reports the job as `launchctl print <domain>/<label>` describes it,
 // and whether it is enabled as `launchctl print-disabled <domain>` lists it.
 // It needs no privileges. A job with no plist is StateNotInstalled and runs
-// no command; a plist launchd has not loaded (exit 113) is StateStopped. A
-// gui domain that does not exist yields StateUnknown with an error wrapping
+// no command; a plist launchd has not loaded (exit 113 or 3) is
+// StateStopped. A gui domain that does not exist yields StateUnknown with an error wrapping
 // ErrManagerUnreachable, and a missing launchctl an error wrapping
 // ErrUnsupported. Output Status cannot read yields StateUnknown with a Detail
 // and no error.
@@ -59,7 +59,7 @@ func (l *launchd) print(ctx context.Context) (Status, error) {
 	target := l.target()
 	out, err := l.launchctl(ctx, "print", target)
 	if err != nil {
-		if code, ok := exitCode(err); ok && code == launchctlNotFound {
+		if notLoaded(err) {
 			return Status{State: StateStopped}, nil
 		}
 		return Status{State: StateUnknown}, fmt.Errorf("service: status %s: print %s: %w", l.label(), target, err)

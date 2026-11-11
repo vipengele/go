@@ -179,8 +179,15 @@ func TestLaunchdInstallPlacesThePlistByScope(t *testing.T) {
 }
 
 func TestLaunchdInstallOverALoadedJobWaitsForTheBootout(t *testing.T) {
+	for name, gone := range map[string]error{"exit 113": notFound(), "exit 3": noSuchProcess()} {
+		t.Run(name, func(t *testing.T) { installOverALoadedJob(t, gone) })
+	}
+}
+
+func installOverALoadedJob(t *testing.T, gone error) {
+	t.Helper()
 	tl := newTestLaunchd(t, ScopeUser, 501)
-	tl.runner.on("launchctl print gui/501/demo", nil, nil, notFound())
+	tl.runner.on("launchctl print gui/501/demo", nil, nil, gone)
 	if err := tl.Install(context.Background()); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -536,18 +543,20 @@ func TestLaunchdStart(t *testing.T) {
 			{"launchctl", "kickstart", "gui/501/demo"},
 		})
 	})
-	t.Run("not loaded", func(t *testing.T) {
-		tl := newTestLaunchd(t, ScopeSystem, 0)
-		plist := tl.writePlist(t)
-		tl.runner.on("launchctl print system/demo", notFound())
-		if err := tl.Start(context.Background()); err != nil {
-			t.Fatalf("Start: %v", err)
-		}
-		tl.wantCalls(t, [][]string{
-			{"launchctl", "print", "system/demo"},
-			{"launchctl", "bootstrap", "system", plist},
+	for name, gone := range map[string]error{"not loaded": notFound(), "not loaded, exit 3": noSuchProcess()} {
+		t.Run(name, func(t *testing.T) {
+			tl := newTestLaunchd(t, ScopeSystem, 0)
+			plist := tl.writePlist(t)
+			tl.runner.on("launchctl print system/demo", gone)
+			if err := tl.Start(context.Background()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			tl.wantCalls(t, [][]string{
+				{"launchctl", "print", "system/demo"},
+				{"launchctl", "bootstrap", "system", plist},
+			})
 		})
-	})
+	}
 }
 
 func TestLaunchdStartPassesLaunchctlErrorsThrough(t *testing.T) {

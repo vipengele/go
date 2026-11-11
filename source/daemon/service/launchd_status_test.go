@@ -69,6 +69,7 @@ func TestLaunchdStatusMapsPrintOutput(t *testing.T) {
 		detail   string
 	}{
 		{"not loaded", printAnswer{err: notFound()}, StateStopped, 0, 0, ""},
+		{"not loaded, exit 3", printAnswer{err: noSuchProcess()}, StateStopped, 0, 0, ""},
 		{"running", printAnswer{out: "print-running.txt"}, StateRunning, 4242, 0, ""},
 		{"running after earlier crashes", printAnswer{out: "print-running-after-crashes.txt"}, StateRunning, 4242, 3, ""},
 		{"running after a clean exit", printAnswer{out: "print-running-after-clean-exit.txt"}, StateRunning, 4242, 0, ""},
