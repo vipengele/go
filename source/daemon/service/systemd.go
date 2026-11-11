@@ -18,18 +18,22 @@ const systemUnitDir = "/etc/systemd/system"
 type runner func(ctx context.Context, argv []string) ([]byte, error)
 
 // execRunner is the runner that starts argv as a process. It starts only the
-// two programs the driver runs, systemctl and id, each named by a constant, so
-// no input chooses the program; any other argv[0] fails with an error
-// wrapping exec.ErrNotFound and starts nothing.
+// three programs the drivers run, systemctl, launchctl and id, each named by a
+// constant, so no input chooses the program; any other argv[0] fails with an
+// error wrapping exec.ErrNotFound and starts nothing. A command that exits
+// non-zero returns an error wrapping its *exec.ExitError, whose exit code
+// exitCode reads.
 func execRunner(ctx context.Context, argv []string) ([]byte, error) {
 	var cmd *exec.Cmd
 	switch argv[0] {
 	case "systemctl":
 		cmd = exec.CommandContext(ctx, "systemctl", argv[1:]...) // #nosec G204 -- the program is the constant systemctl; its arguments are the driver's fixed verbs and flags plus the validated unit or account name, passed without a shell
+	case "launchctl":
+		cmd = exec.CommandContext(ctx, "launchctl", argv[1:]...) // #nosec G204 -- the program is the constant launchctl; its arguments are the driver's fixed verbs, the domain built from the uid, the validated label and the plist path under $HOME or /Library/LaunchDaemons, passed without a shell
 	case "id":
 		cmd = exec.CommandContext(ctx, "id", argv[1:]...) // #nosec G204 -- the program is the constant id; its arguments are the driver's fixed verbs and flags plus the validated unit or account name, passed without a shell
 	default:
-		return nil, fmt.Errorf("%s: %w: the driver runs only systemctl and id", argv[0], exec.ErrNotFound)
+		return nil, fmt.Errorf("%s: %w: the drivers run only systemctl, launchctl and id", argv[0], exec.ErrNotFound)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -43,13 +47,25 @@ func execRunner(ctx context.Context, argv []string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// exitCode returns the exit status carried by an error of the runner, which
+// wraps the *exec.ExitError of a command that ran and exited non-zero, and
+// false when err carries none.
+func exitCode(err error) (int, bool) {
+	var e interface{ ExitCode() int }
+	if errors.As(err, &e) {
+		return e.ExitCode(), true
+	}
+	return 0, false
+}
+
 // systemd is the Manager of a Linux host running systemd. Every contact with
 // the operating system goes through a field, so tests substitute fakes.
 type systemd struct {
 	cfg       Config
 	hardening Hardening
 	notify    notify
-	// run starts every command the driver runs: systemctl and id.
+	// run starts every command the driver runs, systemctl and id. New sets
+	// execRunner, whose allowlist also holds the launchd driver's launchctl.
 	run runner
 	// euid is the effective user id of the process.
 	euid int
@@ -130,21 +146,27 @@ func (s *systemd) requirePrivileges(method string) error {
 }
 
 // checkAccount fails when the system unit runs as an account that does not
-// exist, asking `id -u -- <user>`. The driver never creates the account. A
-// missing id returns an error wrapping ErrUnsupported.
+// exist, as the free checkAccount does.
 func (s *systemd) checkAccount(ctx context.Context) error {
 	if s.user() || s.cfg.User == "" {
 		return nil
 	}
-	_, err := s.run(ctx, []string{"id", "-u", "--", s.cfg.User})
+	return checkAccount(ctx, s.run, s.cfg.User, s.unitName())
+}
+
+// checkAccount fails when account does not exist, asking `id -u -- <account>`
+// through run, and names service in the error. The drivers never create the
+// account. A missing id returns an error wrapping ErrUnsupported.
+func checkAccount(ctx context.Context, run runner, account, service string) error {
+	_, err := run(ctx, []string{"id", "-u", "--", account})
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, exec.ErrNotFound):
-		return fmt.Errorf("%w: id not found, cannot check the account %q: %w", ErrUnsupported, s.cfg.User, err)
+		return fmt.Errorf("%w: id not found, cannot check the account %q: %w", ErrUnsupported, account, err)
 	}
 	return fmt.Errorf("service: the account %q does not exist, create it before installing %s: %w",
-		s.cfg.User, s.unitName(), err)
+		account, service, err)
 }
 
 // installedUnitPath returns the path of the unit file, or an error wrapping
@@ -163,37 +185,49 @@ func (s *systemd) installedUnitPath() (string, error) {
 	return path, nil
 }
 
-// writeUnit writes the rendered unit to a temporary file in the unit
-// directory, sets its mode to 0644 whatever the umask, and renames it over
-// the unit file, so a reader never sees a partial unit. The temporary file is
-// removed on any failure.
+// writeUnit writes the rendered unit to the unit file with writeFileAtomic.
 func (s *systemd) writeUnit() error {
 	path, err := s.unitPath()
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), "."+s.unitName()+".*.tmp")
+	return writeFileAtomic(path, "unit file", renderUnit(s.cfg, s.hardening, s.notify))
+}
+
+// commitUnitFile is commitFile for a unit file.
+func commitUnitFile(f *os.File, data []byte, path string) error {
+	return commitFile(f, data, path, "unit file")
+}
+
+// writeFileAtomic writes data to a temporary file in the directory of path,
+// sets its mode to 0644 whatever the umask, and renames it over path, so a
+// reader never sees a partial file. The temporary file is removed on any
+// failure. noun names the file in every error, such as "unit file" or
+// "plist".
+func writeFileAtomic(path, noun string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("service: create unit file: %w", err)
+		return fmt.Errorf("service: create %s: %w", noun, err)
 	}
-	if err := commitUnitFile(f, renderUnit(s.cfg, s.hardening, s.notify), path); err != nil {
+	if err := commitFile(f, data, path, noun); err != nil {
 		_ = os.Remove(f.Name())
 		return err
 	}
 	return nil
 }
 
-// commitUnitFile writes data to the temporary file f, sets its mode to 0644,
+// commitFile writes data to the temporary file f, sets its mode to 0644,
 // closes it and renames it to path. It always closes f, and attempts the
 // write, the chmod and the close even after one fails, so the returned error
-// joins every failure among them. It never removes f.
-func commitUnitFile(f *os.File, data []byte, path string) error {
+// joins every failure among them. It never removes f. noun names the file in
+// every error.
+func commitFile(f *os.File, data []byte, path, noun string) error {
 	_, writeErr := f.Write(data)
 	if err := errors.Join(writeErr, f.Chmod(0o644), f.Close()); err != nil {
-		return fmt.Errorf("service: write unit file: %w", err)
+		return fmt.Errorf("service: write %s: %w", noun, err)
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
-		return fmt.Errorf("service: rename unit file: %w", err)
+		return fmt.Errorf("service: rename %s: %w", noun, err)
 	}
 	return nil
 }
