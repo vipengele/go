@@ -94,11 +94,11 @@ func newTestLaunchd(t *testing.T, scope Scope, euid int) *testLaunchd {
 // plist returns the path of the job's property list.
 func (tl *testLaunchd) plist(t *testing.T) string {
 	t.Helper()
-	path, err := tl.plistPath()
+	p, err := tl.paths()
 	if err != nil {
-		t.Fatalf("plistPath: %v", err)
+		t.Fatalf("paths: %v", err)
 	}
-	return path
+	return p.plist
 }
 
 // writePlist installs a placeholder property list and returns its path.
@@ -248,6 +248,10 @@ func TestLaunchdInstallBootstrapFailureLeavesThePlistInstalled(t *testing.T) {
 				!strings.Contains(err.Error(), "Start retries") {
 				t.Fatalf("err = %v, want the plist installed but not loaded", err)
 			}
+			// Only EIO names the race with an unfinished bootout.
+			if got, want := strings.Contains(err.Error(), "launchd may still be unloading the job"), code == launchctlIOError; got != want {
+				t.Fatalf("err = %v, mentions an unfinished unload = %v, want %v", err, got, want)
+			}
 			if _, err := os.Stat(tl.plist(t)); err != nil {
 				t.Fatalf("plist stat err = %v, want it kept", err)
 			}
@@ -286,11 +290,11 @@ func TestLaunchdInstallWritesTheRenderedPlist(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			logs, err := tl.logPaths()
+			p, err := tl.paths()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := renderPlist(tl.cfg, logs); !bytes.Equal(got, want) {
+			if want := renderPlist(tl.cfg, p.logs); !bytes.Equal(got, want) {
 				t.Fatalf("plist =\n%s\nwant\n%s", got, want)
 			}
 			fi, err := os.Stat(path)
@@ -314,16 +318,17 @@ func TestLaunchdInstallWritesTheRenderedPlist(t *testing.T) {
 func TestLaunchdLogPathsTakeTheOptionOverTheDefault(t *testing.T) {
 	tl := newTestLaunchd(t, ScopeUser, 501)
 	tl.logs = launchdLogs{stderr: "/var/log/demo.err"}
-	got, err := tl.logPaths()
+	p, err := tl.paths()
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := p.logs
 	want := launchdLogs{
 		stdout: filepath.Join(tl.homeDir, "Library", "Logs", "demo", "demo.log"),
 		stderr: "/var/log/demo.err",
 	}
 	if got != want {
-		t.Fatalf("logPaths = %+v, want %+v", got, want)
+		t.Fatalf("logs = %+v, want %+v", got, want)
 	}
 }
 
@@ -339,8 +344,12 @@ func TestLaunchdPrepareCreatesThePlistAndLogDirectories(t *testing.T) {
 		filepath.Dir(out),
 		filepath.Join(tl.homeDir, "Library", "Logs", "demo"),
 	} {
-		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		fi, err := os.Stat(dir)
+		if err != nil || !fi.IsDir() {
 			t.Fatalf("stat %s = %v, want a directory", dir, err)
+		}
+		if fi.Mode().Perm() != 0o750 {
+			t.Fatalf("%s mode = %v, want 0750", dir, fi.Mode().Perm())
 		}
 	}
 	if len(tl.runner.calls) != 0 {
@@ -369,14 +378,25 @@ func TestLaunchdPrepareFailures(t *testing.T) {
 			tl.logs = launchdLogs{stdout: filepath.Join(blocker, "demo.log")}
 		}, "create log directory"},
 	}
+	methods := map[string]func(*launchd, context.Context) error{
+		"Prepare": (*launchd).Prepare,
+		"Install": (*launchd).Install,
+	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tl := newTestLaunchd(t, ScopeUser, 501)
-			tc.setup(t, tl)
-			if err := tl.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want %q", err, tc.want)
-			}
-		})
+		for name, method := range methods {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				tl := newTestLaunchd(t, ScopeUser, 501)
+				tc.setup(t, tl)
+				if err := method(tl.launchd, context.Background()); err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err = %v, want %q", err, tc.want)
+				}
+				for _, argv := range tl.runner.calls {
+					if argv[1] != "print" {
+						t.Fatalf("commands = %q, want none past the domain check", tl.runner.calls)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -489,10 +509,17 @@ func TestLaunchdHomeUnsetFailsAnAgent(t *testing.T) {
 			}
 		})
 	}
-	tl := newTestLaunchd(t, ScopeUser, 501)
-	tl.lookupEnv = func(string) (string, bool) { return "", false }
-	if _, err := tl.logPaths(); err == nil {
-		t.Fatal("logPaths = nil error, want HOME unset")
+	for name, lookup := range map[string]func(string) (string, bool){
+		"unset": func(string) (string, bool) { return "", false },
+		"empty": func(string) (string, bool) { return "", true },
+	} {
+		t.Run("paths/"+name, func(t *testing.T) {
+			tl := newTestLaunchd(t, ScopeUser, 501)
+			tl.lookupEnv = lookup
+			if _, err := tl.paths(); err == nil || !strings.Contains(err.Error(), "HOME is not set") {
+				t.Fatalf("paths err = %v, want HOME unset", err)
+			}
+		})
 	}
 }
 

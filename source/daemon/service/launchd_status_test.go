@@ -117,6 +117,7 @@ func TestLaunchdStatusUnreadableValues(t *testing.T) {
 		name, out, detail string
 	}{
 		{"pid", strings.Replace(running, "pid = 4242", "pid = many", 1), "pid"},
+		{"pid zero", strings.Replace(running, "pid = 4242", "pid = 0", 1), "pid"},
 		{"runs", strings.Replace(running, "runs = 1", "runs = -1", 1), "runs"},
 		{"last exit code", strings.Replace(running, "runs = 1", "last exit code = crashed", 1), "last exit code"},
 	}
@@ -131,6 +132,53 @@ func TestLaunchdStatusUnreadableValues(t *testing.T) {
 				t.Fatalf("Status = %+v, want unknown mentioning %q", st, tc.detail)
 			}
 		})
+	}
+}
+
+func TestLaunchdStatusCountsRestartsOnlyAfterAFailedRun(t *testing.T) {
+	tests := []struct {
+		name, out string
+		want      State
+		pid       int
+		restarts  int
+	}{
+		{"running without a pid", "state = running\n\truns = 1", StateStarting, 0, 0},
+		{"relaunched, no exit code", "state = waiting\n\truns = 3", StateStarting, 0, 0},
+		{"relaunched, never exited", "state = waiting\n\truns = 2\n\tlast exit code = (never exited)", StateStarting, 0, 0},
+		{"signal, no run count", "state = waiting\n\tlast terminating signal = Killed: 9", StateStarting, 0, 0},
+		{"exit code, one run", "state = running\n\tpid = 7\n\truns = 1\n\tlast exit code = 1", StateRunning, 7, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := "gui/501/com.example.demo = {\n\t" + tc.out + "\n}\n"
+			tl, _ := newStatusLaunchd(t, ScopeUser, printAnswer{out: out})
+			st, err := tl.Status(context.Background())
+			if err != nil {
+				t.Fatalf("Status: %v", err)
+			}
+			if st.State != tc.want || st.PID != tc.pid || st.Restarts != tc.restarts || st.Detail != "" {
+				t.Fatalf("Status = %+v, want %v with PID %d, %d restarts and no Detail", st, tc.want, tc.pid, tc.restarts)
+			}
+		})
+	}
+}
+
+func TestLaunchdStatusPlistStatFailureIsUnknown(t *testing.T) {
+	tl := newTestLaunchd(t, ScopeUser, 501)
+	blocker := filepath.Join(t.TempDir(), "home")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl.homeDir = blocker
+	st, err := tl.Status(context.Background())
+	if err == nil || errors.Is(err, ErrNotInstalled) || !strings.Contains(err.Error(), "stat plist") {
+		t.Fatalf("Status error = %v, want a stat failure other than ErrNotInstalled", err)
+	}
+	if st != (Status{State: StateUnknown}) {
+		t.Fatalf("Status = %+v, want only StateUnknown", st)
+	}
+	if len(tl.runner.calls) != 0 {
+		t.Fatalf("commands = %q, want none", tl.runner.calls)
 	}
 }
 
@@ -305,10 +353,29 @@ func TestLaunchdDisabled(t *testing.T) {
 }
 
 func TestLaunchdDisabledSkipsOtherBlocks(t *testing.T) {
-	out := "login item associations = {\n\t\"com.example.demo\" => disabled\n}\n" +
-		"disabled services = {\n\t\"com.example.other\" => disabled\n}\n"
-	if launchdDisabled([]byte(out), "com.example.demo") {
-		t.Fatal("launchdDisabled = true, want a label outside disabled services ignored")
+	tests := []struct {
+		name, out string
+		want      bool
+	}{
+		{"label only in another block",
+			"login item associations = {\n\t\"com.example.demo\" => disabled\n}\n" +
+				"disabled services = {\n\t\"com.example.other\" => disabled\n}\n", false},
+		{"disabled services after a skipped block",
+			"login item associations = {\n\t\"com.example.demo\" => enabled\n}\n" +
+				"disabled services = {\n\t\"com.example.demo\" => disabled\n}\n", true},
+		{"label after a nested block inside a skipped block",
+			"other = {\n\tnested = {\n\t}\n\t\"com.example.demo\" => disabled\n}\n" +
+				"disabled services = {\n\t\"com.example.demo\" => enabled\n}\n", false},
+		{"disabled services after a skipped block holding a nested one",
+			"other = {\n\tnested = {\n\t}\n}\n" +
+				"disabled services = {\n\t\"com.example.demo\" => disabled\n}\n", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := launchdDisabled([]byte(tc.out), "com.example.demo"); got != tc.want {
+				t.Fatalf("launchdDisabled = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -327,5 +394,10 @@ func TestParseLaunchdPrintReadsOnlyTheServiceBlock(t *testing.T) {
 	bare := parseLaunchdPrint([]byte("state = running\npid = 7\n"))
 	if bare["state"] != "running" || bare["pid"] != "7" {
 		t.Fatalf("props = %q, want the top level read when there is no block", bare)
+	}
+
+	nested := parseLaunchdPrint([]byte("state = running\nenvironment = {\n\tpid = 7\n}\nruns = 2\n"))
+	if _, ok := nested["pid"]; ok || nested["state"] != "running" || nested["runs"] != "2" {
+		t.Fatalf("props = %q, want the top level read and the nested block skipped when there is no opening block", nested)
 	}
 }

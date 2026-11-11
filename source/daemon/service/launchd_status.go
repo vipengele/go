@@ -26,7 +26,8 @@ import (
 // Enabled is false, Detail says the enabled state is unknown, and the error
 // is returned with it.
 func (l *launchd) Status(ctx context.Context) (Status, error) {
-	if _, err := l.installedPlistPath(); err != nil {
+	p, err := l.installedPaths()
+	if err != nil {
 		if errors.Is(err, ErrNotInstalled) {
 			return Status{State: StateNotInstalled}, nil
 		}
@@ -39,23 +40,24 @@ func (l *launchd) Status(ctx context.Context) (Status, error) {
 		}
 		return st, fmt.Errorf("service: status %s: %w", l.label(), err)
 	}
-	st, err := l.print(ctx)
+	st, err := l.print(ctx, p.logs)
 	if err != nil {
 		return st, err
 	}
 	enabled, err := l.enabled(ctx)
+	st.Enabled = enabled
 	if err != nil {
 		st.Detail = joinDetail(st.Detail,
 			fmt.Sprintf("launchctl print-disabled %s failed, so whether %s is enabled is unknown", l.domain(), l.label()))
 		return st, fmt.Errorf("service: status %s: %w", l.label(), err)
 	}
-	st.Enabled = enabled
 	return st, nil
 }
 
 // print runs `launchctl print` for the job and maps its top-level properties
-// to a Status. Enabled is left false.
-func (l *launchd) print(ctx context.Context) (Status, error) {
+// to a Status, whose Detail names the log files logs when the job failed.
+// Enabled is left false.
+func (l *launchd) print(ctx context.Context, logs launchdLogs) (Status, error) {
 	target := l.target()
 	out, err := l.launchctl(ctx, "print", target)
 	if err != nil {
@@ -90,7 +92,7 @@ func (l *launchd) print(ctx context.Context) (Status, error) {
 		}
 		runs = n
 	}
-	failed, reason, ok := lastRunFailed(props)
+	reason, ok := lastRunFailed(props)
 	if !ok {
 		st.Detail = fmt.Sprintf("launchctl print %s reports an unreadable last exit code = %q",
 			target, props["last exit code"])
@@ -100,7 +102,7 @@ func (l *launchd) print(ctx context.Context) (Status, error) {
 	// Every run after the first is a relaunch; relaunches count against the
 	// job only when the last run did not succeed.
 	restarts := 0
-	if failed && runs > 1 {
+	if reason != "" && runs > 0 {
 		restarts = runs - 1
 	}
 	st.Restarts = restarts
@@ -112,34 +114,31 @@ func (l *launchd) print(ctx context.Context) (Status, error) {
 	st.State = resolve(observed, restarts)
 	if st.State == StateFailed {
 		st.Detail = fmt.Sprintf("%s failed (%s, state = %s, %d restarts); see %s",
-			target, reason, state, restarts, l.logHint())
+			target, reason, state, restarts, logs.hint())
 	}
 	return st, nil
 }
 
 // lastRunFailed reads how the job's last run ended from the `last exit code`
-// and `last terminating signal` properties. failed is true for a non-zero
-// exit code or a signal, and reason then names it; a job that has never
-// exited has not failed. ok is false when the exit code is neither a number,
-// optionally followed by ": <text>", nor a parenthesised note such as
+// and `last terminating signal` properties. reason is empty when the last run
+// succeeded or the job has never exited, and names the non-zero exit code or
+// the signal when it failed. ok is false when the exit code is neither a
+// number, optionally followed by ": <text>", nor a parenthesised note such as
 // "(never exited)".
-func lastRunFailed(props map[string]string) (failed bool, reason string, ok bool) {
+func lastRunFailed(props map[string]string) (reason string, ok bool) {
 	if sig := props["last terminating signal"]; sig != "" {
-		return true, "last terminating signal = " + sig, true
+		return "last terminating signal = " + sig, true
 	}
 	v, present := props["last exit code"]
 	if !present || strings.HasPrefix(v, "(") {
-		return false, "", true
+		return "", true
 	}
 	num, _, _ := strings.Cut(v, ":")
 	code, err := strconv.Atoi(strings.TrimSpace(num))
-	if err != nil {
-		return false, "", false
+	if err != nil || code == 0 {
+		return "", err == nil
 	}
-	if code == 0 {
-		return false, "", true
-	}
-	return true, "last exit code = " + v, true
+	return "last exit code = " + v, true
 }
 
 // parseLaunchdPrint reads the `key = value` lines of the service's own block
@@ -246,15 +245,11 @@ func (l *launchd) unreachableDetail() string {
 		"the GUI, which an ssh login or a sudo -u shell is not", l.domain())
 }
 
-// logHint names the job's log file, or both files when stdout and stderr go
-// to different paths.
-func (l *launchd) logHint() string {
-	logs, err := l.logPaths()
-	if err != nil {
-		return "the job's log files"
+// hint names the log file, or both files when stdout and stderr go to
+// different paths.
+func (l launchdLogs) hint() string {
+	if l.stdout == l.stderr {
+		return l.stdout
 	}
-	if logs.stdout == logs.stderr {
-		return logs.stdout
-	}
-	return logs.stdout + " and " + logs.stderr
+	return l.stdout + " and " + l.stderr
 }

@@ -236,7 +236,7 @@ The launchd driver:
   `/Library/LaunchAgents` are not supported. There is no lingering: an agent runs only while its
   user is logged in to the GUI.
 - `Install` is: privileges, account check (`id -u -- <user>` for a daemon with a `User`), the gui
-  domain check for an agent, `Prepare` (the plist directory and the log directories, 0755), atomic
+  domain check for an agent, `Prepare` (the plist directory and the log directories, 0750), atomic
   plist write (0644), `launchctl enable`, `bootout`, a poll of `launchctl print` every 250 ms for up
   to 5 s until the job is unloaded, `bootstrap`. Booting out and bootstrapping again is the launchd
   form of systemd's enable-then-restart: a changed plist or binary takes effect. A failing
