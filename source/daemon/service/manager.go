@@ -41,8 +41,8 @@ type Manager interface {
 //     when set; otherwise paths.InContainerFor decides with the identity,
 //     and paths.InContainer without one.
 //  3. An invalid cfg, then an invalid Hardening from WithSystemdHardening,
-//     then an invalid watchdog from WithSystemdNotify, returns an error
-//     wrapping ErrInvalidConfig.
+//     then an invalid watchdog from WithSystemdNotify, then an invalid log
+//     path from WithLaunchdLogs, returns an error wrapping ErrInvalidConfig.
 //  4. A GOOS without a driver returns an error wrapping ErrUnsupported.
 func New(cfg Config, opts ...Option) (Manager, error) {
 	var o options
@@ -70,6 +70,9 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 		}
 	}
 	if err := o.notify.validate(); err != nil {
+		return nil, err
+	}
+	if err := o.launchd.validate(); err != nil {
 		return nil, err
 	}
 	switch goos {

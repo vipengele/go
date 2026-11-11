@@ -355,3 +355,78 @@ func TestNewWithContainerFalseLeavesResults(t *testing.T) {
 		t.Fatalf("valid config: err = %v, want ErrUnsupported", unsupported)
 	}
 }
+
+func TestNewValidatesLaunchdLogsOnEveryGOOS(t *testing.T) {
+	tests := []struct {
+		name           string
+		stdout, stderr string
+		invalid        bool
+	}{
+		{"both empty", "", "", false},
+		{"absolute", "/var/log/tool.out", "/var/log/tool.err", false},
+		{"stdout only", "/var/log/tool.out", "", false},
+		{"stderr only", "", "/var/log/tool.err", false},
+		{"relative stdout", "tool.out", "", true},
+		{"relative stderr", "", "logs/tool.err", true},
+		{"windows drive path", `C:\logs\tool.out`, "", true},
+		{"control character in stdout", "/var/log/a\nb", "", true},
+		{"control character in stderr", "", "/var/log/a\x7fb", true},
+		{"invalid UTF-8", "/var/log/\xff", "", true},
+	}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, tc := range tests {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				m, err := New(validConfig(goos), WithGOOS(goos), WithLaunchdLogs(tc.stdout, tc.stderr), notInContainer())
+				if tc.invalid {
+					if !errors.Is(err, ErrInvalidConfig) {
+						t.Fatalf("err = %v, want ErrInvalidConfig", err)
+					}
+					if !strings.Contains(err.Error(), "WithLaunchdLogs") {
+						t.Fatalf("err = %q, want it to name WithLaunchdLogs", err)
+					}
+					if m != nil {
+						t.Fatalf("Manager = %v, want nil", m)
+					}
+					return
+				}
+				if errors.Is(err, ErrInvalidConfig) {
+					t.Fatalf("err = %v, want no ErrInvalidConfig", err)
+				}
+				if goos == "linux" {
+					assertNotRefused(t, m, err)
+				}
+			})
+		}
+	}
+}
+
+func TestNewValidatesLaunchdLogsBeforeTheGOOSSwitch(t *testing.T) {
+	_, err := New(validConfig("darwin"), WithGOOS("darwin"), WithLaunchdLogs("tool.out", ""), notInContainer())
+	if !errors.Is(err, ErrInvalidConfig) || errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrInvalidConfig and not ErrUnsupported", err)
+	}
+}
+
+func TestNewValidatesLaunchdLogsAfterNotify(t *testing.T) {
+	_, err := New(validConfig("linux"), WithGOOS("linux"),
+		WithSystemdNotify(-time.Second), WithLaunchdLogs("tool.out", ""), notInContainer())
+	if !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), "WithSystemdNotify") {
+		t.Fatalf("err = %v, want the WithSystemdNotify violation", err)
+	}
+	if strings.Contains(err.Error(), "WithLaunchdLogs") {
+		t.Fatalf("err = %v, want only the WithSystemdNotify violation", err)
+	}
+}
+
+func TestNewRefusesInAContainerBeforeValidatingLaunchdLogs(t *testing.T) {
+	m, err := New(validConfig("darwin"), WithGOOS("darwin"), WithLaunchdLogs("tool.out", ""), inContainer())
+	assertContainerError(t, m, err)
+}
+
+func TestNewStoresLaunchdLogs(t *testing.T) {
+	var o options
+	WithLaunchdLogs("/var/log/a", "/var/log/b")(&o)
+	if want := (launchdLogs{stdout: "/var/log/a", stderr: "/var/log/b"}); o.launchd != want {
+		t.Fatalf("launchd = %+v, want %+v", o.launchd, want)
+	}
+}

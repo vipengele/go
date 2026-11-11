@@ -1,7 +1,10 @@
 package service
 
 import (
+	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.vipengele.org/cli/spec"
 )
@@ -18,6 +21,37 @@ type options struct {
 	// notify is the WithSystemdNotify setting; its zero value renders
 	// Type=simple.
 	notify notify
+	// launchd is the WithLaunchdLogs setting; an empty path keeps the
+	// driver's default for that stream.
+	launchd launchdLogs
+}
+
+// launchdLogs holds the log file paths of a launchd job. An empty field keeps
+// the driver's default for that stream.
+type launchdLogs struct {
+	stdout, stderr string
+}
+
+// validate reports the first path that is not a POSIX absolute path free of
+// control characters and invalid UTF-8, wrapping ErrInvalidConfig. The rules
+// do not depend on the target GOOS, because launchd runs only on macOS.
+func (l launchdLogs) validate() error {
+	for _, p := range []struct{ name, path string }{
+		{"stdout", l.stdout},
+		{"stderr", l.stderr},
+	} {
+		switch {
+		case p.path == "":
+		case !strings.HasPrefix(p.path, "/"):
+			return fmt.Errorf("%w: WithLaunchdLogs: %s %q is not an absolute path", ErrInvalidConfig, p.name, p.path)
+		case !utf8.ValidString(p.path):
+			return fmt.Errorf("%w: WithLaunchdLogs: %s %q is not valid UTF-8", ErrInvalidConfig, p.name, p.path)
+		case strings.IndexFunc(p.path, isControl) >= 0:
+			return fmt.Errorf("%w: WithLaunchdLogs: %s %q contains a control character",
+				ErrInvalidConfig, p.name, p.path)
+		}
+	}
+	return nil
 }
 
 // Option configures New.
@@ -71,4 +105,15 @@ func WithSystemdHardening(h Hardening) Option {
 // milliseconds; drivers other than systemd ignore the option.
 func WithSystemdNotify(watchdog time.Duration) Option {
 	return func(o *options) { o.notify = notify{enabled: true, watchdog: watchdog} }
+}
+
+// WithLaunchdLogs sets the files a launchd job writes its standard output and
+// standard error to, as the StandardOutPath and StandardErrorPath keys of its
+// property list. An empty string keeps the driver's default for that stream.
+//
+// New validates each non-empty path on every GOOS and returns an error
+// wrapping ErrInvalidConfig when it is not a POSIX absolute path or contains a
+// control character or invalid UTF-8; the systemd driver ignores the option.
+func WithLaunchdLogs(stdout, stderr string) Option {
+	return func(o *options) { o.launchd = launchdLogs{stdout: stdout, stderr: stderr} }
 }
