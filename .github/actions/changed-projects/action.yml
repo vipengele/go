@@ -25,6 +25,10 @@
 # the coverage config) selects all of them, since those can alter any project's
 # result. Anything else — docs, agentic instructions — selects none.
 #
+# The release-tool workflows (.github/workflows/release-tool*.yml) are owned by
+# the `update` project and are not shared CI files: a change to one selects
+# `update` and, through the require edges, its consumers, and no other project.
+#
 # The diff is against the base of the event: the PR base, the merge-group base or
 # the pushed range. When no base can be determined (a manual run, a first push, a
 # base commit the clone lacks) every project is selected: an unknown diff must not
@@ -107,6 +111,12 @@ runs:
         selected="$(grep -E '^source/' <<< "$changed" | jq -R . | jq -sc --argjson all "$all" "${owner}"'
           [.[] | ltrimstr("source/") as $f | owner($f) | select(. != null)] | unique' || true)"
         selected="${selected:-[]}"
+
+        # The release-tool workflows live outside source/ but belong to the
+        # `update` project; they select it, and nothing else, when it exists.
+        if grep -qE '^\.github/workflows/release-tool[a-z-]*\.yml$' <<< "$changed"; then
+          selected="$(jq -c --argjson all "$all" '. + [$all[] | select(. == "update")] | unique' <<< "$selected")"
+        fi
 
         # A require of go.vipengele.org/<path> is a cross-project edge to the
         # project owning <path> (ADR-0006, ADR-0004); the closure selects every

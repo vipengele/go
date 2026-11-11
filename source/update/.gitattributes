@@ -14,3 +14,7 @@ goreleaser/*.in text eol=lf
 internal/minisign/testdata/minisign.pub -text
 internal/minisign/testdata/checksums.txt -text
 internal/minisign/testdata/*.minisig -text
+
+# The fixture's golden GoReleaser config is compared byte for byte with the rendered output, whose
+# lines end in "\n": a CRLF checkout fails the comparison. It stays LF on every platform.
+testdata/releasefixture/.goreleaser.yaml text eol=lf
