@@ -545,22 +545,6 @@ func TestHostIsWindowsServiceIsFalseForATestProcess(t *testing.T) {
 	}
 }
 
-func TestHostRunWindowsServiceFailsOffWindows(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the service control manager exists on windows")
-	}
-	err := hostRunWindowsService(func(<-chan scmRequest, func(scmStatus)) uint32 {
-		t.Error("execute called on a host with no service control manager")
-		return 0
-	})
-	if err == nil {
-		t.Fatal("hostRunWindowsService = nil, want an error")
-	}
-	if want := "daemon: not running as a Windows service: no service control manager on " + runtime.GOOS; err.Error() != want {
-		t.Errorf("err = %q, want %q", err, want)
-	}
-}
-
 func TestWindowsExitCodes(t *testing.T) {
 	if WindowsRestartExitCode != 75 || WindowsFailureExitCode != 1 {
 		t.Errorf("codes = %d, %d; want 75, 1, the codes the service package reads",

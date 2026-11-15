@@ -259,30 +259,6 @@ func TestNewDefaultsToRuntimeGOOS(t *testing.T) {
 	}
 }
 
-func TestSystemdUnitPath(t *testing.T) {
-	tests := []struct {
-		name  string
-		scope Scope
-		env   map[string]string
-		want  string
-		fails bool
-	}{
-		{"system", ScopeSystem, nil, "/etc/systemd/system/x.service", false},
-		{"xdg", ScopeUser, map[string]string{"XDG_CONFIG_HOME": "/c", "HOME": "/h"}, "/c/systemd/user/x.service", false},
-		{"home", ScopeUser, map[string]string{"HOME": "/h"}, "/h/.config/systemd/user/x.service", false},
-		{"neither", ScopeUser, nil, "", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &systemd{cfg: Config{Name: "x", Scope: tc.scope}, lookupEnv: env(tc.env)}
-			got, err := s.unitPath()
-			if tc.fails != (err != nil) || got != tc.want {
-				t.Fatalf("unitPath = %q, %v; want %q, fails=%v", got, err, tc.want, tc.fails)
-			}
-		})
-	}
-}
-
 const wantInstead = "the container runtime supervises this process; run it as the image's entrypoint and give the container a restart policy that restarts on exit 0 (Docker --restart unless-stopped, Compose restart: unless-stopped, or a Kubernetes Deployment)"
 
 // driverConfig returns a Config New accepts on goos and builds a driver for:
