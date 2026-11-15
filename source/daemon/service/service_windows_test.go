@@ -20,8 +20,9 @@ const (
 	e2ePoll = 100 * time.Millisecond
 	// e2eWait bounds every wait for the service to reach a state.
 	e2eWait = 60 * time.Second
-	// e2eQuiet is how long a service stopped inside its restart delay is
-	// watched for a recovery restart: more than twice the delay.
+	// e2eQuiet is how long the service is watched for a recovery restart
+	// after a Stop inside its restart delay returns: more than twice the
+	// delay.
 	e2eQuiet = 2*windowsRestartDelay + 2*time.Second
 )
 
@@ -113,19 +114,19 @@ func TestWindowsServiceEndToEnd(t *testing.T) {
 			updated.PID, restarted.PID, StateStarting)
 	}
 
-	// A Stop inside the restart delay leaves the service stopped: the
-	// recovery restart queued by the restart code does not fire after it.
+	// A Stop inside the restart delay outlasts it and stops the service the
+	// recovery restart starts, so the service stays stopped after Stop
+	// returns and Status reads its exit code 0 as stopped.
 	e.requestRestart()
-	stoppedAt := e.waitRestartDelay()
+	e.waitRestartDelay()
 	if st := e.status(); st.State != StateStarting {
 		t.Errorf("Status inside the restart delay = %+v, want %v", st, StateStarting)
 	}
 	if err := e.m.Stop(ctx); err != nil {
 		t.Fatalf("Stop inside the restart delay: %v", err)
 	}
-	if late := time.Since(stoppedAt); late >= windowsRestartDelay {
-		t.Fatalf("Stop returned %v after the service stopped with the restart code, past the %v restart delay: "+
-			"the test cannot tell whether Stop kept the recovery restart from firing", late, windowsRestartDelay)
+	if st := e.status(); st.State != StateStopped || st.PID != 0 {
+		t.Errorf("Status after Stop inside the restart delay = %+v, want %v with no PID", st, StateStopped)
 	}
 	e.stayStopped(e2eQuiet)
 
@@ -330,16 +331,14 @@ func (e *e2eService) config() scmConfig {
 }
 
 // waitRestartDelay waits until the SCM reports the service stopped with the
-// restart code, the start of its restart delay, and returns when it first
-// saw it.
-func (e *e2eService) waitRestartDelay() time.Time {
+// restart code, inside its restart delay.
+func (e *e2eService) waitRestartDelay() {
 	e.t.Helper()
 	deadline := time.Now().Add(e2eWait)
 	for {
 		q := e.query()
-		if q.State == scmStopped && scmErrno(q.Win32ExitCode) == errSCMServiceSpecificError &&
-			q.ServiceSpecificExitCode == daemon.WindowsRestartExitCode {
-			return time.Now()
+		if inRestartDelay(q) {
+			return
 		}
 		if time.Now().After(deadline) {
 			e.t.Fatalf("service not stopped with the restart code %d after %v: last SCM status %+v",
@@ -356,7 +355,7 @@ func (e *e2eService) stayStopped(d time.Duration) {
 	start := time.Now()
 	for time.Since(start) < d {
 		if q := e.query(); q.State != scmStopped {
-			e.t.Fatalf("recovery restart fired after Stop during the restart delay: %v after Stop the SCM reports %+v, want it stopped",
+			e.t.Fatalf("the service ran again after Stop inside the restart delay returned: %v after Stop the SCM reports %+v, want it stopped",
 				time.Since(start).Round(time.Millisecond), q)
 		}
 		time.Sleep(e2ePoll)

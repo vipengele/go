@@ -39,6 +39,18 @@ type fakeSCM struct {
 	// stopPolls is the number of queries after a stop that still report
 	// SERVICE_STOP_PENDING.
 	stopPolls int
+	// refuseStops is the number of stop calls that fail with
+	// errSCMServiceCannotAccept, and dropStops the number after them that
+	// succeed and leave the state as it is. stopErr, when set, fails every
+	// stop call after those.
+	refuseStops int
+	dropStops   int
+	stopErr     error
+	// relaunch makes the recovery restart fire: once relaunchPolls queries
+	// have reported the service stopped with the restart code, the next one
+	// finds it start-pending with relaunchPID.
+	relaunch      bool
+	relaunchPolls int
 	// gonePolls is the number of opens after a delete that still find the
 	// service; a negative value finds it forever.
 	gonePolls int
@@ -157,16 +169,40 @@ func (s fakeService) start() error {
 }
 
 func (s fakeService) stop() (scmStatus, error) {
-	s.f.record("stop")
-	if s.f.st.State == scmStopped {
-		return s.f.st, errSCMServiceNotActive
+	f := s.f
+	f.record("stop")
+	if f.st.State == scmStopped {
+		return f.st, errSCMServiceNotActive
 	}
-	s.f.st = scmStatus{State: scmStopPending}
-	return s.f.st, nil
+	if f.refuseStops > 0 {
+		f.refuseStops--
+		return f.st, errSCMServiceCannotAccept
+	}
+	if f.dropStops > 0 {
+		f.dropStops--
+		return f.st, nil
+	}
+	if f.stopErr != nil {
+		return scmStatus{}, f.stopErr
+	}
+	f.st = scmStatus{State: scmStopPending}
+	return f.st, nil
 }
+
+// relaunchPID is the process ID of the service the fake's recovery restart
+// starts.
+const relaunchPID = 5150
 
 func (s fakeService) query() (scmStatus, error) {
 	s.f.record("query")
+	if s.f.relaunch && inRestartDelay(s.f.st) {
+		if s.f.relaunchPolls == 0 {
+			s.f.relaunch = false
+			s.f.st = scmStatus{State: scmStartPending, ProcessID: relaunchPID}
+		} else {
+			s.f.relaunchPolls--
+		}
+	}
 	if s.f.st.State == scmStopPending {
 		if s.f.stopPolls == 0 {
 			s.f.st = scmStatus{State: scmStopped}
@@ -532,6 +568,167 @@ func TestWindowsStopTimesOut(t *testing.T) {
 	if err := w.Stop(t.Context()); err == nil || !strings.Contains(err.Error(), "not stopped") {
 		t.Fatalf("Stop = %v, want a timeout", err)
 	}
+}
+
+// restartCodeStop is the status of a service stopped with the restart code,
+// inside its restart delay.
+func restartCodeStop() scmStatus {
+	return scmStatus{
+		State:                   scmStopped,
+		Win32ExitCode:           uint32(errSCMServiceSpecificError),
+		ServiceSpecificExitCode: daemon.WindowsRestartExitCode,
+	}
+}
+
+func TestWindowsStopInsideTheRestartDelayOutlastsIt(t *testing.T) {
+	w, f, sleeps := newTestWindows(demoWindowsConfig())
+	installed(f, restartCodeStop())
+	if err := w.Stop(t.Context()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if want := int((windowsRestartDelay + windowsRestartMargin) / windowsPollInterval); *sleeps != want {
+		t.Errorf("slept %d times, want %d, the restart delay plus the margin", *sleeps, want)
+	}
+	if slices.Contains(f.calls, "stop") {
+		t.Errorf("calls = %q, want no stop control to a service that stayed stopped", f.calls)
+	}
+	if f.st != restartCodeStop() || f.openHandles != 0 {
+		t.Errorf("status %+v with %d open handles, want it still stopped with the restart code and none open",
+			f.st, f.openHandles)
+	}
+}
+
+func TestWindowsStopInsideTheRestartDelayStopsTheRelaunchedService(t *testing.T) {
+	w, f, sleeps := newTestWindows(demoWindowsConfig())
+	installed(f, restartCodeStop())
+	f.relaunch = true
+	f.relaunchPolls = 10
+	f.refuseStops = 2
+	if err := w.Stop(t.Context()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if f.relaunch {
+		t.Fatal("the recovery restart never fired")
+	}
+	if *sleeps >= int((windowsRestartDelay+windowsRestartMargin)/windowsPollInterval) {
+		t.Errorf("slept %d times, want the wait to end once the service was relaunched", *sleeps)
+	}
+	if n := countCalls(f.calls, "stop"); n != 3 {
+		t.Errorf("sent the stop control %d times, want 3: twice refused while start-pending, then taken", n)
+	}
+	if f.st.State != scmStopped {
+		t.Fatalf("state %d, want stopped", f.st.State)
+	}
+	f.elevated = false
+	st, err := w.Status(t.Context())
+	if err != nil || st.State != StateStopped {
+		t.Errorf("Status after Stop = %+v, %v, want %v", st, err, StateStopped)
+	}
+}
+
+func TestWindowsInstallAndUninstallOutlastTheRestartDelay(t *testing.T) {
+	methods := map[string]func(*windowsDriver, context.Context) error{
+		"Install":   (*windowsDriver).Install,
+		"Uninstall": (*windowsDriver).Uninstall,
+	}
+	for name, call := range methods {
+		t.Run(name, func(t *testing.T) {
+			w, f, _ := newTestWindows(demoWindowsConfig())
+			installed(f, restartCodeStop())
+			f.relaunch = true
+			f.relaunchPolls = 4
+			if err := call(w, t.Context()); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if f.relaunch || !slices.Contains(f.calls, "stop") {
+				t.Errorf("calls = %q, want the relaunched service stopped", f.calls)
+			}
+		})
+	}
+}
+
+func TestWindowsStopResendsAStopTheServiceDidNotTake(t *testing.T) {
+	tests := []struct {
+		name          string
+		state         scmState
+		refuse, drop  int
+		wantStopCalls int
+	}{
+		{"refused while start-pending", scmStartPending, 3, 0, 4},
+		{"taken but not acted on", scmRunning, 0, 2, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, f, _ := newTestWindows(demoWindowsConfig())
+			installed(f, scmStatus{State: tt.state, ProcessID: 7})
+			f.refuseStops, f.dropStops = tt.refuse, tt.drop
+			if err := w.Stop(t.Context()); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			if n := countCalls(f.calls, "stop"); n != tt.wantStopCalls {
+				t.Errorf("sent the stop control %d times, want %d", n, tt.wantStopCalls)
+			}
+			if f.st.State != scmStopped {
+				t.Errorf("state %d, want stopped", f.st.State)
+			}
+		})
+	}
+}
+
+func TestWindowsStopTimesOutOnAStopNeverTaken(t *testing.T) {
+	w, f, sleeps := newTestWindows(demoWindowsConfig())
+	installed(f, scmStatus{State: scmStartPending, ProcessID: 7})
+	f.refuseStops = 1 << 30
+	if err := w.Stop(t.Context()); err == nil || !strings.Contains(err.Error(), "not stopped") {
+		t.Fatalf("Stop = %v, want a timeout", err)
+	}
+	if want := int(windowsWaitTimeout / windowsPollInterval); *sleeps != want {
+		t.Errorf("slept %d times, want %d", *sleeps, want)
+	}
+}
+
+func TestWindowsStopInsideTheRestartDelayTimesOutOnARelaunchThatDoesNotStop(t *testing.T) {
+	w, f, _ := newTestWindows(demoWindowsConfig())
+	installed(f, restartCodeStop())
+	f.relaunch = true
+	f.relaunchPolls = 2
+	f.stopPolls = 1 << 30
+	if err := w.Stop(t.Context()); err == nil || !strings.Contains(err.Error(), "not stopped") {
+		t.Fatalf("Stop = %v, want a timeout", err)
+	}
+}
+
+func TestWindowsStopFailsAtOnceOnAStopError(t *testing.T) {
+	w, f, sleeps := newTestWindows(demoWindowsConfig())
+	installed(f, scmStatus{State: scmRunning, ProcessID: 7})
+	f.stopErr = errSCMAccessDenied
+	if err := w.Stop(t.Context()); !errors.Is(err, errSCMAccessDenied) {
+		t.Fatalf("Stop = %v, want the stop control's error", err)
+	}
+	if *sleeps != 0 {
+		t.Errorf("slept %d times, want none", *sleeps)
+	}
+}
+
+func TestWindowsStopTakesTheContextsEnd(t *testing.T) {
+	w, f, _ := newTestWindows(demoWindowsConfig())
+	installed(f, restartCodeStop())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := w.Stop(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop = %v, want context.Canceled", err)
+	}
+}
+
+// countCalls is the number of calls equal to call.
+func countCalls(calls []string, call string) int {
+	n := 0
+	for _, c := range calls {
+		if c == call {
+			n++
+		}
+	}
+	return n
 }
 
 func TestWindowsUninstallWaitsUntilGone(t *testing.T) {

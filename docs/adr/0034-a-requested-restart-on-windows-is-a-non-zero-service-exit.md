@@ -55,8 +55,14 @@ the daemon as a service. A requested restart reaches the SCM as a failure it rec
   doing the relaunch and the process holding no restart logic.
 - **A failed restart-requested exit is visible to the operator.** The SCM records a non-zero exit
   for it, where systemd and launchd record exit 0 (ADR-0021).
-- **A Stop during the restart delay is an open risk.** A Stop issued in the 5 seconds after the
-  restart code is reported finds the service already `STOPPED`, and the queued recovery restart may
-  still fire. The end-to-end test asserts that the service stays stopped.
+- **A Stop during the restart delay outlasts it.** A Stop issued in the 5 seconds after the restart
+  code is reported finds the service already `STOPPED`, and the recovery restart the SCM queued
+  still fires. The SCM reports no time for the stop, so the driver cannot tell how much of the delay
+  is left: Stop, and the stop inside `Install` and `Uninstall`, watch the service for the whole
+  delay plus a margin from the moment they see the restart code, and stop the service the recovery
+  restart starts in that time. That instance may run briefly; it then exits 0 and `Status` reads
+  `stopped`. A Stop in the delay takes several seconds longer than one of a running service, and a
+  service still `STOPPED` with the restart code once the wait ends keeps reading `starting`. The
+  end-to-end test asserts that the service stays stopped after Stop returns.
 - **The recovery policy lives in the installed service.** A service installed by hand without the
   recovery action and the flag stops on a requested restart and is not relaunched.

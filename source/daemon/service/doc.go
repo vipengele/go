@@ -161,9 +161,16 @@
 // recovery action restarts (ADR-0034,
 // a-requested-restart-on-windows-is-a-non-zero-service-exit.md). Stop stops
 // the service and waits until it is stopped; a service stopped on request
-// exits 0 and is not restarted. Uninstall stops the service, deletes it and
-// returns once the SCM no longer holds it; the registry key goes with it, and
-// the service's data and account stay.
+// exits 0 and is not restarted. A stop that finds the service stopped with
+// the restart exit code, inside its recovery delay, outlasts that delay: the
+// SCM gives no time of the stop, so the driver watches the service for the
+// whole delay and a margin from the moment it sees it, and stops the service
+// the recovery restart starts in that time. Stop, and the stop inside Install
+// and Uninstall, then take up to that long, and the service may run briefly
+// before it stops again. A stop the service cannot take yet, while it is
+// starting, is sent again until it does. Uninstall stops the service, deletes
+// it and returns once the SCM no longer holds it; the registry key goes with
+// it, and the service's data and account stay.
 //
 // # Status
 //

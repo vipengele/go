@@ -30,6 +30,11 @@ const (
 	windowsWaitTimeout  = 30 * time.Second
 	windowsPollInterval = 250 * time.Millisecond
 
+	// windowsRestartMargin is added to windowsRestartDelay in the wait of a
+	// stop that finds the service inside its restart delay. It covers the
+	// SCM's scheduling of the recovery action and the polls of the driver.
+	windowsRestartMargin = 5 * time.Second
+
 	// windowsLocalSystem is the account a service runs as when Config.User
 	// is empty.
 	windowsLocalSystem = "LocalSystem"
@@ -45,6 +50,7 @@ const (
 	errSCMAccessDenied           scmErrno = 5    // ERROR_ACCESS_DENIED
 	errSCMServiceAlreadyRunning  scmErrno = 1056 // ERROR_SERVICE_ALREADY_RUNNING
 	errSCMServiceDoesNotExist    scmErrno = 1060 // ERROR_SERVICE_DOES_NOT_EXIST
+	errSCMServiceCannotAccept    scmErrno = 1061 // ERROR_SERVICE_CANNOT_ACCEPT_CTRL
 	errSCMServiceNotActive       scmErrno = 1062 // ERROR_SERVICE_NOT_ACTIVE
 	errSCMServiceSpecificError   scmErrno = 1066 // ERROR_SERVICE_SPECIFIC_ERROR
 	errSCMServiceMarkedForDelete scmErrno = 1072 // ERROR_SERVICE_MARKED_FOR_DELETE
@@ -59,6 +65,8 @@ func (e scmErrno) Error() string {
 		return "An instance of the service is already running."
 	case errSCMServiceDoesNotExist:
 		return "The specified service does not exist as an installed service."
+	case errSCMServiceCannotAccept:
+		return "The service cannot accept control messages at this time."
 	case errSCMServiceNotActive:
 		return "The service has not been started."
 	case errSCMServiceMarkedForDelete:
@@ -501,19 +509,30 @@ func (w *windowsDriver) configure(s scmService) error {
 	return nil
 }
 
-// stopAndWait sends the stop control to s unless it is stopped, and waits
-// until it reports SERVICE_STOPPED.
+// stopAndWait stops s and waits until it reports SERVICE_STOPPED, up to
+// windowsWaitTimeout. A stopped service is left as it is, unless it stopped
+// with daemon.WindowsRestartExitCode: the SCM gives no time of that stop, so
+// the recovery restart it queued may fire up to windowsRestartDelay after
+// stopAndWait first sees it, and stopAndWait watches the service for that
+// delay plus windowsRestartMargin from then. A service that the SCM starts
+// again in that time is stopped as a running one is; one still stopped with
+// the restart code at the end of it is left as it is.
 func (w *windowsDriver) stopAndWait(ctx context.Context, s scmService) error {
 	st, err := s.query()
 	if err != nil {
 		return fmt.Errorf("query: %w", err)
 	}
+	if inRestartDelay(st) {
+		if st, err = w.outlastRestartDelay(ctx, s); err != nil {
+			return err
+		}
+	}
 	if st.State == scmStopped {
 		return nil
 	}
 	if st.State != scmStopPending {
-		if _, err := s.stop(); err != nil && !errors.Is(err, errSCMServiceNotActive) {
-			return fmt.Errorf("stop: %w", err)
+		if err := sendStop(s); err != nil {
+			return err
 		}
 	}
 	return w.poll(ctx, "still not stopped", func() (bool, error) {
@@ -521,8 +540,56 @@ func (w *windowsDriver) stopAndWait(ctx context.Context, s scmService) error {
 		if err != nil {
 			return false, fmt.Errorf("query: %w", err)
 		}
-		return st.State == scmStopped, nil
+		switch st.State {
+		case scmStopped:
+			return true, nil
+		case scmStopPending:
+			return false, nil
+		}
+		// A service starting or running has not taken the stop control:
+		// it may have refused it while start-pending, or the SCM may have
+		// taken it before the service's process registered its handler.
+		return false, sendStop(s)
 	})
+}
+
+// inRestartDelay reports whether st is the status of a service stopped with
+// daemon.WindowsRestartExitCode, which the recovery action answers with a
+// restart once windowsRestartDelay has passed.
+func inRestartDelay(st scmStatus) bool {
+	return st.State == scmStopped && scmErrno(st.Win32ExitCode) == errSCMServiceSpecificError &&
+		st.ServiceSpecificExitCode == daemon.WindowsRestartExitCode
+}
+
+// outlastRestartDelay queries s every windowsPollInterval until it reports a
+// status inRestartDelay does not, and returns that status, or returns the
+// last status once windowsRestartDelay plus windowsRestartMargin has been
+// slept.
+func (w *windowsDriver) outlastRestartDelay(ctx context.Context, s scmService) (scmStatus, error) {
+	window := min(windowsRestartDelay+windowsRestartMargin, windowsWaitTimeout)
+	for waited := time.Duration(0); ; waited += windowsPollInterval {
+		st, err := s.query()
+		if err != nil {
+			return scmStatus{}, fmt.Errorf("query: %w", err)
+		}
+		if !inRestartDelay(st) || waited >= window {
+			return st, nil
+		}
+		if err := w.sleep(ctx, windowsPollInterval); err != nil {
+			return scmStatus{}, err
+		}
+	}
+}
+
+// sendStop sends the stop control to s. A control the service cannot accept
+// yet, and one the SCM answers with errSCMServiceNotActive, are not errors:
+// the caller polls the service and sends it again while it is not stopping.
+func sendStop(s scmService) error {
+	_, err := s.stop()
+	if err != nil && !errors.Is(err, errSCMServiceNotActive) && !errors.Is(err, errSCMServiceCannotAccept) {
+		return fmt.Errorf("stop: %w", err)
+	}
+	return nil
 }
 
 // Uninstall stops the service, deletes it and returns once the SCM no longer
@@ -573,7 +640,11 @@ func (w *windowsDriver) Start(context.Context) error {
 // Stop stops the installed service and waits, up to windowsWaitTimeout,
 // until it reports SERVICE_STOPPED. Stopping a stopped service succeeds. A
 // service an operator stops exits 0 and is not restarted by its recovery
-// action.
+// action. A service inside its restart delay, stopped with
+// daemon.WindowsRestartExitCode, is watched until the recovery restart fires
+// or windowsRestartDelay plus windowsRestartMargin has passed, so Stop
+// outlasts the delay: the service the recovery restart starts is stopped,
+// exits 0 and reads as StateStopped.
 func (w *windowsDriver) Stop(ctx context.Context) error {
 	return w.controlled("Stop", func(_ scmManager, s scmService, _ func() error) error {
 		if err := w.stopAndWait(ctx, s); err != nil {
