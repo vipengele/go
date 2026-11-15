@@ -118,8 +118,9 @@ func (m *Machine) Begin(ctx context.Context, p Pending) error {
 	})
 }
 
-// Boot judges a boot of the running build and reports whether it rolled the update back, in which
-// case the caller exits so the restored binary is started.
+// Boot judges a boot of the running build and reports whether the update it belongs to is rolled
+// back, by this call or by another caller between the count and the rollback, in which case the
+// caller exits so the restored binary is started.
 //
 // With no update pending, it removes a leftover <target>.failed, ignoring any error, and changes
 // nothing. With an update pending for another version than the running one, the update is not
@@ -127,7 +128,9 @@ func (m *Machine) Begin(ctx context.Context, p Pending) error {
 // Boot records rolled_back without touching a file or counting an attempt. With the running
 // version pending, Boot counts and stores the attempt first, so that a build that crashes before
 // confirming still uses it up, and rolls back once the count passes the limit of
-// WithMaxBootAttempts. A failed store of the attempt is an error and never rolls back.
+// WithMaxBootAttempts. A failed store of the attempt is an error and never rolls back. When the
+// record is already rolled_back for the running version by the time Boot rolls back, another caller
+// has restored the backup, and Boot returns true without restoring it again.
 //
 // A rollback restores the backup before it records rolled_back. A restore that fails, a missing
 // backup included, is returned and leaves the record pending. When the restore succeeds and the
@@ -183,9 +186,12 @@ func (m *Machine) Boot(ctx context.Context) (bool, error) {
 }
 
 // MarkFailed rolls the pending update back at once, whatever its boot attempts, recording reason,
-// and reports whether it did. It returns ErrNotUpdatedBuild when the running version is not the
-// pending one, and false with a nil error when no update is pending. A failed restore or store is
-// reported as Boot reports it.
+// and reports whether the update the running build belongs to is rolled back, in which case the
+// caller exits so the restored binary is started. A record already rolled_back for the running
+// version is reported true without a restore or a write: the binary of this build is gone. It
+// returns ErrNotUpdatedBuild when the update pending is for another version, and false with a nil
+// error when no update is pending and none was rolled back for the running version. A failed
+// restore or store is reported as Boot reports it.
 func (m *Machine) MarkFailed(ctx context.Context, reason string) (bool, error) {
 	return m.rollBack(ctx, "mark failed", reason)
 }
@@ -226,14 +232,19 @@ func (m *Machine) Confirm(ctx context.Context) error {
 }
 
 // rollBack restores the backup of the update pending for the running version and records it
-// rolled_back with reason, both under one Store.Update, and reports whether the backup was
-// restored. With no update pending it returns false and a nil error; with an update pending for
-// another version, ErrNotUpdatedBuild.
+// rolled_back with reason, both under one Store.Update, and reports whether the update the running
+// build belongs to is rolled back, by this call or by another caller before it. A record already
+// rolled_back for the running version is reported true with nothing restored or written. Any other
+// record that is not pending is reported false with a nil error; an update pending for another
+// version is ErrNotUpdatedBuild.
 func (m *Machine) rollBack(ctx context.Context, op, reason string) (bool, error) {
-	restored := false
+	rolledBack := false
 
 	err := m.change(ctx, op, func(rec Record) (Record, bool, error) {
 		switch {
+		case rec.Status == StatusRolledBack && rec.ToVersion == m.running:
+			rolledBack = true
+			return rec, false, nil
 		case rec.Status != StatusPending:
 			return rec, false, nil
 		case rec.ToVersion != m.running:
@@ -244,7 +255,7 @@ func (m *Machine) rollBack(ctx context.Context, op, reason string) (bool, error)
 			return rec, false, err
 		}
 
-		restored = true
+		rolledBack = true
 		rec.Status = StatusRolledBack
 		rec.Reason = reason
 		rec.UpdatedAt = m.clock.Now()
@@ -252,7 +263,7 @@ func (m *Machine) rollBack(ctx context.Context, op, reason string) (bool, error)
 		return rec, true, nil
 	})
 
-	return restored, err
+	return rolledBack, err
 }
 
 // notRunningReason says why a record pending for another version than the running one is rolled

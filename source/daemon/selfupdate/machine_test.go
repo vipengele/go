@@ -71,6 +71,26 @@ func (s *fakeStore) Update(_ context.Context, fn func(Record) (Record, error)) e
 	return nil
 }
 
+// interleavedStore is a fakeStore that applies between to the record before each Update after the
+// first, standing for another caller that changes the record in the gap between two Updates.
+type interleavedStore struct {
+	fakeStore
+
+	between func(*Record)
+	updates int
+}
+
+func (s *interleavedStore) Update(ctx context.Context, fn func(Record) (Record, error)) error {
+	s.mu.Lock()
+	s.updates++
+	if s.updates > 1 && s.between != nil {
+		s.between(&s.rec)
+	}
+	s.mu.Unlock()
+
+	return s.fakeStore.Update(ctx, fn)
+}
+
 // fileOps records the calls a Machine makes through its restore and removeFile seams.
 type fileOps struct {
 	mu         sync.Mutex
@@ -365,6 +385,37 @@ func TestBootSavesTheAttemptBeforeJudging(t *testing.T) {
 	}
 }
 
+func TestBootPastTheLimitAfterAnotherRollbackReportsRolledBack(t *testing.T) {
+	t.Parallel()
+
+	rec := pendingRecord()
+	rec.BootAttempts = 3
+
+	rolledBackElsewhere := rec
+	rolledBackElsewhere.BootAttempts = 4
+	rolledBackElsewhere.Status = StatusRolledBack
+	rolledBackElsewhere.Reason = "health check failed"
+
+	store := &interleavedStore{
+		fakeStore: fakeStore{rec: rec},
+		between:   func(r *Record) { *r = rolledBackElsewhere },
+	}
+	m, ops := newMachine(t, store, newVersion)
+
+	rolledBack, err := m.Boot(t.Context())
+	if err != nil || !rolledBack {
+		t.Fatalf("Boot = %v, %v, want true, nil", rolledBack, err)
+	}
+
+	if n := ops.restoreCount(); n != 0 {
+		t.Errorf("restore called %d times, want 0", n)
+	}
+
+	if got := load(t, store); got != rolledBackElsewhere {
+		t.Errorf("record = %+v, want the other rollback unchanged: %+v", got, rolledBackElsewhere)
+	}
+}
+
 func TestBootOfAnotherVersionRecordsRolledBackWithoutFiles(t *testing.T) {
 	t.Parallel()
 
@@ -595,6 +646,52 @@ func TestMarkFailed(t *testing.T) {
 
 		if got := load(t, store); got.Status != StatusPending {
 			t.Errorf("status = %v, want pending", got.Status)
+		}
+	})
+
+	t.Run("already rolled back for the running version", func(t *testing.T) {
+		t.Parallel()
+
+		rec := pendingRecord()
+		rec.Status = StatusRolledBack
+		rec.Reason = "boot attempt 4 of v1.1.0 exceeds the limit of 3"
+		store := storeWith(t, rec)
+		m, ops := newMachine(t, store, newVersion)
+
+		rolledBack, err := m.MarkFailed(t.Context(), "broken")
+		if err != nil || !rolledBack {
+			t.Fatalf("MarkFailed = %v, %v, want true, nil", rolledBack, err)
+		}
+
+		if n := ops.restoreCount(); n != 0 {
+			t.Errorf("restore called %d times, want 0", n)
+		}
+
+		if got := load(t, store); got != rec {
+			t.Errorf("record = %+v, want it unchanged: %+v", got, rec)
+		}
+	})
+
+	t.Run("rolled back for another version", func(t *testing.T) {
+		t.Parallel()
+
+		rec := pendingRecord()
+		rec.Status = StatusRolledBack
+		rec.Reason = "health check failed"
+		store := storeWith(t, rec)
+		m, ops := newMachine(t, store, oldVersion)
+
+		rolledBack, err := m.MarkFailed(t.Context(), "broken")
+		if err != nil || rolledBack {
+			t.Errorf("MarkFailed = %v, %v, want false, nil", rolledBack, err)
+		}
+
+		if n := ops.restoreCount(); n != 0 {
+			t.Errorf("restore called %d times, want 0", n)
+		}
+
+		if got := load(t, store); got != rec {
+			t.Errorf("record = %+v, want it unchanged: %+v", got, rec)
 		}
 	})
 
