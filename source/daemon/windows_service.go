@@ -21,15 +21,9 @@ const (
 	WindowsRestartExitCode uint32 = 75
 
 	// WindowsFailureExitCode is the exit code of every other ending the SCM did not ask for: a
-	// failed start, a Runner's exit, ErrAlreadyRan, and a Run that returns nil because its
-	// context ended.
+	// failed start, a Runner's exit, and a Run that returns nil because its context ended.
 	WindowsFailureExitCode uint32 = 1
 )
-
-// windowsStartWaitHint is the wait hint of the start-pending status: how long the SCM is told the
-// start may take before it reports the service running. It is the default start timeout, the
-// bound of the start phase when WithStartTimeout is not given.
-const windowsStartWaitHint = defaultStartTimeout
 
 // windowsStopMargin is added to the grace period in the wait hint of the stop-pending status. It
 // covers the work of the stop phase beyond the Runners' own: releasing the instance lock and
@@ -110,10 +104,11 @@ func (s *Supervisor) runUnderSCM(ctx context.Context) error {
 }
 
 // serveSCM is the service handler: it runs run in its own goroutine under a context derived from
-// ctx and reports its progress to the SCM. It reports start-pending, accepting no control, then
-// running, accepting Stop and Shutdown, once run reaches readiness. A Stop or Shutdown reports
-// stop-pending with a wait hint of the grace period plus windowsStopMargin and cancels run's
-// context; readiness after it reports nothing. Interrogate is answered with the current status.
+// ctx and reports its progress to the SCM. It reports start-pending, accepting no control, with a
+// wait hint of the start timeout, the bound of the start phase, then running, accepting Stop and
+// Shutdown, once run reaches readiness. A Stop or Shutdown reports stop-pending with a wait hint
+// of the grace period plus windowsStopMargin and cancels run's context; readiness after it
+// reports nothing. Interrogate is answered with the current status.
 // It returns the exit code, which windowsExitCode derives, and what run returned.
 func (s *Supervisor) serveSCM(ctx context.Context, requests <-chan scmRequest, report func(scmStatus)) (uint32, error) {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -123,7 +118,7 @@ func (s *Supervisor) serveSCM(ctx context.Context, requests <-chan scmRequest, r
 	var once sync.Once
 	s.serviceReady = func() { once.Do(func() { close(ready) }) }
 
-	current := scmStatus{State: scmStartPending, WaitHint: waitHint(windowsStartWaitHint)}
+	current := scmStatus{State: scmStartPending, WaitHint: waitHint(s.startTimeout)}
 	report(current)
 
 	done := make(chan error, 1)

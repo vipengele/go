@@ -129,12 +129,12 @@ func WithSystemd(lookup func(key string) (string, bool)) Option {
 // process, it does nothing and Run behaves as without it. An error finding out whether the SCM
 // started the process is returned by Run, which then starts no Runner.
 //
-// Under the SCM, Run hands the whole run to the SCM, the ErrAlreadyRan check and the instance lock
-// of WithInstanceLock included, and reports its progress: start-pending, accepting no control,
-// until the point WithReady's callback is called, then running, accepting Stop and Shutdown. A Stop
-// or Shutdown reports stop-pending, with a wait hint of the grace period of WithGrace plus a
-// margin, and cancels the context the run uses, which carries the values and the cancellation of
-// ctx. Interrogate is answered with the current status.
+// Under the SCM, Run hands the whole run to the SCM, the instance lock of WithInstanceLock
+// included, and reports its progress: start-pending, accepting no control, with a wait hint of the
+// start timeout of WithStartTimeout, until the point WithReady's callback is called, then running,
+// accepting Stop and Shutdown. A Stop or Shutdown reports stop-pending, with a wait hint of the
+// grace period of WithGrace plus a margin, and cancels the context the run uses, which carries the
+// values and the cancellation of ctx. Interrogate is answered with the current status.
 //
 // The service is registered with the dispatcher under no name, which the SCM ignores for a service
 // that runs in its own process. A program must reach Run promptly: the SCM fails a service that
@@ -144,9 +144,11 @@ func WithSystemd(lookup func(key string) (string, bool)) Option {
 // When the run ends the service stops with a service-specific exit code (ADR-0034, "On Windows a
 // requested restart is a non-zero service exit"): 0 when the SCM asked for the stop, whatever the
 // run returned; WindowsRestartExitCode for an error RestartRequested reports; and
-// WindowsFailureExitCode for every other ending, a failed start, ErrAlreadyRan and a nil error
-// after ctx ended included. A service installed by go.vipengele.org/daemon/service is relaunched by
-// the SCM on any non-zero code and stays stopped on 0.
+// WindowsFailureExitCode for every other ending, a failed start and a nil error after ctx ended
+// included. A service installed by go.vipengele.org/daemon/service is relaunched by the SCM on any
+// non-zero code and stays stopped on 0. A second Run returns ErrAlreadyRan before it asks whether
+// the SCM started the process, so it never reaches the SCM: a process starts the SCM's dispatcher
+// once.
 //
 // Run returns once the SCM has recorded the stop, with what the run returned, so the caller's
 // handling of that error is the same as outside the SCM; the exit status of the process does not

@@ -85,8 +85,8 @@ func (f *fakeSCM) exitCode(t *testing.T) uint32 {
 	}
 }
 
-// statusStartPending, statusRunning and statusStopPending are the statuses the handler reports for a Supervisor with
-// grace.
+// statusStartPending, statusRunning and statusStopPending are the statuses the handler reports for a
+// Supervisor with the default start timeout and with grace.
 func statusStartPending() scmStatus {
 	return scmStatus{State: scmStartPending, WaitHint: uint32((30 * time.Second).Milliseconds())}
 }
@@ -332,14 +332,6 @@ func TestWindowsServiceOtherEndingsExitWithTheFailureCode(t *testing.T) {
 		checkFailure(t, r, nil)
 	})
 
-	t.Run("already ran", func(t *testing.T) {
-		r := newSCMRun(t, nil, newScripted("a"))
-		r.s.ran.Store(true)
-		r.launch()
-		r.scm.expect(t, statusStartPending())
-		checkFailure(t, r, ErrAlreadyRan)
-	})
-
 	t.Run("start fails before readiness", func(t *testing.T) {
 		a := newScripted("a")
 		a.startErr = boom
@@ -365,6 +357,73 @@ func checkFailure(t *testing.T, r *scmRun, want error) {
 	}
 	r.scm.quiet(t)
 	r.finish(t)
+}
+
+func TestWindowsServiceSecondRunReturnsErrAlreadyRanWithoutTheSCM(t *testing.T) {
+	// secondRun fails the test unless a second Run of r's Supervisor returns ErrAlreadyRan without
+	// asking whether the process is a service or going to the SCM.
+	secondRun := func(t *testing.T, r *scmRun) {
+		t.Helper()
+		r.s.isWindowsService = func() (bool, error) {
+			t.Error("isWindowsService called by a second Run")
+			return true, nil
+		}
+		r.s.runWindowsService = func(scmExecute) error {
+			t.Error("runWindowsService called by a second Run")
+			return nil
+		}
+		if err := r.s.Run(context.Background()); !errors.Is(err, ErrAlreadyRan) {
+			t.Errorf("second Run = %v, want %v", err, ErrAlreadyRan)
+		}
+	}
+
+	t.Run("after a served run", func(t *testing.T) {
+		a := newScripted("a")
+		r := startServed(t, nil, a)
+		r.scm.send(scmStop)
+		r.scm.expect(t, statusStopPending(r.s.grace))
+		if code := r.scm.exitCode(t); code != 0 {
+			t.Errorf("exit code = %d, want 0", code)
+		}
+		if err := r.wait(t); err != nil {
+			t.Errorf("Run = %v, want nil", err)
+		}
+		secondRun(t, r)
+		r.scm.quiet(t)
+		r.finish(t)
+	})
+
+	t.Run("after the check failed", func(t *testing.T) {
+		probe := errors.New("probe")
+		a := newScripted("a")
+		r := newSCMRun(t, nil, a)
+		r.s.isWindowsService = func() (bool, error) { return false, probe }
+		r.launch()
+		if err := r.wait(t); !errors.Is(err, probe) {
+			t.Errorf("Run = %v, want %v", err, probe)
+		}
+		secondRun(t, r)
+		checkNotStarted(t, a)
+		r.finish(t)
+	})
+}
+
+func TestWindowsServiceStartPendingWaitHintIsTheStartTimeout(t *testing.T) {
+	for _, timeout := range []time.Duration{time.Second, 2 * time.Minute} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			a := newScripted("a")
+			r := launchSCM(t, []Option{WithStartTimeout(timeout)}, a)
+			r.scm.expect(t, scmStatus{State: scmStartPending, WaitHint: uint32(timeout.Milliseconds())})
+			r.scm.expect(t, statusRunning())
+			r.scm.send(scmStop)
+			r.scm.next(t)
+			r.scm.exitCode(t)
+			if err := r.wait(t); err != nil {
+				t.Errorf("Run = %v, want nil", err)
+			}
+			r.finish(t)
+		})
+	}
 }
 
 func TestWindowsServiceStopPendingWaitHintIsGracePlusMargin(t *testing.T) {

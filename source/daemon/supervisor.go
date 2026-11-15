@@ -251,8 +251,12 @@ func (s *Supervisor) checks() []namedCheck {
 // joined after the run's error when the run took place; see WithWindowsService.
 //
 // Run may be called once; a second call returns ErrAlreadyRan, even when the first returned
-// without starting a Runner.
+// without starting a Runner, and under WithWindowsService returns it without going to the service
+// control manager.
 func (s *Supervisor) Run(ctx context.Context) error {
+	if !s.ran.CompareAndSwap(false, true) {
+		return ErrAlreadyRan
+	}
 	if s.windowsService {
 		service, err := s.isWindowsService()
 		if err != nil {
@@ -267,9 +271,6 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 // run is the body of Run, served as the service under the Windows service control manager.
 func (s *Supervisor) run(ctx context.Context) error {
-	if !s.ran.CompareAndSwap(false, true) {
-		return ErrAlreadyRan
-	}
 	defer s.feed.setPhase(phaseStopped)
 
 	s.log = s.logger

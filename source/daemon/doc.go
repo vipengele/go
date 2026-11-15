@@ -184,9 +184,10 @@
 // during shutdown whose Err wraps context.Canceled; any other exit during shutdown is a stop
 // problem. With WithInstanceLock, a lock that cannot be taken is Run's only error, an
 // *AlreadyRunningError while another instance holds it, and no Runner is started. A second Run
-// returns ErrAlreadyRan, even after a first that returned because the lock was held: Run marks
-// the Supervisor as run before it takes the lock, so a program that retries builds a new
-// Supervisor with New. A Reload that returns an error or panics is a failure of the Runner,
+// returns ErrAlreadyRan, even after a first that returned because the lock was held or because
+// the Windows service check failed: Run marks the Supervisor as run before anything else, so a
+// program that retries builds a new Supervisor with New. Under WithWindowsService a second Run
+// returns ErrAlreadyRan without going to the service control manager. A Reload that returns an error or panics is a failure of the Runner,
 // naming it, and one that overruns the round's deadline is ErrReloadTimeout naming it; a deadline
 // that passes between two Reloads is ErrReloadTimeout naming no Runner. Each begins shutdown and
 // leads the joined errors as a start failure does. A rejected configuration is not an error. A
