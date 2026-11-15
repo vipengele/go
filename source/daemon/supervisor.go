@@ -244,8 +244,11 @@ func (s *Supervisor) checks() []namedCheck {
 // returns.
 //
 // With WithWindowsService, when the process runs under the Windows service control manager, all
-// of the above runs as the service, and Run returns what it would return outside it once the
-// service has stopped; see WithWindowsService.
+// of the above runs as the service, with the Stop and Shutdown controls of the manager taking the
+// place of a cancelled ctx, and Run returns what it would return outside it once the service has
+// stopped. An error finding out whether the manager started the process is returned wrapped as
+// "daemon: windows service:", with no Runner started; so is an error of the manager's dispatcher,
+// joined after the run's error when the run took place; see WithWindowsService.
 //
 // Run may be called once; a second call returns ErrAlreadyRan, even when the first returned
 // without starting a Runner.

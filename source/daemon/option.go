@@ -136,6 +136,11 @@ func WithSystemd(lookup func(key string) (string, bool)) Option {
 // margin, and cancels the context the run uses, which carries the values and the cancellation of
 // ctx. Interrogate is answered with the current status.
 //
+// The service is registered with the dispatcher under no name, which the SCM ignores for a service
+// that runs in its own process. A program must reach Run promptly: the SCM fails a service that
+// does not connect to its dispatcher within its start timeout, about 30 seconds by default, so
+// nothing slow belongs between the start of main and Run.
+//
 // When the run ends the service stops with a service-specific exit code (ADR-0034, "On Windows a
 // requested restart is a non-zero service exit"): 0 when the SCM asked for the stop, whatever the
 // run returned; WindowsRestartExitCode for an error RestartRequested reports; and
