@@ -44,8 +44,9 @@ Checked 2026-11-05 while planning vipengele/go#72 (Reload on SIGHUP).
   `RemovedKeys()` (`config/schema.go:56`).
 - Windows: ADR-0023 (daemon "has none and gets no artificial one", Windows covered by injection and
   manual `GOOS=windows go vet`), ADR-0024 (runtime GOOS selection, no build tags), ADR-0019
-  (`*_windows.go` turns on CI `GOOS=windows go vet`; build tags only for syscalls). Only
-  `source/filelock` has `lock_unix.go/lock_windows.go/lock_other.go`. `syscall.SIGHUP` does not exist
+  (`*_windows.go` turns on CI `GOOS=windows go vet`; build tags only for syscalls). daemon's
+  `_windows.go` files are the SCM calls only (`windows_service_windows.go`,
+  `service/scm_windows.go`); none touches signals or reload. `syscall.SIGHUP` does not exist
   on windows (it does in the syscall package for windows in recent Go, but is never delivered).
 - The reload path is `WithReload[T]` with the consumer passing a closure over `Options.Load`
   (`doc.go` "# Reload" at :129); daemon still does not import `config` or `cli/core`.

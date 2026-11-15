@@ -1,27 +1,26 @@
 ---
-about: "the service Manager has no Windows driver; a Windows driver must break two ADR-0024 conventions (exec runner, no _windows.go) and restart-as-exit-0 does not map to SCM recovery"
+about: "the Windows service driver reaches the SCM only through the unexported scm seam, and a requested restart on Windows is a non-zero service exit that the SCM recovery action relaunches"
 saw:
+  - source/daemon/service/windows.go
+  - source/daemon/service/scm_windows.go
+  - source/daemon/service/scm_other.go
   - source/daemon/service/manager.go
-  - source/daemon/service/systemd.go
-  - source/daemon/restart.go
-  - source/daemon/supervisor.go
-  - docs/adr/0024-service-drivers-are-selected-at-runtime.md
-  - docs/adr/0030-windows-tests-run-for-projects-with-windows-files.md
+  - source/daemon/windows_service.go
+  - docs/adr/0034-a-requested-restart-on-windows-is-a-non-zero-service-exit.md
 ---
 
-Found while planning issue #79 (Windows service driver). No note covered this.
-
-- `service.New` has `case "windows": return nil, ErrUnsupported` (manager.go:106), documented at manager.go:49 and
-  service/doc.go:8. A new driver is one `case` (ADR-0024 Consequences).
-- Every current driver reaches the OS through the `runner` seam, whose `execRunner` is an allowlist of
-  systemctl/launchctl/id (systemd.go:19-45). SCM via x/sys/windows/svc/mgr is not exec: it needs a new seam, and
-  ADR-0024 says only the SCM calls may live in `_windows.go`, which turns on ADR-0030's windows-latest test job and
-  `GOOS=windows go vet`. Keep rendering/validation (isAbs, validWindowsAccount in config.go) host-independent.
-- Restart contract: `RestartRequested` => consumer exits 0 (restart.go:9-16, ADR-0021). systemd is Restart=always
-  (systemd_unit.go), launchd KeepAlive plain true (launchd_plist.go:57-59) precisely so exit 0 relaunches. SCM failure
-  actions fire only on a non-zero exit when the failure-actions-on-non-crash flag is set, so a Windows driver must set
-  that flag (external SCM knowledge, not verified in-repo) or exit 0 will not restart.
-- No "run under the supervisor" entry point exists: Supervisor.Run (supervisor.go:235) only takes a ctx; the package
-  never subscribes SIGINT/SIGTERM (doc.go "Signals"). A svc.Handler must cancel that ctx on svc.Stop/Shutdown.
-- x/sys is only an indirect dep of daemon (go.mod:12); no *_windows.go exists in source/daemon. Only filelock
-  (lock_windows.go) holds a non-test one.
+- `service.New`'s `case "windows"` returns a `windowsDriver` whose `scm` field is the host's
+  (`hostSCM()`, manager.go). The driver (windows.go) is plain Go on every host; only
+  `scm_windows.go` imports golang.org/x/sys, and `scm_other.go` (`!windows`) fails every call with
+  `ErrUnsupported`, so `New(…, WithGOOS("windows"))` succeeds off Windows and each method fails.
+- The SCM is not reached through `execRunner` (systemd.go): its allowlist stays systemctl,
+  launchctl and id, and the Windows driver never runs sc.exe.
+- systemd (`Restart=always`) and launchd (`KeepAlive`) relaunch a requested restart's exit 0; the
+  SCM does not. `Install` sets one recovery action, a restart after 5s, plus the
+  failure-actions-on-non-crash-failures flag (windows.go `configure`), and a Supervisor under
+  `WithWindowsService` stops with `daemon.WindowsRestartExitCode` for a requested restart
+  (windows_service.go `windowsExitCode`). A Stop or Shutdown from the SCM exits 0 whatever Run
+  returned, so an operator's stop is never relaunched (ADR-0034).
+- The driver's `Status` reads a STOPPED service with service-specific exit code
+  `daemon.WindowsRestartExitCode` as `starting` (windows.go `stopped`), so it keeps reading
+  `starting` after a Stop issued inside the restart delay until the service next starts.
