@@ -30,7 +30,7 @@ func TestNewInvalidConfig(t *testing.T) {
 }
 
 func TestNewUnsupported(t *testing.T) {
-	for _, goos := range []string{"windows", "freebsd", "plan9"} {
+	for _, goos := range []string{"freebsd", "plan9"} {
 		t.Run(goos, func(t *testing.T) {
 			m, err := New(validConfig(goos), WithGOOS(goos), notInContainer())
 			if !errors.Is(err, ErrUnsupported) {
@@ -83,6 +83,24 @@ func TestNewChecksTheWindowsAccountBeforeUnsupported(t *testing.T) {
 	_, err := New(cfg, WithGOOS("windows"), notInContainer())
 	if !errors.Is(err, ErrInvalidConfig) || errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrInvalidConfig only", err)
+	}
+}
+
+func TestNewWindowsReturnsTheWindowsDriver(t *testing.T) {
+	cfg := driverConfig("windows")
+	m, err := New(cfg, WithGOOS("windows"), notInContainer())
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	w, ok := m.(*windowsDriver)
+	if !ok {
+		t.Fatalf("Manager = %T, want *windowsDriver", m)
+	}
+	if !reflect.DeepEqual(w.cfg, cfg) {
+		t.Fatalf("cfg = %+v, want %+v", w.cfg, cfg)
+	}
+	if w.scm == nil || w.sleep == nil {
+		t.Fatal("scm and sleep must both be set")
 	}
 }
 
@@ -267,6 +285,16 @@ func TestSystemdUnitPath(t *testing.T) {
 
 const wantInstead = "the container runtime supervises this process; run it as the image's entrypoint and give the container a restart policy that restarts on exit 0 (Docker --restart unless-stopped, Compose restart: unless-stopped, or a Kubernetes Deployment)"
 
+// driverConfig returns a Config New accepts on goos and builds a driver for:
+// validConfig less the WorkingDir the windows driver rejects.
+func driverConfig(goos string) Config {
+	cfg := validConfig(goos)
+	if goos == "windows" {
+		cfg.WorkingDir = ""
+	}
+	return cfg
+}
+
 // notInContainer keeps New from probing the host for a container.
 func notInContainer() Option {
 	return WithContainer(func() bool { return false })
@@ -370,7 +398,7 @@ func TestNewValidatesSystemdNotifyOnEveryGOOS(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		for _, tc := range tests {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
-				m, err := New(validConfig(goos), WithGOOS(goos), WithSystemdNotify(tc.watchdog), notInContainer())
+				m, err := New(driverConfig(goos), WithGOOS(goos), WithSystemdNotify(tc.watchdog), notInContainer())
 				if tc.invalid {
 					if !errors.Is(err, ErrInvalidConfig) {
 						t.Fatalf("err = %v, want ErrInvalidConfig", err)
@@ -386,9 +414,7 @@ func TestNewValidatesSystemdNotifyOnEveryGOOS(t *testing.T) {
 				if errors.Is(err, ErrInvalidConfig) {
 					t.Fatalf("err = %v, want no ErrInvalidConfig", err)
 				}
-				if goos != "windows" {
-					assertNotRefused(t, m, err)
-				}
+				assertNotRefused(t, m, err)
 			})
 		}
 	}
@@ -496,7 +522,7 @@ func TestNewValidatesLaunchdLogsOnEveryGOOS(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		for _, tc := range tests {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
-				m, err := New(validConfig(goos), WithGOOS(goos), WithLaunchdLogs(tc.stdout, tc.stderr), notInContainer())
+				m, err := New(driverConfig(goos), WithGOOS(goos), WithLaunchdLogs(tc.stdout, tc.stderr), notInContainer())
 				if tc.invalid {
 					if !errors.Is(err, ErrInvalidConfig) {
 						t.Fatalf("err = %v, want ErrInvalidConfig", err)
@@ -512,9 +538,7 @@ func TestNewValidatesLaunchdLogsOnEveryGOOS(t *testing.T) {
 				if errors.Is(err, ErrInvalidConfig) {
 					t.Fatalf("err = %v, want no ErrInvalidConfig", err)
 				}
-				if goos != "windows" {
-					assertNotRefused(t, m, err)
-				}
+				assertNotRefused(t, m, err)
 			})
 		}
 	}
