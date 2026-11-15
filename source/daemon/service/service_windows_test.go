@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"go.vipengele.org/daemon"
 )
 
 const (
@@ -336,12 +338,12 @@ func (e *e2eService) waitRestartDelay() time.Time {
 	for {
 		q := e.query()
 		if q.State == scmStopped && scmErrno(q.Win32ExitCode) == errSCMServiceSpecificError &&
-			q.ServiceSpecificExitCode == windowsRestartExitCode {
+			q.ServiceSpecificExitCode == daemon.WindowsRestartExitCode {
 			return time.Now()
 		}
 		if time.Now().After(deadline) {
 			e.t.Fatalf("service not stopped with the restart code %d after %v: last SCM status %+v",
-				windowsRestartExitCode, e2eWait, q)
+				daemon.WindowsRestartExitCode, e2eWait, q)
 		}
 		time.Sleep(e2ePoll)
 	}

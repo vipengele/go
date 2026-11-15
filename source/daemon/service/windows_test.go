@@ -8,11 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
 
-// windowsFailureExitCode stands for the failure exit code of the daemon
-// package: any non-zero service-specific code but windowsRestartExitCode.
-const windowsFailureExitCode uint32 = 1
+	"go.vipengele.org/daemon"
+)
 
 // fakeSCM is an scm holding at most one service. It records every call in
 // calls, as a name followed by the service name or argument where one helps.
@@ -591,8 +589,8 @@ func TestWindowsStatusMapsTheSCMStatus(t *testing.T) {
 		{"clean stop", scmStatus{State: scmStopped}, StateStopped, 0, ""},
 		{"never started", scmStatus{State: scmStopped, Win32ExitCode: uint32(errSCMServiceNeverStarted)}, StateStopped, 0, ""},
 		{"specific 0", scmStatus{State: scmStopped, Win32ExitCode: specific}, StateStopped, 0, ""},
-		{"restart code", scmStatus{State: scmStopped, Win32ExitCode: specific, ServiceSpecificExitCode: windowsRestartExitCode}, StateStarting, 0, ""},
-		{"failure code", scmStatus{State: scmStopped, Win32ExitCode: specific, ServiceSpecificExitCode: windowsFailureExitCode}, StateFailed, 0, "service-specific exit code 1"},
+		{"restart code", scmStatus{State: scmStopped, Win32ExitCode: specific, ServiceSpecificExitCode: daemon.WindowsRestartExitCode}, StateStarting, 0, ""},
+		{"failure code", scmStatus{State: scmStopped, Win32ExitCode: specific, ServiceSpecificExitCode: daemon.WindowsFailureExitCode}, StateFailed, 0, "service-specific exit code 1"},
 		{"win32 code", scmStatus{State: scmStopped, Win32ExitCode: 1067}, StateFailed, 0, "Win32 exit code 1067"},
 		{"unknown state", scmStatus{State: 99}, StateUnknown, 0, "state 99"},
 	}

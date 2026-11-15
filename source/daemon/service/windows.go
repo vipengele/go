@@ -8,16 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.vipengele.org/daemon"
 )
 
 const (
-	// windowsRestartExitCode is the service-specific exit code a service
-	// reports with SERVICE_STOPPED when its Runner requested a restart. It
-	// equals the restart exit code of the daemon package, whose handler
-	// reports it; the SCM answers it with the recovery restart, and Status
-	// reads it as StateStarting (ADR-0034).
-	windowsRestartExitCode uint32 = 75
-
 	// windowsRestartDelay is the delay of the one recovery action Install
 	// sets, systemd's RestartSec and launchd's ThrottleInterval.
 	windowsRestartDelay = 5 * time.Second
@@ -590,7 +585,7 @@ func (w *windowsDriver) Stop(ctx context.Context) error {
 
 // Status reports the service as the SCM describes it. It needs no
 // elevation. A service the SCM does not hold is StateNotInstalled. A service
-// stopped with windowsRestartExitCode is inside its recovery delay and
+// stopped with daemon.WindowsRestartExitCode is inside its recovery delay and
 // reported as StateStarting; one stopped with any other non-zero exit code is
 // StateFailed. Enabled reports automatic start, and Restarts is always 0: the
 // SCM keeps no restart count.
@@ -651,7 +646,7 @@ func (w *windowsDriver) stopped(q scmStatus) (State, string) {
 		switch q.ServiceSpecificExitCode {
 		case 0:
 			return StateStopped, ""
-		case windowsRestartExitCode:
+		case daemon.WindowsRestartExitCode:
 			return StateStarting, ""
 		}
 		return StateFailed, fmt.Sprintf("%s stopped with service-specific exit code %d", w.cfg.Name, q.ServiceSpecificExitCode)
