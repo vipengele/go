@@ -455,6 +455,14 @@ func TestWaitHintIsCappedAtTheLargestTheSCMTakes(t *testing.T) {
 	}
 }
 
+func TestWaitHintOfANegativeDurationIsZero(t *testing.T) {
+	for _, d := range []time.Duration{-time.Millisecond, -2 * time.Second, time.Duration(-1 << 62)} {
+		if got := waitHint(d); got != 0 {
+			t.Errorf("waitHint(%v) = %d, want 0", d, got)
+		}
+	}
+}
+
 func TestWindowsServiceIgnoresAClosedControlChannel(t *testing.T) {
 	a := newScripted("a")
 	r := newSCMRun(t, nil, a)

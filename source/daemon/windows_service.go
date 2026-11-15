@@ -171,10 +171,14 @@ func windowsExitCode(stopRequested bool, err error) uint32 {
 	}
 }
 
-// waitHint is d in whole milliseconds, capped at the largest wait hint the SCM takes.
+// waitHint is d in whole milliseconds, capped at the largest wait hint the SCM takes. A negative
+// d is a hint of 0.
 func waitHint(d time.Duration) uint32 {
 	ms := d.Milliseconds()
-	if ms > math.MaxUint32 {
+	if ms < 0 { // [lydite:exclude_from_mutation][at 0 both branches return 0]
+		return 0
+	}
+	if ms > math.MaxUint32 { // [lydite:exclude_from_mutation][at math.MaxUint32 both branches return math.MaxUint32]
 		return math.MaxUint32
 	}
 	return uint32(ms)

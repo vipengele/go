@@ -538,7 +538,7 @@ func (w *windowsDriver) stopAndWait(ctx context.Context, s scmService) error {
 	return w.poll(ctx, "still not stopped", func() (bool, error) {
 		st, err := s.query()
 		if err != nil {
-			return false, fmt.Errorf("query: %w", err)
+			return false, fmt.Errorf("query: %w", err) // [lydite:exclude_from_mutation][poll reads done's bool only when its error is nil]
 		}
 		switch st.State {
 		case scmStopped:
@@ -615,7 +615,7 @@ func (w *windowsDriver) Uninstall(ctx context.Context) error {
 				return true, nil
 			}
 			if err != nil {
-				return false, fmt.Errorf("open: %w", err)
+				return false, fmt.Errorf("open: %w", err) // [lydite:exclude_from_mutation][poll reads done's bool only when its error is nil]
 			}
 			_ = s.close()
 			return false, nil

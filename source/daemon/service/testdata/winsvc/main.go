@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.vipengele.org/daemon"
@@ -33,8 +34,13 @@ func main() {
 
 func run() error {
 	var out io.Writer = io.Discard
-	if path := os.Getenv("WINSVC_LOG"); path != "" {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if logPath := os.Getenv("WINSVC_LOG"); logPath != "" {
+		dir, name, err := openDir(logPath)
+		if err != nil {
+			return err
+		}
+		f, err := dir.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		_ = dir.Close()
 		if err != nil {
 			return err
 		}
@@ -43,13 +49,18 @@ func run() error {
 	}
 	logger := slog.New(slog.NewTextHandler(out, nil)).With("pid", os.Getpid())
 
-	marker := os.Getenv("WINSVC_MARKER")
-	if marker == "" {
+	markerPath := os.Getenv("WINSVC_MARKER")
+	if markerPath == "" {
 		return errors.New("WINSVC_MARKER is not set")
 	}
+	markerDir, marker, err := openDir(markerPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = markerDir.Close() }()
 
 	s, err := daemon.New([]daemon.Runner{daemon.Func("marker", func(ctx context.Context) error {
-		return waitForMarker(ctx, logger, marker)
+		return waitForMarker(ctx, logger, markerDir, marker)
 	})}, daemon.WithWindowsService(), daemon.WithGrace(5*time.Second), daemon.WithLogger(logger))
 	if err != nil {
 		return err
@@ -63,10 +74,22 @@ func run() error {
 	return nil
 }
 
+// openDir opens the directory of path as an os.Root and returns it with the
+// last element of path, the name every access goes through, so that a path
+// from the environment reaches no file outside its own directory.
+func openDir(path string) (*os.Root, string, error) {
+	dir, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, "", err
+	}
+	return dir, filepath.Base(path), nil
+}
+
 // waitForMarker returns ctx's error once ctx ends, or ErrRestartRequired once
-// it has removed the marker file. A marker it cannot remove is logged and
-// looked for again, so that one marker asks for one restart.
-func waitForMarker(ctx context.Context, logger *slog.Logger, marker string) error {
+// it has removed the marker file, the file marker in dir. A marker it cannot
+// remove is logged and looked for again, so that one marker asks for one
+// restart.
+func waitForMarker(ctx context.Context, logger *slog.Logger, dir *os.Root, marker string) error {
 	t := time.NewTicker(markerPoll)
 	defer t.Stop()
 	for {
@@ -75,10 +98,10 @@ func waitForMarker(ctx context.Context, logger *slog.Logger, marker string) erro
 			return ctx.Err()
 		case <-t.C:
 		}
-		if _, err := os.Stat(marker); err != nil {
+		if _, err := dir.Stat(marker); err != nil {
 			continue
 		}
-		if err := os.Remove(marker); err != nil {
+		if err := dir.Remove(marker); err != nil {
 			logger.Warn("winsvc: remove the marker", "err", err)
 			continue
 		}
