@@ -49,6 +49,43 @@ func TestNewUnsupported(t *testing.T) {
 	}
 }
 
+func TestNewRejectsScopeUserAndWorkingDirOnWindows(t *testing.T) {
+	tests := []struct {
+		name   string
+		edit   func(*Config)
+		naming string
+	}{
+		{"ScopeUser", func(c *Config) { c.Scope = ScopeUser; c.WorkingDir = "" }, "ScopeUser"},
+		{"WorkingDir", func(c *Config) {}, "WorkingDir"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig("windows")
+			tc.edit(&cfg)
+			m, err := New(cfg, WithGOOS("windows"), notInContainer())
+			if !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("err = %v, want ErrUnsupported", err)
+			}
+			if !strings.Contains(err.Error(), tc.naming) {
+				t.Fatalf("err = %q, want it to name %q", err, tc.naming)
+			}
+			if m != nil {
+				t.Fatalf("Manager = %v, want nil", m)
+			}
+		})
+	}
+}
+
+func TestNewChecksTheWindowsAccountBeforeUnsupported(t *testing.T) {
+	cfg := validConfig("windows")
+	cfg.User = `CORP\svc`
+	cfg.Scope = ScopeUser
+	_, err := New(cfg, WithGOOS("windows"), notInContainer())
+	if !errors.Is(err, ErrInvalidConfig) || errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrInvalidConfig only", err)
+	}
+}
+
 func TestNewLinuxReturnsTheSystemdDriver(t *testing.T) {
 	m, err := New(validConfig("linux"), WithGOOS("linux"), notInContainer())
 	if err != nil {

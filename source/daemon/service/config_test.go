@@ -159,7 +159,7 @@ func TestValidateAcceptsNamesAndKeysAtTheEdgesOfTheirCharacterSets(t *testing.T)
 		if goos == "linux" {
 			c.User = "z9a0"
 		} else {
-			c.User = `Zz9\aA0`
+			c.User = `NT SERVICE\zZ9aA0`
 		}
 		if err := c.validate(goos); err != nil {
 			t.Errorf("validate(%q) = %v, want nil", goos, err)
@@ -258,22 +258,21 @@ func TestValidateChecksWindowsAccountNames(t *testing.T) {
 		user string
 		ok   bool
 	}{
+		{"", true},
 		{`NT AUTHORITY\LocalService`, true},
-		{`.\svc`, true},
-		{`svc`, true},
-		{`CORP\svc.user_1-a`, true},
-		{"LocalSystem", true},
-		{strings.Repeat("a", 104), true},
-		{strings.Repeat("a", 105), false},
-		{`a\b\c`, false},
-		{`CORP\`, false},
-		{`\svc`, false},
-		{` svc`, false},
-		{`svc `, false},
-		{`CORP \svc`, false},
-		{`CORP\ svc`, false},
+		{`nt authority\localservice`, true},
+		{`NT AUTHORITY\NETWORKSERVICE`, true},
+		{`NT AUTHORITY\NetworkService`, true},
+		{`NT SERVICE\my-svc`, true},
+		{`nt service\MY-SVC`, true},
+		{`NT SERVICE\other`, false},
+		{`NT SERVICE\`, false},
+		{`NT AUTHORITY\System`, false},
+		{`CORP\svc`, false},
+		{`.\svc`, false},
+		{`svc`, false},
+		{`LocalSystem`, false},
 		{`svc@corp`, false},
-		{`svc%`, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.user, func(t *testing.T) {
@@ -393,7 +392,7 @@ func errString(err error) string {
 	return err.Error()
 }
 
-func TestValidateAcceptsAUserWithScopeUserOnWindows(t *testing.T) {
+func TestValidateAcceptsScopeUserOnWindowsRules(t *testing.T) {
 	c := validConfig("windows")
 	c.Scope = ScopeUser
 	if err := c.validate("windows"); err != nil {

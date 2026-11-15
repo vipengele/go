@@ -44,7 +44,9 @@ type Manager interface {
 //  3. An invalid cfg, then an invalid Hardening from WithSystemdHardening,
 //     then an invalid watchdog from WithSystemdNotify, then an invalid log
 //     path from WithLaunchdLogs, returns an error wrapping ErrInvalidConfig.
-//  4. A GOOS without a driver returns an error wrapping ErrUnsupported. The
+//  4. On windows, ScopeUser and a WorkingDir return an error wrapping
+//     ErrUnsupported that names the scope or the field.
+//  5. A GOOS without a driver returns an error wrapping ErrUnsupported. The
 //     drivers are systemd on linux and launchd on darwin; every other GOOS,
 //     windows included, has none.
 func New(cfg Config, opts ...Option) (Manager, error) {
@@ -104,6 +106,12 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 			sleep:     sleepContext,
 		}, nil
 	case "windows":
+		if cfg.Scope == ScopeUser {
+			return nil, fmt.Errorf("%w: Scope: ScopeUser on %s", ErrUnsupported, goos)
+		}
+		if cfg.WorkingDir != "" {
+			return nil, fmt.Errorf("%w: WorkingDir on %s", ErrUnsupported, goos)
+		}
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
