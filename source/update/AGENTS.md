@@ -269,6 +269,16 @@ golangci-lint run
     regions are optional. Production code imports no YAML library; tests use `yaml/v3`.
   - Tests round-trip the parsed YAML through `Config.Select`. `ExampleRender`'s `Output` mirrors the
     template, so editing the template means updating the example.
+- `.github/workflows/release-tool.yml` (repo root, ADR-0033) — the reusable workflow through which a
+  tool releases: GoReleaser over the tool's committed `.goreleaser.yaml`, minisign over the checksums
+  and a GitHub Release from `docs/release-notes/<tag>.md`. It belongs to this project (a change to
+  `.github/workflows/release-tool*.yml` selects `update`) and a tool pins it by the commit SHA of `update`'s
+  tag `source/update/vX.Y.Z`, written `@<sha> # source/update/vX.Y.Z`, so a change to it reaches tools only through an `update` release.
+  - `release-tool-selftest.yml` runs it with `dry-run` against `testdata/releasefixture`, a fixture
+    tool whose committed `.goreleaser.yaml` is the golden of `internal/releasetest`:
+    `go test ./internal/releasetest -update` regenerates it. `testdata/releaseverify` verifies the
+    built assets and the signature. Both are `main` packages under `testdata/`, which `./...`
+    skips. The self-test is not a merge gate.
 - `internal/minisign/` — the minisign verifier: `ParsePublicKey` (with or without the `untrusted
   comment:` line; `.Line` is the bare key line), `ParseSignature` and `Verify`, accepting both the
   hashed `ED` and the legacy `Ed` signature forms. Its `testdata/` holds an interop vector (a key and

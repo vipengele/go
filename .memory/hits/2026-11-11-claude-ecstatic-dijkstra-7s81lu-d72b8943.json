@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "notes": {
+    "gt-token-cannot-touch-workflows": {
+      "count": 1,
+      "first": "2026-11-11T05:29:26.203521705Z",
+      "last": "2026-11-11T05:29:26.203521705Z"
+    },
+    "release-tag-exists-before-validation": {
+      "count": 1,
+      "first": "2026-11-11T05:29:26.198243461Z",
+      "last": "2026-11-11T05:29:26.198243461Z"
+    }
+  }
+}
