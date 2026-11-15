@@ -5,14 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 
 	"go.vipengele.org/daemon"
 )
-
-// failedSuffix names the file a rollback leaves the replaced binary at, <target>.failed, where the
-// running image cannot be replaced in place. Boot removes it once no update is pending.
-const failedSuffix = ".failed"
 
 // Pending describes an update Begin records: the binary at Target is about to be replaced by
 // ToVersion, and the previous binary is kept at Backup.
@@ -50,13 +45,15 @@ func New(store Store, runningVersion string, opts ...Option) (*Machine, error) {
 		return nil, errors.New("selfupdate: nil store")
 	}
 
+	ops := osFSOps()
+
 	m := &Machine{
 		store:           store,
 		running:         runningVersion,
 		clock:           systemClock{},
 		maxBootAttempts: defaultMaxBootAttempts,
-		restore:         restoreBackup,
-		removeFile:      os.Remove,
+		restore:         func(rec Record) error { return restoreBackup(ops, rec) },
+		removeFile:      ops.remove,
 	}
 
 	for _, opt := range opts {
@@ -302,22 +299,4 @@ func (m *Machine) change(ctx context.Context, op string, fn func(Record) (Record
 	default:
 		return fmt.Errorf("selfupdate: %s: %w", op, err)
 	}
-}
-
-// restoreBackup renames the backup the record names over its target. A backup that is absent is a
-// *NoBackupError, with nothing touched; a failed check or rename is a *RestoreError.
-func restoreBackup(rec Record) error {
-	if _, err := os.Lstat(rec.Backup); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &NoBackupError{Path: rec.Backup}
-		}
-
-		return &RestoreError{Backup: rec.Backup, Target: rec.Target, Err: err}
-	}
-
-	if err := os.Rename(rec.Backup, rec.Target); err != nil {
-		return &RestoreError{Backup: rec.Backup, Target: rec.Target, Err: err}
-	}
-
-	return nil
 }
