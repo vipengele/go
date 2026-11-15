@@ -284,6 +284,10 @@ The launchd driver:
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
   `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and
   `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
+- `selfupdate/` has its own depguard rule: the same list plus `go.vipengele.org/cli/state`, which
+  its file store writes through. It imports the root `daemon` for `Clock` (ADR-0028); the root
+  rule does not allow `selfupdate`, so the root `daemon` never imports it. Its tests are internal
+  (`package selfupdate`) and use their own fake clock, never `daemontest`.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by
