@@ -59,7 +59,7 @@ var errNoStaged = errors.New("update: no staged binary to install")
 // The [*Installed] lives in memory alone. A backup left behind by a process that ended before
 // settling it is invisible to this package, and the next Install replaces it; on Windows, where
 // Discard cannot remove the backup of the running executable, [Config.RemoveStaleBackup] removes
-// it once that process has exited.
+// it once that process has exited, unless [Config.BackupGuard] reports it in use.
 func (c Config) Install(staged *Staged) (*Installed, error) {
 	return c.install(staged, defaultSteps())
 }
