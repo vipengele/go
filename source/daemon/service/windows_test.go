@@ -40,10 +40,11 @@ type fakeSCM struct {
 	// SERVICE_STOP_PENDING.
 	stopPolls int
 	// refuseStops is the number of stop calls that fail with
-	// errSCMServiceCannotAccept, and dropStops the number after them that
+	// refuseErr (errSCMServiceCannotAccept when nil), and dropStops the number after them that
 	// succeed and leave the state as it is. stopErr, when set, fails every
 	// stop call after those.
 	refuseStops int
+	refuseErr   error
 	dropStops   int
 	stopErr     error
 	// relaunch makes the recovery restart fire: once relaunchPolls queries
@@ -235,6 +236,9 @@ func (s fakeService) stop() (scmStatus, error) {
 	}
 	if f.refuseStops > 0 {
 		f.refuseStops--
+		if f.refuseErr != nil {
+			return f.st, f.refuseErr
+		}
 		return f.st, errSCMServiceCannotAccept
 	}
 	if f.dropStops > 0 {
@@ -740,6 +744,25 @@ func TestWindowsStopResendsAStopTheServiceDidNotTake(t *testing.T) {
 	}
 }
 
+func TestWindowsStopAndUninstallRetryAStopRefusedAsInvalidWhileStartPending(t *testing.T) {
+	for name, run := range map[string]func(*windowsDriver, context.Context) error{
+		"Stop":      (*windowsDriver).Stop,
+		"Uninstall": (*windowsDriver).Uninstall,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w, f, _ := newTestWindows(demoWindowsConfig())
+			installed(f, scmStatus{State: scmStartPending, ProcessID: 7})
+			f.refuseStops, f.refuseErr = 3, errSCMInvalidServiceControl
+			if err := run(w, t.Context()); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if n := countCalls(f.calls, "stop"); n != 4 {
+				t.Errorf("sent the stop control %d times, want 4: three refused, then taken", n)
+			}
+		})
+	}
+}
+
 func TestWindowsStopTimesOutOnAStopNeverTaken(t *testing.T) {
 	w, f, sleeps := newTestWindows(demoWindowsConfig())
 	installed(f, scmStatus{State: scmStartPending, ProcessID: 7})
@@ -906,6 +929,7 @@ func TestSCMErrnoErrorNamesEveryCodeTheDriverTellsApart(t *testing.T) {
 		{errSCMAccessDenied, "Access is denied."},
 		{errSCMServiceAlreadyRunning, "An instance of the service is already running."},
 		{errSCMServiceDoesNotExist, "The specified service does not exist as an installed service."},
+		{errSCMInvalidServiceControl, "The requested control is not valid for this service."},
 		{errSCMServiceCannotAccept, "The service cannot accept control messages at this time."},
 		{errSCMServiceNotActive, "The service has not been started."},
 		{errSCMServiceMarkedForDelete, "The specified service has been marked for deletion."},

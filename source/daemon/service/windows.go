@@ -50,6 +50,7 @@ const (
 	errSCMAccessDenied           scmErrno = 5    // ERROR_ACCESS_DENIED
 	errSCMServiceAlreadyRunning  scmErrno = 1056 // ERROR_SERVICE_ALREADY_RUNNING
 	errSCMServiceDoesNotExist    scmErrno = 1060 // ERROR_SERVICE_DOES_NOT_EXIST
+	errSCMInvalidServiceControl  scmErrno = 1052 // ERROR_INVALID_SERVICE_CONTROL
 	errSCMServiceCannotAccept    scmErrno = 1061 // ERROR_SERVICE_CANNOT_ACCEPT_CTRL
 	errSCMServiceNotActive       scmErrno = 1062 // ERROR_SERVICE_NOT_ACTIVE
 	errSCMServiceSpecificError   scmErrno = 1066 // ERROR_SERVICE_SPECIFIC_ERROR
@@ -65,6 +66,8 @@ func (e scmErrno) Error() string {
 		return "An instance of the service is already running."
 	case errSCMServiceDoesNotExist:
 		return "The specified service does not exist as an installed service."
+	case errSCMInvalidServiceControl:
+		return "The requested control is not valid for this service."
 	case errSCMServiceCannotAccept:
 		return "The service cannot accept control messages at this time."
 	case errSCMServiceNotActive:
@@ -584,9 +587,12 @@ func (w *windowsDriver) outlastRestartDelay(ctx context.Context, s scmService) (
 // sendStop sends the stop control to s. A control the service cannot accept
 // yet, and one the SCM answers with errSCMServiceNotActive, are not errors:
 // the caller polls the service and sends it again while it is not stopping.
+// A service still start-pending accepts no controls, and the SCM refuses a
+// stop sent then with errSCMInvalidServiceControl or errSCMServiceCannotAccept.
 func sendStop(s scmService) error {
 	_, err := s.stop()
-	if err != nil && !errors.Is(err, errSCMServiceNotActive) && !errors.Is(err, errSCMServiceCannotAccept) {
+	if err != nil && !errors.Is(err, errSCMServiceNotActive) && !errors.Is(err, errSCMServiceCannotAccept) &&
+		!errors.Is(err, errSCMInvalidServiceControl) {
 		return fmt.Errorf("stop: %w", err)
 	}
 	return nil
