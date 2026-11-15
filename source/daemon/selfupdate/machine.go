@@ -99,14 +99,14 @@ func (m *Machine) Begin(ctx context.Context, p Pending) error {
 		return errors.New("selfupdate: begin: empty Backup")
 	}
 
-	return m.change(ctx, "begin", func(rec Record) (Record, bool, error) {
+	return m.change(ctx, "begin", func(rec Record) (*Record, error) {
 		if rec.Status == StatusPending {
-			return rec, false, ErrUpdatePending
+			return nil, ErrUpdatePending
 		}
 
 		now := m.clock.Now()
 
-		return Record{
+		return &Record{
 			Status:      StatusPending,
 			FromVersion: p.FromVersion,
 			ToVersion:   p.ToVersion,
@@ -114,7 +114,7 @@ func (m *Machine) Begin(ctx context.Context, p Pending) error {
 			Backup:      p.Backup,
 			StartedAt:   now,
 			UpdatedAt:   now,
-		}, true, nil
+		}, nil
 	})
 }
 
@@ -143,17 +143,17 @@ func (m *Machine) Boot(ctx context.Context) (bool, error) {
 		counted Record
 	)
 
-	err := m.change(ctx, "boot", func(rec Record) (Record, bool, error) {
+	err := m.change(ctx, "boot", func(rec Record) (*Record, error) {
 		switch {
 		case rec.Status != StatusPending:
 			target = rec.Target
-			return rec, false, nil
+			return nil, nil
 		case rec.ToVersion != m.running:
 			rec.Status = StatusRolledBack
 			rec.Reason = m.notRunningReason(rec)
 			rec.UpdatedAt = m.clock.Now()
 
-			return rec, true, nil
+			return &rec, nil
 		}
 
 		pending = true
@@ -161,7 +161,7 @@ func (m *Machine) Boot(ctx context.Context) (bool, error) {
 		rec.UpdatedAt = m.clock.Now()
 		counted = rec
 
-		return rec, true, nil
+		return &rec, nil
 	})
 	if err != nil {
 		return false, err
@@ -205,12 +205,12 @@ func (m *Machine) Confirm(ctx context.Context) error {
 
 	confirmed := false
 
-	err := m.change(ctx, "confirm", func(rec Record) (Record, bool, error) {
+	err := m.change(ctx, "confirm", func(rec Record) (*Record, error) {
 		switch {
 		case rec.Status != StatusPending:
-			return rec, false, nil
+			return nil, nil
 		case rec.ToVersion != m.running:
-			return rec, false, ErrNotUpdatedBuild
+			return nil, ErrNotUpdatedBuild
 		}
 
 		confirmed = true
@@ -218,7 +218,7 @@ func (m *Machine) Confirm(ctx context.Context) error {
 		rec.Status = StatusConfirmed
 		rec.UpdatedAt = m.clock.Now()
 
-		return rec, true, nil
+		return &rec, nil
 	})
 	if err != nil || !confirmed || backup == "" {
 		return err
@@ -240,19 +240,19 @@ func (m *Machine) Confirm(ctx context.Context) error {
 func (m *Machine) rollBack(ctx context.Context, op, reason string) (bool, error) {
 	rolledBack := false
 
-	err := m.change(ctx, op, func(rec Record) (Record, bool, error) {
+	err := m.change(ctx, op, func(rec Record) (*Record, error) {
 		switch {
 		case rec.Status == StatusRolledBack && rec.ToVersion == m.running:
 			rolledBack = true
-			return rec, false, nil
+			return nil, nil
 		case rec.Status != StatusPending:
-			return rec, false, nil
+			return nil, nil
 		case rec.ToVersion != m.running:
-			return rec, false, ErrNotUpdatedBuild
+			return nil, ErrNotUpdatedBuild
 		}
 
 		if err := m.restore(rec); err != nil {
-			return rec, false, err
+			return nil, err
 		}
 
 		rolledBack = true
@@ -260,7 +260,7 @@ func (m *Machine) rollBack(ctx context.Context, op, reason string) (bool, error)
 		rec.Reason = reason
 		rec.UpdatedAt = m.clock.Now()
 
-		return rec, true, nil
+		return &rec, nil
 	})
 
 	return rolledBack, err
@@ -278,10 +278,10 @@ func (m *Machine) notRunningReason(rec Record) string {
 		m.running, rec.ToVersion)
 }
 
-// change applies fn to the stored record under one Store.Update. fn returns the next record,
-// whether to store it, and an error that aborts the update. change returns fn's error as it is,
-// stores nothing when fn asks for no write, and wraps any error of the store with op.
-func (m *Machine) change(ctx context.Context, op string, fn func(Record) (Record, bool, error)) error {
+// change applies fn to the stored record under one Store.Update. fn returns the record to store,
+// nil to store nothing, and an error that aborts the update. change returns fn's error as it is
+// and wraps any error of the store with op.
+func (m *Machine) change(ctx context.Context, op string, fn func(Record) (*Record, error)) error {
 	// unchanged aborts the Update without a write: an fn error is the only way to make a Store
 	// write nothing.
 	unchanged := errors.New("selfupdate: record unchanged")
@@ -289,16 +289,16 @@ func (m *Machine) change(ctx context.Context, op string, fn func(Record) (Record
 	var fnErr error
 
 	err := m.store.Update(ctx, func(rec Record) (Record, error) {
-		next, write, err := fn(rec)
+		next, err := fn(rec)
 
 		switch {
 		case err != nil:
 			fnErr = err
 			return rec, err
-		case !write:
+		case next == nil:
 			return rec, unchanged
 		default:
-			return next, nil
+			return *next, nil
 		}
 	})
 

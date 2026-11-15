@@ -34,12 +34,14 @@ func testTime() time.Time {
 	return time.Date(2026, 11, 15, 6, 0, 0, 0, time.UTC)
 }
 
-// fakeStore is an in-memory Store whose Update fails with updateErr when it is set.
+// fakeStore is an in-memory Store whose Update fails with updateErr when it is set. writes counts
+// the Updates that stored a record.
 type fakeStore struct {
 	mu        sync.Mutex
 	rec       Record
 	loadErr   error
 	updateErr error
+	writes    int
 }
 
 func (s *fakeStore) Load(context.Context) (Record, error) {
@@ -67,8 +69,16 @@ func (s *fakeStore) Update(_ context.Context, fn func(Record) (Record, error)) e
 	}
 
 	s.rec = next
+	s.writes++
 
 	return nil
+}
+
+func (s *fakeStore) writeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.writes
 }
 
 // interleavedStore is a fakeStore that applies between to the record before each Update after the
@@ -414,6 +424,10 @@ func TestBootPastTheLimitAfterAnotherRollbackReportsRolledBack(t *testing.T) {
 	if got := load(t, store); got != rolledBackElsewhere {
 		t.Errorf("record = %+v, want the other rollback unchanged: %+v", got, rolledBackElsewhere)
 	}
+
+	if n := store.writeCount(); n != 1 {
+		t.Errorf("store wrote %d times, want 1: the counted attempt only", n)
+	}
 }
 
 func TestBootOfAnotherVersionRecordsRolledBackWithoutFiles(t *testing.T) {
@@ -477,6 +491,27 @@ func TestBootWhenNotPendingRemovesTheFailedBinary(t *testing.T) {
 
 		if got := load(t, store); got != rec {
 			t.Errorf("%v: record = %+v, want it unchanged", rec.Status, got)
+		}
+	}
+}
+
+func TestBootWhenNotPendingStoresNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, rec := range []Record{
+		{},
+		{Status: StatusConfirmed, ToVersion: newVersion, Target: "/opt/tool/bin/tool"},
+		{Status: StatusRolledBack, ToVersion: newVersion, Target: "/opt/tool/bin/tool"},
+	} {
+		store := &fakeStore{rec: rec}
+		m, _ := newMachine(t, store, oldVersion)
+
+		if rolledBack, err := m.Boot(t.Context()); err != nil || rolledBack {
+			t.Errorf("%v: Boot = %v, %v, want false, nil", rec.Status, rolledBack, err)
+		}
+
+		if n := store.writeCount(); n != 0 {
+			t.Errorf("%v: store wrote %d times, want 0", rec.Status, n)
 		}
 	}
 }
@@ -695,6 +730,43 @@ func TestMarkFailed(t *testing.T) {
 		}
 	})
 
+	t.Run("stores nothing unless it rolls back", func(t *testing.T) {
+		t.Parallel()
+
+		rolledBackRunning := pendingRecord()
+		rolledBackRunning.Status = StatusRolledBack
+
+		rolledBackOther := pendingRecord()
+		rolledBackOther.Status = StatusRolledBack
+		rolledBackOther.ToVersion = "v1.2.0"
+
+		for name, tc := range map[string]struct {
+			rec  Record
+			want bool
+		}{
+			"idle":                                {rec: Record{}},
+			"confirmed":                           {rec: Record{Status: StatusConfirmed, ToVersion: newVersion}},
+			"rolled back for another version":     {rec: rolledBackOther},
+			"rolled back for the running version": {rec: rolledBackRunning, want: true},
+		} {
+			store := &fakeStore{rec: tc.rec}
+			m, ops := newMachine(t, store, newVersion)
+
+			rolledBack, err := m.MarkFailed(t.Context(), "broken")
+			if err != nil || rolledBack != tc.want {
+				t.Errorf("%s: MarkFailed = %v, %v, want %v, nil", name, rolledBack, err, tc.want)
+			}
+
+			if n := ops.restoreCount(); n != 0 {
+				t.Errorf("%s: restore called %d times, want 0", name, n)
+			}
+
+			if n := store.writeCount(); n != 0 {
+				t.Errorf("%s: store wrote %d times, want 0", name, n)
+			}
+		}
+	})
+
 	t.Run("not pending", func(t *testing.T) {
 		t.Parallel()
 
@@ -739,6 +811,42 @@ func TestConfirm(t *testing.T) {
 			if got := load(t, store); got != rec {
 				t.Errorf("%v: record = %+v, want it unchanged", rec.Status, got)
 			}
+		}
+	})
+
+	t.Run("not pending stores nothing", func(t *testing.T) {
+		t.Parallel()
+
+		for _, rec := range []Record{
+			{},
+			{Status: StatusConfirmed, ToVersion: newVersion, Backup: "/b"},
+			{Status: StatusRolledBack, ToVersion: newVersion, Backup: "/b"},
+		} {
+			store := &fakeStore{rec: rec}
+			m, _ := newMachine(t, store, newVersion)
+
+			if err := m.Confirm(t.Context()); err != nil {
+				t.Errorf("%v: Confirm = %v, want nil", rec.Status, err)
+			}
+
+			if n := store.writeCount(); n != 0 {
+				t.Errorf("%v: store wrote %d times, want 0", rec.Status, n)
+			}
+		}
+	})
+
+	t.Run("wrong version stores nothing", func(t *testing.T) {
+		t.Parallel()
+
+		store := &fakeStore{rec: pendingRecord()}
+		m, _ := newMachine(t, store, oldVersion)
+
+		if err := m.Confirm(t.Context()); !errors.Is(err, ErrNotUpdatedBuild) {
+			t.Errorf("Confirm = %v, want ErrNotUpdatedBuild", err)
+		}
+
+		if n := store.writeCount(); n != 0 {
+			t.Errorf("store wrote %d times, want 0", n)
 		}
 	})
 
@@ -844,8 +952,21 @@ func TestBackupInUseOnACorruptRecordIsAnError(t *testing.T) {
 	writeRaw(t, path, "not json")
 	m, _ := newMachine(t, NewFileStore(path), newVersion)
 
-	if _, err := m.BackupInUse(t.Context()); !errors.Is(err, state.ErrCorrupt) {
-		t.Errorf("BackupInUse error = %v, want one matching state.ErrCorrupt", err)
+	if inUse, err := m.BackupInUse(t.Context()); !errors.Is(err, state.ErrCorrupt) || inUse {
+		t.Errorf("BackupInUse = %v, %v, want false and an error matching state.ErrCorrupt", inUse, err)
+	}
+}
+
+func TestBackupInUseOnAFailedLoadIsFalseWithTheError(t *testing.T) {
+	t.Parallel()
+
+	errLoad := errors.New("unreadable")
+	rec := pendingRecord()
+	m, _ := newMachine(t, &fakeStore{rec: rec, loadErr: errLoad}, newVersion)
+
+	inUse, err := m.BackupInUse(t.Context())
+	if !errors.Is(err, errLoad) || inUse {
+		t.Errorf("BackupInUse = %v, %v, want false and the load error", inUse, err)
 	}
 }
 
