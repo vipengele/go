@@ -452,3 +452,86 @@ func TestFileStoreErrorsNameTheRecord(t *testing.T) {
 		t.Errorf("Load error = %v, want it to name %s", err, path)
 	}
 }
+
+func TestFileStoreUpdateAbandonsAStalledRead(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	defer close(release)
+
+	store := NewFileStore(recordPath(t))
+	store.readFile = func() (Record, error) {
+		<-release
+		return Record{}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	err := store.Update(ctx, func(Record) (Record, error) {
+		t.Error("Update called fn before the load finished")
+
+		return Record{}, nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Update error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestFileStoreUpdateReturnsTheLoadError(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("read failed")
+
+	store := NewFileStore(recordPath(t))
+	store.readFile = func() (Record, error) { return Record{}, boom }
+	store.writeFile = func(Record) error {
+		t.Error("Update wrote after a failed load")
+
+		return nil
+	}
+
+	err := store.Update(t.Context(), func(Record) (Record, error) {
+		t.Error("Update called fn after a failed load")
+
+		return Record{}, nil
+	})
+	if !errors.Is(err, boom) {
+		t.Errorf("Update error = %v, want %v", err, boom)
+	}
+}
+
+func TestFileStoreWriteFailureNamesTheSave(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "missing", "selfupdate.json")
+
+	err := NewFileStore(path).write(pendingRecord())
+	if err == nil || !strings.Contains(err.Error(), "save record") {
+		t.Errorf("write error = %v, want a save record error", err)
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("write error = %v, want it to wrap os.ErrNotExist", err)
+	}
+}
+
+func TestFileStoreContextDoneDuringFnWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	path := recordPath(t)
+	ctx, cancel := context.WithCancel(t.Context())
+
+	err := NewFileStore(path).Update(ctx, func(Record) (Record, error) {
+		cancel()
+
+		return pendingRecord(), nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Update error = %v, want context.Canceled", err)
+	}
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat error = %v, want no record written", err)
+	}
+}

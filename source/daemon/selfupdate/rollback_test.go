@@ -327,3 +327,54 @@ func TestRestoreReportsAFailedBackupCheck(t *testing.T) {
 		t.Fatalf("restoreBackup = %v, want a *RestoreError carrying %v", err, statErr)
 	}
 }
+
+func TestRestoreInPlaceRenameFailureIsARestoreError(t *testing.T) {
+	t.Parallel()
+
+	rec := binaryRecord(t, t.TempDir(), true)
+	boom := errors.New("rename refused")
+
+	ops := osFSOps()
+	ops.rename = func(string, string) error { return boom }
+
+	err := restoreInPlace(ops, rec)
+
+	var restoreErr *RestoreError
+	if !errors.As(err, &restoreErr) {
+		t.Fatalf("restoreInPlace = %v, want a *RestoreError", err)
+	}
+
+	if !errors.Is(err, boom) || restoreErr.Backup != rec.Backup || restoreErr.Target != rec.Target {
+		t.Errorf("RestoreError = %+v, want the paths and %v", restoreErr, boom)
+	}
+}
+
+func TestRestoreAsideTargetLstatFailureRenamesNothing(t *testing.T) {
+	t.Parallel()
+
+	rec := binaryRecord(t, t.TempDir(), true)
+	denied := fs.ErrPermission
+
+	ops := osFSOps()
+	ops.lstat = func(string) (fs.FileInfo, error) { return nil, denied }
+	ops.rename = func(oldpath, newpath string) error {
+		t.Errorf("rename(%s, %s) called, want no rename", oldpath, newpath)
+
+		return nil
+	}
+
+	err := restoreAside(ops, rec)
+
+	var restoreErr *RestoreError
+	if !errors.As(err, &restoreErr) || !errors.Is(err, denied) {
+		t.Fatalf("restoreAside = %v, want a *RestoreError wrapping %v", err, denied)
+	}
+
+	if got := readRaw(t, rec.Target); got != "new" {
+		t.Errorf("target = %q, want it untouched", got)
+	}
+
+	if got := readRaw(t, rec.Backup); got != "old" {
+		t.Errorf("backup = %q, want it untouched", got)
+	}
+}
