@@ -68,8 +68,9 @@ type runner struct {
 	lastCheck time.Time
 	// running is set while a cycle runs.
 	running bool
-	// stopTimer stops the armed timer, and is nil while none is armed. gen numbers the armed
-	// timer: a callback that finds another number was disarmed after it fired, and does nothing.
+	// stopTimer stops the armed timer, and is nil while none is armed. gen counts the disarms: a
+	// timer's callback carries the gen it was armed at, and does nothing when it finds another,
+	// because its timer was disarmed after it fired.
 	stopTimer func() bool
 	gen       uint64
 	// ctx is the parent of every cycle's context and cancel cancels it; both are set by Start.
@@ -238,7 +239,6 @@ func (r *runner) Stop(ctx context.Context) error {
 		r.mu.Unlock()
 		return nil
 	}
-	r.disarm()
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -333,7 +333,8 @@ func (r *runner) runCycle(parent context.Context) (timedOut bool, err error) {
 		cancel(context.Canceled)
 	}()
 
-	return false, r.cycle(ctx)
+	err = r.cycle(ctx)
+	return timedOut, err
 }
 
 // finishCycle ends the runner after a cycle that requires a restart or panicked, or that ran while
@@ -376,15 +377,17 @@ func (r *runner) untilNext() time.Duration {
 	return max(r.lastCheck.Add(r.interval).Sub(r.clock.Now()), 0)
 }
 
-// arm arms the timer that fires the next check after d. The caller holds mu and no timer is armed.
+// arm arms the timer that fires the next check after d; its callback carries the current gen. The
+// caller holds mu, and no timer is armed: arm is called at Start, after disarm, or once the cycle the
+// last timer fired has returned. Timers armed between two disarms share a gen, and every one of them
+// but the last has already fired.
 func (r *runner) arm(d time.Duration) {
-	r.gen++
 	gen := r.gen
 	r.stopTimer = r.clock.AfterFunc(d, func() { r.fire(gen) })
 }
 
-// disarm stops the armed timer, if any; a callback of it that has already fired does nothing. The
-// caller holds mu.
+// disarm stops the armed timer, if any, and moves gen on, so that a callback of it that has
+// already fired does nothing. The caller holds mu.
 func (r *runner) disarm() {
 	r.gen++
 	if r.stopTimer != nil {

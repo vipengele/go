@@ -15,7 +15,6 @@ import (
 
 	"go.vipengele.org/cli/spec"
 	"go.vipengele.org/daemon"
-	"go.vipengele.org/daemon/daemontest"
 	"go.vipengele.org/filelock"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/updatetest"
@@ -174,7 +173,7 @@ func newCycleEnv(t *testing.T, o envOptions) *cycleEnv {
 	}
 	e.machine = m
 
-	clock := armingClock{Clock: daemontest.NewClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)), armed: make(chan time.Duration, 64)}
+	clock := newArmingClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
 	logger := slog.New(captureHandler{mu: &e.logMu, records: &e.records})
 	settings := Settings{AutoApply: o.autoApply}
 	r, err := NewRunner(e.cfg, m, settings, func(s Settings) Settings { return s },
@@ -240,6 +239,18 @@ func (e *cycleEnv) logged(level slog.Level, msg string) record {
 		e.t.Fatalf("%q logged at %v, want %v", msg, found[0].level, level)
 	}
 	return found[0]
+}
+
+// notLogged fails the test if any record was logged with msg.
+func (e *cycleEnv) notLogged(msg string) {
+	e.t.Helper()
+	e.logMu.Lock()
+	defer e.logMu.Unlock()
+	for _, rec := range e.records {
+		if rec.msg == msg {
+			e.t.Errorf("logged %q at %v, want no such record", msg, rec.level)
+		}
+	}
 }
 
 // noWarnings fails the test if any record was logged at Warn or above.
@@ -529,6 +540,7 @@ func TestCycleInstallFailingAfterTheHookAbandonsTheUpdate(t *testing.T) {
 	e.runSwallowed()
 
 	e.logged(slog.LevelWarn, msgApplyFailed)
+	e.notLogged(msgAbandonFailed)
 	rec := e.record()
 	if rec.Status != StatusRolledBack || rec.ToVersion != newerVersion || rec.Reason == "" {
 		t.Errorf("record = %+v, want rolled_back for %s with a reason", rec, newerVersion)

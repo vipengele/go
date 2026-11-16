@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,16 +24,62 @@ const (
 )
 
 // armingClock is a daemontest.Clock that reports the delay of every timer armed on it, so that a
-// test knows the runner has armed its next wait before it advances the clock.
+// test knows the runner has armed its next wait before it advances the clock, and keeps every
+// timer, so that a test can tell whether it was stopped and run its callback itself.
 type armingClock struct {
 	*daemontest.Clock
-	armed chan time.Duration
+	armed  chan time.Duration
+	timers *timerLog
 }
 
+// newArmingClock returns an armingClock that reads start until it is advanced.
+func newArmingClock(start time.Time) armingClock {
+	return armingClock{Clock: daemontest.NewClock(start), armed: make(chan time.Duration, 64), timers: &timerLog{}}
+}
+
+// AfterFunc arms the timer on the daemontest.Clock and keeps it before it reports its delay, so a
+// test that has received the delay finds the timer with last.
 func (c armingClock) AfterFunc(d time.Duration, f func()) func() bool {
 	stop := c.Clock.AfterFunc(d, f)
+	t := &armedTimer{d: d, f: f}
+	c.timers.add(t)
 	c.armed <- d
-	return stop
+	return func() bool {
+		t.stopped.Store(true)
+		return stop()
+	}
+}
+
+// armedTimer is one AfterFunc call on an armingClock: its delay, its callback, and whether its stop
+// function has been called.
+type armedTimer struct {
+	d       time.Duration
+	f       func()
+	stopped atomic.Bool
+}
+
+// timerLog keeps the timers an armingClock armed, in the order it armed them.
+type timerLog struct {
+	mu     sync.Mutex
+	timers []*armedTimer
+}
+
+func (l *timerLog) add(t *armedTimer) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.timers = append(l.timers, t)
+}
+
+// last returns the latest timer armed with delay d.
+func (l *timerLog) last(d time.Duration) *armedTimer {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := len(l.timers) - 1; i >= 0; i-- {
+		if l.timers[i].d == d {
+			return l.timers[i]
+		}
+	}
+	return nil
 }
 
 // cycleCall is one call of the fake cycle: its context, the clock's time when it began, and the
@@ -98,7 +145,7 @@ func newHarness(t *testing.T, settings Settings, pathErr error, opts ...RunnerOp
 		calls: make(chan cycleCall),
 		quit:  make(chan struct{}),
 	}
-	h.clock = armingClock{Clock: daemontest.NewClock(h.start), armed: make(chan time.Duration, 64)}
+	h.clock = newArmingClock(h.start)
 	logger := slog.New(captureHandler{mu: &h.logMu, records: &h.records})
 
 	cycle := func(ctx context.Context) error {
@@ -249,6 +296,42 @@ func stopAsync(r *runner) <-chan error {
 	return stopped
 }
 
+// timer returns the latest timer the runner armed with delay d.
+func (h *harness) timer(d time.Duration) *armedTimer {
+	h.t.Helper()
+	t := h.clock.timers.last(d)
+	if t == nil {
+		h.t.Fatalf("no timer armed for %v", d)
+	}
+	return t
+}
+
+// wantStopped fails unless the runner has called the stop function of t.
+func (h *harness) wantStopped(t *armedTimer) {
+	h.t.Helper()
+	if !t.stopped.Load() {
+		h.t.Errorf("the timer armed for %v was not stopped", t.d)
+	}
+}
+
+// wantCallbackRunsNoCycle runs the callback of t, as a timer that fired before it was stopped
+// does, and fails if it calls the cycle rather than returning.
+func (h *harness) wantCallbackRunsNoCycle(t *armedTimer) {
+	h.t.Helper()
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		t.f()
+	}()
+	select {
+	case <-returned:
+	case c := <-h.calls:
+		h.t.Fatalf("the callback of the timer armed for %v called the cycle at %v", t.d, c.at)
+	case <-time.After(failAfter):
+		h.t.Fatal("the callback did not return")
+	}
+}
+
 func TestRunnerFirstCheckIsAtTheJitter(t *testing.T) {
 	t.Parallel()
 
@@ -264,6 +347,24 @@ func TestRunnerFirstCheckIsAtTheJitter(t *testing.T) {
 	h.clock.Advance(j - time.Nanosecond)
 	h.wantNoCall()
 	h.check(time.Nanosecond, nil, DefaultInterval)
+}
+
+func TestRunnerStartLogsTheFirstCheckAtDebug(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, Settings{Interval: 2 * time.Hour, AutoApply: true}, nil)
+	j := h.begin()
+
+	got := h.logged(slog.LevelDebug, msgScheduled)
+	if len(got) != 1 {
+		t.Fatalf("logged %d %q records, want 1", len(got), msgScheduled)
+	}
+	if delay := got[0].attrs["delay"].Duration(); delay != j {
+		t.Errorf("record names delay %v, want the jitter %v", delay, j)
+	}
+	if interval := got[0].attrs["interval"].Duration(); interval != 2*time.Hour {
+		t.Errorf("record names interval %v, want 2h", interval)
+	}
 }
 
 func TestRunnerChecksEveryInterval(t *testing.T) {
@@ -416,6 +517,7 @@ func TestRunnerStopWhileWaitingForTheJitter(t *testing.T) {
 
 	h := newHarness(t, DefaultSettings(), nil)
 	j := h.begin()
+	first := h.timer(j)
 
 	if err := h.r.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() = %v", err)
@@ -424,6 +526,7 @@ func TestRunnerStopWhileWaitingForTheJitter(t *testing.T) {
 	if err := h.r.Err(); err != nil {
 		t.Errorf("Err() = %v, want nil after Stop", err)
 	}
+	h.wantStopped(first)
 	h.clock.Advance(j)
 	h.wantNoCall()
 	h.wantNoArm()
@@ -435,6 +538,7 @@ func TestRunnerStopBetweenChecks(t *testing.T) {
 	h := newHarness(t, DefaultSettings(), nil)
 	j := h.begin()
 	h.check(j, nil, DefaultInterval)
+	next := h.timer(DefaultInterval)
 
 	if err := h.r.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() = %v", err)
@@ -443,6 +547,7 @@ func TestRunnerStopBetweenChecks(t *testing.T) {
 	if err := h.r.Err(); err != nil {
 		t.Errorf("Err() = %v, want nil after Stop", err)
 	}
+	h.wantStopped(next)
 	h.r.reload(Settings{Interval: time.Hour, AutoApply: true})
 	h.clock.Advance(DefaultInterval)
 	h.wantNoCall()
@@ -565,6 +670,12 @@ func TestRunnerCheckRequiringARestartEndsTheRunner(t *testing.T) {
 	if err := h.r.Err(); !errors.Is(err, daemon.ErrRestartRequired) {
 		t.Errorf("Err() = %v, want daemon.ErrRestartRequired", err)
 	}
+	h.r.mu.Lock()
+	parent := h.r.ctx
+	h.r.mu.Unlock()
+	if parent.Err() == nil {
+		t.Error("the parent context of the checks is not done once the runner has ended")
+	}
 	if got := h.logged(slog.LevelInfo, msgRestartRequired); len(got) != 1 {
 		t.Errorf("logged %d %q records, want 1", len(got), msgRestartRequired)
 	}
@@ -627,7 +738,7 @@ func TestRunnerKeepsTickingAfterAFailedCheck(t *testing.T) {
 func TestRunnerCheckThatPanicsEndsTheRunnerWithAPanicError(t *testing.T) {
 	t.Parallel()
 
-	clock := armingClock{Clock: daemontest.NewClock(time.Unix(0, 0)), armed: make(chan time.Duration, 64)}
+	clock := newArmingClock(time.Unix(0, 0))
 	r, err := newRunner(
 		func(context.Context) error { panic("boom") },
 		func() (string, error) { return testPath, nil },
@@ -743,7 +854,7 @@ func TestNewRunnerRejects(t *testing.T) {
 func TestRunnerStopWhileStartResolvesThePathArmsNothing(t *testing.T) {
 	t.Parallel()
 
-	clock := armingClock{Clock: daemontest.NewClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)), armed: make(chan time.Duration, 64)}
+	clock := newArmingClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
 	var r *runner
 	stopErr := make(chan error, 1)
 	path := func() (string, error) {
@@ -772,18 +883,32 @@ func TestRunnerStopWhileStartResolvesThePathArmsNothing(t *testing.T) {
 	}
 }
 
-func TestRunnerTimerCallbackOfADisarmedTimerDoesNothing(t *testing.T) {
+func TestRunnerReloadStopsTheTimerItReplacesAndItsFiredCallbackRunsNoCycle(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, DefaultSettings(), nil)
 	j := h.begin()
-
-	h.r.mu.Lock()
-	stale := h.r.gen - 1
-	h.r.mu.Unlock()
-	h.r.fire(stale)
-	h.wantNoCall()
-	h.wantNoArm()
-
 	h.check(j, nil, DefaultInterval)
+	replaced := h.timer(DefaultInterval)
+
+	h.clock.Advance(time.Hour)
+	h.r.reload(Settings{Interval: 3 * time.Hour, AutoApply: true})
+	h.wantArmed(2 * time.Hour)
+	h.wantStopped(replaced)
+
+	h.wantCallbackRunsNoCycle(replaced)
+	h.wantNoArm()
+	h.check(2*time.Hour, nil, 3*time.Hour)
+}
+
+func TestRunnerCheckContextEndsOnceTheCheckReturns(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, DefaultSettings(), nil)
+	j := h.begin()
+	c := h.check(j, nil, DefaultInterval)
+
+	if err := c.ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Errorf("check context Err() = %v after the check returned, want context.Canceled", err)
+	}
 }
