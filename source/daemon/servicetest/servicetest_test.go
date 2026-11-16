@@ -11,7 +11,8 @@ import (
 
 // TestSupervisor proves the sample daemon under systemd in a podman container,
 // as a system service, a user service and a system service of Type=notify. It
-// runs only with SERVICETEST=1.
+// runs only with SERVICETEST=1. The driver is built once and shared by every
+// target, so the three runs do not each rebuild it.
 func TestSupervisor(t *testing.T) {
 	SkipUnlessEnabled(t)
 
@@ -20,6 +21,10 @@ func TestSupervisor(t *testing.T) {
 	build.Env = append(build.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building testdata/sampled: %v\n%s", err, out)
+	}
+	driver := filepath.Join(t.TempDir(), "servicetest-driver")
+	if out, err := goBuildDriver(t.Context(), driver); err != nil {
+		t.Fatalf("building the driver: %v\n%s", err, out)
 	}
 
 	targets := []struct {
@@ -36,6 +41,7 @@ func TestSupervisor(t *testing.T) {
 	for _, tc := range targets {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.target.Binary = binary
+			tc.target.Driver = driver
 			Run(t, tc.target)
 		})
 	}
