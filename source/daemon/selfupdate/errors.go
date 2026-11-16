@@ -13,6 +13,15 @@ var ErrUpdatePending = errors.New("selfupdate: an update is already pending")
 // so this process is not the build the update installed.
 var ErrNotUpdatedBuild = errors.New("selfupdate: running version is not the pending update's")
 
+// ErrNoPendingUpdate reports an update abandoned while the stored record is not pending: there is
+// no update to abandon.
+var ErrNoPendingUpdate = errors.New("selfupdate: no update is pending")
+
+// ErrUpdateRunning reports an update abandoned while the running version is the ToVersion of the
+// pending record: the binary was swapped and this process is the build the update installed, so
+// only a boot judges it.
+var ErrUpdateRunning = errors.New("selfupdate: running version is the pending update's")
+
 // NoBackupError reports a rollback that found no backup binary at Path, so nothing could be
 // restored and the target was left as it is.
 type NoBackupError struct {

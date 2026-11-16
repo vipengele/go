@@ -244,6 +244,33 @@ func (m *Machine) Confirm(ctx context.Context) error {
 	return nil
 }
 
+// Abandon records the update pending for another version than the running one as rolled_back
+// with reason, as Boot would on the next start, and touches no file but the record: no backup is
+// restored or removed. A caller uses it when installing the update failed after Begin recorded it
+// pending and the binary was not swapped, so the record is settled at once and a later Begin may
+// retry. When the executable may not be as it was, the caller leaves the record pending for Boot,
+// which judges the binary that actually starts.
+//
+// Abandon refuses, writing nothing, a record that is not pending with ErrNoPendingUpdate and an
+// update pending for the running version with ErrUpdateRunning: the swap happened, and Boot judges
+// it.
+func (m *Machine) Abandon(ctx context.Context, reason string) error {
+	return m.change(ctx, "abandon", func(rec Record) (*Record, error) {
+		switch {
+		case rec.Status != StatusPending:
+			return nil, ErrNoPendingUpdate
+		case sameVersion(rec.ToVersion, m.running):
+			return nil, ErrUpdateRunning
+		}
+
+		rec.Status = StatusRolledBack
+		rec.Reason = reason
+		rec.UpdatedAt = m.clock.Now()
+
+		return &rec, nil
+	})
+}
+
 // rollBack restores the backup of the update pending for the running version and records it
 // rolled_back with reason, both under one Store.Update, and reports whether the update the running
 // build belongs to is rolled back, by this call or by another caller before it. A record already

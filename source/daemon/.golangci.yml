@@ -33,7 +33,7 @@ linters:
           deny:
             - pkg: go.vipengele.org/
               desc: outside daemoncmd, daemon imports only cli/spec, cli/spec/paths and filelock among its siblings
-        selfupdate-imports-the-root-cli-state-and-update:
+        selfupdate-imports-the-root-cli-state-update-and-version:
           files:
             - "**/selfupdate/**"
             - "!$test"
@@ -45,13 +45,14 @@ linters:
             - go.vipengele.org/daemon/systemd$
             - go.vipengele.org/cli/spec$
             - go.vipengele.org/cli/spec/paths$
+            - go.vipengele.org/cli/spec/version$
             - go.vipengele.org/filelock$
             - go.vipengele.org/cli/state$
             - go.vipengele.org/update$
           deny:
             - pkg: go.vipengele.org/
-              desc: selfupdate imports only daemon, daemon/service, daemon/httpserver, daemon/systemd, cli/spec, cli/spec/paths, cli/state, filelock and update among its siblings
-        selfupdate-tests-also-import-updatetest:
+              desc: selfupdate imports only daemon, daemon/service, daemon/httpserver, daemon/systemd, cli/spec, cli/spec/paths, cli/spec/version, cli/state, filelock and update among its siblings
+        selfupdate-tests-also-import-the-test-kits:
           files:
             - "**/selfupdate/**_test.go"
           list-mode: lax
@@ -62,13 +63,15 @@ linters:
             - go.vipengele.org/daemon/systemd$
             - go.vipengele.org/cli/spec$
             - go.vipengele.org/cli/spec/paths$
+            - go.vipengele.org/cli/spec/version$
             - go.vipengele.org/filelock$
             - go.vipengele.org/cli/state$
             - go.vipengele.org/update$
+            - go.vipengele.org/daemon/daemontest$
             - go.vipengele.org/update/updatetest$
           deny:
             - pkg: go.vipengele.org/
-              desc: selfupdate's tests import only what selfupdate may, and update/updatetest
+              desc: selfupdate's tests import only what selfupdate may, daemon/daemontest and update/updatetest
         daemoncmd-imports-the-root-service-selfupdate-and-update:
           files:
             - "**/daemoncmd/**"

@@ -2,9 +2,12 @@ package selfupdate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"go.vipengele.org/daemon"
 	"go.vipengele.org/update"
@@ -13,6 +16,7 @@ import (
 var (
 	_ daemon.UpdateGuard = (*Machine)(nil)
 	_ update.BackupGuard = (*Machine)(nil)
+	_ update.BackupGuard = (*applyGuard)(nil)
 )
 
 // The messages of the records Apply logs, both with the release's tag under "version":
@@ -24,57 +28,121 @@ const (
 	msgNotSupervised    = "self-update installed, but no service supervisor restarts the process"
 )
 
-// Apply installs the release sel names through cfg and records the update as pending, so that the
-// next boots of the installed build are judged by Boot and confirmed by Confirm. It returns an error
-// wrapping daemon.ErrRestartRequired once the update is installed and recorded: a Runner that
-// returns it ends Supervisor.Run with an error for which daemon.RestartRequested is true, and the
-// process exits so its supervisor starts the installed binary.
+// abandonTimeout bounds the Abandon that settles a failed install, which runs even when the
+// context of Apply has ended.
+const abandonTimeout = 30 * time.Second
+
+// installFunc runs cfg.Apply of sel with opts and then beforeInstall as the last
+// update.BeforeInstall hook.
+type installFunc func(
+	ctx context.Context,
+	cfg update.Config,
+	sel update.Selection,
+	beforeInstall func(context.Context, update.InstallPlan) error,
+	opts ...update.ApplyOption,
+) (*update.Installed, error)
+
+// configApply is the installFunc of update.Config.Apply.
+func configApply(
+	ctx context.Context,
+	cfg update.Config,
+	sel update.Selection,
+	beforeInstall func(context.Context, update.InstallPlan) error,
+	opts ...update.ApplyOption,
+) (*update.Installed, error) {
+	return cfg.Apply(ctx, sel, append(opts, update.BeforeInstall(beforeInstall))...)
+}
+
+// applyGuard is the update.BackupGuard of one Machine.Apply. It answers as its Machine until began
+// is set, once that Apply's Begin has recorded the update pending, and reports the backup not in
+// use from then on: the pending record is the install's own, and the guard Install asks before its
+// renames must not refuse it. Every other Config keeps the Machine as its guard, so it stays
+// refused while the record is pending.
+type applyGuard struct {
+	m     *Machine
+	began atomic.Bool
+}
+
+// BackupInUse reports false once the Apply of g has begun, and the Machine's answer before.
+func (g *applyGuard) BackupInUse(ctx context.Context) (bool, error) {
+	if g.began.Load() {
+		return false, nil
+	}
+
+	return g.m.BackupInUse(ctx)
+}
+
+// Apply installs the release sel names through cfg, recording the update pending before the
+// executable is swapped, so that the next boots of the installed build are judged by Boot and
+// confirmed by Confirm. It returns an error wrapping daemon.ErrRestartRequired once the update is
+// installed: a Runner that returns it ends Supervisor.Run with an error for which
+// daemon.RestartRequested is true, and the process exits so its supervisor starts the installed
+// binary.
 //
-// Apply sets cfg.BackupGuard to m, so cfg.Apply refuses with update.ErrBackupInUse, before any
-// request, while an earlier update is pending. Any error of cfg.Apply is returned as it is, with
-// nothing installed.
+// Apply sets cfg.BackupGuard to a guard of its own call that answers as m, so cfg.Apply refuses
+// with update.ErrBackupInUse, before any request, while an earlier update is pending. Once the
+// staged binary has passed every check, after the update.BeforeInstall hooks of opts, Apply records
+// Pending{FromVersion: the running version, ToVersion: sel.Tag, Target: the executable, Backup: its
+// backup} with Begin from a hook of its own. From then on the guard of this call reports the backup
+// not in use, so the install is not refused by its own record, while every Config carrying m as its
+// BackupGuard stays refused. A process that stops between the record and the swap leaves a pending
+// update whose binary never started, which the next Boot rolls back without touching a file.
 //
-// Once the binary is installed, Apply records Pending{FromVersion: the running version, ToVersion:
-// sel.Tag, Target: the installed path, Backup: the backup path} with Begin, under a context that
-// ctx's cancellation does not reach, since an installed binary with no record is never judged.
-// When Begin fails, Apply rolls the install back and returns Begin's error; when the rollback fails
-// too, the error carries both and names the backup, where the previous binary stays. The backup is
-// otherwise kept: Confirm removes it and a rollback restores it.
+// An error of cfg.Apply is returned as cfg.Apply returns it. When Begin refuses, with
+// ErrUpdatePending while another update is pending, nothing is installed and nothing is recorded.
+// When cfg.Apply fails after Begin, Apply settles the record with Abandon, under a context that
+// ctx's cancellation does not reach, bounded by abandonTimeout, and joins an Abandon failure onto
+// the error; a failure that is an *update.RestoreError is not abandoned, since the executable may
+// then hold no binary, and the record stays pending for Boot to judge the binary that starts.
 //
-// cfg.PostUpdate then runs with the installed path. A hook that fails is logged at Warn and never
-// joined into the result, since a restart joined with another error is not a restart. Last, Apply
-// checks with daemon.UnderSupervisor, through what WithSupervisorCheck set, whether a service
-// supervisor restarts the process, and logs at Warn when none does.
+// Once the binary is installed, cfg.PostUpdate runs with the installed path. A hook that fails is
+// logged at Warn and never joined into the result, since a restart joined with another error is not
+// a restart. Last, Apply checks with daemon.UnderSupervisor, through what WithSupervisorCheck set,
+// whether a service supervisor restarts the process, and logs at Warn when none does. The backup is
+// kept: Confirm removes it and a rollback restores it.
 func (m *Machine) Apply(ctx context.Context, cfg update.Config, sel update.Selection, opts ...update.ApplyOption) error {
+	return m.apply(ctx, cfg, sel, configApply, opts...)
+}
+
+// apply is Apply through install.
+func (m *Machine) apply(
+	ctx context.Context,
+	cfg update.Config,
+	sel update.Selection,
+	install installFunc,
+	opts ...update.ApplyOption,
+) error {
 	log := m.logger
 	if log == nil {
 		log = slog.Default()
 	}
 
-	cfg.BackupGuard = m
+	guard := &applyGuard{m: m}
+	cfg.BackupGuard = guard
 
-	installed, err := cfg.Apply(ctx, sel, opts...)
+	installed, err := install(ctx, cfg, sel, func(ctx context.Context, plan update.InstallPlan) error {
+		if err := m.Begin(ctx, Pending{
+			FromVersion: m.running,
+			ToVersion:   plan.Version,
+			Target:      plan.Target,
+			Backup:      plan.Backup,
+		}); err != nil {
+			return err
+		}
+		guard.began.Store(true)
+
+		return nil
+	}, opts...)
 	if err != nil {
-		return err
-	}
-
-	pending := Pending{
-		FromVersion: m.running,
-		ToVersion:   sel.Tag,
-		Target:      installed.Path(),
-		Backup:      installed.Backup(),
-	}
-
-	if err := m.Begin(context.WithoutCancel(ctx), pending); err != nil {
-		if rbErr := installed.Rollback(); rbErr != nil {
-			return fmt.Errorf("selfupdate: apply: recording the update failed: %w; rolling it back failed too, "+
-				"the previous binary stays at %s: %w", err, pending.Backup, rbErr)
+		var restoreErr *update.RestoreError
+		if !guard.began.Load() || errors.As(err, &restoreErr) {
+			return err
 		}
 
-		return fmt.Errorf("selfupdate: apply: recording the update failed, the install is rolled back: %w", err)
+		return errors.Join(err, m.abandon(ctx, sel.Tag, err))
 	}
 
-	if err := update.RunPostUpdate(cfg.PostUpdate, pending.Target); err != nil {
+	if err := update.RunPostUpdate(cfg.PostUpdate, installed.Path()); err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, msgPostUpdateFailed,
 			slog.String("version", sel.Tag), slog.Any("err", err))
 	}
@@ -84,5 +152,20 @@ func (m *Machine) Apply(ctx context.Context, cfg update.Config, sel update.Selec
 			slog.String("version", sel.Tag), slog.String("label", m.label))
 	}
 
-	return fmt.Errorf("selfupdate: %s installed, restart to run it: %w", sel.Tag, daemon.ErrRestartRequired)
+	return fmt.Errorf("selfupdate: %s installed at %s, backup kept at %s, restart to run it: %w",
+		sel.Tag, installed.Path(), installed.Backup(), daemon.ErrRestartRequired)
+}
+
+// abandon settles the record of an install of tag that failed with cause after Begin recorded it
+// pending. It runs on a context of its own, bounded by abandonTimeout, so that an Apply whose
+// context has ended still settles the record, and returns Abandon's error wrapped.
+func (m *Machine) abandon(ctx context.Context, tag string, cause error) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonTimeout)
+	defer cancel()
+
+	if err := m.Abandon(actx, fmt.Sprintf("installing %s failed: %v", tag, cause)); err != nil {
+		return fmt.Errorf("selfupdate: apply: settling the failed install: %w", err)
+	}
+
+	return nil
 }

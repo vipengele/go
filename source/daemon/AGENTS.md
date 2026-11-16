@@ -144,13 +144,24 @@ golangci-lint run
   as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
   backup binary before it records `rolled_back`; `rollback_windows.go` moves the running binary
   aside instead of overwriting it. Versions compare with a leading `v` ignored on both sides.
-  `apply.go` holds `(*Machine).Apply`: it sets the Config's `BackupGuard` to the Machine, runs
-  `update.Config.Apply`, records the update with `Begin` (rolling the install back when that
-  fails), runs the post-update hooks and logs their failure, logs a warning when
-  `daemon.UnderSupervisor` is false, and returns an error wrapping `ErrRestartRequired` alone.
-  `WithLogger` and `WithSupervisorCheck` (label and environment lookup) are its options. Tests that
-  run a real Apply never call `t.Parallel` (a forked staged binary fails with `ETXTBSY`) and compare
-  the installed bytes with `updatetest.ReleaseExecutable`.
+  `apply.go` holds `(*Machine).Apply`, the one apply path, which the Runner's cycle calls too: it
+  records the update pending with `Begin` from an `update.BeforeInstall` hook (ADR-0035), before
+  the swap, and gives `update.Config.Apply` a call-scoped `BackupGuard` (`applyGuard`) that answers
+  as the Machine until that `Begin` succeeds and then does not count its own record, so the
+  install is not refused while every other Config guarded by the Machine stays refused. A refused
+  `Begin` (`ErrUpdatePending`) installs nothing; an install failing after `Begin` is settled with
+  `Abandon` (`ErrNoPendingUpdate`, `ErrUpdateRunning`), unless it is an `*update.RestoreError`,
+  which stays pending for `Boot`. On success it runs the post-update hooks and logs their failure,
+  logs a warning when `daemon.UnderSupervisor` is false, and returns an error wrapping
+  `ErrRestartRequired` alone. `WithLogger` and `WithSupervisorCheck` (label and environment lookup)
+  are its options; its unexported `apply` takes the `installFunc` seam tests use to fake an install.
+  Tests that run a real Apply never call `t.Parallel` (a forked staged binary fails with `ETXTBSY`)
+  and compare the installed bytes with `updatetest.ReleaseExecutable`. `NewRunner[T]` (`cycle.go`)
+  returns the `Runner[T]`, a `daemon.Runner` and `Reloader[T]` that checks on a schedule
+  (`runner.go`, the scheduler; `jitter.go`; `settings.go`, the `interval` and `auto_apply` keys;
+  `options.go`, `RunnerOption`, with `WithRunnerLogger` and `WithRunnerClock`) and ends with an
+  error matching `daemon.ErrRestartRequired` after an install, keeping the backup for the
+  Machine's rollback.
   `report.go` holds `Reporter`, which turns the `Store`'s record into a `daemon.UpdateReporter` and
   only reads it (`Load`), and `ReleaseInfo`, the channel and watermark as strings from the
   consumer's `release` func. The consumer wires it twice, and `daemoncmd` does not import
@@ -388,7 +399,8 @@ install, kill, reinstall, crash loop and uninstall through `service.New`. Read i
 - The root `daemon` package is not stdlib-only: it requires `go.vipengele.org/filelock` and
   `go.vipengele.org/cli/spec` (for `spec.Identity` and `cli/spec/paths`), which bring in
   `go.vipengele.org/commons` and `golang.org/x/sys` indirectly. Only `daemoncmd` imports any
-  other `cli/spec` package.
+  other `cli/spec` package. `go.vipengele.org/update` is required, with a directory `replace`
+  (`../update`), for `selfupdate` alone.
 - The grace period's context is made from `context.Background()`, never from the cancelled run context.
 - Work that outlives `Start` is never bound to the start context, which is cancelled when the start
   phase ends: `Func` and the HTTP Runner derive theirs with `context.WithoutCancel`.
@@ -401,12 +413,14 @@ install, kill, reinstall, crash loop and uninstall through `service.New`. Read i
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
   `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and
   `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
-- `selfupdate/` has its own depguard rule: the same list plus `go.vipengele.org/cli/state`, which
-  its file store writes through, and `go.vipengele.org/update`, which `Apply` installs through; its
-  tests also import `go.vipengele.org/update/updatetest`. It imports the root `daemon` for `Clock`
-  (ADR-0028); the root rule allows neither `selfupdate` nor `update`, so the root `daemon` never
-  imports them. Its tests are internal (`package selfupdate`) and use their own fake clock and
-  hand-written Runners, never `daemontest`.
+- `selfupdate/` has its own depguard rule: the same list plus `go.vipengele.org/cli/spec/version`,
+  `go.vipengele.org/cli/state`, which its file store writes through, and `go.vipengele.org/update`,
+  which `Apply` and the Runner install through; its tests also import
+  `go.vipengele.org/daemon/daemontest` and `go.vipengele.org/update/updatetest`. It imports the root
+  `daemon` for `Clock` and `Runner` (ADR-0028); the root rule allows neither `selfupdate` nor
+  `update`, so the root `daemon` never imports them. Its tests are internal (`package selfupdate`);
+  the runner and cycle tests use `daemontest.Clock`, the others their own fake clock and
+  hand-written Runners.
 - `daemoncmd/` has its own depguard rule: the module's own `daemon`, `daemon/service` and
   `daemon/selfupdate`, `cli/spec`, `cli/spec/table`, `update` and `update/updatecmd`; its tests
   also import `daemoncmd` itself, `daemontest`, `cli/spec/speccheck` and `update/updatetest`.

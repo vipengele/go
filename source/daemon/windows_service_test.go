@@ -429,8 +429,10 @@ func TestWindowsServiceStartPendingWaitHintIsTheStartTimeout(t *testing.T) {
 func TestWindowsServiceStopPendingWaitHintIsGracePlusMargin(t *testing.T) {
 	for _, grace := range []time.Duration{time.Millisecond, 10 * time.Second, 90 * time.Minute} {
 		t.Run(grace.String(), func(t *testing.T) {
+			// The grace period is measured on a clock that never moves, so a stop that takes longer
+			// than a 1ms grace on a slow host still completes: the wait hint is all this test checks.
 			a := newScripted("a")
-			r := startServed(t, []Option{WithGrace(grace)}, a)
+			r := startServed(t, []Option{WithGrace(grace), WithClock(newManualClock())}, a)
 			r.scm.send(scmStop)
 			got := r.scm.next(t)
 			want := uint32((grace + windowsStopMargin).Milliseconds())
