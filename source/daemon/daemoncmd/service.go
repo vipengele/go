@@ -329,11 +329,15 @@ func runHooks(ctx context.Context, inv *spec.Invocation, mgr service.Manager, ho
 	return nil
 }
 
+// serviceStatusSchema is the version of the JSON shape the service status is written in, the
+// keys of [service.Status]. It is versioned apart from the health envelope's schema.
+const serviceStatusSchema = 1
+
 // writeServiceStatus writes st to the standard output: a table of one row per field, or the
 // status at schema 1 when the output is JSON.
 func writeServiceStatus(inv *spec.Invocation, st service.Status) error {
 	if inv.Output.Format() == spec.FormatJSON {
-		return spec.WriteJSON(inv.Env.Stdout, schema, st)
+		return spec.WriteJSON(inv.Env.Stdout, serviceStatusSchema, st)
 	}
 	return renderServiceStatus(inv.Env.Stdout, inv.Output.Styler(spec.Stdout), st)
 }

@@ -184,18 +184,21 @@ func TestNewServiceForwardsOptionsToInstall(t *testing.T) {
 	}
 }
 
-func TestConstructorsPanicOnNilManagerFunc(t *testing.T) {
-	constructors := map[string]func(daemoncmd.ManagerFunc, ...daemoncmd.ServiceOption) *spec.Command{
-		"NewService": daemoncmd.NewService,
-	}
-	for _, c := range serviceCommands() {
-		constructors[c.name] = c.new
-	}
-	for name, newCmd := range constructors {
+func TestConstructorsPanicOnNilManagerFuncNamingThemselves(t *testing.T) {
+	for name, newCmd := range map[string]func(daemoncmd.ManagerFunc, ...daemoncmd.ServiceOption) *spec.Command{
+		"NewService":       daemoncmd.NewService,
+		"NewInstall":       daemoncmd.NewInstall,
+		"NewUninstall":     daemoncmd.NewUninstall,
+		"NewStart":         daemoncmd.NewStart,
+		"NewStop":          daemoncmd.NewStop,
+		"NewRestart":       daemoncmd.NewRestart,
+		"NewServiceStatus": daemoncmd.NewServiceStatus,
+	} {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
-				if recover() == nil {
-					t.Fatalf("%s(nil) did not panic", name)
+				want := "daemoncmd: " + name + ": m is nil"
+				if got := recover(); got != want {
+					t.Fatalf("%s(nil) panicked with %v, want %q", name, got, want)
 				}
 			}()
 			newCmd(nil)
