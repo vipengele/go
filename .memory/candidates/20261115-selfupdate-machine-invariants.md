@@ -10,6 +10,9 @@ saw:
 - `rollBack` (machine.go) calls the `restore` seam inside the same `Store.Update` fn that writes
   `rolled_back`, so the binary is back before the record says so (ADR-0033). A save failure after
   a successful restore returns true with the error.
+- Versions compare through `sameVersion` (machine.go), which ignores a leading "v" on both sides,
+  so a build reporting "1.2.3" counts against a record for tag "v1.2.3"; compared exactly, its
+  boots never count and its rollback never happens.
 - `Boot` (machine.go) on a pending record whose `ToVersion` differs from the running version records
   `rolled_back` and touches no file: that is how a restore whose record write was lost is repaired.
   Changing that branch to restore or count an attempt breaks the repair.
