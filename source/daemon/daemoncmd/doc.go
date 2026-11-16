@@ -41,6 +41,51 @@
 // nothing to Stdout and the App reports the error on Stderr. The update state never changes the
 // exit code.
 //
+// # update-status
+//
+// [NewUpdateStatus] returns the "update-status" command, which a tool mounts beside "status". It
+// prints where the daemon's self-update stands: the "update" object of the daemon's "/status",
+// asked through the same [Resolver] and [StatusOption]s as [NewStatus]. When the daemon gives no
+// update, because it cannot be resolved or reached, the request times out, it answers other than
+// 200 or with a body that is not the schema 1 envelope, or its snapshot carries no update, the
+// command asks the fallback [daemon.UpdateReporter] instead, typically one reading the state the
+// self-update keeps on disk. A cancelled context is not such a failure: the command returns its
+// error without asking the fallback.
+//
+// # update-status text
+//
+// The command writes a table of field and value: the source the status was read from, its state,
+// then each other field of the update that is set:
+//
+//	FIELD          VALUE
+//	source         daemon
+//	status         pending
+//	from version   v1.4.0
+//	to version     v1.5.0
+//	boot attempts  2
+//	started at     2026-11-04T03:20:00Z
+//
+// A reachable daemon that reports no update, with no fallback, prints "self-update is not
+// configured". When a failure of the daemon makes the command read the fallback, it notes the
+// failure on Stderr, so Stdout carries the status alone.
+//
+// # update-status JSON
+//
+// The command writes one flat object with [spec.WriteJSON] at schema 1: "source", which is
+// "daemon", "store" for the fallback or "none" for a daemon that reports no update with no
+// fallback, then the keys of [daemon.UpdateStatus], none for "none", then "daemon_error", the
+// failure of the daemon that made the command read the fallback. daemon_error is absent when the
+// daemon answered without an update. The Stderr note is written in this mode too.
+//
+// # update-status exit
+//
+// The command returns nil for an update that is idle, pending or confirmed, and for source none.
+// An update that is rolled_back or unknown, or that carries an error, is printed all the same,
+// and the command returns [ErrUpdateNotOK] wrapped in [spec.Reported], so the App adds no message
+// and exits 1. A rolled-back update therefore keeps update-status exiting 1 until the next update
+// begins. A daemon that fails with no fallback is an ordinary error: the command prints nothing to
+// Stdout and the App reports the error on Stderr.
+//
 // # Service commands
 //
 // [NewService] returns the "service" command, which groups install, uninstall, start, stop,
