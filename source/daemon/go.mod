@@ -3,9 +3,9 @@ module go.vipengele.org/daemon
 go 1.27.4
 
 require (
-	go.vipengele.org/cli/spec v0.0.0
-	go.vipengele.org/cli/state v0.0.0
-	go.vipengele.org/filelock v0.0.0
+	go.vipengele.org/cli/spec v0.1.0
+	go.vipengele.org/cli/state v0.1.0
+	go.vipengele.org/filelock v0.1.0
 	go.vipengele.org/update v0.0.0
 	golang.org/x/sys v0.50.0
 )
