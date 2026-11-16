@@ -203,6 +203,11 @@
 // A check still running when its timeout expires fails with ErrCheckTimeout and is left to
 // return on its own; until it does, later snapshots report it as failing without running it again.
 //
+// WithUpdateReporter gives a Health the daemon's self-update state, which a Snapshot carries as
+// Update and /status as its "update" object. The reporter is bounded like a check, and one that
+// fails, panics or is still running reports UpdateUnknown, never UpdateIdle. It never changes the
+// snapshot's status, and /livez and /readyz never call it.
+//
 // Handler serves a Health over HTTP: /livez and /readyz answer 200 or 503, and /status the
 // snapshot as the JSON envelope spec.WriteJSON writes. /livez runs only the Liveness checks, so a slow dependency cannot delay the
 // probe that decides a restart; /readyz and /status run every check. The status command of
