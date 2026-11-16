@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -343,22 +344,37 @@ func (l *launchd) Uninstall(ctx context.Context) error {
 // Start kickstarts the job when it is loaded and bootstraps its plist when it
 // is not; RunAtLoad then starts it. A running job keeps running.
 func (l *launchd) Start(ctx context.Context) error {
-	p, err := l.installed(ctx, "Start")
+	return l.launch(ctx, "Start", "start", "kickstart")
+}
+
+// Restart kills and relaunches the job with `kickstart -k` when it is loaded,
+// and bootstraps its plist when it is not, as Start does: a job that Stop
+// booted out is unloaded, and kickstart fails on it.
+func (l *launchd) Restart(ctx context.Context) error {
+	return l.launch(ctx, "Restart", "restart", "kickstart", "-k")
+}
+
+// launch checks the job is installed for method, then runs the launchctl
+// command kick, followed by the job's target, when the job is loaded, and
+// bootstraps its plist when it is not. verb names the operation in errors.
+func (l *launchd) launch(ctx context.Context, method, verb string, kick ...string) error {
+	p, err := l.installed(ctx, method)
 	if err != nil {
 		return err
 	}
 	loaded, err := l.loaded(ctx)
 	if err != nil {
-		return fmt.Errorf("service: start %s: %w", l.label(), err)
+		return fmt.Errorf("service: %s %s: %w", verb, l.label(), err)
 	}
 	if !loaded {
 		if err := l.bootstrap(ctx, p.plist); err != nil {
-			return fmt.Errorf("service: start %s: %w", l.label(), err)
+			return fmt.Errorf("service: %s %s: %w", verb, l.label(), err)
 		}
 		return nil
 	}
-	if _, err := l.launchctl(ctx, "kickstart", l.target()); err != nil {
-		return fmt.Errorf("service: start %s: kickstart %s: %w", l.label(), l.target(), err)
+	cmd := strings.Join(kick, " ")
+	if _, err := l.launchctl(ctx, append(kick, l.target())...); err != nil {
+		return fmt.Errorf("service: %s %s: %s %s: %w", verb, l.label(), cmd, l.target(), err)
 	}
 	return nil
 }

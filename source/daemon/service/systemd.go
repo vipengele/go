@@ -315,6 +315,11 @@ func (s *systemd) Stop(ctx context.Context) error {
 	return s.control(ctx, "Stop", "stop")
 }
 
+// Restart restarts the installed unit, starting it when it is stopped.
+func (s *systemd) Restart(ctx context.Context) error {
+	return s.control(ctx, "Restart", "restart")
+}
+
 // control runs `systemctl <verb> <unit>` once privileges are checked and the
 // unit file exists.
 func (s *systemd) control(ctx context.Context, method, verb string) error {

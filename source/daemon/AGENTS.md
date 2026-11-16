@@ -122,7 +122,7 @@ golangci-lint run
 
 `go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd on linux,
 launchd on darwin, the service control manager on windows; no other GOOS has a driver) behind the `Manager` interface: `Prepare`, `Install`,
-`Uninstall`, `Start`, `Stop`, `CheckPrivileges` and `Status`, each taking only a context. Read its `doc.go` first and
+`Uninstall`, `Start`, `Stop`, `Restart`, `CheckPrivileges` and `Status`, each taking only a context. Read its `doc.go` first and
 `docs/adr/0024-service-drivers-are-selected-at-runtime.md`.
 
 - `manager.go` — `Manager` and `New(cfg, opts...)`, which checks, in order, the `WithIdentity`
@@ -152,8 +152,8 @@ launchd on darwin, the service control manager on windows; no other GOOS has a d
   share: `execRunner`, whose allowlist is `systemctl`, `launchctl` and `id`, `exitCode`,
   `writeFileAtomic` and `checkAccount`.
 - `launchd.go`, `launchd_plist.go`, `launchd_status.go` — the launchd driver: the unexported
-  `launchd` struct with `Prepare`, `Install`, `Uninstall`, `Start` and `Stop`, the property list
-  rendering with the default log paths, and `Status`.
+  `launchd` struct with `Prepare`, `Install`, `Uninstall`, `Start`, `Stop`, `Restart` and
+  `CheckPrivileges`, the property list rendering with the default log paths, and `Status`.
 - `windows.go`, `scm_windows.go`, `scm_other.go` — the Windows driver. `windows.go` holds the
   driver, written against the unexported `scm` seam (`elevated`, `connect`, and the `scmManager`
   it returns) with `scmErrno` Win32 codes that an implementation wraps so the driver tells them
@@ -188,7 +188,7 @@ The systemd driver:
 
 - Scopes. A system unit lives in `/etc/systemd/system`, is driven by `systemctl`, is `WantedBy=
   multi-user.target` with `After=`/`Wants=network-online.target`, and `Install`, `Uninstall`,
-  `Start`, `Stop`, `Prepare` and `CheckPrivileges` need root (`ErrPrivilegesRequired`). A user unit lives in
+  `Start`, `Stop`, `Restart`, `Prepare` and `CheckPrivileges` need root (`ErrPrivilegesRequired`). A user unit lives in
   `$XDG_CONFIG_HOME/systemd/user` (default `$HOME/.config/systemd/user`), is driven by
   `systemctl --user`, is `WantedBy=default.target` with no network ordering, and needs no root;
   `Config.User` must be empty with `ScopeUser` on POSIX. `Type=simple` by default, `Type=notify`
@@ -202,8 +202,8 @@ The systemd driver:
   a running one, so `Install` also applies an update.
 - `Uninstall` with no unit file is `ErrNotInstalled`. A failing `disable --now` does not stop the
   removal of the unit file and the `daemon-reload`, and `Uninstall` then returns an error saying the
-  disable failed; data and the account stay. `Start` and `Stop` are `ErrNotInstalled` without a unit
-  file.
+  disable failed; data and the account stay. `Start`, `Stop` and `Restart` (`systemctl restart`,
+  which starts a stopped unit) are `ErrNotInstalled` without a unit file.
 - Escaping: values are escaped, never rejected.
 
   | Directive | Rule |
@@ -246,14 +246,16 @@ The Windows driver (ADR-0034): a service is created in the SCM with a single res
 action (5 s delay) answering a non-zero exit, which is why a supervisor under `WithWindowsService`
 exits non-zero for a requested restart (`WindowsRestartExitCode`) and the driver's `Status` reads
 that as starting. Every wait on the SCM (a service marked for deletion, a stopping service) is
-bounded by `windowsWaitTimeout` and polled every `windowsPollInterval`. Windows rules for `Config`
-(`User` as an account, `ScopeUser`, `WorkingDir`) live in `config.go` and `manager.go`.
+bounded by `windowsWaitTimeout` and polled every `windowsPollInterval`. `Restart` is `Stop`'s
+`stopAndWait`, which outlasts a recovery delay, followed by a start; a service not in the SCM is
+`ErrNotInstalled`. Windows rules for `Config` (`User` as an account, `ScopeUser`, `WorkingDir`)
+live in `config.go` and `manager.go`.
 
 The launchd driver:
 
 - Scopes. The label is `Config.Name`. `ScopeSystem` is a LaunchDaemon in the `system` domain,
   `/Library/LaunchDaemons/<Name>.plist`, with `UserName` from `Config.User` (root when empty);
-  `Prepare`, `Install`, `Uninstall`, `Start`, `Stop` and `CheckPrivileges` need root
+  `Prepare`, `Install`, `Uninstall`, `Start`, `Stop`, `Restart` and `CheckPrivileges` need root
   (`ErrPrivilegesRequired`). `ScopeUser` is a LaunchAgent in `gui/<uid>`, `$HOME/Library/LaunchAgents/<Name>.plist`, needing no
   root. A user service is an agent because only an agent reaches the user's Keychain; the `gui`
   domain exists only while the user is logged in to the GUI (not over ssh or `sudo -u`), and
@@ -269,8 +271,10 @@ The launchd driver:
   back.
 - `Stop` is `bootout` plus the unload wait, because `KeepAlive` relaunches a killed process; the job
   stays installed and enabled. `Start` is `kickstart` when the job is loaded and `bootstrap` when it
-  is not. `Uninstall` is `bootout`, `disable` and the plist removal; a failing `bootout` or `disable`
-  does not keep the plist, and the logs stay. `Start`, `Stop` and `Uninstall` without a plist are
+  is not; `Restart` is `kickstart -k` when it is loaded and the same `bootstrap` when it is not,
+  since a job `Stop` booted out is unloaded and `kickstart -k` fails on it. `Uninstall` is
+  `bootout`, `disable` and the plist removal; a failing `bootout` or `disable` does not keep the
+  plist, and the logs stay. `Start`, `Stop`, `Restart` and `Uninstall` without a plist are
   `ErrNotInstalled`; a missing `launchctl` is `ErrUnsupported`.
 - Exit codes: 113 is a service the domain does not hold, 3 (`ESRCH`) the same from `bootout` and
   older releases, and both count as not loaded; 5 (`EIO`) from `bootstrap` names a race with an

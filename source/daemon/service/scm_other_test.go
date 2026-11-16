@@ -45,6 +45,7 @@ func TestNewWindowsOnAnotherHostFailsEveryMethodUnsupported(t *testing.T) {
 		"Uninstall":       func() error { return m.Uninstall(ctx) },
 		"Start":           func() error { return m.Start(ctx) },
 		"Stop":            func() error { return m.Stop(ctx) },
+		"Restart":         func() error { return m.Restart(ctx) },
 		"CheckPrivileges": func() error { return m.CheckPrivileges(ctx) },
 		"Status": func() error {
 			st, err := m.Status(ctx)

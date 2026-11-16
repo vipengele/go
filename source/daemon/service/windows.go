@@ -667,6 +667,21 @@ func (w *windowsDriver) Stop(ctx context.Context) error {
 	})
 }
 
+// Restart stops the installed service as Stop does, outlasting a restart
+// delay, and then starts it. A stopped service is started; a service that is
+// running again by the time the start is sent counts as restarted.
+func (w *windowsDriver) Restart(ctx context.Context) error {
+	return w.controlled("Restart", func(_ scmManager, s scmService, _ func() error) error {
+		if err := w.stopAndWait(ctx, s); err != nil {
+			return fmt.Errorf("service: restart %s: %w", w.cfg.Name, err)
+		}
+		if err := s.start(); err != nil && !errors.Is(err, errSCMServiceAlreadyRunning) {
+			return fmt.Errorf("service: restart %s: start: %w", w.cfg.Name, err)
+		}
+		return nil
+	})
+}
+
 // Status reports the service as the SCM describes it. It needs no
 // elevation. A service the SCM does not hold is StateNotInstalled. A service
 // stopped with daemon.WindowsRestartExitCode is inside its recovery delay and

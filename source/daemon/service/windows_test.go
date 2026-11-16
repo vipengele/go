@@ -531,6 +531,7 @@ func TestWindowsMutatingMethodsNeedElevation(t *testing.T) {
 		"Uninstall": (*windowsDriver).Uninstall,
 		"Start":     (*windowsDriver).Start,
 		"Stop":      (*windowsDriver).Stop,
+		"Restart":   (*windowsDriver).Restart,
 	}
 	for name, call := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -573,6 +574,7 @@ func TestWindowsMethodsOfAMissingServiceAreNotInstalled(t *testing.T) {
 		"Uninstall": (*windowsDriver).Uninstall,
 		"Start":     (*windowsDriver).Start,
 		"Stop":      (*windowsDriver).Stop,
+		"Restart":   (*windowsDriver).Restart,
 	}
 	for name, call := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -636,6 +638,116 @@ func TestWindowsStopTimesOut(t *testing.T) {
 	f.stopPolls = 1 << 30
 	if err := w.Stop(t.Context()); err == nil || !strings.Contains(err.Error(), "not stopped") {
 		t.Fatalf("Stop = %v, want a timeout", err)
+	}
+}
+
+func TestWindowsRestartStopsThenStartsTheService(t *testing.T) {
+	w, f, sleeps := newTestWindows(demoWindowsConfig())
+	installed(f, scmStatus{State: scmRunning, ProcessID: 7})
+	f.stopPolls = 1
+	if err := w.Restart(t.Context()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	want := []string{"elevated", "connect control", "open demo", "query", "stop", "query", "query", "start", "close", "close manager"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls =\n%q\nwant\n%q", f.calls, want)
+	}
+	if *sleeps != 1 {
+		t.Errorf("slept %d times, want 1 while the service was stopping", *sleeps)
+	}
+	if f.st != (scmStatus{State: scmRunning, ProcessID: 4242}) || f.openHandles != 0 {
+		t.Errorf("status %+v with %d open handles, want the new process running and none open", f.st, f.openHandles)
+	}
+}
+
+func TestWindowsRestartStartsAStoppedService(t *testing.T) {
+	w, f, _ := newTestWindows(demoWindowsConfig())
+	installed(f, scmStatus{State: scmStopped})
+	if err := w.Restart(t.Context()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	want := []string{"elevated", "connect control", "open demo", "query", "start", "close", "close manager"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls =\n%q\nwant\n%q", f.calls, want)
+	}
+	if f.st.State != scmRunning {
+		t.Errorf("state %d, want running", f.st.State)
+	}
+}
+
+func TestWindowsRestartTakesARunningServiceAtStartAsRestarted(t *testing.T) {
+	w, f, _ := newTestWindows(demoWindowsConfig())
+	installed(f, scmStatus{State: scmStopped})
+	f.failOn("start", 0, errSCMServiceAlreadyRunning)
+	if err := w.Restart(t.Context()); err != nil {
+		t.Fatalf("Restart = %v, want nil when the service is already running at start", err)
+	}
+}
+
+func TestWindowsRestartInsideTheRestartDelayOutlastsItBeforeStarting(t *testing.T) {
+	w, f, sleeps := newTestWindows(demoWindowsConfig())
+	installed(f, restartCodeStop())
+	if err := w.Restart(t.Context()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	window := int((windowsRestartDelay + windowsRestartMargin) / windowsPollInterval)
+	if *sleeps != window {
+		t.Errorf("slept %d times, want %d, the restart delay plus the margin", *sleeps, window)
+	}
+	// One look, then one query per sleep of the delay, and only then the start.
+	want := []string{"elevated", "connect control", "open demo", "query"}
+	for range window + 1 {
+		want = append(want, "query")
+	}
+	want = append(want, "start", "close", "close manager")
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls =\n%q\nwant\n%q", f.calls, want)
+	}
+	if f.st.State != scmRunning {
+		t.Errorf("state %d, want running", f.st.State)
+	}
+}
+
+func TestWindowsRestartInsideTheRestartDelayStopsTheRelaunchThenStarts(t *testing.T) {
+	w, f, sleeps := newTestWindows(demoWindowsConfig())
+	installed(f, restartCodeStop())
+	f.relaunch = true
+	f.relaunchPolls = 3
+	if err := w.Restart(t.Context()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if f.relaunch {
+		t.Fatal("the recovery restart never fired")
+	}
+	// The first look and two queries inside the delay find it stopped with
+	// the restart code, the fourth finds the relaunch; the stop control is
+	// sent to it, a query sees it stopped, and the start follows.
+	want := []string{
+		"elevated", "connect control", "open demo",
+		"query", "query", "query", "query", "stop", "query", "start",
+		"close", "close manager",
+	}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("calls =\n%q\nwant\n%q", f.calls, want)
+	}
+	if *sleeps != 2 {
+		t.Errorf("slept %d times, want 2 inside the restart delay", *sleeps)
+	}
+	if f.st != (scmStatus{State: scmRunning, ProcessID: 4242}) {
+		t.Errorf("status %+v, want the started process running", f.st)
+	}
+}
+
+func TestWindowsRestartFailsWhenTheServiceDoesNotStop(t *testing.T) {
+	w, f, _ := newTestWindows(demoWindowsConfig())
+	installed(f, scmStatus{State: scmRunning, ProcessID: 7})
+	f.stopPolls = 1 << 30
+	err := w.Restart(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "restart demo") || !strings.Contains(err.Error(), "not stopped") {
+		t.Fatalf("Restart = %v, want a timeout naming restart", err)
+	}
+	if slices.Contains(f.calls, "start") {
+		t.Errorf("calls = %q, want no start after a stop that did not finish", f.calls)
 	}
 }
 
@@ -747,6 +859,7 @@ func TestWindowsStopResendsAStopTheServiceDidNotTake(t *testing.T) {
 func TestWindowsStopAndUninstallRetryAStopRefusedAsInvalidWhileStartPending(t *testing.T) {
 	for name, run := range map[string]func(*windowsDriver, context.Context) error{
 		"Stop":      (*windowsDriver).Stop,
+		"Restart":   (*windowsDriver).Restart,
 		"Uninstall": (*windowsDriver).Uninstall,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -993,6 +1106,10 @@ func TestWindowsMethodsReturnTheSCMsError(t *testing.T) {
 		{"Stop open", (*windowsDriver).Stop, &running, nil, "open", 0, "open demo:"},
 		{"Stop query", (*windowsDriver).Stop, &running, nil, "query", 0, "stop demo: query:"},
 		{"Stop query while stopping", (*windowsDriver).Stop, &running, nil, "query", 1, "stop demo: query:"},
+		{"Restart open", (*windowsDriver).Restart, &running, nil, "open", 0, "open demo:"},
+		{"Restart query", (*windowsDriver).Restart, &running, nil, "query", 0, "restart demo: query:"},
+		{"Restart stop", (*windowsDriver).Restart, &running, nil, "stop", 0, "restart demo: stop:"},
+		{"Restart start", (*windowsDriver).Restart, &running, nil, "start", 0, "restart demo: start:"},
 		{"Status open", windowsStatusCall, &running, nil, "open", 0, "status demo: service: open demo:"},
 		{"Status config", windowsStatusCall, &running, nil, "config", 0, "status demo: read config:"},
 		{"Status query", windowsStatusCall, &running, nil, "query", 0, "status demo: query:"},
@@ -1055,6 +1172,7 @@ func TestWindowsControlledMethodsNeedTheSCM(t *testing.T) {
 		"Uninstall": (*windowsDriver).Uninstall,
 		"Start":     (*windowsDriver).Start,
 		"Stop":      (*windowsDriver).Stop,
+		"Restart":   (*windowsDriver).Restart,
 	}
 	for name, call := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -1095,6 +1213,16 @@ func TestWindowsInstallTakesTheContextsEndWhileWaitingOutADeletion(t *testing.T)
 	}
 	if *sleeps != 1 || countCalls(f.calls, "create demo") != 1 {
 		t.Errorf("slept %d times over calls %q, want one create and one sleep", *sleeps, f.calls)
+	}
+}
+
+func TestWindowsRestartNeedsElevationNamingRestart(t *testing.T) {
+	w, f, _ := newTestWindows(demoWindowsConfig())
+	f.elevated = false
+	installed(f, scmStatus{State: scmRunning, ProcessID: 7})
+	err := w.Restart(t.Context())
+	if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "windows Restart of the service demo") {
+		t.Fatalf("Restart = %v, want ErrPrivilegesRequired naming Restart", err)
 	}
 }
 
