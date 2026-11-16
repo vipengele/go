@@ -32,7 +32,7 @@ linters:
           deny:
             - pkg: go.vipengele.org/
               desc: outside daemoncmd, daemon imports only cli/spec, cli/spec/paths and filelock among its siblings
-        selfupdate-imports-the-root-and-cli-state:
+        selfupdate-imports-the-root-cli-state-update-and-version:
           files:
             - "**/selfupdate/**"
           list-mode: lax
@@ -41,10 +41,14 @@ linters:
             - go.vipengele.org/daemon/service$
             - go.vipengele.org/daemon/httpserver$
             - go.vipengele.org/daemon/systemd$
+            - go.vipengele.org/daemon/daemontest$
             - go.vipengele.org/cli/spec$
             - go.vipengele.org/cli/spec/paths$
+            - go.vipengele.org/cli/spec/version$
             - go.vipengele.org/filelock$
             - go.vipengele.org/cli/state$
+            - go.vipengele.org/update$
+            - go.vipengele.org/update/updatetest$
           deny:
             - pkg: go.vipengele.org/
-              desc: selfupdate imports only daemon, daemon/service, daemon/httpserver, daemon/systemd, cli/spec, cli/spec/paths, cli/state and filelock among its siblings
+              desc: selfupdate imports only daemon, daemon/service, daemon/httpserver, daemon/systemd, daemon/daemontest, cli/spec, cli/spec/paths, cli/spec/version, cli/state, filelock, update and update/updatetest among its siblings
