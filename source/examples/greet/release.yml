@@ -1,0 +1,34 @@
+# The release workflow of the greet tool, as a tool keeps it in its own
+# .github/workflows/release.yml. It lives in the project directory so that it
+# never runs in this repository.
+#
+# A push of a `vX.Y.Z` tag calls release-tool.yml at the commit SHA of the tag
+# `source/update/vX.Y.Z`, the version of the tool's update require, which
+# builds from the committed .goreleaser.yaml, signs checksums.txt with the
+# minisign key and publishes the GitHub Release. The key is a secret of the
+# protected `release` environment, which only tag pushes reach; the called
+# build job resolves it there.
+
+# snippet:start release
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  release:
+    # GitHub checks every job of the called workflow against this grant when the
+    # run starts, and its publish job creates the release.
+    permissions:
+      contents: write
+    uses: vipengele/go/.github/workflows/release-tool.yml@415a61a829b6d2e615e0ca978023b315d7588904 # source/update/v0.1.0
+    with:
+      environment: release
+    secrets:
+      MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+
+# snippet:end
