@@ -20,7 +20,31 @@ const ExitUpdateAvailable = 10
 type Option func(*settings)
 
 // settings is what the [Option]s of one [Commands] call set.
-type settings struct{}
+type settings struct {
+	installed InstalledHook
+}
+
+// Applied is an update the `update` command has installed and not settled: the [*update.Installed]
+// whose backup still holds the previous binary, and the versions it went From and To.
+type Applied struct {
+	Installed *update.Installed
+	From, To  string
+}
+
+// InstalledHook receives an update the `update` command has installed, after the Config's
+// [update.PostUpdate] hooks have run. It owns the backup: the command neither discards nor rolls
+// back a.Installed, so the hook settles it, now or in a later process through a record of its own.
+// An error it returns is the command's, which then reports no success.
+type InstalledHook func(ctx context.Context, inv *spec.Invocation, a Applied) error
+
+// WithInstalled has the `update` command hand each update it installs to hook in place of
+// discarding the backup. A nil hook leaves the command discarding it; a later WithInstalled
+// replaces an earlier one.
+func WithInstalled(hook InstalledHook) Option {
+	return func(s *settings) {
+		s.installed = hook
+	}
+}
 
 // Commands returns the tool's `update` command, which updates the running executable as cfg
 // describes it. cfg is not validated here: a Config that does not resolve fails the run.
@@ -34,6 +58,7 @@ func Commands(cfg update.Config, opts ...Option) []*spec.Command {
 
 	c := &command{
 		cfg:            cfg,
+		installed:      s.installed,
 		check:          spec.BoolFlag("check", "report whether a newer release exists, without installing it"),
 		yes:            spec.BoolFlag("yes", "update without asking for confirmation", spec.Shorthand("y")),
 		to:             spec.StringFlag("to", "install this release version, such as v1.2.3, instead of the latest"),
@@ -74,6 +99,7 @@ below the highest version applied or running counts as up to date.`, name, ExitU
 // command is the `update` command of one Config: the Config and the handles of its flags.
 type command struct {
 	cfg            update.Config
+	installed      InstalledHook
 	check          *spec.FlagOf[bool]
 	yes            *spec.FlagOf[bool]
 	to             *spec.FlagOf[string]
@@ -248,14 +274,21 @@ func (c *command) update(ctx context.Context, inv *spec.Invocation, r update.Con
 		return err
 	}
 
-	// A hook failure leaves the update applied; it is reported and the update settled.
+	// A hook failure leaves the update applied; it is reported and the update stands.
 	if err := update.RunPostUpdate(r.PostUpdate, installed.Path()); err != nil {
 		inv.Warning("a post-update step failed: %v", err)
 	}
 
-	backup := installed.Backup()
-	if err := installed.Discard(); err != nil {
-		inv.Warning("the previous binary is left at %s: %v", backup, err)
+	// The hook owns the backup: discarding it here would take the rollback the hook may need.
+	if c.installed != nil {
+		if err := c.installed(ctx, inv, Applied{Installed: installed, From: r.Version, To: rel.Tag}); err != nil {
+			return err
+		}
+	} else {
+		backup := installed.Backup()
+		if err := installed.Discard(); err != nil {
+			inv.Warning("the previous binary is left at %s: %v", backup, err)
+		}
 	}
 
 	inv.Success("updated %s %s → %s", r.Name, r.Version, rel.Tag)

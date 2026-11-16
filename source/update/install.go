@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -38,11 +39,14 @@ var errNoStaged = errors.New("update: no staged binary to install")
 //  5. The staged file takes the executable's permission bits; setuid, setgid and sticky are not
 //     copied. This happens before any rename, so the binary never sits at the executable's path
 //     with the staged mode.
-//  6. The executable is renamed to its backup, the executable's path followed by ".old". A backup
+//  6. [Config.BackupGuard], when set, is asked whether the backup is in use, with a background
+//     context. A backup in use refuses the install with [ErrBackupInUse], and a guard that fails
+//     refuses it with the guard's error, wrapped.
+//  7. The executable is renamed to its backup, the executable's path followed by ".old". A backup
 //     already there is replaced.
-//  7. The staged file is renamed to the executable's path.
+//  8. The staged file is renamed to the executable's path.
 //
-// Nothing at the executable's path changes before step 6. When step 7 fails, the backup is renamed
+// Nothing at the executable's path or its backup changes before step 7. When step 8 fails, the backup is renamed
 // back first; when that fails too, the error is a [*RestoreError] whose Backup names the file
 // holding the previous binary. A failure the operating system reports as a lack of permission, at
 // any step that writes, is a [*PermissionError] carrying a hint for the user.
@@ -57,7 +61,8 @@ var errNoStaged = errors.New("update: no staged binary to install")
 // the new binary, but another hard link to the same file keeps the previous binary.
 //
 // The [*Installed] lives in memory alone. A backup left behind by a process that ended before
-// settling it is invisible to this package, and the next Install replaces it; on Windows, where
+// settling it is invisible to this package, and the next Install replaces it unless
+// [Config.BackupGuard] reports it in use; on Windows, where
 // Discard cannot remove the backup of the running executable, [Config.RemoveStaleBackup] removes
 // it once that process has exited, unless [Config.BackupGuard] reports it in use.
 func (c Config) Install(staged *Staged) (*Installed, error) {
@@ -66,6 +71,11 @@ func (c Config) Install(staged *Staged) (*Installed, error) {
 
 // install is [Config.Install] through s.
 func (c Config) install(staged *Staged, s fsSteps) (*Installed, error) {
+	return c.installWithin(context.Background(), staged, s)
+}
+
+// installWithin is [Config.Install] through s, asking [Config.BackupGuard] with ctx.
+func (c Config) installWithin(ctx context.Context, staged *Staged, s fsSteps) (*Installed, error) {
 	if staged == nil {
 		return nil, errNoStaged
 	}
@@ -114,6 +124,10 @@ func (c Config) install(staged *Staged, s fsSteps) (*Installed, error) {
 
 	backup := target + backupSuffix
 
+	if err := r.checkBackupGuard(ctx); err != nil {
+		return nil, abandon(err)
+	}
+
 	if err := s.rename(target, backup); err != nil {
 		return nil, abandon(fsError("rename", target, err))
 	}
@@ -134,6 +148,26 @@ func (c Config) install(staged *Staged, s fsSteps) (*Installed, error) {
 	}
 
 	return &Installed{path: target, backup: backup, goos: r.GOOS, steps: s}, nil
+}
+
+// checkBackupGuard returns nil when c has no [Config.BackupGuard] or the guard reports the backup
+// not in use, an error wrapping [ErrBackupInUse] when it reports it in use, and the guard's own
+// error, wrapped, when it fails.
+func (c Config) checkBackupGuard(ctx context.Context) error {
+	if c.BackupGuard == nil {
+		return nil
+	}
+
+	inUse, err := c.BackupGuard.BackupInUse(ctx)
+	if err != nil {
+		return fmt.Errorf("update: check whether the backup is in use: %w", err)
+	}
+
+	if inUse {
+		return fmt.Errorf("%w: settle the pending update before installing another", ErrBackupInUse)
+	}
+
+	return nil
 }
 
 // checkStagedDir returns nil when the directory of the staged file name, its symbolic links

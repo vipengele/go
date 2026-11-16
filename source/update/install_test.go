@@ -960,3 +960,91 @@ func TestInstalledPathFeedsPostUpdate(t *testing.T) {
 		t.Errorf("hook read %q, want %q", seen, "new")
 	}
 }
+
+func TestInstallRefusesABackupInUseBeforeAnyRename(t *testing.T) {
+	t.Parallel()
+
+	fx := newInstallFixture(t)
+	name := fx.staged.Name()
+	backup := fx.exe + ".old"
+
+	if err := os.WriteFile(backup, []byte("pending"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fx.config.BackupGuard = &stubGuard{inUse: true}
+
+	var log stepLog
+
+	inst, err := fx.config.install(fx.staged, loggedSteps(&log))
+	if inst != nil {
+		t.Errorf("install Installed = %v, want nil", inst)
+	}
+
+	if !errors.Is(err, ErrBackupInUse) {
+		t.Fatalf("install = %v, want one matching ErrBackupInUse", err)
+	}
+
+	for _, call := range log.list() {
+		if strings.HasPrefix(call, "rename ") {
+			t.Errorf("steps = %q, want no rename", log.list())
+			break
+		}
+	}
+
+	if got := readFile(t, fx.exe); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+
+	if got := readFile(t, backup); got != "pending" {
+		t.Errorf("backup holds %q, want %q", got, "pending")
+	}
+
+	assertMissing(t, name)
+}
+
+func TestInstallRefusesWhenTheBackupGuardFails(t *testing.T) {
+	t.Parallel()
+
+	fx := newInstallFixture(t)
+	name := fx.staged.Name()
+	cause := errors.New("corrupt record")
+	fx.config.BackupGuard = &stubGuard{err: cause}
+
+	_, err := fx.config.Install(fx.staged)
+	if !errors.Is(err, cause) {
+		t.Fatalf("Install = %v, want one matching %v", err, cause)
+	}
+
+	if got := readFile(t, fx.exe); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
+	}
+
+	assertMissing(t, name)
+	assertMissing(t, fx.exe+".old")
+}
+
+func TestInstallWithABackupNotInUseReplacesIt(t *testing.T) {
+	t.Parallel()
+
+	fx := newInstallFixture(t)
+	guard := &stubGuard{}
+	fx.config.BackupGuard = guard
+
+	if err := os.WriteFile(fx.exe+".old", []byte("stale"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	inst, err := fx.config.Install(fx.staged)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if guard.ctx == nil {
+		t.Error("guard was not asked, want it asked before the rename")
+	}
+
+	if got := readFile(t, inst.Backup()); got != "old" {
+		t.Errorf("backup holds %q, want %q", got, "old")
+	}
+}
