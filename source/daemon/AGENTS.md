@@ -396,6 +396,11 @@ install, kill, reinstall, crash loop and uninstall through `service.New`. Read i
   `update.Config` with `BackupGuard` set to the Machine and passing it both to `NewUpdate` and to
   the pre-run `RemoveStaleBackup` hook of `UpdateCheckHooks`; `NewUpdate` sets the guard on its own
   copy and cannot enforce this.
+  `daemoncmd/example_test.go` (`Example_selfUpdate`) wires the whole flow: the shared Config, `NewUpdate`,
+  `WithUpdateGuard` and a Runner that stands in for `Machine.Apply` with an error of the shape
+  Apply returns (wrapping `ErrRestartRequired`), so `Run` ends with `RestartRequested` and the
+  process exits 0. A real Apply needs a signed release served over HTTP, so
+  `selfupdate/apply_test.go` exercises it, including the Supervisor case.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by

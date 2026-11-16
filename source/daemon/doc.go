@@ -128,6 +128,20 @@
 // Windows service control manager, so the update is confirmed only by a run that started, and
 // neither notification waits for it. A Confirm that fails is logged and the run goes on.
 //
+// # Self-update
+//
+// A daemon that updates its own binary builds one go.vipengele.org/update Config with BackupGuard
+// set to a *selfupdate.Machine, and shares it. The update command, daemoncmd.NewUpdate, installs
+// a release, records it with Machine.Begin and restarts the service. A Runner that updates in
+// process calls Machine.Apply and returns its error, which wraps ErrRestartRequired, so Run ends
+// with a requested restart and the process exits 0 for its service supervisor to start the
+// installed binary. The Supervisor, built with WithUpdateGuard(machine), has Boot judge each boot
+// of the updated build, rolling it back when it is out of attempts, and Confirm the update once
+// the run is up. The same Config goes to the pre-run hooks of Config.UpdateCheckHooks, so a
+// stale-backup removal keeps the backup of a pending update. Example_selfUpdate in daemoncmd wires
+// the Config, the command, the pre-run hooks and the Supervisor, with a Runner that returns an
+// error of the shape Machine.Apply returns.
+//
 // # Supervisor detection
 //
 // UnderSupervisor reports whether the process was started as a service by systemd, launchd or the
