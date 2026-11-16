@@ -161,7 +161,7 @@ func NewRunner[T any](
 		return nil, fmt.Errorf("selfupdate: %w", err)
 	}
 
-	c := &cycle{cfg: cfg, machine: machine, apply: applyWithHook}
+	c := &cycle{cfg: cfg, machine: machine, install: configApply}
 	sched, err := newRunner(c.run, cfg.Target, settings, opts...)
 	if err != nil {
 		return nil, err

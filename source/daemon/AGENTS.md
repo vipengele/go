@@ -144,16 +144,19 @@ golangci-lint run
   as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
   backup binary before it records `rolled_back`; `rollback_windows.go` moves the running binary
   aside instead of overwriting it. Versions compare with a leading `v` ignored on both sides.
-  `apply.go` holds `(*Machine).Apply`: it sets the Config's `BackupGuard` to the Machine, runs
-  `update.Config.Apply`, records the update with `Begin` (rolling the install back when that
-  fails), runs the post-update hooks and logs their failure, logs a warning when
-  `daemon.UnderSupervisor` is false, and returns an error wrapping `ErrRestartRequired` alone.
-  `WithLogger` and `WithSupervisorCheck` (label and environment lookup) are its options. Tests that
-  run a real Apply never call `t.Parallel` (a forked staged binary fails with `ETXTBSY`) and compare
-  the installed bytes with `updatetest.ReleaseExecutable`. The Runner's cycle records the update
-  pending instead from the `update.BeforeInstall` hook (ADR-0035), before the swap: `Machine.Begin`
-  runs there, and `Machine.Abandon` settles it as `rolled_back` when the install then fails with
-  the executable as it was (`ErrNoPendingUpdate`, `ErrUpdateRunning`). `NewRunner[T]` (`cycle.go`)
+  `apply.go` holds `(*Machine).Apply`, the one apply path, which the Runner's cycle calls too: it
+  records the update pending with `Begin` from an `update.BeforeInstall` hook (ADR-0035), before
+  the swap, and gives `update.Config.Apply` a call-scoped `BackupGuard` (`applyGuard`) that answers
+  as the Machine until that `Begin` succeeds and then does not count its own record, so the
+  install is not refused while every other Config guarded by the Machine stays refused. A refused
+  `Begin` (`ErrUpdatePending`) installs nothing; an install failing after `Begin` is settled with
+  `Abandon` (`ErrNoPendingUpdate`, `ErrUpdateRunning`), unless it is an `*update.RestoreError`,
+  which stays pending for `Boot`. On success it runs the post-update hooks and logs their failure,
+  logs a warning when `daemon.UnderSupervisor` is false, and returns an error wrapping
+  `ErrRestartRequired` alone. `WithLogger` and `WithSupervisorCheck` (label and environment lookup)
+  are its options; its unexported `apply` takes the `installFunc` seam tests use to fake an install.
+  Tests that run a real Apply never call `t.Parallel` (a forked staged binary fails with `ETXTBSY`)
+  and compare the installed bytes with `updatetest.ReleaseExecutable`. `NewRunner[T]` (`cycle.go`)
   returns the `Runner[T]`, a `daemon.Runner` and `Reloader[T]` that checks on a schedule
   (`runner.go`, the scheduler; `jitter.go`; `settings.go`, the `interval` and `auto_apply` keys;
   `options.go`, `RunnerOption`, with `WithRunnerLogger` and `WithRunnerClock`) and ends with an

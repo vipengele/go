@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -171,14 +170,25 @@ func newApplyMachine(t *testing.T, store Store, opts ...Option) (*Machine, *sync
 	return m, buf
 }
 
-func TestApplyRecordsThePendingUpdateAndAsksForARestart(t *testing.T) {
+func TestApplyRecordsThePendingUpdateBeforeTheSwapAndAsksForARestart(t *testing.T) {
 	f := newApplyFixture(t)
-	store := NewFileStore(recordPath(t))
+	store := &observingStore{Store: NewFileStore(recordPath(t))}
 	m, buf := newApplyMachine(t, store)
+
+	var atRecord []byte
+	store.observe(func(rec Record) {
+		if rec.Status == StatusPending {
+			atRecord = readBytes(t, f.exe)
+		}
+	})
 
 	err := m.Apply(t.Context(), f.cfg, f.sel)
 	if !daemon.RestartRequested(err) {
 		t.Fatalf("Apply error = %v, want one for which RestartRequested is true", err)
+	}
+
+	if string(atRecord) != "old" {
+		t.Errorf("executable when pending was stored = %q, want the previous binary %q", atRecord, "old")
 	}
 
 	backup := f.exe + ".old"
@@ -275,28 +285,35 @@ func TestApplyLogsAFailedPostUpdateHookWithoutJoiningIt(t *testing.T) {
 	}
 }
 
-// failingUpdateStore is an idle fakeStore whose Update runs before and then fails with err,
-// storing nothing.
-type failingUpdateStore struct {
-	fakeStore
+// wantNothingInstalled fails t unless the executable of f still holds "old", with no backup and no
+// staged file beside it.
+func (f applyFixture) wantNothingInstalled(t *testing.T) {
+	t.Helper()
 
-	before func()
-	err    error
-}
-
-func (s *failingUpdateStore) Update(context.Context, func(Record) (Record, error)) error {
-	if s.before != nil {
-		s.before()
+	if got := readBytes(t, f.exe); string(got) != "old" {
+		t.Errorf("executable holds %q, want the previous binary %q", got, "old")
 	}
 
-	return s.err
+	entries, err := os.ReadDir(filepath.Dir(f.exe))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+
+	if len(entries) != 1 || entries[0].Name() != applyName {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+
+		t.Errorf("executable's directory holds %q, want only %q", names, applyName)
+	}
 }
 
-func TestApplyRollsBackWhenBeginFails(t *testing.T) {
+func TestApplyWhoseBeginFailsInstallsNothing(t *testing.T) {
 	f := newApplyFixture(t)
 
 	errStore := errors.New("disk full")
-	store := &failingUpdateStore{err: errStore}
+	store := &fakeStore{updateErr: errStore}
 	m, _ := newApplyMachine(t, store)
 
 	err := m.Apply(t.Context(), f.cfg, f.sel)
@@ -308,50 +325,242 @@ func TestApplyRollsBackWhenBeginFails(t *testing.T) {
 		t.Errorf("RestartRequested(%v) = true, want false", err)
 	}
 
-	if got := readBytes(t, f.exe); string(got) != "old" {
-		t.Errorf("executable holds %q, want the previous binary %q", got, "old")
-	}
-
-	if _, err := os.Stat(f.exe + ".old"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("Stat(backup) error = %v, want ErrNotExist", err)
-	}
+	f.wantNothingInstalled(t)
 
 	if got := load(t, store); got != (Record{}) || store.writeCount() != 0 {
 		t.Errorf("record = %+v after %d writes, want no record stored", got, store.writeCount())
 	}
 }
 
-func TestApplyNamesTheBackupWhenTheRollbackFailsToo(t *testing.T) {
+func TestApplyWhoseBeginFindsAnotherUpdatePendingInstallsNothing(t *testing.T) {
 	f := newApplyFixture(t)
+	store := NewFileStore(recordPath(t))
+	m, buf := newApplyMachine(t, store)
 
-	backup := f.exe + ".old"
-	errStore := errors.New("disk full")
-	store := &failingUpdateStore{
-		err: errStore,
-		// Without the backup, the rename that rolls the install back fails.
-		before: func() {
-			if err := os.Remove(backup); err != nil {
-				t.Errorf("Remove(backup): %v", err)
-			}
+	// Another process records its own update once this Apply has passed its guard and staged the
+	// binary.
+	other := pendingRecord()
+	f.cfg.Preflight = []update.Preflight{
+		func(ctx context.Context, _ update.StagedBinary) error {
+			return store.Update(ctx, put(other))
 		},
 	}
-	m, _ := newApplyMachine(t, store)
 
 	err := m.Apply(t.Context(), f.cfg, f.sel)
-	if err == nil {
-		t.Fatal("Apply error = nil, want the record and rollback failures")
-	}
-
-	if !errors.Is(err, errStore) || !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("Apply error = %v, want it to carry the store's error and the rollback's ErrNotExist", err)
-	}
-
-	if !strings.Contains(err.Error(), backup) {
-		t.Errorf("Apply error = %q, want it to name the backup %q", err, backup)
+	if !errors.Is(err, ErrUpdatePending) {
+		t.Fatalf("Apply error = %v, want ErrUpdatePending", err)
 	}
 
 	if daemon.RestartRequested(err) {
 		t.Errorf("RestartRequested(%v) = true, want false", err)
+	}
+
+	f.wantNothingInstalled(t)
+
+	if got := load(t, store); got != other {
+		t.Errorf("record = %+v, want the other update %+v unchanged", got, other)
+	}
+
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("log = %q, want no warning", buf.String())
+	}
+}
+
+func TestApplyAbandonsAnInstallFailingAfterBegin(t *testing.T) {
+	f := newApplyFixture(t)
+	store := &observingStore{Store: NewFileStore(recordPath(t))}
+	m, _ := newApplyMachine(t, store)
+
+	// Once pending is stored, the executable resolves to a file in another directory, so Install
+	// refuses the staged binary before it renames anything.
+	elsewhere := filepath.Join(t.TempDir(), applyName)
+	if err := os.WriteFile(elsewhere, []byte("old"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var (
+		mu  sync.Mutex
+		exe = f.exe
+	)
+	f.cfg.Executable = func() (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return exe, nil
+	}
+	store.observe(func(rec Record) {
+		if rec.Status == StatusPending {
+			mu.Lock()
+			defer mu.Unlock()
+			exe = elsewhere
+		}
+	})
+
+	err := m.Apply(t.Context(), f.cfg, f.sel)
+	if err == nil || daemon.RestartRequested(err) {
+		t.Fatalf("Apply error = %v, want the install's failure", err)
+	}
+
+	got := load(t, store)
+	if got.Status != StatusRolledBack || got.ToVersion != newVersion || !strings.Contains(got.Reason, newVersion) {
+		t.Errorf("record = %+v, want rolled_back for %s with a reason naming it", got, newVersion)
+	}
+
+	f.wantNothingInstalled(t)
+}
+
+// failAfterBegin is an installFunc that resolves the target, calls beforeInstall with its plan and
+// then, when that succeeds, runs between and fails with the error it returns, renaming nothing.
+func failAfterBegin(between func(ctx context.Context, plan update.InstallPlan) error) installFunc {
+	return func(
+		ctx context.Context,
+		cfg update.Config,
+		sel update.Selection,
+		beforeInstall func(context.Context, update.InstallPlan) error,
+		_ ...update.ApplyOption,
+	) (*update.Installed, error) {
+		target, err := cfg.Target()
+		if err != nil {
+			return nil, err
+		}
+
+		plan := update.InstallPlan{Target: target, Backup: target + ".old", Version: sel.Tag}
+		if err := beforeInstall(ctx, plan); err != nil {
+			return nil, err
+		}
+
+		return nil, between(ctx, plan)
+	}
+}
+
+func TestApplyLeavesTheUpdatePendingAfterARestoreError(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := NewFileStore(recordPath(t))
+	m, _ := newApplyMachine(t, store)
+
+	// No real install fails its restore on demand.
+	install := failAfterBegin(func(_ context.Context, plan update.InstallPlan) error {
+		return &update.RestoreError{
+			Path:       plan.Target,
+			Backup:     plan.Backup,
+			Err:        errors.New("rename staged: refused"),
+			RestoreErr: errors.New("rename backup: refused"),
+		}
+	})
+
+	err := m.apply(t.Context(), f.cfg, f.sel, install)
+
+	var restoreErr *update.RestoreError
+	if !errors.As(err, &restoreErr) {
+		t.Fatalf("apply error = %v, want a *update.RestoreError", err)
+	}
+
+	if got := load(t, store); got.Status != StatusPending || got.ToVersion != newVersion || got.Target != f.exe {
+		t.Errorf("record = %+v, want pending for %s at %s", got, newVersion, f.exe)
+	}
+}
+
+func TestApplyJoinsAFailedAbandonOntoTheInstallsError(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := NewFileStore(recordPath(t))
+	m, _ := newApplyMachine(t, store)
+
+	// Another process settles the pending record between Begin and the failure of the install.
+	errRename := errors.New("rename staged: refused")
+	install := failAfterBegin(func(ctx context.Context, _ update.InstallPlan) error {
+		other, err := New(store, oldVersion)
+		if err != nil {
+			return err
+		}
+
+		if err := other.Abandon(ctx, "settled elsewhere"); err != nil {
+			return err
+		}
+
+		return errRename
+	})
+
+	err := m.apply(t.Context(), f.cfg, f.sel, install)
+	if !errors.Is(err, errRename) || !errors.Is(err, ErrNoPendingUpdate) {
+		t.Fatalf("apply error = %v, want the install's error and ErrNoPendingUpdate", err)
+	}
+
+	if got := load(t, store); got.Status != StatusRolledBack || got.Reason != "settled elsewhere" {
+		t.Errorf("record = %+v, want rolled_back by the other process", got)
+	}
+}
+
+func TestApplyKeepsEveryOtherConfigGuardedByTheMachineRefused(t *testing.T) {
+	f := newApplyFixture(t)
+	store := &observingStore{Store: NewFileStore(recordPath(t))}
+	m, _ := newApplyMachine(t, store)
+
+	other := f.cfg
+	other.BackupGuard = m
+
+	var refusedWhilePending error
+	store.observe(func(rec Record) {
+		if rec.Status == StatusPending {
+			_, refusedWhilePending = other.Apply(t.Context(), f.sel)
+		}
+	})
+
+	if err := m.Apply(t.Context(), f.cfg, f.sel); !daemon.RestartRequested(err) {
+		t.Fatalf("Apply error = %v, want one for which RestartRequested is true", err)
+	}
+
+	if !errors.Is(refusedWhilePending, update.ErrBackupInUse) {
+		t.Errorf("other Apply while pending = %v, want ErrBackupInUse", refusedWhilePending)
+	}
+
+	store.observe(nil)
+
+	if _, err := other.Apply(t.Context(), f.sel); !errors.Is(err, update.ErrBackupInUse) {
+		t.Errorf("other Apply after the install = %v, want ErrBackupInUse", err)
+	}
+}
+
+func TestApplyGuardAnswersAsTheMachineUntilItsBeginSucceeds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		rec   Record
+		began bool
+		want  bool
+	}{
+		{name: "idle before Begin", rec: Record{}, want: false},
+		{name: "another update pending before Begin", rec: pendingRecord(), want: true},
+		{name: "its own update pending after Begin", rec: pendingRecord(), began: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			m, _ := newApplyMachine(t, &fakeStore{rec: tt.rec})
+			g := &applyGuard{m: m}
+			g.began.Store(tt.began)
+
+			got, err := g.BackupInUse(t.Context())
+			if err != nil || got != tt.want {
+				t.Errorf("BackupInUse() = %v, %v; want %v, nil", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyGuardReportsTheMachinesError(t *testing.T) {
+	t.Parallel()
+
+	errLoad := errors.New("unreadable")
+	m, _ := newApplyMachine(t, &fakeStore{loadErr: errLoad})
+
+	if _, err := (&applyGuard{m: m}).BackupInUse(t.Context()); !errors.Is(err, errLoad) {
+		t.Errorf("BackupInUse() error = %v, want %v", err, errLoad)
 	}
 }
 

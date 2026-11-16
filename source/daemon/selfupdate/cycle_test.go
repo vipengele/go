@@ -166,15 +166,17 @@ func newCycleEnv(t *testing.T, o envOptions) *cycleEnv {
 		Preflight:   o.preflight,
 	}
 
+	// The Machine logs to the Runner's logger, so a check's records include those of Machine.Apply,
+	// and counts as supervised, so a successful install warns of nothing.
+	logger := slog.New(captureHandler{mu: &e.logMu, records: &e.records})
 	e.store = &observingStore{Store: NewFileStore(e.storePath)}
-	m, err := New(e.store, o.version)
+	m, err := New(e.store, o.version, WithLogger(logger), WithSupervisorCheck("", supervised))
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.machine = m
 
 	clock := newArmingClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
-	logger := slog.New(captureHandler{mu: &e.logMu, records: &e.records})
 	settings := Settings{AutoApply: o.autoApply}
 	r, err := NewRunner(e.cfg, m, settings, func(s Settings) Settings { return s },
 		WithRunnerLogger(logger), WithRunnerClock(clock))
@@ -239,18 +241,6 @@ func (e *cycleEnv) logged(level slog.Level, msg string) record {
 		e.t.Fatalf("%q logged at %v, want %v", msg, found[0].level, level)
 	}
 	return found[0]
-}
-
-// notLogged fails the test if any record was logged with msg.
-func (e *cycleEnv) notLogged(msg string) {
-	e.t.Helper()
-	e.logMu.Lock()
-	defer e.logMu.Unlock()
-	for _, rec := range e.records {
-		if rec.msg == msg {
-			e.t.Errorf("logged %q at %v, want no such record", msg, rec.level)
-		}
-	}
 }
 
 // noWarnings fails the test if any record was logged at Warn or above.
@@ -539,8 +529,10 @@ func TestCycleInstallFailingAfterTheHookAbandonsTheUpdate(t *testing.T) {
 
 	e.runSwallowed()
 
-	e.logged(slog.LevelWarn, msgApplyFailed)
-	e.notLogged(msgAbandonFailed)
+	failed := e.logged(slog.LevelWarn, msgApplyFailed)
+	if err, ok := failed.attrs["err"].Any().(error); !ok || errors.Is(err, ErrNoPendingUpdate) {
+		t.Errorf("err attr = %v, want the install's failure with no failed abandon", failed.attrs["err"])
+	}
 	rec := e.record()
 	if rec.Status != StatusRolledBack || rec.ToVersion != newerVersion || rec.Reason == "" {
 		t.Errorf("record = %+v, want rolled_back for %s with a reason", rec, newerVersion)
@@ -565,28 +557,15 @@ func TestCycleRestoreErrorLeavesTheUpdatePending(t *testing.T) {
 	e := newCycleEnv(t, envOptions{autoApply: true})
 
 	// The executable's path may hold no binary after a *RestoreError, which no real install
-	// produces on demand; the apply calls the hook and then fails with one.
-	e.r.check.apply = func(
-		ctx context.Context,
-		r update.Config,
-		sel update.Selection,
-		beforeInstall func(context.Context, update.InstallPlan) error,
-	) (*update.Installed, error) {
-		target, err := r.Target()
-		if err != nil {
-			return nil, err
-		}
-		plan := update.InstallPlan{Target: target, Backup: target + ".old", Version: sel.Tag}
-		if err := beforeInstall(ctx, plan); err != nil {
-			return nil, err
-		}
-		return nil, &update.RestoreError{
-			Path:       target,
+	// produces on demand; the install calls the hook and then fails with one.
+	e.r.check.install = failAfterBegin(func(_ context.Context, plan update.InstallPlan) error {
+		return &update.RestoreError{
+			Path:       plan.Target,
 			Backup:     plan.Backup,
 			Err:        errors.New("rename staged: refused"),
 			RestoreErr: errors.New("rename backup: refused"),
 		}
-	}
+	})
 
 	e.runSwallowed()
 
@@ -836,36 +815,24 @@ func TestCycleInstallFailingAfterAnotherProcessSettledTheRecordWarns(t *testing.
 	e := newCycleEnv(t, envOptions{autoApply: true})
 
 	// Another process settles the pending record between the hook and the failure of the install,
-	// so the check finds nothing pending to abandon.
-	e.r.check.apply = func(
-		ctx context.Context,
-		r update.Config,
-		sel update.Selection,
-		beforeInstall func(context.Context, update.InstallPlan) error,
-	) (*update.Installed, error) {
-		target, err := r.Target()
-		if err != nil {
-			return nil, err
-		}
-		if err := beforeInstall(ctx, update.InstallPlan{Target: target, Backup: target + ".old", Version: sel.Tag}); err != nil {
-			return nil, err
-		}
+	// so Machine.Apply finds nothing pending to abandon.
+	errRename := errors.New("rename staged: refused")
+	e.r.check.install = failAfterBegin(func(ctx context.Context, _ update.InstallPlan) error {
 		other, err := New(NewFileStore(e.storePath), runningVersion)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := other.Abandon(ctx, "settled elsewhere"); err != nil {
-			return nil, err
+			return err
 		}
-		return nil, errors.New("rename staged: refused")
-	}
+		return errRename
+	})
 
 	e.runSwallowed()
 
-	e.logged(slog.LevelWarn, msgApplyFailed)
-	rec := e.logged(slog.LevelWarn, msgAbandonFailed)
-	if err, ok := rec.attrs["err"].Any().(error); !ok || !errors.Is(err, ErrNoPendingUpdate) {
-		t.Errorf("err attr = %v, want ErrNoPendingUpdate", rec.attrs["err"])
+	rec := e.logged(slog.LevelWarn, msgApplyFailed)
+	if err, ok := rec.attrs["err"].Any().(error); !ok || !errors.Is(err, errRename) || !errors.Is(err, ErrNoPendingUpdate) {
+		t.Errorf("err attr = %v, want the install's failure and ErrNoPendingUpdate", rec.attrs["err"])
 	}
 	if got := e.record(); got.Status != StatusRolledBack || got.Reason != "settled elsewhere" {
 		t.Errorf("record = %+v, want rolled_back by the other process", got)

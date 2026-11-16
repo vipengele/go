@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"time"
 
 	"go.vipengele.org/cli/spec/version"
 	"go.vipengele.org/daemon"
@@ -24,12 +23,7 @@ const (
 	msgCheckFailed      = "self-update check failed"
 	msgApplyFailed      = "self-update install failed"
 	msgRestorePending   = "self-update install failed and the previous binary was not restored; the update stays pending for the next boot"
-	msgAbandonFailed    = "self-update install failed and its pending record could not be settled"
 )
-
-// abandonTimeout bounds the Abandon that settles a failed install, which runs even when the
-// check's own context has ended.
-const abandonTimeout = 30 * time.Second
 
 var (
 	_ update.BackupGuard   = (*Machine)(nil)
@@ -46,14 +40,18 @@ var (
 //   - Asks the Source for the latest release of the Channel. No release (update.ErrNoRelease), or
 //     none newer than the running version, is logged at Debug.
 //   - With AutoApply off, logs "update available" at Info and downloads nothing.
-//   - With AutoApply on, applies the release. Once the staged binary has passed every check and
-//     before the executable is swapped, the Machine records the update pending, from the running
-//     version to the release, with the target and its backup; when another update is pending by
-//     then, the install is skipped and logged at Info. A successful install keeps the backup for
-//     the Machine's rollback and ends the Runner with an error matching daemon.ErrRestartRequired.
-//   - An install that fails after the pending record was written is abandoned in the Machine, so a
-//     later check may retry it, unless it failed with an *update.RestoreError: the executable may
-//     then hold no binary, and the record stays pending for the next boot to judge.
+//   - With AutoApply on, applies the release with Machine.Apply. Once the staged binary has passed
+//     every check and before the executable is swapped, the Machine records the update pending,
+//     from the running version to the release, with the target and its backup; when another update
+//     is pending by then, the install is skipped and logged at Info. A successful install keeps the
+//     backup for the Machine's rollback and ends the Runner with the error of Machine.Apply, which
+//     matches daemon.ErrRestartRequired; the post-update hooks and the supervisor check of
+//     Machine.Apply log through the Machine's logger.
+//   - An install that fails after the pending record was written is abandoned by Machine.Apply, so
+//     a later check may retry it, and logged at Warn with any failure of the abandon joined on,
+//     unless it failed with an *update.RestoreError: the executable may then hold no binary, the
+//     record stays pending for the next boot to judge, and the failure is logged at Warn with the
+//     backup under "backup".
 //
 // Every other failure, a refusal by Apply included, is logged at Warn and the next check is
 // scheduled as usual; a check ended by its timeout or by Stop is logged at Debug with the context's
@@ -145,31 +143,14 @@ func (r *Runner[T]) Reload(_ context.Context, cfg T) error {
 	return nil
 }
 
-// applyFunc applies sel through r, calling beforeInstall as update.BeforeInstall does.
-type applyFunc func(
-	ctx context.Context,
-	r update.Config,
-	sel update.Selection,
-	beforeInstall func(context.Context, update.InstallPlan) error,
-) (*update.Installed, error)
-
-// applyWithHook is the applyFunc of update.Config.Apply.
-func applyWithHook(
-	ctx context.Context,
-	r update.Config,
-	sel update.Selection,
-	beforeInstall func(context.Context, update.InstallPlan) error,
-) (*update.Installed, error) {
-	return r.Apply(ctx, sel, update.BeforeInstall(beforeInstall))
-}
-
 // cycle is one check of a Runner, over the Config of the binary and the Machine that records its
 // updates. sched is the scheduler that calls it, which holds its logger and the current Settings.
 type cycle struct {
 	cfg     update.Config
 	machine *Machine
 	sched   *runner
-	apply   applyFunc
+	// install is the installFunc the Machine's Apply runs.
+	install installFunc
 }
 
 // run checks for a newer release and, when AutoApply is on, installs it, as Runner describes. It
@@ -221,49 +202,21 @@ func (c *cycle) run(ctx context.Context) error {
 		return nil
 	}
 
-	began := false
-	installed, err := c.apply(ctx, r, sel, func(ctx context.Context, plan update.InstallPlan) error {
-		if err := c.machine.Begin(ctx, Pending{
-			FromVersion: r.Version,
-			ToVersion:   plan.Version,
-			Target:      plan.Target,
-			Backup:      plan.Backup,
-		}); err != nil {
-			return err
-		}
-		began = true
-		return nil
-	})
+	err = c.machine.apply(ctx, r, sel, c.install)
 
 	var restoreErr *update.RestoreError
 	switch {
-	case err == nil:
-		return fmt.Errorf("selfupdate: installed %s at %s, backup kept at %s: %w",
-			rel.Tag, installed.Path(), installed.Backup(), daemon.ErrRestartRequired)
-	case !began && errors.Is(err, ErrUpdatePending):
+	case daemon.RestartRequested(err):
+		return err
+	case errors.Is(err, ErrUpdatePending):
 		c.log(ctx, slog.LevelInfo, msgBeginPending, runnerAttr, currentAttr, latestAttr)
-	case !began:
-		c.fail(ctx, msgApplyFailed, err, runnerAttr, latestAttr)
 	case errors.As(err, &restoreErr):
 		c.fail(ctx, msgRestorePending, err, runnerAttr, latestAttr, slog.String("backup", restoreErr.Backup))
 	default:
 		c.fail(ctx, msgApplyFailed, err, runnerAttr, latestAttr)
-		c.abandon(ctx, rel.Tag, err, runnerAttr, latestAttr)
 	}
 
 	return nil
-}
-
-// abandon settles the record of an install of tag that failed with cause after it was recorded
-// pending. It runs on a context of its own, bounded by abandonTimeout, so that a check whose
-// context has ended still settles the record; a failure is logged at Warn.
-func (c *cycle) abandon(ctx context.Context, tag string, cause error, attrs ...slog.Attr) {
-	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonTimeout)
-	defer cancel()
-
-	if err := c.machine.Abandon(actx, fmt.Sprintf("installing %s failed: %v", tag, cause)); err != nil {
-		c.log(ctx, slog.LevelWarn, msgAbandonFailed, append(attrs, slog.Any("err", err))...)
-	}
 }
 
 // fail logs err with msg: at Warn, or at Debug with the context's cause once ctx has ended, by the

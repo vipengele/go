@@ -61,3 +61,9 @@ install, `recordApplied` and its `HighestApplied` watermark, are unexported.
   any file.
 - **The watermark rises as for any `Apply`.** A successful install with a hook raises
   `HighestApplied` to the installed tag.
+- **Every daemon self-update records through the hook.** `selfupdate.Machine.Apply` and the
+  scheduled `Runner`, which installs through it, both run `Begin` from a `BeforeInstall` hook. The
+  `BackupGuard` that `Machine.Apply` gives `Apply` is scoped to that one call: it answers as the
+  Machine until the call's own `Begin` succeeds and then does not count that pending record, so the
+  guard `Install` asks before its renames does not refuse the install the record describes. Every
+  other `Config` carries the Machine itself and stays refused while the update is pending.
