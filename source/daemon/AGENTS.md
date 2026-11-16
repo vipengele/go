@@ -51,14 +51,21 @@ golangci-lint run
   `WithHTTPName` and `DefaultHTTPOrder`; it serves TLS with `ServeTLS` when the server's
   `TLSConfig` is non-nil, and `Start` fails with `ErrNoCertificate` when that config carries no
   certificate (`Certificates`, `GetCertificate` or `GetConfigForClient`).
+- `update_guard.go` — `UpdateGuard` (`Boot`, `Confirm`), the interface `*selfupdate.Machine`
+  satisfies, so the root `daemon` never imports `selfupdate`, and the `Run` steps of
+  `WithUpdateGuard`: `bootUpdate` after the instance lock and the SIGHUP subscription and before
+  the first `Start`, returning Boot's error or, for a rollback, an error wrapping
+  `ErrRestartRequired` alone (an error beside a rollback is logged, never joined, since a join
+  makes `RestartRequested` false), and `confirmUpdate` in `wait` after `READY=1`, `serviceReady`
+  and the watchdog, whose error is logged. Tests: `update_guard_test.go`.
 - `restart.go` — `RestartRequested`, true only when every leaf of an error is `ErrRestartRequired`
   and none is a `*PanicError`.
 - `reload.go` — `Reloader[T]`, the optional Runner interface for applying a new configuration, and
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
   the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam), `WithSystemd` and
-  `WithWindowsService`. Tests: `systemd_test.go`.
+  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam), `WithSystemd`,
+  `WithWindowsService` and `WithUpdateGuard`. Tests: `systemd_test.go`.
 - `windows_service.go` — `WithWindowsService`'s behaviour: `Run` serves under the Windows service
   control manager when the process runs as a service, and exits with `WindowsRestartExitCode` for a
   requested restart and `WindowsFailureExitCode` for every other ending the SCM did not ask for
