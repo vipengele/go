@@ -1,0 +1,77 @@
+{
+ "unit": "update-core:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "GitHub token follows a same-host https-to-http redirect and is sent in cleartext",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/update/githubauth.go:71",
+    "source/update/githubauth.go:109",
+    "source/update/githubauth.go:132"
+   ],
+   "description": "The API client decides whether to attach `Authorization: Bearer <token>` and whether to follow a redirect by comparing the host only (`sameHost(req.URL.Host, apiHost)`). The scheme is never compared. A redirect from `https://<api-host>/...` to `http://<api-host>/...` is therefore followed, and the wrapping transport adds the token to the plain-HTTP request, where anyone on the path can read it. ADR-0028 promises the token is \"kept to the API host\"; that holds literally, but the transport-security downgrade is not considered. The trigger has to come from the API host itself (or a proxy answering for it, e.g. a misconfigured GHES front end), since an on-path attacker cannot forge the HTTPS response. That is why this is low.",
+   "evidence": "githubauth.go:71-74 `if !sameHost(req.URL.Host, apiHost) { return &CrossHostRedirectError{...} }` and githubauth.go:110 `if t.token == \"\" || !sameHost(req.URL.Host, t.host)`; `sameHost` is `strings.EqualFold(host, apiHost)`.\n\nReproduced with an external test (outside the repo): `GitHubSource{APIURL: \"https://api.example.com\", Token: ->\"SECRET\"}` over a fake RoundTripper that answers the https request with `302 Location: http://api.example.com/plain`. `Latest(ctx, update.Beta)` produced these requests:\n`https://api.example.com/repos/o/r/releases?per_page=100&page=1 auth=Bearer SECRET`\n`http://api.example.com/plain auth=Bearer SECRET`",
+   "suggestion": "Record the APIURL scheme alongside the host. In `CheckRedirect`, refuse a redirect whose scheme is weaker than the APIURL's (https to http). In `tokenTransport.RoundTrip`, attach the token only when both scheme and host match."
+  },
+  {
+   "title": "A signed older release replayed under a newer tag passes Download and CheckDowngrade; only Apply's preflight stops it",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    "source/update/download.go:118",
+    "source/update/downgrade.go:33",
+    "source/update/asset/asset.go:10",
+    "source/update/asset/asset.go:13",
+    "source/update/apply.go:96",
+    "source/update/apply.go:117"
+   ],
+   "description": "Nothing `Download` verifies is bound to the release tag. The minisign signature covers the checksums file, and the archive is looked up in it by asset name. The default names, `{name}_{os}_{arch}.{ext}` and `checksums.txt`, carry no version, so the `checksums.txt`, `checksums.txt.minisig` and archive of any older genuine release are a valid signed set for every later tag.\n\n`CheckDowngrade` compares the floor against `sel.Tag`, which is the claimed tag from the redirect Location or API JSON, not anything signed. Someone who can publish or substitute release assets without the signing key (the threat ADR-0024 targets), or who controls the download host or path (HTTPS is not enforced), can present old vulnerable assets under a tag above the floor. `Download` then returns a \"verified\" archive and `CheckDowngrade` passes.\n\nIn `Apply` the replay is caught only at step 7, by executing the replayed binary and reading its self-reported version. A caller composing the exported steps (Download, Extract, Install), which doc.go and ADR-0029 present as supported, has no protection unless it also calls `CheckStaged`. ADR-0024 says \"Downgrade and replay are not covered\" and ADR-0027 says it settles that, but the watermark only settles a truthful tag.",
+   "evidence": "download.go:118 `want, err := parseChecksum(bytes.NewReader(sums), sel.Archive.Name)`: the only link between signed data and the selection is the asset name.\nasset/asset.go:10 `DefaultTemplate = \"{name}_{os}_{arch}.{ext}\"` and :13 `DefaultChecksumsTemplate = \"checksums.txt\"`: neither contains `{version}` or `{tag}`.\ndowngrade.go:33-35 `floor := downgradeFloor(st.HighestApplied, r.Version); if version.Newer(tag, floor) {...}`: `tag` is the unsigned claim.\n\nSequence: installed v1.5.0; attacker serves a release tagged v9.0.0 whose three assets are byte-for-byte those of v1.0.0. `CheckDowngrade(\"v9.0.0\")` returns nil, the signature verifies with the trusted key, the digest matches, and `Download` returns the archive. `Extract` then `Install` would install v1.0.0. Only `checkStaged` (apply.go:117) refuses, after running the v1.0.0 binary.",
+   "suggestion": "Bind the tag to the signed data. For example, require the minisign trusted comment (already authenticated) or a signed line in the checksums file to name the tag, and have `Download` compare it with `sel.Tag`. At minimum, document on `Download`, `Install` and `CheckDowngrade` that a caller composing the steps must run `CheckStaged`, and consider making the default asset names carry `{version}`."
+  },
+  {
+   "title": "Response-cache file is fully re-read and re-written for every API page and never evicts entries",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/update/githubcache.go:74",
+    "source/update/githubcache.go:87",
+    "source/update/github.go:372",
+    "source/update/github.go:405",
+    "source/update/github.go:315"
+   ],
+   "description": "`fileCache` keeps every entry in one JSON file, with each body base64-encoded (`Body []byte`). `Get` loads and decodes the whole file to return one entry. `Put` loads and decodes the whole file again, then re-encodes and rewrites all of it. `apiGet` calls `Get` once and `Put` once per request, and the Beta/Edge lookup makes up to 10 page requests, each with its own entry of up to 32 MiB.\n\nA lookup that reads P pages therefore does 2P full decodes and P full rewrites of a file holding all P pages: work and peak memory grow quadratically with pages, on the background check that runs beside every command and has a 250 ms exit budget.\n\nEntries are keyed by URL and never removed, so pages a repository no longer reaches, or URLs for a previous APIURL or repo, stay in the file and are re-parsed and rewritten forever.",
+   "evidence": "githubcache.go:74-83 `f, err := within(ctx, c.reader()) ... r, ok := f.Entries[url]`: full file load for one key.\ngithubcache.go:90-99 `f, err := read() ... f.Entries[url] = r; return struct{}{}, write(f)`: full load plus full rewrite per Put.\ngithub.go:372 `cached, hit := s.cacheGet(ctx, rawURL)` and :405-407 `s.Cache.Put(ctx, rawURL, *fresh)` run once per page inside the `for pages < maxListPages` loop (github.go:315-336).\n\nWith ten 2 MB pages the file is about 27 MB of base64 JSON. One lookup decodes it about 20 times and writes it 10 times.",
+   "suggestion": "Store one file per entry (for example named by a hash of the URL) so Get and Put touch only that entry, or load the file once per `Latest` call and write it once at the end. Drop entries not touched by the current lookup, or cap the file size."
+  },
+  {
+   "title": "Remote response bodies are embedded unescaped in error text",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/update/errors.go:56",
+    "source/update/github.go:556",
+    "source/update/download.go:299"
+   ],
+   "description": "`StatusError.Error()` appends up to 1 KiB of the raw response body with `%s`. The body comes from whichever server answered a non-200: the asset host after any redirect chain (HTTPS is not enforced for downloads), or the API or web host. It is cut only on a UTF-8 boundary; control characters are kept. The update command prints this error to the user's terminal, so a hostile or intermediary server can inject ANSI/OSC escape sequences (rewrite preceding lines, set the title, plant hyperlinks) or multi-line text imitating tool output. No sanitising helper exists under `source/cli`, `source/update` or `source/commons`.",
+   "evidence": "errors.go:61 `return fmt.Sprintf(\"update: GET %s: unexpected status %d: %s\", e.URL, e.StatusCode, e.Body)`.\ngithub.go:557-559 `body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1)); return newStatusError(rawURL, resp.StatusCode, string(body))`.\ndownload.go:299 `return statusError(asset.URL, resp)` for any non-200 asset response.\n\nInput: a 403 whose body is `\\x1b[2K\\x1b[1A\\x1b[2Kupdate complete\\n` is reproduced verbatim in the error string.",
+   "suggestion": "Sanitise the kept body in `newStatusError`: replace C0/C1 control characters, ESC included, and collapse newlines, or render it with `%q`. Keep the raw bytes out of `Error()` if callers need them."
+  },
+  {
+   "title": "Start reads the state file on every command before the gates that need no state",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/update/background.go:73",
+    "source/update/background.go:77",
+    "source/update/check.go:108"
+   ],
+   "description": "`Config.Start` runs from the pre-run hook of every command. It calls `StateStore.Load` first and only then evaluates `eligibility`. Five of the six gates (dev build, CI, no terminal, disabled, opted out) need nothing from the state; only the throttle does. Every invocation in CI, with output piped, with `<PREFIX>_NO_UPDATE_CHECK` set, or of a dev build still pays for a goroutine spawn (`within`), an open/read of `update-state.json` and a JSON decode on the command's critical path. That path is bounded only by the command's context, so a slow or hung state directory (network home) delays commands that will never check.",
+   "evidence": "background.go:73-79:\n`st, err := r.StateStore.Load(ctx)`\n`if err != nil { st = State{} }`\n`if eligibility(checkInputsFrom(r, st)) != checkEligible { return nil, nil }`\n\ncheck.go:108-121 evaluates `!version.IsRelease(in.Version)`, `in.InCI`, `!in.Terminal`, `in.Disabled`, `in.OptedOut` before the only state-dependent case, `!throttleElapsed(in.LastAttempt, ...)`.",
+   "suggestion": "Evaluate the state-independent gates first and return a nil `*Check` before touching the StateStore; load the state only for the throttle gate and the notice."
+  }
+ ]
+}

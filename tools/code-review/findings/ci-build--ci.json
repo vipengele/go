@@ -1,0 +1,167 @@
+{
+ "unit": "ci-build:ci",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "Dependabot bumps in any sibling that has dependents can never pass ci-build: the tidy gate fails in every dependent",
+   "category": "ci",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/ci-build.yml:77",
+    ".github/actions/changed-projects/action.yml:121",
+    ".gt-repo.yaml:23",
+    "source/daemon/go.mod:10",
+    "source/cli/core/go.mod:16"
+   ],
+   "description": "Siblings are consumed through directory replaces, so a dependent's go.mod/go.sum must list the max version of every third-party module its replaced siblings require. Dependabot is configured per directory (.gt-repo.yaml / .github/dependabot.yml) and bumps one project's go.mod only. changed-projects then (correctly) selects the dependents, and ci-build's `go mod tidy; git diff --exit-code -- go.mod go.sum` fails in each dependent because tidy raises the indirect version there. The build stage fails, test is skipped, ci-gate is red, and dependabot-auto-merge can never merge the PR. Every dependency update (including security updates) to commons, config, cli/state, cli/spec or filelock therefore needs a human to hand-edit the dependents' go.mod/go.sum on the Dependabot branch. Nothing in the repo (ADR-0006, dependabot config, a group, a follow-up tidy job) accounts for this.",
+   "evidence": "Three open Dependabot PRs are stuck on exactly this. PR #197 (x/sys 0.49.0 -> 0.50.0 in /source/filelock): check runs `build / build (filelock)` success, `build / build (daemon)` failure, `build / build (update)` failure, `test` skipped, `ci-gate` failure. Job log of build (daemon), step 'go.mod and go.sum are tidy':\n  -\tgolang.org/x/sys v0.49.0 // indirect\n  +\tgolang.org/x/sys v0.50.0 // indirect\n  ...go.sum diff...\n  ##[error]Process completed with exit code 1.\nPR #175 (yaml 3.0.5 -> 3.0.6 in /source/config, open since 2026-11-07): `build / build (config)` success, `build / build (cli/core)` failure, ci-gate failure. PR #174 (same bump in /source/cli/state) is open for the same reason. source/cli/core/go.mod:16 carries `go.yaml.in/yaml/v3 v3.0.5 // indirect` and replaces config and cli/state by directory; source/daemon/go.mod:10 carries `golang.org/x/sys v0.49.0 // indirect` and replaces filelock.",
+   "suggestion": "Make the bump land in all affected modules at once: e.g. a Dependabot `groups`/multi-directory (`directories:`) gomod entry so one PR updates every project, or a workflow that runs `go mod tidy` in the dependents of a Dependabot PR and pushes the result, or document the manual step and exclude these PRs from the auto-merge expectation."
+  },
+  {
+   "title": "changed-projects misses the project a file is moved out of (rename detection hides the old path)",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    ".github/actions/changed-projects/action.yml:94",
+    ".github/actions/changed-projects/action.yml:111"
+   ],
+   "description": "The changed-file list is `git diff --name-only \"$base\" HEAD`. Git's rename detection is on by default, and with --name-only a renamed file is reported under its new path only. A file moved from project A to project B (or from a project to somewhere outside source/) therefore selects B (or nothing), never A, although A lost a file and may no longer compile or pass its tests. A and its dependents are not built, linted or tested; when the destination is outside every project, preflight emits run-build=false/run-test=false and ci-gate passes with both stages skipped.",
+   "evidence": "Reproduced with the action's script extracted verbatim, in a scratch repo with projects commons, config and cli/spec (cli/spec requires commons):\n- `git mv source/commons/b.go source/config/b.go` -> script prints `changed files: source/config/b.go` and `projects=[\"config\"]` (commons and its dependent cli/spec are not selected).\n- `git mv source/config/b.go docs/b.go.txt` -> `changed files: docs/b.go.txt`, `projects=[]`, which ci-preflight.yml:54-56 turns into both stages skipped.",
+   "suggestion": "Use `git diff --name-only --no-renames \"$base\" HEAD` (or `--name-status` and take both sides of R/C entries) so the source path of a move is listed as a deletion and selects its project."
+  },
+  {
+   "title": "changed-projects selects nothing for files whose path git quotes (non-ASCII names), so CI is skipped for such a change",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    ".github/actions/changed-projects/action.yml:94",
+    ".github/actions/changed-projects/action.yml:97",
+    ".github/actions/changed-projects/action.yml:111"
+   ],
+   "description": "`git diff --name-only` applies core.quotePath (default true): a path containing a non-ASCII byte, a double quote, a backslash or a control character is printed C-quoted, starting with `\"` and with octal escapes. The script then filters with `grep -E '^source/'` and the shared-file regex anchored at `^`, neither of which matches a line starting with a quote. A change that touches only such files in a project (a testdata fixture with an accented or CJK name, a Go file with a non-ASCII name) selects no project; preflight skips build and test and ci-gate passes vacuously. This contradicts the action's own rule that an unknown diff must not skip a project.",
+   "evidence": "Reproduced with the extracted script: after committing `source/commons/testdata/tëst.txt` and `source/commons/ünï.go` the script prints\n  changed files:\n    \"source/commons/testdata/t\\303\\253st.txt\"\n    \"source/commons/\\303\\274n\\303\\257.go\"\nand writes `projects=[]`. The same change with an ASCII name (`source/commons/testdata/a b.txt`) yields `projects=[\"cli/spec\",\"commons\"]`.",
+   "suggestion": "Run the diff as `git -c core.quotePath=false diff --name-only -z ...` and split on NUL (jq --raw-input with `split(\"\\u0000\")`), or at minimum pass `-c core.quotePath=false`."
+  },
+  {
+   "title": "verify-sibling-deps does not run when no project is selected, so a release-notes-only PR can put a project into strict mode with its replaces still in place and break CI for every later PR",
+   "category": "ci",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/ci-build.yml:50",
+    ".github/workflows/ci-orchestration.yml:94",
+    ".github/workflows/ci-preflight.yml:54",
+    ".github/actions/verify-sibling-deps/action.yml:15"
+   ],
+   "description": "verify-sibling-deps is documented as reading the repository's files and tags \"never from a diff, so every event answers the same\", and its mode switch is driven by docs/release-notes/<project>/v*.md. But the action is only invoked from ci-build's detect job, and the whole build stage is skipped when preflight reports no affected project. A change under docs/release-notes/ touches no project, so changed-projects returns [] and verify-sibling-deps never evaluates the strict mode the PR itself introduces. The PR merges green. From then on the check, which runs across the whole repo, fails in every PR that selects any project (including unrelated ones and all Dependabot PRs) until the notes are removed or the project is released. The strict-mode guarantee ADR-0006 describes (\"it is on from the moment the notes land\") is thus not enforced at the moment the notes land.",
+   "evidence": "Simulated on a copy of the tree: adding only `docs/release-notes/update/v0.1.0.md` makes the changed-projects script print `changed files: docs/release-notes/update/v0.1.0.md` and `projects=[]` (-> run-build=false, ci-orchestration.yml:94 skips build, the only caller of verify-sibling-deps at ci-build.yml:50). Running the verify script on that same tree exits 1 with eight errors such as `replace of go.vipengele.org/cli/spec -> ../cli/spec: update is in strict mode (release notes v0.1.0 have no tag)` and `go.vipengele.org/commons v0.0.0 has no tag source/commons/v0.0.0`.",
+   "suggestion": "Run verify-sibling-deps unconditionally (e.g. in ci-preflight, which always runs), or make changed-projects select project <path> when docs/release-notes/<path>/** changes."
+  },
+  {
+   "title": "Third-party reusable workflows are referenced by a moving major tag and receive write tokens, OIDC and the bot App private key",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/ci-orchestration.yml:57",
+    ".github/workflows/ci-orchestration.yml:137",
+    ".github/workflows/ci-orchestration.yml:145",
+    ".github/workflows/ci-orchestration.yml:160",
+    ".github/workflows/ci-orchestration.yml:181",
+    ".github/workflows/dependabot-auto-merge.yml:28",
+    ".github/workflows/dependabot-auto-merge.yml:36",
+    ".github/workflows/gt-lydite-clearance.yml:22",
+    ".github/workflows/gt-sync.yml:25"
+   ],
+   "description": "Every first-party action in scope is pinned to a commit SHA (and the SHAs match the commented versions), but all seven calls into `pedromvgomes/gt/.github/workflows/reusable-*.yml` use the mutable tag `@v2`, in a repository under a different owner than vipengele. Whoever can move that tag (or compromises that account) changes, with no change or review in this repository: the code that decides whether the pipeline is skipped (attest), the code that merges Dependabot PRs with `contents: write` + `pull-requests: write` and receives `APP_CLIENT_ID`/`APP_PRIVATE_KEY`, the baseline job with `contents: write` on main, the weekly sync with `contents: write` + `pull-requests: write`, and the `issue_comment`-triggered clearance job (runs on any comment by anyone, with `statuses: write` + `id-token: write`; the authorisation of the commenter lives entirely in the callee) that publishes the required `lydite/referral` status. The repo's own comment confirms the design: gt-sync.yml:10-11 \"Because the callers pin a moving major tag ... gate logic changes need no file change at all\". No ADR in docs/adr records this trade-off.",
+   "evidence": "`uses: pedromvgomes/gt/.github/workflows/reusable-attest.yml@v2` (ci-orchestration.yml:57), `...reusable-dependabot-auto-merge.yml@v2` with `secrets: APP_CLIENT_ID / APP_PRIVATE_KEY` and workflow permissions `contents: write, pull-requests: write` (dependabot-auto-merge.yml:22-38), `...reusable-lydite-clearance.yml@v2` on `issue_comment: [created]` with `statuses: write, pull-requests: write, id-token: write` (gt-lydite-clearance.yml:14-27), `...reusable-sync.yml@v2` with `contents: write, pull-requests: write` (gt-sync.yml:19-25). `git ls-remote --tags https://github.com/pedromvgomes/gt` shows refs/tags/v2 and refs/tags/v2.1.1 at the same commit 34a438e, i.e. v2 is re-pointed on each release. By contrast actions/checkout, setup-go, setup-node and golangci-lint-action are all SHA-pinned.",
+   "suggestion": "Pin the reusable workflows to a full commit SHA (Dependabot's github-actions ecosystem updates SHA-pinned reusable workflow refs with a version comment), or record the accepted risk in an ADR and protect the v2 tag in the gt repository with a tag ruleset."
+  },
+  {
+   "title": "ci-tools is not part of ci-gate, so its 'fails before it merges' claim is not enforced",
+   "category": "ci",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/ci-tools.yml:10",
+    ".github/workflows/ci-tools.yml:15",
+    ".github/workflows/ci-orchestration.yml:193"
+   ],
+   "description": "ci-tools.yml is a separate, path-filtered `pull_request` workflow. It is not one of ci-gate's `needs`, and ci-orchestration.yml states branch protection requires exactly one check, ci-gate (ADR-0033 repeats: \"Only ci-gate is required ... path-filtered like ci-tools.yml\"). For a change under tools/** changed-projects selects nothing, so the gt CI build and test stages skip and ci-gate is green regardless of ci-tools' outcome. The vanity-worker typecheck, build and the `publish-modules --dry-run` schema validation are therefore advisory: a PR (including an auto-merged Dependabot npm bump for /tools/vanity-worker, or a new source/**/go.mod whose path the module-list schema rejects) can merge with ci-tools red. The workflow also has no merge_group trigger. This contradicts the file's own header, \"a project path outside the list's schema fails them before it merges\", and ADR-0016's \"Checked on every pull request\".",
+   "evidence": "ci-tools.yml:14-20 `on: pull_request: paths: ['tools/**', 'source/**/go.mod', '.github/workflows/ci-tools.yml']`; ci-orchestration.yml:193 `needs: [attest, preflight, build, test, conventional-commits, governance, lydite]` (no tools job); ci-orchestration.yml:8 \"Branch protection requires exactly one check: \\\"ci-gate\\\".\"; docs/adr/0033 line 97 \"The self-test is not a merge gate. Only `ci-gate` is required\". Only the vitest suite is covered indirectly, by the lydite `vanity-worker` component.",
+   "suggestion": "Call the tools checks from a stage of the orchestrator (e.g. a job in ci-build or a new stage gated by a tools/** / go.mod path check inside the job) so ci-gate waits on them, instead of a separately triggered path-filtered workflow."
+  },
+  {
+   "title": "The agentic rule says a /v2 project is supported, but verify-sibling-deps fails its module path, its replace and its tagged require",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    ".github/actions/verify-sibling-deps/action.yml:89",
+    ".github/actions/verify-sibling-deps/action.yml:139",
+    ".github/actions/verify-sibling-deps/action.yml:152",
+    ".github/actions/changed-projects/action.yml:20"
+   ],
+   "description": "agentic/rules/module-path-matches-the-vanity-map.md (rendered into CLAUDE.md's rule set) states: \"A major version v2 or above: the module path gains a /v2 suffix after the path (go.vipengele.org/<path>/v2) and the tag stays source/<path>/v2.0.0\", and changed-projects explicitly resolves `cli/v2` to `cli` by longest prefix. verify-sibling-deps has no such lookup: it compares the module line with exactly `go.vipengele.org/<dir>`, maps a required sibling path to `source/<path>/v2` for both the replace target and the tag name. Following the rule therefore fails the required check three ways. ADR-0006's Consequences section records this limitation, so the action is behaving as decided; the rule and the CLAUDE.md Layout text (which describe the v2 form as valid without caveat) are what is wrong, and the two actions disagree with each other.",
+   "evidence": "Reproduced with the extracted script against a scratch repo holding tag `source/commons/v2.0.0`, `module go.vipengele.org/commons/v2` in source/commons, one dependent with `replace go.vipengele.org/commons/v2 => ../commons` and one requiring `go.vipengele.org/commons/v2 v2.0.0` unreplaced:\n  ::error file=source/app/go.mod::replace of go.vipengele.org/commons/v2 -> ../commons resolves to source/commons; a sibling is replaced only by its own project directory source/commons/v2\n  ::error file=source/cli/spec/go.mod::go.vipengele.org/commons/v2 v2.0.0 has no tag source/commons/v2/v2.0.0 ...\n  ::error file=source/commons/go.mod::module path is go.vipengele.org/commons/v2, expected go.vipengele.org/commons\nwhile changed-projects on the same tree outputs `[\"app\",\"cli/spec\",\"commons\"]` (edges resolved).",
+   "suggestion": "Either teach verify-sibling-deps the same longest-prefix owner lookup and strip a trailing /vN (N>=2) from the module path, or state in the rule and CLAUDE.md that a /v2 module is not yet accepted by verify-sibling-deps and release.yml (ADR-0006)."
+  },
+  {
+   "title": "The tidy gate does not notice a go.sum that is missing from the commit",
+   "category": "ci",
+   "severity": "low",
+   "locations": [
+    ".github/workflows/ci-build.yml:77"
+   ],
+   "description": "The step runs `go mod tidy` then `git diff --exit-code -- go.mod go.sum`. `git diff` compares tracked files only, so when a project has dependencies but its go.sum is not committed (new project, or go.sum deleted), tidy creates an untracked go.sum and the diff is empty: the step passes although tidy changed the tree. The freshly created go.sum then also lets the later lint, vet and build steps of the same job succeed. The omission is only caught by ci-test (which does not tidy), so the build stage's \"go.mod and go.sum are tidy\" result is vacuous for this case, contrary to CLAUDE.md (\"CI fails when this changes go.mod or go.sum\").",
+   "evidence": "On a copy of the tree with source/filelock/go.sum removed from git: `GOWORK=off go mod tidy; git diff --exit-code -- go.mod go.sum; echo $?` prints `0`, and `git status --short .` shows `?? go.sum`.",
+   "suggestion": "Check with `git status --porcelain -- go.mod go.sum` (fail on any output), or `git add -N go.sum` before the diff."
+  },
+  {
+   "title": "\"CI never reads go.work\" does not hold for ci-preflight: the go command there selects its toolchain from go.work",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    ".github/workflows/ci-preflight.yml:40",
+    ".github/actions/changed-projects/action.yml:126",
+    "go.work:1"
+   ],
+   "description": "CLAUDE.md (Layout: \"go.work ... CI never reads it (ADR-0006)\") and ci-build.yml's header say go.work never decides whether CI passes. ci-build.yml and ci-test.yml set `GOWORK: \"off\"` at workflow level, but ci-preflight.yml does not, and it runs changed-projects, which calls `go mod edit -json` from the repository root with the runner image's preinstalled Go (no setup-go). With GOWORK unset the go command finds the root go.work and applies its `go` directive for toolchain selection: when the directive is newer than the runner's Go it downloads that toolchain before running, and fails if it cannot. A go.work change also selects no project, so nothing else would flag it. The preflight stage's result thus depends on go.work and on the network, and a failing preflight fails ci-gate.",
+   "evidence": "On a copy of the tree with go.work's directive changed to a version newer than the local toolchain, the extracted changed-projects script run without GOWORK fails: `go: downloading go1.99.0 (linux/amd64)` / `go: download go1.99.0 for linux/amd64: toolchain not available`, exit 1, no `projects=` output. The same run with GOWORK=off succeeds and prints `projects=[]`.",
+   "suggestion": "Set `GOWORK: \"off\"` (and ideally `GOTOOLCHAIN: local`) in ci-preflight.yml, or inside both composite actions' `env`, so they behave the same wherever they are called."
+  },
+  {
+   "title": "No check that a project is registered in .lydite/components.yml, .gt-repo.yaml and go.work",
+   "category": "feature-gap",
+   "severity": "low",
+   "locations": [
+    ".lydite/components.yml:20",
+    ".gt-repo.yaml:20",
+    "go.work:3",
+    ".github/actions/verify-sibling-deps/action.yml:65"
+   ],
+   "description": "CLAUDE.md lists three manual registrations for a new project (a lydite component, a Dependabot gomod entry followed by `gt repo sync`, a `use` line in go.work) and ADR-0006 requires \"go.work lists every project\". Nothing in the scoped CI compares these lists with `find source -name go.mod`: verify-sibling-deps enumerates every go.mod but only checks module path, nesting and sibling requires, and ci-tools only validates the vanity module list. A project added without a component is built and tested by ci-build/ci-test but silently escapes lydite's coverage gate and govulncheck scan, and one without a Dependabot entry gets no dependency updates. The three lists are consistent today (8 projects each); the gap is that drift would pass every check.",
+   "evidence": "verify-sibling-deps/action.yml:65 builds `gomods` from `find source -name go.mod` and the loop at :77-163 never reads .lydite/components.yml, .gt-repo.yaml or go.work; grep for `components.yml` and `go.work` across .github/ finds only comments.",
+   "suggestion": "Add a step to verify-sibling-deps (or a small sibling action) that fails when the set of source/**/go.mod directories differs from the `dir:` entries under source/ in .lydite/components.yml, the gomod directories in .gt-repo.yaml and the `use` lines of go.work."
+  },
+  {
+   "title": "Licence allow-list widened repo-wide for npm dev tooling",
+   "category": "ci",
+   "severity": "low",
+   "locations": [
+    ".lydite/config.yml:3"
+   ],
+   "description": "The comment says LGPL-3.0-or-later, MPL-2.0, 0BSD and CC0-1.0 arrive only through wrangler and vitest/vite dev tooling of tools/vanity-worker and that nothing of them ships. The `licence.policy.allow` list they were added to is the single policy for the whole repository, so the same licences are now also accepted for a dependency of any released Go library under source/ (where an LGPL-3.0 or MPL-2.0 module would ship to consumers), and the gate would not flag it.",
+   "evidence": ".lydite/config.yml:1-17: one top-level `licence: policy: allow: [Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0, LGPL-3.0-or-later, MPL-2.0, 0BSD, CC0-1.0]` with no per-component or per-ecosystem scoping, preceded by the comment restricting the rationale to the Worker's dev dependencies.",
+   "suggestion": "If lydite supports it, scope the copyleft/weak-copyleft entries to the vanity-worker component (or to dev dependencies); otherwise note in the comment that the Go projects are covered by the same list and must be reviewed by hand for these licences."
+  },
+  {
+   "title": ".gt.yaml setup template pipes an install script from a mutable branch into sh",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    ".gt.yaml:7"
+   ],
+   "description": "The gt clone/worktree setup template installs agtk, when absent, with `curl -fsSL https://raw.githubusercontent.com/pedromvgomes/agentic-toolkit/main/install.sh | sh`. The script is fetched from the tip of `main` of another owner's repository with no version or checksum and executed on every contributor machine that sets up the repo without agtk already installed, followed by `agtk sync`, which resolves refs over the network. This is developer-machine setup rather than CI, but it is the same unpinned third-party execution pattern the workflows otherwise avoid by SHA-pinning.",
+   "evidence": ".gt.yaml:6-7: `command -v agtk >/dev/null 2>&1 || \\\\\\n  curl -fsSL https://raw.githubusercontent.com/pedromvgomes/agentic-toolkit/main/install.sh | sh`",
+   "suggestion": "Fetch the installer from a release tag or commit SHA and verify a checksum, or require agtk to be preinstalled and fail with a message instead of installing it implicitly."
+  }
+ ]
+}

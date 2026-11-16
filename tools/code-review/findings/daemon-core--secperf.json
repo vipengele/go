@@ -1,0 +1,73 @@
+{
+ "unit": "daemon-core:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "status command writes check names and error text from the HTTP response to the terminal without neutralising escape sequences",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    "source/daemon/daemoncmd/status.go:199-204",
+    "source/daemon/daemoncmd/status.go:107",
+    "source/cli/spec/table/table.go:133-146"
+   ],
+   "description": "daemoncmd's text rendering puts `c.Name` and `c.Error` from the fetched /status body straight into table cells. The table only maps tab, newline and carriage return to a space; ESC, BEL and other C0/C1 control characters pass through to `inv.Env.Stdout`. A check's error text is routinely built from downstream data (a dependency's error message, a response body fragment), and the daemon at the resolved URL may itself be remote, so whoever can influence a check error or answer on that URL can inject terminal control sequences into the operator's terminal: retitle the window, clear the screen and repaint a fake \"ok\" table, or on some terminals worse. `decode` validates only `schema` and the overall `status`; `name`, `error` and each check's `status` are free text.",
+   "evidence": "status.go:204 `checks.Add(c.Name, strings.Join(kinds, \",\"), c.Status, c.Duration, c.Error)`; table.go:134-146 `controlSpaces` handles only '\\t', '\\n', '\\r'.\n\nReproduced with a temp module outside the repo: a Health with `h.Add(\"db\", func(ctx) error { return fmt.Errorf(\"upstream said: \\x1b]0;pwned\\x07\\x1b[2J\\x1b[1;1Hall good\") })` served by `h.Handler()`, then `daemoncmd.NewStatus(...).Run`. Captured stdout ends with: `db     readiness  ... 0s  upstream said: \\x1b]0;pwned\\a\\x1b[2J\\x1b[1;1Hall good\\n` - the OSC title sequence and the clear-screen/cursor-home sequence are emitted verbatim.",
+   "suggestion": "Neutralise control characters in the text path before the cells are added (replace every rune for which `unicode.IsControl` is true, plus U+009B and similar C1 introducers, with a visible escape such as `\\x1b` or U+FFFD), either in daemoncmd's `render` or in `table.newCell` so every table consumer benefits. Leave the JSON path alone: encoding/json already escapes them."
+  },
+  {
+   "title": "status command prints the password of a base URL with userinfo in its error messages",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/daemoncmd/status.go:134",
+    "source/daemon/daemoncmd/status.go:143",
+    "source/daemon/daemoncmd/status.go:147",
+    "source/daemon/daemoncmd/status.go:150",
+    "source/daemon/daemoncmd/status.go:127"
+   ],
+   "description": "`fetch` builds `target := req.URL.String()` and embeds it in three error messages (non-200 answer, body read failure, oversized body). `url.URL.String()` includes the userinfo password, unlike `URL.Redacted()` and unlike net/http's own client errors, which strip it. A Resolver that returns a base URL carrying basic-auth credentials (the natural way to reach a health route mounted behind basic auth with the default client) therefore has the password written to stderr, and into any log or CI output that captures it, whenever the daemon answers anything but 200. Line 127 likewise quotes the raw `base` when the URL fails to parse.",
+   "evidence": "status.go:134 `target := req.URL.String()`; status.go:143 `fmt.Errorf(\"%w: GET %s answered %s\", ErrBadStatus, target, resp.Status)`.\n\nReproduced with a temp module: resolver returns `http://admin:s3cret@127.0.0.1:PORT`, server answers 503. Error returned by the command: `status: bad status response: GET http://admin:s3cret@127.0.0.1:37659/status answered 503 Service Unavailable`.",
+   "suggestion": "Use `req.URL.Redacted()` for `target`, and avoid echoing the raw `base` at line 127 (parse first and print the redacted form, or drop the value and keep the wrapped error)."
+  },
+  {
+   "title": "Concurrent health requests each run every check again: no coalescing, so unauthenticated probes multiply load on dependencies",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/daemon/health_http.go:58",
+    "source/daemon/health.go:435-440",
+    "source/daemon/health.go:471-497"
+   ],
+   "description": "ADR-0025 deliberately rejects caching and background polling (\"Nothing is cached and nothing runs in the background\"), so one probe costing one run of each check is by design. What the ADR does not address is overlap: N requests in flight at once start N simultaneous runs of every check, each in its own goroutine. The only guard, `checkState.stuck()`, applies only after a run has been abandoned at its timeout; runs that are merely in progress are not shared. The handler has no auth of its own (\"decides who may reach it\" is left to the consumer) and probe routes are commonly mounted outside authentication, so a burst of cheap GET /readyz or /status requests becomes the same number of concurrent database pings / upstream calls, for up to the check timeout (2s default) each. Sharing an in-flight run between overlapping snapshots would keep the ADR's \"no stale answer\" property while bounding the fan-out to one run per check.",
+   "evidence": "health_http.go:58 `snap := h.snapshot(r.Context(), only)` per request; health.go:437-439 `for i, c := range checks { wg.Go(func() { results[i] = h.run(ctx, c) }) }`; health.go:473 is the only short-circuit and it tests `abandoned > 0`.\n\nReproduced with a temp module: one Readiness check that sleeps 300ms and counts concurrent executions, 200 parallel GET /readyz against `h.Handler()` -> `total=200 peak concurrent=200`.",
+   "suggestion": "Single-flight each check (or each snapshot per kind): a request arriving while a run of a check is in progress waits for that run's result instead of starting another. Alternatively document the amplification next to Handler and point consumers to a concurrency/rate limit in front of the health routes."
+  },
+  {
+   "title": "Watchdog ping cadence is period plus liveness-check duration, so a slow but passing liveness check gets a healthy process killed",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/supervisor.go:376-394",
+    "source/daemon/supervisor.go:348-350",
+    "source/daemon/option.go:102-106"
+   ],
+   "description": "The watchdog tick runs `live()` first and only then pings and arms the next tick with `clock.AfterFunc(period, tick)`, where period is WATCHDOG_USEC/2. The gap between two WATCHDOG=1 datagrams is therefore period + duration of the liveness snapshot (+ up to 1s of Notify), not period. The liveness snapshot may legitimately take up to the Health's check timeout (2s by default) and still pass. Whenever a passing liveness check takes longer than WATCHDOG_USEC/2, the gap exceeds WATCHDOG_USEC and systemd restarts a process whose checks all pass. Nothing relates the check timeout to the watchdog interval, and the documentation states the ping is sent \"every half of WATCHDOG_USEC\"; it mentions a hanging check holding the ping back, not the drift for one that succeeds.",
+   "evidence": "supervisor.go:383 `ok := live()` ... 390-393 `if ok { ping() }; w.stop = clock.AfterFunc(period, tick)` - the next tick is armed after the checks, relative to their end.\n\nSequence: WatchdogSec=3s -> period 1.5s; default check timeout 2s; a liveness check that takes 1.6s and returns nil. Tick at t=1.5s, ping at 3.1s, next tick at 4.6s, next ping at 6.2s: every gap is 3.1s > 3s, so systemd's watchdog fires although every check passed.",
+   "suggestion": "Arm the next tick before running the checks (fixed-rate rather than fixed-delay), or arm it for `period - elapsed`; and/or bound the liveness run in the watchdog by min(check timeout, period) and log a warning when the Health's check timeout is not below WATCHDOG_USEC/2."
+  },
+  {
+   "title": "systemd.Listeners returns a non-listening stream socket as a net.Listener although its doc says that is an error",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/systemd/listeners.go:44-48",
+    "source/daemon/systemd/listeners.go:138-153"
+   ],
+   "description": "The doc comment promises: \"A descriptor that is not a listening stream socket ... is an error too: every listener opened so far is closed, and every inherited descriptor with it\". `adopt` only rejects what `net.FileListener` rejects plus a unixgram socket. `net.FileListener` does not check SO_ACCEPTCONN: a connected (or merely bound) SOCK_STREAM descriptor, which is exactly what a unit with Accept=yes passes, is wrapped as a *net.TCPListener / *net.UnixListener with a nil error. Listeners then returns it as a valid listener; the failure only surfaces later, when Accept returns EINVAL and the HTTP Runner serving it exits, i.e. as a runtime exit rather than the documented start-time error with descriptor cleanup.",
+   "evidence": "listeners.go:142-152: `l, err := net.FileListener(f)` ... `if l.Addr().Network() == \"unixgram\" { ... \"not a stream socket\" }` is the only extra check.\n\nReproduced outside the repo: `c, _ := net.Dial(\"tcp\", ln.Addr().String()); f, _ := c.(*net.TCPConn).File(); l, err := net.FileListener(f)` -> `l=*net.TCPListener err=<nil>`; `l.Accept()` -> `accept4: invalid argument`.",
+   "suggestion": "After FileListener succeeds, read SO_ACCEPTCONN through `SyscallConn().Control` (`unix.GetsockoptInt(fd, SOL_SOCKET, SO_ACCEPTCONN)`) and fail adoption with \"not a listening socket\" when it is 0, or narrow the doc comment to what is actually detected."
+  }
+ ]
+}

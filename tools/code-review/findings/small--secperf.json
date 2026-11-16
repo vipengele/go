@@ -1,0 +1,85 @@
+{
+ "unit": "small:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "state.WriteFile reopens its temporary file by path before chmod and rename, so a swapped entry gets chmod-ed and installed",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/cli/state/write.go:89-109",
+    "source/cli/state/write.go:46-48",
+    "source/cli/state/write.go:133-148"
+   ],
+   "description": "WriteFile creates the temp file with os.CreateTemp, writes it, closes the handle, then calls replace. replace reopens the temp by name with os.OpenFile(name, O_RDWR, 0) (no O_NOFOLLOW), then chmods and syncs whatever the name resolves to and renames it over the destination. Reopening by path is a documented requirement for Replace, where an editor may have swapped the inode. WriteFile has no such need: it owns the handle from CreateTemp and could chmod and sync through it. As written, between CloseWritten and Open another principal with write access to the directory (a group-writable, non-sticky state directory) can replace `.<base>.tmp-*` with a symlink. The chmod then applies `mode` to the symlink's target, a file owned by the calling user, and the symlink itself is renamed to the destination. With a mode such as 0644 this makes an arbitrary file of the caller world-readable. The in-repo callers (update state and cache, config edit) write into 0700 directories, so they are not exposed; the weakness is in the exported API for any other consumer.",
+   "evidence": "write.go:102-109: `_, writeErr := s.Write(f, data); if err := errors.Join(writeErr, s.CloseWritten(f)); ... return s.replace(tmp, path, mode)`. write.go:133-139: `f, err := s.Open(tmp)` then `s.Chmod(f, mode)`. write.go:46-48: `os.OpenFile(filepath.Clean(name), os.O_RDWR, 0)`. Sequence: victim calls WriteFile(\"/shared/x.json\", data, 0o644); after the close, attacker runs `rm /shared/.x.json.tmp-123; ln -s /home/victim/.ssh/id_ed25519 /shared/.x.json.tmp-123`; Open follows the link, Chmod sets the key to 0644, Rename moves the symlink to /shared/x.json.",
+   "suggestion": "In writeFile, chmod and sync through the handle CreateTemp returned (it is already open read-write, which also satisfies Windows) and only then close and rename. Keep the reopen-by-path for the exported Replace, ideally with O_NOFOLLOW or an Lstat check that the entry is a regular file. This also saves an open/close per write."
+  },
+  {
+   "title": "WriteFile and Replace replace a symlinked destination with a regular file instead of writing through it, undocumented",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/state/write.go:119-125",
+    "source/cli/state/write.go:61-87",
+    "source/cli/state/doc.go:1-20"
+   ],
+   "description": "The destination is always replaced by rename(2), which replaces a symlink at `final` rather than its target. A state or config file that the user has symlinked elsewhere (a dotfiles repository, a shared volume) silently becomes a regular file after the first write: the link is destroyed and the link's target keeps the old content. `config edit` in cli/core reaches this through state.Replace(temp, opts.Path, editMode). Neither the Replace/WriteFile doc comments nor doc.go mention it; they say only that \"a reader sees either the old content or the new\".",
+   "evidence": "write.go:119: `if err := s.Rename(tmp, final); err != nil {` with `Rename: os.Rename` (write.go:39) and no Lstat/EvalSymlinks of `final` anywhere in the package (grep for symlink/Lstat/EvalSymlinks in non-test files of source/cli/state returns nothing). Sequence: `ln -s ~/dotfiles/tool.yaml ~/.config/tool/config.yaml`; state.WriteFile(\"~/.config/tool/config.yaml\", data, 0o600) leaves config.yaml a regular file and ~/dotfiles/tool.yaml unchanged.",
+   "suggestion": "Either resolve a symlinked destination (filepath.EvalSymlinks on `final` when it is a symlink, with the temp file created beside the resolved target) or state in the Replace/WriteFile docs and doc.go that a symlink at the destination is replaced, not followed."
+  },
+  {
+   "title": "LoadJSON and LoadYAML read the whole file with no size bound and no file-type check",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/cli/state/load.go:56",
+    "source/cli/state/json.go:15-19",
+    "source/cli/state/yaml.go:18-20"
+   ],
+   "description": "load calls os.ReadFile on the path and hands the whole buffer to the decoder. The package is documented as serving \"the small state files a tool keeps beside its configuration\", but nothing enforces small: a state or cache file that has grown or been replaced with a very large one is read fully into memory, and the decoder then allocates a second representation, before any Corrupt status can be returned. A path that names a FIFO blocks the read indefinitely, with no context or timeout, rather than returning Unreadable. The update check loads its state and GitHub cache through this on every run (source/update/state.go:152, source/update/githubcache.go:125).",
+   "evidence": "load.go:56: `data, err := os.ReadFile(filepath.Clean(path))` followed directly by `decode(data, &v)` at load.go:70; there is no Stat, no io.LimitReader and no mode check. `mkfifo state.json` then LoadJSON[T](\"state.json\") never returns; a multi-gigabyte state.json is read in full before json.Unmarshal reports an error.",
+   "suggestion": "Open the file, fstat it, return Unreadable for a non-regular file, and read through io.LimitReader with a generous cap (a few MiB), reporting Corrupt, or a dedicated too-large error, beyond it."
+  },
+  {
+   "title": "validate.PathSegment accepts Windows device names and trailing-dot names, contradicting \"names exactly one directory entry\"",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/commons/validate/validate.go:156-180",
+    "source/cli/spec/identity.go:93-97",
+    "source/cli/spec/identity.go:66-75"
+   ],
+   "description": "PathSegment is the guard for Identity.DirName and for Identity.Subdir names, which become directories under the Windows roots (%AppData%/%LocalAppData%, cli/spec/paths) as well as the XDG and macOS ones. Its rule admits every lowercase alphanumeric string plus '.', '_', '-' after the first byte, so it accepts the reserved Windows device names (`con`, `prn`, `aux`, `nul`, `com1`..`com9`, `lpt1`..`lpt9`, also with an extension such as `nul.d`) and names ending in '.' (`tool.`). Win32 path normalisation maps the former to devices in any directory and strips the trailing dot from the latter, so `tool.` and `tool` name the same directory. The doc comment's guarantee, \"It holds no separator, so it names exactly one directory entry\", does not hold on Windows, a platform the framework supports (ADR-0031). The values are developer-chosen identity fields rather than attacker input, hence low.",
+   "evidence": "validate.go:170-177: only the first byte is constrained (`!isLower(value[0]) && !isDigit(value[0])`), then every byte must be a-z, 0-9, '.', '_' or '-'. `PathSegment(\"DirName\", \"nul\")`, `PathSegment(\"DirName\", \"aux\")`, `PathSegment(\"name\", \"com1\")` and `PathSegment(\"DirName\", \"tool.\")` all return nil. Identity{DirName: \"aux\"}.Validate() therefore passes and paths.Resolve yields %AppData%\\aux, which MkdirAll cannot create as a normal directory.",
+   "suggestion": "Reject a trailing '.' and the reserved device basenames (the part before the first '.', compared case-insensitively) in PathSegment, or narrow the doc comment and add the check in cli/spec's checkDirName."
+  },
+  {
+   "title": "FieldError stores and prints an over-long rejected value in full",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/commons/validate/validate.go:195-201",
+    "source/commons/validate/validate.go:42-45",
+    "source/commons/validate/validate.go:65-66"
+   ],
+   "description": "Every check rejects a value above its length bound through tooLong, which builds a FieldError that keeps the entire value, and Error() renders it with %q. The length bounds exist to keep values small, but the rejection path itself is unbounded: a value of N bytes yields an error string of at least N bytes (up to 4N with %q escaping of non-printable bytes), which callers then log, print to stderr or wrap repeatedly. Where the checked value comes from a flag, an environment variable or a config file, an oversized input is echoed back verbatim, including any secret pasted into the wrong field.",
+   "evidence": "validate.go:195-197: `func tooLong(field, value string, maxLen int) error { return invalid(field, value, fmt.Sprintf(\"must be at most %d bytes\", maxLen)) }`; validate.go:199-201 stores `Value: value`; validate.go:43-45: `fmt.Sprintf(\"%s %q: %v\", e.Field, e.Value, e.Err)`. validate.Slug(\"name\", strings.Repeat(\"a\", 10<<20)).Error() is a string of more than 10 MiB.",
+   "suggestion": "Truncate the value kept or printed for the too-long case (for example the first maxLen bytes followed by an ellipsis and the real length), keeping the full value out of the message."
+  },
+  {
+   "title": "filelock opens the lock path following symlinks and without checking the file type, and the docs do not require a private directory",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/filelock/filelock.go:102",
+    "source/filelock/filelock.go:134",
+    "source/filelock/doc.go:21-25"
+   ],
+   "description": "Lock and TryLock open the path with O_RDWR|O_CREATE and mode 0600, with no O_NOFOLLOW and no check that the result is a regular file. If the lock path sits in a directory another user can write (the package takes any path and its docs name no requirement on the directory), a dangling symlink planted at the path makes the caller create an empty 0600 file at a location of the planter's choosing, and a symlink to an existing file makes the caller take its flock on that unrelated file. A pre-created world-writable lock file lets the other user hold the flock indefinitely, so Lock polls until its context ends and TryLock reports ErrLocked for a holder that is not an instance of the tool. Both in-repo callers place the lock in a 0700 directory of the tool (source/update/config.go:287-291, source/daemon/instance.go:68-82), so this is an API hardening and documentation gap, not a live hole.",
+   "evidence": "filelock.go:102 and :134: `os.OpenFile(l.path, os.O_RDWR|os.O_CREATE, 0o600)`. doc.go:21-25 says only \"The lock file is created at 0600 when it is missing and is never removed ... The directory must exist\". Sequence: attacker runs `ln -s /home/victim/.config/other/newfile /shared/tool.lock`; victim's filelock.New(\"/shared/tool.lock\").TryLock() creates /home/victim/.config/other/newfile.",
+   "suggestion": "Open with O_NOFOLLOW on Unix and verify via fstat that the descriptor is a regular file owned by the caller, or at minimum document that the lock file must live in a directory only its users can write."
+  }
+ ]
+}

@@ -1,0 +1,95 @@
+{
+ "unit": "daemon-service:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "DecodeJSON returns encoding/json's error text to the client, disclosing internal Go type and field names",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/httpserver/decode.go:43"
+   ],
+   "description": "On a decode failure DecodeJSON builds the RequestError.Message from err.Error() of encoding/json. RequestError.Message is documented as \"the text for the caller\" and is what a handler passes to Error(), so the Go struct name, field path and Go type of the server's internal request type go out on the wire to any client (including one on an unauthenticated path). The 413 and trailing-data branches use fixed text; only this branch echoes the library error.",
+   "evidence": "decode.go:43 `return bodyError(err, \"request body is not valid JSON for this request: \"+err.Error())`. Run outside the repo against this commit: decoding `{\"name\":\"a\",\"quota\":\"x\"}` into `type internalCreateUserCommand struct{Name string; Quota int}` returns `bad_request: request body is not valid JSON for this request: json: cannot unmarshal string into Go struct field internalCreateUserCommand.quota of type int`.",
+   "suggestion": "Map *json.UnmarshalTypeError / *json.SyntaxError to a message built from the JSON field name and offset only (e.g. `field \"quota\" has the wrong type`), and keep the raw error for the server log, not the response."
+  },
+  {
+   "title": "The body limit is not in force while the Authenticator runs, so a body-reading authenticator reads an unbounded request body before authentication",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/httpserver/server.go:63",
+    "source/daemon/httpserver/auth.go:86",
+    "source/daemon/httpserver/auth.go:16"
+   ],
+   "description": "New wraps the handler with LimitBody innermost and RequireAuth outside it, so the *http.Request handed to Authenticator.Authenticate still carries the raw, unlimited r.Body. ADR-0026 chose the order so that a rejected request's body is never read by the kit, which holds for BearerToken; but Authenticator is a public, pluggable interface that receives the whole request, and an authenticator that verifies a body signature (HMAC-signed requests, webhook signatures) reads as much as an unauthenticated client cares to send within ReadTimeout, ignoring WithMaxBodyBytes. Neither the Authenticator doc nor doc.go warns that the body is unlimited at that point.",
+   "evidence": "server.go:63-66: `h := LimitBody(c.maxBodyBytes)(handler); if c.auth != nil { h = RequireAuth(c.auth, c.openPaths...)(h) }`. Experiment outside the repo: New(..., WithAuthenticator(a), WithMaxBodyBytes(10)) with an Authenticate that does io.Copy(io.Discard, r.Body) on a 5 MiB POST printed `authenticator read body bytes: 5242880` and then answered 401.",
+   "suggestion": "Either apply http.MaxBytesReader to r.Body before calling a.Authenticate (keeping the lazy semantics: nothing is read unless the authenticator reads), or document on Authenticator that r.Body is not limited and must not be read without its own bound."
+  },
+  {
+   "title": "systemctl, launchctl and id are resolved through the caller's PATH while the driver runs as root",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/service/systemd.go:30",
+    "source/daemon/service/systemd.go:32",
+    "source/daemon/service/systemd.go:34"
+   ],
+   "description": "execRunner's allowlist fixes the program name but not its location: exec.CommandContext(ctx, \"systemctl\"|\"launchctl\"|\"id\", ...) looks the name up in the inherited PATH. System-scope Install/Uninstall/Start/Stop/Prepare require euid 0 and their error text tells the user to \"run it with sudo\". Where PATH is carried into the root process (macOS's stock sudoers has no secure_path; `sudo -E`; `su` without `-`; a root shell with a user-writable directory early in PATH), the first `launchctl`, `id` or `systemctl` found in any absolute PATH directory is executed as root. The comment on execRunner (\"no input chooses the program\") overstates the guarantee, since the environment chooses which file that name is.",
+   "evidence": "systemd.go:30 `cmd = exec.CommandContext(ctx, \"systemctl\", argv[1:]...)`, :32 `\"launchctl\"`, :34 `\"id\"`; no exec.LookPath restriction or absolute path anywhere in the package (grep for LookPath|/usr/bin|/bin/launchctl in service/*.go returns nothing). requirePrivileges (systemd.go:140-146, launchd.go:141-147) only proceeds for euid 0 on system scope.",
+   "suggestion": "For system scope (euid 0) resolve the tools from fixed locations (/bin/launchctl, /usr/bin/id on darwin; /usr/bin:/bin:/usr/sbin:/sbin for systemctl/id on linux) or run with a fixed cmd.Env PATH; keep PATH lookup only for user scope."
+  },
+  {
+   "title": "A system-scope service is installed without checking that its binary is not writable by an unprivileged account",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/service/config.go:96",
+    "source/daemon/service/systemd.go:255",
+    "source/daemon/service/launchd.go:277"
+   ],
+   "description": "For ScopeSystem the driver, running as root, registers Config.Binary to be executed at every boot as root (when Config.User is empty) or as Config.User. Validation checks only that Binary is a non-empty absolute path free of control characters; Install never stats it. A tool that passes its own executable path from a user-owned location (a Homebrew prefix such as /opt/homebrew/bin, ~/.local/bin, ~/go/bin) therefore gets a root LaunchDaemon/system unit whose program any process of that user can replace, a standard local privilege-escalation pattern, and the library gives neither an error nor a warning. Install does not even verify that the file exists.",
+   "evidence": "config.go:96-103 is the whole of the Binary validation (`Binary == \"\"`, textProblem, isAbs). systemd Install (systemd.go:255-275) goes requirePrivileges -> checkAccount -> Prepare -> writeUnit -> daemon-reload/enable/restart; launchd Install (launchd.go:277-312) likewise; neither calls os.Stat/Lstat on cfg.Binary. No ADR (0024, 0028, 0029) records this as a deliberate omission.",
+   "suggestion": "In system-scope Install, Lstat the binary and its parent directories and fail (or at least return a distinct warning error/Detail) when the file or a parent is group/world-writable or owned by an account other than root or the configured User; document the requirement in doc.go."
+  },
+  {
+   "title": "The user unit directory is taken from XDG_CONFIG_HOME/HOME without requiring an absolute path",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/service/systemd.go:97",
+    "source/daemon/service/systemd.go:100",
+    "source/daemon/service/launchd.go:98"
+   ],
+   "description": "unitDir joins whatever XDG_CONFIG_HOME (or HOME) holds with systemd/user, and launchd.paths does the same with HOME. The XDG Base Directory specification says a relative value is invalid and must be ignored. With a relative value the driver creates the directory tree and writes the unit file (or plist and log directories) relative to the process's current working directory, a place the service manager never reads, and only then fails at `systemctl --user enable`; the stray files stay behind. The package validates every Config path as absolute by the target's rules but trusts these environment values unvalidated.",
+   "evidence": "systemd.go:97-101: `if x, ok := s.lookupEnv(\"XDG_CONFIG_HOME\"); ok && x != \"\" { return filepath.Join(x, \"systemd\", \"user\"), nil }` and the same for HOME. Experiment outside the repo: with XDG_CONFIG_HOME=rel, service.New(Config{Name:\"demo\",Binary:\"/bin/true\",Scope:ScopeUser}, WithGOOS(\"linux\"), ...).Prepare returned nil and created `rel/` in the current directory.",
+   "suggestion": "Ignore a non-absolute XDG_CONFIG_HOME (fall back to $HOME/.config) and fail with a clear error when HOME is not absolute, in both drivers."
+  },
+  {
+   "title": "lingerNote uses the unvalidated USER/LOGNAME value as a path component and as the account in the advice it prints",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/service/systemd_status.go:128",
+    "source/daemon/service/systemd_status.go:135",
+    "source/daemon/service/systemd_status.go:138"
+   ],
+   "description": "For a user unit, Status takes the account name from $USER (then $LOGNAME), joins it under /var/lib/systemd/linger and stats the result, then interpolates the same value into a suggested shell command. The value is never checked against validPOSIXAccount or against the real uid. A value with `/` or `..` makes Status stat a path outside the linger directory, and the linger answer is for whatever name the environment claims rather than the user whose manager `systemctl --user` talks to (USER is stale after `su` to root without `-`, and is unset under cron, where the note is silently dropped). The Detail then tells the operator to run `loginctl enable-linger <that text>` verbatim.",
+   "evidence": "systemd_status.go:128-138: `name, ok := s.lookupEnv(\"USER\") ... os.Stat(filepath.Join(s.lingerDir, name)) ... fmt.Sprintf(\"lingering is off for %s: ...; `loginctl enable-linger %s` turns it on\", name, name)`. With USER=../../../etc/passwd the stat target is /etc/passwd (exists, so the note is suppressed); with USER='x; id' and no such linger file the Detail carries the command text `loginctl enable-linger x; id`.",
+   "suggestion": "Derive the name from the real uid (os/user.LookupId(strconv.Itoa(os.Getuid())) behind the existing seam) or at least require validPOSIXAccount(name) before using it in a path or in the advice."
+  },
+  {
+   "title": "The Recover and Log response wrappers hide io.ReaderFrom, so every response copied from a file loses the sendfile path",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/daemon/httpserver/middleware.go:61",
+    "source/daemon/httpserver/middleware.go:118"
+   ],
+   "description": "New always wraps the ResponseWriter twice (recoverWriter, then statusWriter). Both embed http.ResponseWriter and add WriteHeader/Write/FlushError/Unwrap (recoverWriter also Hijack) but not ReadFrom. net/http's own response type implements io.ReaderFrom so that io.Copy / http.ServeContent / http.ServeFile from an *os.File use sendfile(2); io.Copy only finds that through a type assertion on the writer it is given, and Unwrap is consulted by http.ResponseController only, not by io.Copy. Behind this kit every file or large streamed body is therefore copied through a 32 KiB userspace buffer with two extra method hops per chunk.",
+   "evidence": "middleware.go:61-88 (recoverWriter) and 118-144 (statusWriter) define no ReadFrom method; server.go:70-71 installs both unconditionally (`h = Log(c.logger)(h); h = Recover(c.logger)(h)`). io.Copy's fast path is `if rf, ok := dst.(io.ReaderFrom); ok { return rf.ReadFrom(src) }`, which is false for *statusWriter.",
+   "suggestion": "Add `ReadFrom(r io.Reader) (int64, error)` to both wrappers that records written/status and delegates to the underlying writer's io.ReaderFrom when present (falling back to io.Copy onto the embedded writer)."
+  }
+ ]
+}

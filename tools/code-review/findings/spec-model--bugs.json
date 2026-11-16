@@ -1,0 +1,145 @@
+{
+ "unit": "spec-model:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "Colour is turned on for a Windows console without virtual-terminal processing ever being enabled",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/spec/colour.go:34",
+    "source/cli/spec/terminal/terminal.go:73",
+    "source/cli/spec/style.go:68"
+   ],
+   "description": "On Windows, rule 5 of ColorAllowed reduces to term.IsTerminal, which is `GetConsoleMode(handle) == nil`. That only says the handle is a console; it does not say the console interprets SGR sequences. A Windows console interprets `ESC[..m` only when ENABLE_VIRTUAL_TERMINAL_PROCESSING is set on the output handle, and nothing in the repository sets it or checks for it. On a console where the mode is not already on (legacy conhost, e.g. cmd.exe on Windows 10), every Info/Success/Warning/Error/Detail line and every bold table header is written with literal escape bytes (`←[34mℹ ...←[0m`). The Unix path has no equivalent problem, so this is a platform difference the detection package hides. No ADR (including 0031, update on Windows) discusses it.",
+   "evidence": "terminal.go:73-75 `func realIsTerminal(fd uintptr) bool { return term.IsTerminal(int(fd)) }`; golang.org/x/term@v0.47.0 term_windows.go: `err := windows.GetConsoleMode(windows.Handle(fd), &st); return err == nil`. colour.go:34 `return env.IsTerminal(s)` is the only gate before style.go:72 emits `\"\\x1b[\" + code + \"m\" + text + sgrReset`. `grep -rniE 'VIRTUAL_TERMINAL|SetConsoleMode' source docs` returns nothing. Not reproduced on a Windows host; derived from the code and the documented console-mode contract.",
+   "suggestion": "In terminal (the one package allowed to touch x/term / x/sys), on Windows try to set ENABLE_VIRTUAL_TERMINAL_PROCESSING on the output handle and report the stream as colour-capable only when that succeeds; or expose a separate capability so ColorAllowed can return false when VT processing is unavailable."
+  },
+  {
+   "title": "No ArgPolicy accepts 'N or more' arguments; the 'at least' branch is unreachable",
+   "category": "feature-gap",
+   "severity": "medium",
+   "locations": [
+    "source/cli/spec/args.go:23",
+    "source/cli/spec/args.go:45",
+    "source/cli/spec/args.go:90"
+   ],
+   "description": "ArgPolicy's fields are unexported and the only constructor that sets `unbounded` is AnyArgs, which fixes min at 0. A command therefore cannot declare the very common `FILE...` shape (one or more arguments). The code and docs are written as if it could: Max's doc says it returns false 'when it accepts any number above ArgPolicy.Min', and String has an `at least N arguments` case; both are dead. The only workaround is RangeArgs(1, math.MaxInt), whose error text is 'accepts between 1 and 9223372036854775807 arguments', or checking len(inv.Args) by hand in Run, which ADR-0015 then forces to be a hand-built UsageError-like path.",
+   "evidence": "args.go:24-26 `func AnyArgs() ArgPolicy { return ArgPolicy{unbounded: true} }` is the only place `unbounded` is set; args.go:90-91 `case p.unbounded: return \"at least \" + countArgs(p.min)` can only be reached with min > 0, which no constructor produces. `grep -rn 'MinArgs\\|AtLeast' source` finds no constructor.",
+   "suggestion": "Add `MinArgs(n int) ArgPolicy { return ArgPolicy{min: n, unbounded: true} }` (Validate already handles a negative min for unbounded policies)."
+  },
+  {
+   "title": "Confirm and Prompt ask whenever stdin is a terminal, even when stderr, where the question is written, is not",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/spec/prompt.go:83",
+    "source/cli/spec/prompt.go:110",
+    "source/cli/spec/prompt.go:152"
+   ],
+   "description": "The decision to ask is taken on Stdin alone, but the question is written to Stderr. With stderr redirected and stdin still a terminal (`tool cmd 2>err.log`, or `2>&1 | tee log` in some shells), the question goes into the file or pipe, nothing appears on screen, and the process blocks reading a line the user does not know is expected. The same happens under a nil Env.Stderr with a terminal stdin (the question is discarded by Resolved). The package comment says the run 'cannot proceed without' the question being seen, yet nothing checks that the stream carrying it reaches a person; the non-interactive fallback (default, or UsageError naming the flag) is skipped.",
+   "evidence": "prompt.go:83 `if !inv.Env.IsTerminal(Stdin) {` (same at :110) is the only check; prompt.go:153-155 `env := inv.Env.Resolved(); _, _ = io.WriteString(env.Stderr, text); line, err := readLine(env.Stdin)` writes to stderr unconditionally and ignores the write error. Sequence: Env{Stdin: tty, Stderr: file, Terminal: Detect(...)} -> Confirm(\"Delete?\", ConfirmOptions{Default: DefaultNo, Flag: \"--yes\"}) writes the question to the file and blocks in readLine instead of returning the default.",
+   "suggestion": "Treat the question as askable only when both Stdin and Stderr are terminals (IsTerminal(Stdin) && IsTerminal(Stderr)), falling back to the default / UsageError path otherwise, and document it."
+  },
+  {
+   "title": "speccheck promises to surface a retyped key but cannot see a scalar-to-scalar or null retype",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "source/cli/spec/speccheck/doc.go:1",
+    "source/cli/spec/speccheck/speccheck.go:106",
+    "source/cli/spec/speccheck/speccheck.go:57"
+   ],
+   "description": "The package doc states that renaming, removing or retyping a key must increment \"schema\" and that 'A test that pins the keys makes every such change visible in review'; the failure message repeats 'renaming, removing or retyping a key increments \"schema\"'. But collect records only the path of a leaf, never its JSON type, so a key that changes from string to number, number to bool, scalar to null, or null to empty object produces an identical golden file and the test keeps passing. Only retypes that change the path shape (scalar to object, scalar to array) are detected. A consumer relying on AssertJSONKeys as the ADR-0007 contract gate ships a breaking retype with a green test.",
+   "evidence": "speccheck.go:106-108 `default: add(set, prefix)` for every scalar and null; speccheck.go:86-88 an empty object also adds just `prefix`. Experiment against a golden holding `a.b`: `AssertJSONKeys(t, map[string]any{\"a\": map[string]any{\"b\": \"s\"}}, g)` and the same with `\"b\": nil` both pass; so does any numeric/bool value.",
+   "suggestion": "Either record the JSON kind beside each path in the golden file (e.g. `meta.owner string`), or reword the package doc and the failure message so they claim only added, removed and renamed keys and path-shape changes."
+  },
+  {
+   "title": "speccheck key paths are ambiguous or lost for some keys, and a root scalar passes vacuously",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/speccheck/speccheck.go:90",
+    "source/cli/spec/speccheck/speccheck.go:111",
+    "source/cli/spec/speccheck/speccheck.go:121"
+   ],
+   "description": "Three boundary cases make the golden comparison wrong. (1) Paths are joined with '.' and '[]' without escaping, so a key literally named `a.b` and a nested `a` -> `b` yield the same path, as do `x[]` the key and `x` the array; such a restructuring is invisible. (2) A root-level key `\"\"` is dropped: collect is called with the empty prefix and add ignores the empty path, and a root `\"\"` key holding an object promotes its children to root paths. (3) A value that marshals to a root scalar or null has no paths; update mode writes an empty golden file and every later comparison of any scalar against it passes, so `AssertJSONKeys(t, v, path)` on a wrong value silently pins nothing instead of failing as WriteJSON would ('not an object'). Additionally a key with leading/trailing white space is written verbatim by writeGolden but trimmed by parseGolden, so the test can never pass after an update.",
+   "evidence": "Experiment: with SPECCHECK_UPDATE=1 `AssertJSONKeys(t, \"scalar\", g)` writes a golden of `\"\"` (empty file); afterwards `AssertJSONKeys(t, 42, g)` and `AssertJSONKeys(t, map[string]any{\"\": 1}, g)` both pass. With a golden `a.b\\n`, both `map[string]any{\"a.b\": 1}` and `map[string]any{\"a\": map[string]any{\"b\": \"s\"}}` pass. Code: speccheck.go:91-95 joins with `prefix+\".\"+key`; :111-115 `if path != \"\"`; :121 `strings.TrimSpace(line)` versus :136 `content.WriteString(p + \"\\n\")`.",
+   "suggestion": "Fail when the marshalled value is not a JSON object (matching WriteJSON's contract), and quote or escape keys containing '.', '[]', white space or the empty string when forming paths."
+  },
+  {
+   "title": "table.New accepts duplicate and empty Column.Key, so Rows marshal objects with repeated or empty keys",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/table/table.go:39",
+    "source/cli/spec/table/table.go:164"
+   ],
+   "description": "New panics for zero columns but does not check keys. Two columns with the same Key (or a column whose Key was left empty because it was meant for text only) make Row.MarshalJSON emit an object with a repeated or empty member name. Most decoders keep only the last duplicate, so a column silently disappears from JSON output, and WriteJSON does not notice because it only inspects top-level keys. The misuse is a programming error of the same kind as the arity mismatch that Add panics for, but this one is not caught.",
+   "evidence": "Experiment: `table.New(Column{Key:\"a\",Header:\"A\"}, Column{Key:\"a\",Header:\"B\"}, Column{Header:\"C\"})`, `Add(1, 2, \"x\")`, `json.Marshal(tb.Rows())` -> `[{\"a\":1,\"a\":2,\"\":\"x\"}]`, and `spec.WriteJSON(w, 1, map[string]any{\"rows\": tb.Rows()})` returns nil and writes it. table.go:43-46 copies keys unchecked; :164-178 writes each key as given.",
+   "suggestion": "Have New panic on an empty or repeated Key, alongside the existing zero-column panic, and document it."
+  },
+  {
+   "title": "A table text cell passes escape sequences and other line-breaking control characters through to the terminal",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/table/table.go:134",
+    "source/cli/spec/table/table.go:146"
+   ],
+   "description": "controlSpaces replaces only tab, newline and carriage return. The doc claims 'so a cell never breaks a line', but vertical tab, form feed, NEL (U+0085) and U+2028/U+2029 still break or move the line on many terminals, and ESC/CSI sequences in a cell value are written verbatim. A table of values that originate outside the tool (release names, config values, file names) can therefore recolour, clear or rewrite the terminal, and each escape byte is also counted as a visible rune, misaligning the column. ADR-0015 assumes 'the table never receives escape sequences', which holds only for the Style path, not for the data.",
+   "evidence": "table.go:134-141 `case '\\t', '\\n', '\\r': return ' '` and nothing else. Experiment: `Add(1, 2, \"x\\x1b[31mred\\vq z\")` then Render with the zero Styler writes `\"A  B  C\\n1  2  x\\x1b[31mred\\vq z\\n\"`.",
+   "suggestion": "Map every Unicode control character (unicode.IsControl, plus U+2028/U+2029) to a space or a visible placeholder before styling and measuring."
+  },
+  {
+   "title": "Command.Validate panics on a typed-nil flag handle instead of reporting it",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/command.go:151",
+    "source/cli/spec/command.go:155",
+    "source/cli/spec/flag.go:216"
+   ],
+   "description": "Validate documents that it rejects 'a nil entry in Commands or Flags', but the check `f == nil` is an interface comparison. A nil `*FlagOf[T]` stored in the Flags slice (a package-level `var verbose *spec.FlagOf[bool]` listed before it is assigned is the natural way to get one) is a non-nil interface, so the loop goes on to call f.problems(), which dereferences the nil receiver. The call meant to turn tree mistakes into one joined error crashes the process instead.",
+   "evidence": "Experiment: `var f *spec.FlagOf[bool]; c := &spec.Command{Name: \"x\", Run: run, Flags: []spec.Flag{f}}; c.Validate()` -> `runtime error: invalid memory address or nil pointer dereference`. command.go:151 `if f == nil {`; command.go:155 `for _, err := range f.problems()`; flag.go:216 `validate.Slug(\"flag name\", f.name)` on the nil receiver.",
+   "suggestion": "Detect a nil pointer inside the interface (the package already has isNilPointer in stream.go) and report it as `Flags[i] is nil`."
+  },
+  {
+   "title": "ColorAllowed reports colour on for Stdin and for unknown streams",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/colour.go:28",
+    "source/cli/spec/colour.go:34"
+   ],
+   "description": "ColorAllowed never looks at which stream it is asked about before rule 5. Under FORCE_COLOR it returns true for Stdin and for a Stream value that names no stream, and under rule 5 it returns true for Stdin whenever stdin is a terminal. Output.Color and Output.Styler in the same package define the opposite: 'false for Stdin and any other stream, which take no output'. A caller that builds a Styler from ColorAllowed directly gets a different answer from one that goes through Output for the same stream.",
+   "evidence": "Experiment with LookupEnv returning FORCE_COLOR=1: `spec.ColorAllowed(false, nil, env, spec.Stdin)` -> true and `spec.ColorAllowed(false, nil, env, spec.Stream(9))` -> true. colour.go:28-30 `if force := envValue(env, \"FORCE_COLOR\"); force != \"\" && force != \"0\" { return true }` has no stream check; output.go:90-98 returns false in the default case.",
+   "suggestion": "Return false at the top of ColorAllowed for any stream other than Stdout and Stderr, or state in the doc that the function is defined only for the two output streams."
+  },
+  {
+   "title": "Interactive questions and colour are unavailable in pipe-based Windows terminals (Git Bash/mintty, Cygwin, MSYS2)",
+   "category": "feature-gap",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/terminal/terminal.go:73",
+    "source/cli/spec/prompt.go:83",
+    "source/cli/spec/prompt.go:110"
+   ],
+   "description": "Detection on Windows is GetConsoleMode only. mintty-style terminals connect the process to named pipes rather than a console unless ConPTY is enabled, so every stream reads as 'not a terminal'. Consequences in the default Git Bash window: Confirm and Prompt never ask and return a UsageError (exit 2, 'requires interactive input') or silently take the default, and colour is off unless FORCE_COLOR is set. Nothing in the package doc, Probes, or the ADRs records this limit, and Probes.IsTerminal is the only seam, which cli/core does not expose to a tool.",
+   "evidence": "terminal.go:73-75 delegates to term.IsTerminal; golang.org/x/term@v0.47.0 term_windows.go `isTerminal`: `windows.GetConsoleMode(windows.Handle(fd), &st); return err == nil`, which fails for a pipe handle. `grep -rli 'msys\\|mintty\\|cygwin' docs source` finds nothing. Not reproduced on Windows; derived from the code.",
+   "suggestion": "Document the limit on Detect, or add the usual MSYS/Cygwin pty pipe-name check (`\\\\msys-*-pty*-{from,to}-master`) on Windows as a second probe."
+  },
+  {
+   "title": "WriteJSON rejects only an exact \"schema\" key; a case variant overrides the envelope for case-insensitive readers",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/json.go:74"
+   ],
+   "description": "WriteJSON guarantees the value 'has no \"schema\" key of its own' so that the envelope's version is the only one. The check compares the unescaped key byte-for-byte, so a payload key such as `Schema` or `SCHEMA` (an untagged Go struct field named Schema marshals exactly so) is accepted. encoding/json's Unmarshal matches object keys to struct fields case-insensitively and lets the later member win, so a Go reader decoding into `struct{ Schema int `json:\"schema\"` }` reads the payload's value, not the envelope's.",
+   "evidence": "json.go:74 `if key == schemaKey {`. Experiment: `spec.WriteJSON(&o, 1, map[string]any{\"Schema\": 2})` returns nil and writes `{\"schema\": 1, \"Schema\": 2}`.",
+   "suggestion": "Compare with strings.EqualFold (after unescaping) and reject any case variant of the schema key."
+  }
+ ]
+}

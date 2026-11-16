@@ -1,0 +1,97 @@
+{
+ "unit": "daemon-service:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "systemd driver no longer recognises an unreachable manager on systemd 257+: the error text it matches was reworded",
+   "category": "bug",
+   "severity": "high",
+   "locations": [
+    "source/daemon/service/systemd.go:131",
+    "source/daemon/service/systemd_status.go:42",
+    "source/daemon/service/doc.go:38"
+   ],
+   "description": "`(*systemd).systemctl` classifies a failure as ErrManagerUnreachable only when the error text contains the literal substring \"Failed to connect to bus\". systemd 257 changed that message to \"Failed to connect to %s scope bus via %s transport: ...\" (for example \"Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined ...\"), which does not contain the substring. On any host with systemd 257 or later (Debian 13, Ubuntu 25.04+, current Fedora and Arch), Status/Install/Start/Stop of a user unit under `sudo -u`, cron or any session-less process return a plain runner error: errors.Is(err, ErrManagerUnreachable) is false, and Status carries no `unreachableDetail` text. That contradicts doc.go (\"Status reports ErrManagerUnreachable, with StateUnknown, when the user manager cannot be reached, as under sudo -u or cron\") and the Status doc comment. The tests only feed the old wording (\"Failed to connect to bus: No medium found\"), so they cannot catch it.",
+   "evidence": "service/systemd.go:131 `case strings.Contains(err.Error(), \"Failed to connect to bus\"):`.\n\nsystemd source, src/shared/bus-util.c (fetched from GitHub by tag):\n- v255 and v256: `\"Failed to connect to bus: %m\"` and `\"Failed to connect to bus: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined ...\"`\n- v257: `\"Failed to connect to %s scope bus via %s transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined ...\"`, `\"Failed to connect to %s scope bus via %s transport: %m\", runtime_scope_to_string(scope), bus_transport_to_string(transport)`.\n\nLocally, systemd 255 prints the old form (`env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS systemctl --user show x.service` -> \"Failed to connect to bus: No medium found\"), which is the only form the tests use (service/systemd_status_test.go:170, :302, service/systemd_test.go:210, service/manager_test.go:154). The v257 behaviour is established from the source text, not from a run on a 257 host.",
+   "suggestion": "Match both wordings, e.g. a check for \"Failed to connect to\" together with \"bus\" (or a regexp `Failed to connect to (\\S+ scope )?bus`), and add test cases with the 257 messages for both the user and the system scope. For the user scope, consider additionally detecting the condition without parsing text (XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS both unset, or no $XDG_RUNTIME_DIR/bus socket)."
+  },
+  {
+   "title": "New's Recover and Log wrappers hide http.Flusher, http.Hijacker and io.ReaderFrom from the handler",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/daemon/httpserver/middleware.go:61",
+    "source/daemon/httpserver/middleware.go:78",
+    "source/daemon/httpserver/middleware.go:118",
+    "source/daemon/httpserver/middleware.go:137",
+    "source/daemon/httpserver/server.go:70"
+   ],
+   "description": "`recoverWriter` and `statusWriter` embed http.ResponseWriter and add only `FlushError`, `Unwrap` (and `Hijack` on recoverWriter). Neither has a `Flush()` method, statusWriter (the writer the handler actually receives from New) has no `Hijack`, and neither has `ReadFrom`. They work through `http.NewResponseController`, as the comment on recoverWriter says, but a handler behind `New` that uses the classic type assertions silently loses the capability: `w.(http.Flusher)` is false, so a server-sent-events or streaming handler written the common way either reports \"streaming unsupported\" or never flushes; `w.(http.Hijacker)` is false, so WebSocket libraries that assert the interface refuse to upgrade; and io.Copy / http.ServeContent lose the sendfile path. Nothing in doc.go or ADR-0026 tells a consumer that handlers must use http.ResponseController, so this is a contract a caller breaks without noticing.",
+   "evidence": "Experiment (scratch module importing httpserver, handler reports the assertions on its ResponseWriter):\n- behind `httpserver.New(h)`: `flusher=false hijacker=false readerfrom=false`\n- same handler served bare: `flusher=true hijacker=true readerfrom=true`\n\nmiddleware.go:78 `func (w *recoverWriter) FlushError() error` and :137 `func (w *statusWriter) FlushError() error` are the only flush methods; there is no `Flush()`. statusWriter (lines 118-144) defines WriteHeader, Write, FlushError and Unwrap only. The only test covering these paths uses `http.NewResponseController(w).Hijack()` (middleware_test.go:539).",
+   "suggestion": "Add `Flush()` to both wrappers (delegating to the FlushError path and recording the write/status), add `Hijack()` to statusWriter, and optionally `ReadFrom`. If the restriction is intended, state under `# Middleware order` in doc.go that handlers must reach flushing and hijacking through http.ResponseController."
+  },
+  {
+   "title": "A Binary containing '$' is rendered as '$$' in ExecStart, which systemd does not collapse for the executable path",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/service/systemd_unit.go:92",
+    "source/daemon/service/systemd_unit.go:44"
+   ],
+   "description": "renderUnit doubles every '$' in every ExecStart word, including the first one, cfg.Binary. systemd performs variable substitution (and the `$$` -> `$` collapse) on arguments only, not on the command path, so a Binary such as `/opt/a$b/bin` is written as `\"/opt/a$$b/bin\"` and systemd looks for a file literally named `/opt/a$$b/bin`. Config.Validate accepts such a Binary, and the renderUnit doc claims every value is escaped so that systemd reads it unchanged; the installed unit then fails to start with the executable not found.",
+   "evidence": "systemd_unit.go:91-93:\n```go\nfor _, w := range append([]string{cfg.Binary}, cfg.Args...) {\n    words = append(words, strings.ReplaceAll(quoteWord(w), \"$\", \"$$\"))\n}\n```\nChecked with systemd 255 (`systemd-analyze verify`), with an executable present at `/tmp/a$b/bin`:\n- `ExecStart=\"/tmp/a$$b/bin\" \"x\"` -> `u.service: Command /tmp/a$$b/bin is not executable: No such file or directory`\n- `ExecStart=\"/tmp/a$b/bin\" \"x\"` -> no complaint.",
+   "suggestion": "Apply the `$` -> `$$` doubling to cfg.Args only and leave it out for the first word (cfg.Binary), keeping the quoting and `%%` doubling; add a golden with a '$' in Binary."
+  },
+  {
+   "title": "LimitBody's documented connection close does not happen behind New: the oversize body is drained and the connection reused",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/httpserver/middleware.go:298",
+    "source/daemon/httpserver/middleware.go:303",
+    "source/daemon/httpserver/server.go:63"
+   ],
+   "description": "LimitBody's doc says that after a read past the limit \"the server closes the connection after the response\". http.MaxBytesReader does that by type-asserting the ResponseWriter it was given for the unexported `requestTooLarge()` method, without unwrapping. In New's chain LimitBody is innermost, so the writer it receives is the `*statusWriter` of Log wrapping the `*recoverWriter` of Recover; the assertion fails, the connection is not marked for closing, and net/http instead reads on through the remainder of the oversize body (up to its 256 KiB post-handler allowance) and keeps the connection alive. The documented behaviour holds only when LimitBody is used directly on the server's own writer.",
+   "evidence": "Experiment: POST a JSON string of 1 MiB + 100 000 bytes on a raw TCP connection, handler calls DecodeJSON and answers with Error, then send a second request on the same connection.\n- handler behind `httpserver.New`: `status=413 close=false`, second request on the same connection is served (`status=415`).\n- handler behind `httpserver.LimitBody(1<<20)` alone: `status=413 close=true`, second request fails with `unexpected EOF`.\n\nmiddleware.go:303 `return http.MaxBytesHandler(next, n)` passes the wrapped writer through to http.MaxBytesReader.",
+   "suggestion": "Either have the wrappers forward the close (for example LimitBody, or DecodeJSON's 413 path, sets `Connection: close` on the response when a *http.MaxBytesError is seen), or correct the LimitBody doc to say the close only happens when the writer is the server's own."
+  },
+  {
+   "title": "A context that ends during a service-manager command surfaces as \"signal: killed\", not as the context's error",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/service/systemd.go:41",
+    "source/daemon/service/manager.go:14"
+   ],
+   "description": "Manager documents that every method \"takes only a context that bounds the call\". execRunner runs the command with exec.CommandContext and wraps whatever cmd.Run returns. When the context is cancelled or its deadline passes while systemctl/launchctl is running (for example `systemctl restart` of a Type=notify unit waiting for READY=1, which blocks up to the start timeout), Run returns the *exec.ExitError of the killed process, so the error Install/Start/Stop/Status return reads \"...: signal: killed\" and does not match context.Canceled or context.DeadlineExceeded under errors.Is. A caller cannot tell its own timeout from the service manager's command dying, and `exitCode` reports -1 for it. The launchd `sleepContext` path, by contrast, returns ctx.Err() directly, so the same Stop call reports a timeout in two different ways depending on where it lands.",
+   "evidence": "systemd.go:41-46:\n```go\nif err := cmd.Run(); err != nil {\n    ...\n    return stdout.Bytes(), fmt.Errorf(\"%s: %w\", strings.Join(argv, \" \"), err)\n}\n```\nExperiment with Go 1.27.4: `exec.CommandContext(ctx, \"sleep\", \"5\").Run()` with a 100 ms deadline returns `err=signal: killed`, `errors.Is(err, context.DeadlineExceeded)=false`, and the `ExitCode()` the driver's exitCode reads is -1.",
+   "suggestion": "In execRunner, when cmd.Run fails and ctx.Err() != nil, join or wrap ctx.Err() into the returned error (e.g. `fmt.Errorf(\"%s: %w: %w\", argv, context.Cause(ctx), err)`)."
+  },
+  {
+   "title": "New validates Config but keeps the caller's Args slice and Env map, so later mutation reaches the unit file or plist unvalidated",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/service/manager.go:88",
+    "source/daemon/service/manager.go:98",
+    "source/daemon/service/option.go:88"
+   ],
+   "description": "New validates cfg (rejecting control characters so that no value can break out of the line or element it is written into, per textProblem's comment) and then stores the Config struct by value in the driver. The struct copy still shares the caller's `Args` backing array and `Env` map. Rendering happens later, at Install, so a caller that reuses or edits the map or slice between New and Install (a common pattern when building several services from one base environment) changes what is written, with no validation: a value containing a newline then injects arbitrary directives into the systemd unit, since renderUnit relies on \"Newlines cannot reach a raw value: Validate rejects control characters\". The package already treats this as a hazard elsewhere: WithSystemdHardening copies ReadWritePaths before keeping it.",
+   "evidence": "manager.go:87-88 `return &systemd{ cfg: cfg, ...` and :97-98 `return &launchd{ cfg: cfg, ...` store the validated Config without cloning Args or Env; systemd.go writeUnit calls `renderUnit(s.cfg, ...)` at Install time. option.go:88 `h.ReadWritePaths = append([]string(nil), h.ReadWritePaths...)` shows the defensive copy made for the hardening option only.",
+   "suggestion": "Clone in New after validation: `cfg.Args = slices.Clone(cfg.Args); cfg.Env = maps.Clone(cfg.Env)`."
+  },
+  {
+   "title": "DecodeJSON's client-facing Message embeds the raw encoding/json error, exposing Go struct and field type names",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/daemon/httpserver/decode.go:43",
+    "source/daemon/httpserver/decode.go:12"
+   ],
+   "description": "RequestError.Message is documented as \"the text for the caller\" and is what a handler passes to Error. For a decode failure DecodeJSON appends `err.Error()` from encoding/json verbatim, which for a type mismatch or unknown field names the server's Go struct type, field path and Go type. The message is therefore not stable across refactors and leaks internal type names to any client that can reach the handler (including unauthenticated ones on WithUnauthenticatedPaths routes).",
+   "evidence": "decode.go:43 `return bodyError(err, \"request body is not valid JSON for this request: \"+err.Error())`.\nExperiment: decoding `{\"count\":\"x\"}` into `struct{ Count int `json:\"count\"` }` named `req` returns `bad_request: request body is not valid JSON for this request: json: cannot unmarshal string into Go struct field req.count of type int`.",
+   "suggestion": "Build the message from the structured error instead (for *json.UnmarshalTypeError use the JSON field path and offset only; for syntax errors the offset), and keep the full error for the server log."
+  }
+ ]
+}

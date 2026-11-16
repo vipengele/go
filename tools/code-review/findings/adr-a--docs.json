@@ -1,0 +1,154 @@
+{
+ "unit": "adr-a:docs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "ADR-0003, ADR-0005 and ADR-0006 say daemon requires cli/core and update; the code requires neither and lints against cli/core",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:30",
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:37",
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:113",
+    "docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md:59",
+    "docs/adr/0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md:104",
+    "docs/adr/0010-errors-map-to-exit-codes-through-a-registry-with-coded-and-reported-in-cli-spec.md:42",
+    "source/daemon/go.mod:5",
+    "source/daemon/.golangci.yml:17"
+   ],
+   "description": "Three ADRs in scope fix the dependency direction as `daemon ──► cli/core, cli/spec, update`, and ADR-0003 derives a CI consequence from it: a change to `cli` or `update` selects `daemon`. The code has the opposite rule. `source/daemon/go.mod` requires only `cli/spec` and `filelock`, and daemon's depguard config denies `go.vipengele.org/cli/core` everywhere and every sibling but `cli/spec`, `cli/spec/paths` and `filelock` outside `daemoncmd`. No ADR records the reversal. ADR-0010 (errors) simply asserts that `daemon` \"may not require `cli/core` (ADR-0005)\", citing the ADR whose diagram says it does. The direction is superseded in practice without any ADR saying so, and the CI-selection claim is false: `changed-projects` builds edges from `require` lines only, so a change to `source/update` or `source/cli/core` does not select `daemon`.",
+   "evidence": "ADR-0005 line 59: `daemon   ──► cli/core, cli/spec, update`. ADR-0003 line 37: \"`daemon` requires `cli` and `update` (ADR-0006)\"; line 113: \"A change to `cli` or `update` selects `daemon` in CI, because `daemon`'s `go.mod` requires them\". ADR-0006 line 104: \"`daemon` requires `cli` and `update`; while they are developed together it replaces them with their directories\".\n\nsource/daemon/go.mod requires only `go.vipengele.org/cli/spec v0.0.0` and `go.vipengele.org/filelock v0.0.0` (plus indirect `commons`). source/daemon/.golangci.yml lines 17-18: `- pkg: go.vipengele.org/cli/core` / `desc: daemon does not depend on cli/core`; lines 19-34 allow only daemon's own packages, `cli/spec`, `cli/spec/paths` and `filelock` outside `daemoncmd`. A grep for `go.vipengele.org/update` and `cli/core` imports under source/daemon finds none, only doc comments such as doc.go:228 \"go.vipengele.org/cli/core, which this package does not import\".",
+   "suggestion": "Write an ADR (or amend ADR-0005's dependency section and the status lines of ADR-0003 and ADR-0006) recording that `daemon` requires `cli/spec` and `filelock` only and may not import `cli/core`. Correct ADR-0003's CI consequence, and decide how `daemon` will reach `update` if the update flow is still planned."
+  },
+  {
+   "title": "ADR-0016 says the Worker does not read the published module list and ADR-0004 says a new project needs a Worker deploy; the Worker reads modules.json from R2 on every go-get",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:8",
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:15",
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:62",
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:159",
+    "tools/vanity-worker/src/index.ts:78",
+    "tools/vanity-worker/src/modules-source.ts:24",
+    "tools/vanity-worker/wrangler.toml:12",
+    ".github/workflows/deploy-vanity-worker.yml:3",
+    ".github/workflows/release.yml:251"
+   ],
+   "description": "ADR-0016 (vanity) states that publishing the list to R2 leaves the Worker untouched: \"The Worker's own list is unchanged by this decision, and the Worker does not read the published object.\" ADR-0004 adds that the Worker's list is generated from `source/**/go.mod` at deploy time, so \"a new project needs a Worker deploy before its first tag\". The deployed code does the opposite. The Worker has no compiled-in list, reads `modules.json` from the `MODULE_LIST` R2 binding (60-second per-isolate cache), and answers 503 when the object is missing or invalid. No ADR records this; a grep for R2, MODULE_LIST and modules.json across docs/adr finds only ADR-0016 itself. Meanwhile release.yml, deploy-vanity-worker.yml and CLAUDE.md cite \"ADR-0004, ADR-0016\" for the R2-read behaviour those ADRs deny. The gap also hides a new failure mode: resolution of every module now depends on the R2 object, not only on the Worker being up, and ADR-0004's \"Worker outage\" consequence does not cover it.\n\nA smaller inaccuracy in the same ADR: it says the list is \"generated and validated by `scripts/generate-modules.ts`\". That file only walks for go.mod directories; validation is `validateModuleList`, called from `scripts/publish-modules.ts`.",
+   "evidence": "ADR-0016 lines 8-9: \"The Worker's own list is unchanged by this decision, and the Worker does not read the published object.\" ADR-0004 lines 159-161: \"A new project needs a Worker deploy before its first tag. The Worker's module list is generated from `source/**/go.mod`, so until the deploy that includes the new `go.mod`, the project's path does not resolve\".\n\ntools/vanity-worker/src/index.ts:78: `modules = await cache.get(env.MODULE_LIST);` with a 503 \"Module list unavailable\" on failure (lines 79-82). src/modules-source.ts:27: `const object = await bucket.get(MODULE_LIST_KEY);` where `MODULE_LIST_KEY = \"modules.json\"`. wrangler.toml lines 11-13 bind `MODULE_LIST` to bucket `vipengele-go`. deploy-vanity-worker.yml lines 3-6: \"Its module list is read at request time from the R2 object that publish-vanity-modules writes ... a Worker tag deploys Worker code only.\" scripts/generate-modules.ts exports only `findGoModDirs`; scripts/publish-modules.ts:94 calls `validateModuleList(goModDirs)`.",
+   "suggestion": "Add an ADR (or amend ADR-0016) recording that the Worker reads `modules.json` from R2 at request time, with the 60s TTL, the 503 behaviour and the rollback-tag caveat. Mark ADR-0004's \"needs a Worker deploy\" and \"generated from source/**/go.mod\" statements as replaced, and fix the generate-modules/publish-modules attribution."
+  },
+  {
+   "title": "The daemon update flow that ADR-0003 assigns to daemon (pending, confirm, rollback, scheduled runner) does not exist",
+   "category": "feature-gap",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:25",
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:87",
+    "source/daemon/go.mod:5",
+    "source/daemon/.golangci.yml:19"
+   ],
+   "description": "ADR-0003's project table lists \"the daemon's own update flow (pending, confirm, rollback, scheduled runner)\" among what `daemon` owns, and its cobra section relies on it: \"A scheduled runner in a daemon runs the update engine with no command in the process\". None of it is implemented. `daemon` does not require `go.vipengele.org/update`, and its depguard rule forbids importing it outside `daemoncmd`. No package under source/daemon holds a pending/confirm/rollback state or a Runner that runs an update. No later ADR defers or drops the capability; ADR-0003's status line lists eleven amendments and none touches this row.",
+   "evidence": "ADR-0003 line 25: \"... the single-instance guard, and the daemon's own update flow (pending, confirm, rollback, scheduled runner).\"\n\nsource/daemon/go.mod has no `require go.vipengele.org/update`. `grep -rn -i \"rollback\\|pending\" source/daemon --include=*.go` (non-test) returns only comments about a Start or Stop \"still pending\" in func.go, http.go, supervisor.go and doc.go. `grep -rn \"go.vipengele.org/update\" source/daemon` returns nothing. source/daemon/.golangci.yml lines 19-34 deny every `go.vipengele.org/` import outside `daemoncmd` except `cli/spec`, `cli/spec/paths` and `filelock`.",
+   "suggestion": "Either implement the flow (which needs a decision on how `daemon` depends on `update`), or amend ADR-0003 to say the daemon update flow is not provided and a daemon wires `update` itself."
+  },
+  {
+   "title": "ADR-0003 promises a Windows service manager and service commands in daemoncmd; only systemd and launchd drivers and a status command exist",
+   "category": "feature-gap",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:25",
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:84",
+    "source/daemon/service/manager.go:106",
+    "source/daemon/daemoncmd/status.go:79"
+   ],
+   "description": "ADR-0003 gives `daemon` \"service managers (systemd, launchd, Windows) that register the daemon as a service\" and names `daemon/daemoncmd` as \"the package holding the service commands\". In the code, `service.New` returns `ErrUnsupported` for `windows`, with an explicit case, so a Windows daemon cannot be registered as a service through the library. `daemoncmd` exports only `NewStatus`, an HTTP client of the `/status` route; there is no install, uninstall, start or stop command over the `service.Manager`. ADR-0003's status line says ADR-0024 \"selects service drivers at runtime\" but does not say the Windows driver or the service commands were dropped.",
+   "evidence": "source/daemon/service/manager.go lines 106-107: `case \"windows\": return nil, fmt.Errorf(\"%w: %s\", ErrUnsupported, goos)`. Its doc, lines 47-49: \"The drivers are systemd on linux and launchd on darwin; every other GOOS, windows included, has none.\"\n\n`ls source/daemon/service` shows launchd*.go and systemd*.go only. `grep -n \"^func [A-Z]\" source/daemon/daemoncmd/status.go` returns `WithHTTPClient`, `WithTimeout` and `NewStatus`; the package has no other non-test source file besides doc.go.",
+   "suggestion": "Record in an ADR that the Windows driver and the service-management commands are not yet provided (or are out of scope), or implement them. Until then, ADR-0003's table overstates what `daemon` ships."
+  },
+  {
+   "title": "ADR-0003 and ADR-0005 say each project's .golangci.yml carries a depguard rule denying cobra; commons, config and cli/state have none",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md:50",
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:89",
+    "source/commons/.golangci.yml:1",
+    "source/config/.golangci.yml:1",
+    "source/cli/state/.golangci.yml:1"
+   ],
+   "description": "ADR-0005 states that \"Each project's `.golangci.yml` carries a `depguard` rule that denies cobra outside `internal/cobra`, so the boundary is checked rather than remembered\"; ADR-0003 says the same about its command packages. `commons` was already a project when ADR-0005 was written. Three of the eight projects enable no depguard at all, so a cobra import there would pass lint. The other five do enforce it: `cli/core`, `cli/spec`, `update` and `daemon` by a deny rule, `filelock` by a strict allow-list.",
+   "evidence": "source/commons/.golangci.yml, source/config/.golangci.yml and source/cli/state/.golangci.yml are each exactly:\n```\nversion: \"2\"\nlinters:\n  default: standard\n  enable:\n    - gochecknoglobals\n```\nBy contrast source/cli/spec/.golangci.yml lines 10-15 hold `no-cli-framework` denying `github.com/spf13/cobra`, and source/cli/core/.golangci.yml lines 10-15 hold `cobra-stays-in-internal-cobra`.",
+   "suggestion": "Add a `depguard` deny of `github.com/spf13/cobra` to the three configs, or narrow the ADR wording to the projects that contribute commands."
+  },
+  {
+   "title": "ADR-0008 allows cobra in update's updatecmd package; the depguard rule it cites denies cobra in all of update",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0008-update-takes-its-identity-from-cli-spec.md:20",
+    "source/update/.golangci.yml:16"
+   ],
+   "description": "ADR-0008 says \"Cobra stays out of `update` except in the `updatecmd` package. The `depguard` rules in `source/update/.golangci.yml` enforce it.\" The rule in that file has no exception: it denies cobra for every file, `updatecmd` included. `updatecmd` returns `[]*spec.Command` and imports no cobra, which matches ADR-0005's single-adapter rule. ADR-0008 therefore contradicts both the code and ADR-0005, which it does not claim to amend on this point.",
+   "evidence": "source/update/.golangci.yml lines 16-21:\n```\nno-cobra:\n  files:\n    - \"**\"\n  deny:\n    - pkg: github.com/spf13/cobra\n      desc: update depends on no command-line framework\n```\nsource/update/updatecmd/updatecmd.go:27: `func Commands(cfg update.Config, opts ...Option) []*spec.Command`. source/update/go.mod has no cobra require.",
+   "suggestion": "Reword ADR-0008's bullet to \"Cobra stays out of `update` entirely (ADR-0005)\"."
+  },
+  {
+   "title": "ADR-0009 (App owns version) names the version command package cli/core/versioncmd; the package is cli/core/command/version",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0009-the-app-owns-version-and-takes-hooks-as-options.md:42",
+    "source/cli/core/app.go:8",
+    "source/cli/core/command/version/version.go:37"
+   ],
+   "description": "The ADR says \"Every root the `App` runs holds the `version` command of `cli/core/versioncmd`\". No such package exists. The command is built by `version.New` in `go.vipengele.org/cli/core/command/version`, beside `command/config`. ADR-0005's considered option \"as `versioncmd.New` does\" uses the same name. A reader following the ADR to the code, or importing the path it names, finds nothing.",
+   "evidence": "source/cli/core/app.go:8 imports `\"go.vipengele.org/cli/core/command/version\"` and line 268 calls `version.New(*a.settings.buildInfo, opts...)`. `ls source/cli/core` shows `command/` (with `config` and `version`) and no `versioncmd` directory.",
+   "suggestion": "Replace `cli/core/versioncmd` with `cli/core/command/version` in ADR-0009."
+  },
+  {
+   "title": "Six ADR numbers in 0001-0016 are used by more than one file, so ADR-00NN references are ambiguous",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0009-platform-paths-live-in-cli-spec-paths.md:1",
+    "docs/adr/0009-the-app-owns-version-and-takes-hooks-as-options.md:1",
+    "docs/adr/0010-errors-map-to-exit-codes-through-a-registry-with-coded-and-reported-in-cli-spec.md:1",
+    "docs/adr/0010-version-comparison-lives-in-cli-spec-version.md:1",
+    "docs/adr/0012-configuration-is-a-provider-based-project.md:1",
+    "docs/adr/0012-signals-are-registered-by-execute-and-injected-through-env.md:1",
+    "docs/adr/0014-json-output-envelope.md:1",
+    "docs/adr/0014-the-supervisor-stops-runners-in-reverse-order-within-one-grace-period.md:1",
+    "docs/adr/0015-a-run-function-claims-exit-2-only-through-spec-usageerror.md:1",
+    "docs/adr/0015-table-helper-lives-in-cli-spec-table.md:1",
+    "docs/adr/0016-pre-run-hooks-return-the-context.md:1",
+    "docs/adr/0016-the-default-update-source-reads-the-github-latest-redirect-then-the-api.md:1",
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:1",
+    "docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md:5",
+    ".github/workflows/release.yml:253"
+   ],
+   "description": "Numbers 0009, 0010, 0012, 0014 and 0015 each name two ADRs and 0016 names three. Many references use the bare number, so the reader has to guess which decision is meant. ADR-0003's status line cites \"ADR-0009\", \"ADR-0010\", \"ADR-0012\" and \"ADR-0016\" by number only. ADR-0014 (JSON) \"amends ADR-0007 and ADR-0009\", meaning the App ADR, while ADR-0010 (errors) says \"within what ADR-0009 allows it\", meaning the paths ADR. ADR-0011 \"amends ADR-0010\" and ADR-0016 (pre-run) says \"as ADR-0009 describes\". Workflows and CLAUDE.md cite \"ADR-0016\" for the vanity list, though two other ADRs carry that number. Some ADRs already disambiguate by file name (for example ADR-0010 version and ADR-0015 table), which shows the collision is known.",
+   "evidence": "`ls docs/adr` shows:\n- 0009-platform-paths-live-in-cli-spec-paths.md and 0009-the-app-owns-version-and-takes-hooks-as-options.md\n- 0010-errors-map-to-exit-codes-...md and 0010-version-comparison-lives-in-cli-spec-version.md\n- 0012-configuration-is-a-provider-based-project.md and 0012-signals-are-registered-by-execute-and-injected-through-env.md\n- 0014-json-output-envelope.md and 0014-the-supervisor-stops-runners-...md\n- 0015-a-run-function-claims-exit-2-...md and 0015-table-helper-lives-in-cli-spec-table.md\n- 0016-pre-run-hooks-return-the-context.md, 0016-the-default-update-source-...md and 0016-the-vanity-module-list-...md\n\nADR-0003 line 5: \"by ADR-0009, which reverses the clause that has `update` keep its own platform-directory resolver, by ADR-0010, which moves the version comparison rule ...\". release.yml:253: \"(ADR-0004, ADR-0016)\".",
+   "suggestion": "Renumber the later file of each pair (or adopt a suffix), or require every cross-reference to a duplicated number to carry the file name, and fix the bare references in ADR-0003, 0005, 0010, 0011, 0014, 0016 and the workflow comments."
+  },
+  {
+   "title": "ADR-0004 has no Status line although later ADRs amend it, and its project inventory and go directive are stale",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:1",
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:16",
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:28",
+    "go.work:1",
+    "source/config/go.mod:1",
+    "source/cli/state/go.mod:1",
+    "source/filelock/go.mod:1"
+   ],
+   "description": "ADR-0001, 0003 and 0005 carry a Status line listing the ADRs that amend them. ADR-0004 has none, although ADR-0008, ADR-0009 (paths) and ADR-0016 (vanity) each declare that they amend it. Two of its concrete statements no longer match the repository. \"The projects are:\" lists five projects, while `source/` holds eight: `config`, `cli/state` and `filelock` were added by ADR-0012, ADR-0018 and ADR-0019, none of which says it amends ADR-0004's table. \"Every new or changed `go.mod` carries `go 1.27.2`\" is contradicted by every go.mod and by go.work, all at `go 1.27.4`.",
+   "evidence": "ADR-0004 lines 16-24 list `source/cli/core`, `source/cli/spec`, `source/update`, `source/daemon` and `source/commons`. `find source -name go.mod` also returns source/config/go.mod, source/cli/state/go.mod and source/filelock/go.mod.\n\nADR-0004 line 28: \"Every new or changed `go.mod` carries `go 1.27.2`.\" All eight go.mod files and go.work read `go 1.27.4`.\n\nStatus lines: ADR-0008 \"amends ADR-0003 and ADR-0004\"; ADR-0009 (paths) \"amends ADR-0003, ADR-0004 and ADR-0005\"; ADR-0016 (vanity) \"amends `docs/adr/0004-...`\". ADR-0004 line 1 is the title and line 3 starts the body.",
+   "suggestion": "Add a Status line to ADR-0004 naming ADR-0008, ADR-0009 (paths), ADR-0012, ADR-0016 (vanity), ADR-0018 and ADR-0019. Replace the fixed `go 1.27.2` with a pointer to the `go-directive-names-a-patched-release` rule."
+  }
+ ]
+}

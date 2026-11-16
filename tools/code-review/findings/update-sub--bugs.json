@@ -1,0 +1,59 @@
+{
+ "unit": "update-sub:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "updatecmd prints a warning on every successful Windows update, for the backup lock the library documents as expected",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/update/updatecmd/updatecmd.go:256-259",
+    "source/update/install.go:193-214"
+   ],
+   "description": "After `Apply`, the `update` command calls `installed.Discard()` and turns any error into `inv.Warning(\"the previous binary is left at %s: %v\", ...)`. On Windows the backup `<target>.old` is the file of the process running the update, so `Discard` returns `*BackupLockedError` on every update. The `Discard` doc comment and ADR-0031 both call that the normal outcome which \"the caller may ignore\", and the `UpdateCheckHooks` pre-run hook removes the file on the next command. The command does not separate that case from a real removal failure, so every successful self-update on Windows ends with a warning line on stderr.",
+   "evidence": "updatecmd.go:256-259:\n```go\nbackup := installed.Backup()\nif err := installed.Discard(); err != nil {\n    inv.Warning(\"the previous binary is left at %s: %v\", backup, err)\n}\n```\ninstall.go:209-211 returns `&BackupLockedError{Path: i.backup, Err: err}` when the resolved GOOS is windows and the remove fails with access denied or a sharing violation. ADR-0031, Consequences: \"A Windows update leaves `<exe>.old` until the next run. `Discard` returns a `*BackupLockedError`, which the caller may ignore\". source/update/example_unix_test.go:129 says the same: \"A locked backup (*update.BackupLockedError) is not a failed update and may be ignored.\" The only test of this branch (`TestABackupThatCannotBeRemovedIsAWarning`) uses a directory at the backup path, not the locked case. Not run on Windows here; this follows from reading the code path.",
+   "suggestion": "Match `*update.BackupLockedError` with `errors.As` and stay silent (or print an info line saying the old binary is removed on the next run). Keep the warning for other `Discard` failures."
+  },
+  {
+   "title": "`update --to` always fails for a custom Source that is not an AssetLocator, and only after the confirmation",
+   "category": "feature-gap",
+   "severity": "low",
+   "locations": [
+    "source/update/updatecmd/updatecmd.go:188",
+    "source/update/updatecmd/updatecmd.go:236-239",
+    "source/update/select.go:77-81",
+    "source/update/source.go:7-12"
+   ],
+   "description": "On the pinned path the command builds `update.Release{Tag: to}` itself, with nil `Assets`, and hands it to `Select`. `Select` treats nil `Assets` as \"not listed\" and requires the resolved Source to implement `AssetLocator`; otherwise it returns an error wrapping `ErrAssetsNotListed`. The `Source` interface has only `Latest(ctx, ch)`, so a custom Source that lists assets has no way to serve a named tag. For such a tool `--to` can never work, while the latest path does. The failure also comes after the downgrade guard and the `Update X from A to B?` prompt, so the user confirms an update that cannot start. The package doc and the command help describe `--to` without this limit.",
+   "evidence": "updatecmd.go:188 `rel := update.Release{Tag: to}`; the pinned branch never queries the Source. updatecmd.go:236 `sel, err := r.Select(rel)` runs after the `inv.Confirm` block at 216-234. select.go:77-81:\n```go\nif rel.Assets == nil {\n    loc, ok := r.Source.(AssetLocator)\n    if !ok {\n        return Selection{}, fmt.Errorf(\"%w: release %s, source %T\", ErrAssetsNotListed, rel.Tag, r.Source)\n    }\n```\nSequence: a Config with a custom `Source` implementing only `Latest`; run `update --to v1.2.3`, answer `y`; result is \"update: release assets are not listed: release v1.2.3, source *T\".",
+   "suggestion": "Either document in updatecmd that `--to` needs a Source implementing `AssetLocator`, or run `Select` before the confirmation so the refusal comes first. An optional by-tag lookup interface for sources would close the gap fully."
+  },
+  {
+   "title": "releasetest.Verify never extracts an archive, though its package doc says it checks the files a Config extracts",
+   "category": "test-quality",
+   "severity": "low",
+   "locations": [
+    "source/update/internal/releasetest/doc.go:1-4",
+    "source/update/internal/releasetest/verify.go:76-123",
+    "source/update/internal/releasetest/verify.go:202-238"
+   ],
+   "description": "The package doc says Verify \"checks that the files in GoReleaser's dist directory are the ones a tool's update.Config downloads, verifies and extracts\". Verify checks the tag, runs `Select` per built platform, verifies the minisign signature, and compares every listed SHA-256 digest. It never opens an archive. A dist whose archives carry the wrong binary name (for example a hand-edited `builds.binary`, or a missing `.exe` on windows), or use a format different from the extension in the name, passes Verify and the release-tool self-test. `Config.Extract` on the published release would then fail with `*BinaryNotFoundError`.",
+   "evidence": "verify.go:100-108 only records `sel.Archive.Name` under `sel.Checksums.Name`. `verifyChecksums` (202-238) reads the checksums file and signature, calls `minisign.Verify`, `checkDigest` for each listed file, and checks each archive name is listed. No code path calls `update.Config.Extract` or reads archive entries. The bullet list in doc.go (lines 6-16) also lists no extraction step, so the summary sentence at lines 1-4 overstates what is checked.",
+   "suggestion": "After the digest check, open each selected archive and assert it holds exactly one regular file named BinaryName (plus `.exe` for windows) in the format the Config derives. Otherwise drop \"and extracts\" from the package doc."
+  },
+  {
+   "title": "The sh installer cannot find the latest release with BusyBox wget when curl is absent",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/update/installscript/install.sh.in:92-93",
+    "source/update/installscript/install.sh.in:100-103",
+    "source/update/installscript/install.sh.in:53-59"
+   ],
+   "description": "The script advertises \"curl, else wget\". The wget branch of `latest_location` passes `--max-redirect=0`, a GNU wget option that BusyBox wget (the wget of Alpine and most minimal images, which often have no curl) does not accept. BusyBox prints its usage text and exits non-zero, `|| :` hides the failure, no `  HTTP/` line reaches `wget.log`, and the script stops with \"answered HTTP nothing, not a redirect to the latest release\". With `<PREFIX>_VERSION` set the script works, because `fetch` uses only `-S -O`, which BusyBox supports. I could not run this: no BusyBox is installed in this environment, so it rests on BusyBox's option table, which has no `max-redirect` entry.",
+   "evidence": "install.sh.in:92-93:\n```sh\nwget --max-redirect=0 -S -O /dev/null \"$1\" 2>\"$tmp/wget.log\" || :\n_status=$(awk '/^  HTTP\\// { s = $2 } END { print s }' \"$tmp/wget.log\")\n```\nthen 100-103:\n```sh\ncase $_status in\n30[12378]) ;;\n*) fail \"$1 answered HTTP ${_status:-nothing}, not a redirect to the latest release\" ;;\n```\nThe downloader is chosen at 53-59 by `command -v wget` alone, with no check of which wget it is. Neither installscript/doc.go nor ADR-0023 lists GNU wget as a requirement.",
+   "suggestion": "For the wget fallback, either document that it needs GNU wget, or detect the missing option and fail with a message telling the user to set `<PREFIX>_VERSION` or install curl."
+  }
+ ]
+}

@@ -1,0 +1,87 @@
+{
+ "unit": "core-logging:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "Header values that are multi-line JSON arrays/objects leak: the non-string value skip stops at the first newline",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    "source/cli/core/logging/redact.go:295",
+    "source/cli/core/logging/redact.go:80",
+    "source/cli/core/logging/redact.go:344",
+    "source/cli/core/logging/redact.go:163",
+    "source/cli/core/logging/redact_writer.go:108"
+   ],
+   "description": "A header key whose value is an array or object is only redacted up to the first newline. In the handler layer, `redactor.text` validates the whole multi-line string as JSON (`shapeOf` -> shapeJSON), then `jsonSkip.next` ends the value at the first '\\n' (\"A newline ends the value, as it ends the line\"), so only the opening bracket is replaced and every element on the following lines is written. In the writer layer each physical line is read alone: the line `\"Cookie\": [` is text-shaped and loses only `[`, and the next line carrying the secret matches no pattern. Indented JSON of an `http.Header` (map[string][]string) has exactly this shape, so logging `json.MarshalIndent(req.Header)` as a message or string attribute, or piping a subprocess's pretty-printed JSON through `Result.Writer`, writes Cookie / Set-Cookie / Authorization values in clear. The output is also no longer valid JSON, contradicting the Redaction doc's \"so the line stays valid JSON\". The same header as a single-line JSON document, or passed as a `slog.Any` value, is redacted correctly, so the leak depends only on indentation.",
+   "evidence": "Experiment through the public API (logging.Setup with a bytes.Buffer writer, both formats):\n\nh := http.Header{\"Cookie\": {\"session=s3cret\"}, \"Set-Cookie\": {\"a=s3cret1\",\"b=s3cret2\"}, \"Accept\": {\"x\"}}\nb, _ := json.MarshalIndent(h, \"\", \"  \")\nlogger.Info(\"request headers\", \"headers\", string(b))\n\ntext output: level=INFO msg=\"request headers\" headers=\"{\\n  \\\"Accept\\\": [\\n    \\\"x\\\"\\n  ],\\n  \\\"Cookie\\\": \\\"[REDACTED]\\\"\\n    \\\"session=s3cret\\\"\\n  ],\\n  \\\"Set-Cookie\\\": \\\"[REDACTED]\\\"\\n    \\\"a=s3cret1\\\",\\n    \\\"b=s3cret2\\\"\\n  ]\\n}\"\nJSON format output leaks identically (\"session=s3cret\", \"a=s3cret1\", \"b=s3cret2\" all present).\n\nRaw write of the indented document to Result.Writer produces:\n    \"Cookie\": [REDACTED]\n      \"session=s3cret\"\n    ]\n\nCode: redact.go:295-297 `if c == '\\n' { return skipAfter }`; redact.go:344 `func (r *redactor) text(s string) string { return r.line(s) }` applies the one-line model to a multi-line string.",
+   "suggestion": "In `redactor.text` (message / string attribute, where the whole string is in hand and already validated as JSON by shapeOf) do not end a non-string header value at a newline: skip to the closing bracket. For the writer, either carry a non-string header value's skip state across lines when a text-shaped line ends in `\"Name\": [` / `{` (the continueJSONValue machinery already exists), or document that multi-line JSON is outside the guarantee."
+  },
+  {
+   "title": "A header name opened with WithGroup is not redacted in text format (redacted in JSON format)",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    "source/cli/core/logging/redact.go:799",
+    "source/cli/core/logging/redact.go:349",
+    "source/cli/core/logging/redact.go:163"
+   ],
+   "description": "`redactingHandler.WithGroup` passes the group name straight to the next handler and never checks it against the header names, and `redactor.attr` only looks at the attribute's own key. With the text handler the group becomes a dotted key prefix (`Authorization.value=...`), which neither layer recognises: the handler sees key `value`, and the writer's textHeader pattern needs `Name:` (a colon), not `Name.`/`=`. The same record under `--log-format json` is written as `\"Authorization\":{...}` and the writer layer replaces the whole object. `slog.Group(\"Authorization\", ...)` as an attribute is redacted in both formats, so the result depends on which slog grouping API and which output format are used, while the docs promise redaction of a header key \"at any group depth\".",
+   "evidence": "logging.Setup(Options{Format: spec.FormatText, Writer: &buf}), then:\n\nl.WithGroup(\"Authorization\").Info(\"m\", \"value\", \"s3cret\", \"n\", 5)\nl.WithGroup(\"req\").WithGroup(\"Cookie\").Info(\"m\", \"session\", \"s3cret\")\n\ntext output:\nlevel=INFO msg=m Authorization.value=s3cret Authorization.n=5\nlevel=INFO msg=m req.Cookie.session=s3cret\n\nJSON format output for the same calls:\n{...,\"msg\":\"m\",\"Authorization\":\"[REDACTED]\"}\n{...,\"msg\":\"m\",\"req\":{\"Cookie\":\"[REDACTED]\"}}\n\nCode: redact.go:799-801 `return &redactingHandler{next: h.next.WithGroup(name), r: h.r, format: h.format}`.",
+   "suggestion": "Track in redactingHandler whether any open group name is a header (`r.isHeader(name)`), and when one is, replace every attribute value handled or added through WithAttrs beneath it with \"[REDACTED]\" (or collapse the group into a single redacted attribute)."
+  },
+  {
+   "title": "Case-insensitive `Basic `/`Bearer ` baseline rewrites ordinary prose in messages and attributes",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/logging/redact.go:59",
+    "source/cli/core/logging/redact.go:191",
+    "source/cli/core/logging/redact.go:162"
+   ],
+   "description": "The baseline prefixes are compiled as `(?i:Bearer )` / `(?i:Basic )` followed by `[A-Za-z0-9_+/=.~-]+`, with no word boundary before the scheme and no minimum token shape. Any occurrence of the English words \"basic\" or \"bearer\" followed by a space and a word is therefore treated as a credential, in every message, string attribute and raw line, and cannot be switched off (the baseline is not removable). ADR-0018 chooses the any-letter-case match deliberately, so this is a consequence of that decision rather than a deviation, but the effect on normal diagnostics is not stated anywhere and makes messages about authentication unreadable. The missing left boundary also matches inside longer words (\"probasic x\").",
+   "evidence": "logger.Info(\"basic authentication failed for user\", \"hint\", \"bearer token missing; see Basic usage\")\n\ntext: level=INFO msg=\"basic [REDACTED] failed for user\" hint=\"bearer [REDACTED] missing; see Basic [REDACTED]\"\nJSON: {...,\"msg\":\"basic [REDACTED] failed for user\",\"hint\":\"bearer [REDACTED] missing; see Basic [REDACTED]\"}\n\nTests pin the lower-case match (redact_test.go:147 `\"basic x\": \"basic [REDACTED]\"`).",
+   "suggestion": "Require a left boundary (start of text or a non-word byte) before a baseline scheme, and consider requiring the token to look like a credential (e.g. a minimum length, or for Basic a base64 run) so that prose such as \"basic authentication\" survives; at minimum document the effect in the Redaction doc."
+  },
+  {
+   "title": "In text format the writer layer truncates the rest of a record after any `Header:` mention, dropping later attributes and the closing quote",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/logging/redact.go:163",
+    "source/cli/core/logging/redact.go:216",
+    "source/cli/core/logging/logging.go:74"
+   ],
+   "description": "The handler layer redacts a header value inside a message or attribute precisely (to the end of that string's line), but the text handler then writes the whole record on one physical line and the RedactingWriter re-reads it as plain text, where a header value \"runs to the end of the line\". Everything after the first `Name:` in the record, including the closing quote of the quoted value and every following attribute, is deleted. The run-to-end-of-line rule is an ADR-0018 decision for raw text, but applied on top of slog's own key=value line it silently loses unrelated, already-safe log data, and the result is no longer parseable logfmt. Under the JSON format the same records keep all their attributes.",
+   "evidence": "Format text:\nlogger.Info(\"dump\\nAuthorization: s3cret\\nX: y\", \"k\", \"v\")\n-> level=INFO msg=\"dump\\nAuthorization: [REDACTED]        (no closing quote, `k=v` gone)\n\nlogger.Info(\"m\", \"hdr\", map[string]string{\"Authorization\": \"s3cret tok\"}, \"hdr2\", map[string][]string{\"Cookie\": {\"s3cret\"}})\n-> level=INFO msg=m hdr=map[Authorization:[REDACTED]        (`hdr2` attribute gone)\n\nlogger.Info(\"hdr\", \"headers\", http.Header{\"Accept\":{\"x\"},\"Authorization\":{\"Token s3cret\"},\"Cookie\":{...}})\n-> level=INFO msg=hdr headers=\"map[Accept:[x] Authorization:[REDACTED]\n\nJSON format for the first call keeps the tail: {...,\"msg\":\"dump\\nAuthorization: [REDACTED]\",\"k\":\"v\"}.",
+   "suggestion": "For lines the text handler itself wrote, end a header value at the closing unescaped quote of the quoted slog value (the handler layer has already redacted the content), or have the handler layer emit a value the writer pattern no longer matches, so that only the secret is removed."
+  },
+  {
+   "title": "Flush directly after a complete prefix writes the following token unredacted, a case the Flush doc does not cover",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/logging/redact_writer.go:121",
+    "source/cli/core/logging/redact_writer.go:220",
+    "source/cli/core/logging/redact.go:162"
+   ],
+   "description": "The prefix pattern needs at least one token character after the prefix, so when the held bytes end exactly after a complete prefix (`Bearer `, or a tool prefix such as `ghp_`) `pieceEnd` finds no match, no continuation is recorded, and the token arriving in the next Write starts a new piece that no longer contains the prefix. The token is written in clear. A header name is handled in the same position (`Authorization:` with an empty value sets continueText), and a prefix followed by one token byte sets continueToken, so only this boundary is unprotected. The Flush doc limits its caveat to \"a prefix or header name the held bytes end inside\"; here the bytes end after the whole prefix, not inside it. Reachable by any caller that flushes Result.Writer between chunks of raw or subprocess output.",
+   "evidence": "w := res.Writer\nw.Write([]byte(\"token: Bearer \")); w.Flush(); w.Write([]byte(\"s3cret\\n\"))\n-> destination receives: token: Bearer s3cret\n\nwhereas\nw.Write([]byte(\"Authorization: Bearer abc\")); w.Flush(); w.Write([]byte(\"def tail\\n\"))\n-> Authorization: [REDACTED]\n\nCode: redact.go:162 `(prefixAlt)` + suffixChars + `+`; redact_writer.go:220-227 sets continueToken only for a prefix match with m[1] == len(w.buf).",
+   "suggestion": "In appendPiece/pieceEnd, when the flushed bytes end with a complete prefix (match the prefix alternation anchored at the end of buf), set cont = continueToken and emit \"[REDACTED]\" once the first token byte arrives, or hold back a trailing bare prefix instead of flushing it; alternatively extend the Flush doc to state this boundary."
+  },
+  {
+   "title": "A pieced line that starts as well-formed JSON but continues as plain text is read as JSON and leaks the tail of a header value, contrary to the RedactingWriter doc",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/logging/redact_writer.go:66",
+    "source/cli/core/logging/redact_writer.go:168",
+    "source/cli/core/logging/redact.go:95"
+   ],
+   "description": "`shapeOfStart` classifies the first piece as JSON whenever the held bytes start with `{` and every token so far is well formed, and every later piece of that line is then read as JSON without validation. The RedactingWriter doc says \"Only text that follows a complete JSON document on the same line, after a piece of the line has been written, is read as JSON without being JSON.\" That is not the only case: an incomplete but well-formed JSON start followed by non-JSON text is also read as JSON, so a text header value ends at its first quote and the remainder is written. The same happens when a caller's unterminated raw fragment is held and a later write is appended to it.",
+   "evidence": "w.Write([]byte(`{\"a\":1,`)); w.Flush(); w.Write([]byte(\" Cookie: abc \\\"def\\\" s3cret\\n\"))\n-> destination receives: {\"a\":1, Cookie: [REDACTED]\"def\" s3cret\n\nThe line `{\"a\":1, Cookie: abc \"def\" s3cret` is not JSON and does not follow a complete JSON document; written whole it is text-shaped and becomes `{\"a\":1, Cookie: [REDACTED]`. The same occurs without Flush when the well-formed JSON start exceeds 64 KiB (overflow piece) before the non-JSON tail arrives.",
+   "suggestion": "When a later piece (or the line end) of a JSON-shaped pieced line contains a token that is not valid at that position, fall back to the text reading for the remainder of the line (track the json.Decoder/scanner state across pieces), or correct the doc sentence to describe the actual guarantee."
+  }
+ ]
+}

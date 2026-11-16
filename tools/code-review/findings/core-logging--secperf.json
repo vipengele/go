@@ -1,0 +1,64 @@
+{
+ "unit": "core-logging:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "A header value that spans lines is redacted only up to its first newline: pretty-printed JSON leaks the secret right after \"[REDACTED]\"",
+   "category": "security",
+   "severity": "high",
+   "locations": [
+    "source/cli/core/logging/redact.go:295",
+    "source/cli/core/logging/redact.go:163",
+    "source/cli/core/logging/redact.go:233",
+    "source/cli/core/logging/redact.go:344",
+    "source/cli/core/logging/redact_writer.go:108"
+   ],
+   "description": "The redactor treats a newline as the end of every header value. `jsonSkip.next` returns `skipAfter` on '\\n' (\"A newline ends the value, as it ends the line\"), and `textHeader` stops at `[^\\r\\n]*`. That is right for the writer, which sees one line at a time, but `redactor.text` applies the same code to a whole message or string attribute, which can hold newlines, and `shapeOf` accepts a multi-line document as JSON. For a header key whose value is an array or object written across lines (the output of `json.MarshalIndent` on an `http.Header`, or any pretty-printed API/debug dump), only the opening bracket is replaced by `\"[REDACTED]\"`; the following lines, which hold the actual secret, are written unchanged. The result is also no longer valid JSON. This contradicts the documented contract (\"a value of the key Name of any other type, an array, an object ... becomes the string [REDACTED] whole\"). The writer layer does not rescue it: the handler output carries the newlines as `\\n` escapes, and raw multi-line text reaching `RedactingWriter` is redacted per line, so the continuation lines of the value pass through there too. The output looks redacted, which makes the leak easy to miss. No test covers a multi-line value.",
+   "evidence": "Reproduced through the public API in a scratch module (logging.Setup with a bytes.Buffer, Redaction{Headers: [\"X-Api-Key\"]}):\n\nh := http.Header{\"Cookie\": {\"session=SECRETCOOKIE\"}, \"X-Api-Key\": {\"SECRETKEY\"}, \"Accept\": {\"x\"}}\nind, _ := json.MarshalIndent(h, \"\", \"  \")\nl.Info(\"dump\", \"headers\", string(ind))\n\nText format output:\n  msg=dump headers=\"{\\n  \\\"Accept\\\": [\\n    \\\"x\\\"\\n  ],\\n  \\\"Cookie\\\": \\\"[REDACTED]\\\"\\n    \\\"session=SECRETCOOKIE\\\"\\n  ],\\n  \\\"X-Api-Key\\\": \\\"[REDACTED]\\\"\\n    \\\"SECRETKEY\\\"\\n  ]\\n}\"\nJSON format output is the same string under \"headers\"; `l.Info(string(ind))` leaks identically in the message.\n\nWriting the same bytes to Result.Writer (raw/subprocess path) gives:\n  \"Cookie\": [REDACTED]\n    \"session=SECRETCOOKIE\"\n  ],\n  \"X-Api-Key\": [REDACTED]\n    \"SECRETKEY\"\n\nCode: redact.go:295-298 `if c == '\\n' { return skipAfter }`; redact.go:163 textHeader `...\\s*:\\s*)[^\\r\\n]*`.",
+   "suggestion": "In `redactor.text` (messages and attribute values) skip a non-string JSON value across newlines: give `jsonSkip` a mode in which '\\n' is ordinary white space, used whenever the input is a whole string rather than a writer line. For the writer, keep per-line state: when a text or JSON line ends with a header key followed by an unclosed `[` or `{`, carry a continuation (the existing `continueJSONValue` machinery) across the newline until the bracket closes. Add tests with `json.MarshalIndent(http.Header)` for message, string attribute and raw writer."
+  },
+  {
+   "title": "A header key written with escaped quotes (`\\\"Cookie\\\": \\\"v\\\"`), i.e. a JSON document carried inside a string, is not recognised by any pattern",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    "source/cli/core/logging/redact.go:163",
+    "source/cli/core/logging/redact.go:164",
+    "source/cli/core/logging/redact.go:165",
+    "source/cli/core/logging/redact.go:428"
+   ],
+   "description": "All three header patterns require the name to be followed directly by `\"`, white space or `:`: textHeader `Name\"?\\s*:`, jsonHeader `Name(?:\"\\s*:\\s*\"|\\s*:\\s*)`, and jsonKey, which additionally demands an unescaped opening quote. When a JSON document sits inside a string that has been escaped once (a JSON string value, or a Go/logfmt quoted string), the key reads `\\\"Cookie\\\":` and the byte after the name is a backslash, so nothing matches and the value is written in full. Two reachable paths:\n\n1. Handler layer, JSON format: `jsonAny` encodes a `slog.Any` value and redacts the encoded text as one JSON document; a string field holding a JSON body (`map[string]any{\"body\": string(respBody)}`, a struct with a `Body string`) is never read by its own shape. The same value under the text format is redacted (the `%+v` form has unescaped quotes), and the same body as a plain `slog.String` attribute is redacted, so the outcome depends on format and nesting.\n2. Writer layer: a subprocess or raw line that is itself a JSON log line or a logfmt line quoting a JSON fragment, written through `Result.Writer` / `cli.LogWriterFrom`, which ADR-0018 names as the backstop for exactly such output.\n\nSecrets matched by a prefix (`Bearer `, `Basic `) are still caught; cookies, API-key headers and other Authorization schemes are not.",
+   "evidence": "Reproduced via logging.Setup (Redaction{Headers: [\"X-Api-Key\"]}):\n\nJSON format:\n l.Info(\"resp\", \"r\", map[string]any{\"body\": `{\"Set-Cookie\":\"sid=SECRETSID\",\"X-Api-Key\":\"SECRETKEY\"}`})\n -> {...,\"msg\":\"resp\",\"r\":{\"body\":\"{\\\"Set-Cookie\\\":\\\"sid=SECRETSID\\\",\\\"X-Api-Key\\\":\\\"SECRETKEY\\\"}\"}}\n l.Info(\"resp\", \"r\", struct{ Body string }{`{\"Set-Cookie\":\"sid=SECRETSID\"}`})\n -> {...,\"r\":{\"Body\":\"{\\\"Set-Cookie\\\":\\\"sid=SECRETSID\\\"}\"}}\n(text format for the same calls: r=\"map[body:{\\\"Set-Cookie\\\":[REDACTED]\")\n\nRaw writer, either format, both lines pass through unchanged:\n {\"level\":\"info\",\"msg\":\"hdrs {\\\"Cookie\\\": \\\"session=SECRETCOOKIE\\\"}\"}\n time=x level=INFO msg=\"hdrs {\\\"Cookie\\\": \\\"session=SECRETCOOKIE\\\"}\"",
+   "suggestion": "Accept an escaped quote after (and before) the name: in textHeader allow `(?:\\\\?\")?` before the separator, and add an escaped-key alternative to jsonHeader (`Name\\\\\"\\s*:\\s*(?:\\\\\")?` with the value ending at the next `\\\"` or the closing unescaped quote). Alternatively, in `jsonAny`/JSON-shaped lines, decode each string value, run `redactor.text` on it by its own shape and re-encode it when it changed, as `decodeBytes` already does for base64 strings."
+  },
+  {
+   "title": "A header-named group opened with WithGroup is not redacted under the text format",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/logging/redact.go:799",
+    "source/cli/core/logging/redact.go:351"
+   ],
+   "description": "`redactor.attr` replaces the whole value of an attribute whose key is a header name, including a `slog.Group(\"Cookie\", ...)`. `redactingHandler.WithGroup` only forwards the name to the next handler, so attributes logged beneath a group opened with `logger.WithGroup(\"Cookie\")` are checked by their own keys alone. Under the JSON format the writer layer still catches it (the line contains `\"Cookie\":{...}`), but under the text format the line is `Cookie.value=...`, which no pattern matches, so the documented rule \"the value of an attribute whose key is one of them, at any group depth\" holds for one spelling of a group and not the other.",
+   "evidence": "l.WithGroup(\"Cookie\").Info(\"g\", \"value\", \"SECRETCOOKIE\")\n text: time=... level=INFO msg=g Cookie.value=SECRETCOOKIE\n json: {...,\"msg\":\"g\",\"Cookie\":\"[REDACTED]\"}\nwhile l.Info(\"g\", slog.Group(\"Cookie\", \"value\", \"SECRETCOOKIE\")) gives Cookie=[REDACTED] in both formats.",
+   "suggestion": "Track in `redactingHandler` whether any open group name is a header (set a flag in `WithGroup` when `r.isHeader(name)`), and when it is set replace every attribute value in `Handle` and `WithAttrs` with `[REDACTED]`."
+  },
+  {
+   "title": "Redaction costs 20-50x per record and caps the writer at a few MB/s: several unanchored, case-insensitive capture regexps run over every string twice",
+   "category": "performance",
+   "severity": "medium",
+   "locations": [
+    "source/cli/core/logging/redact.go:210",
+    "source/cli/core/logging/redact.go:163",
+    "source/cli/core/logging/redact.go:785",
+    "source/cli/core/logging/redact_writer.go:149",
+    "source/cli/core/logging/redact_writer.go:196",
+    "source/cli/core/logging/redact.go:428"
+   ],
+   "description": "Every enabled record is scanned by `lineAs` in the handler (message plus each string attribute: `ReplaceAllString` with textHeader/jsonHeader, then with prefix, plus `shapeOf`) and then the formatted line is scanned again in `RedactingWriter.Write` (shape detection with `json.Valid`, `jsonKey`, header regexp, prefix regexp). The header patterns begin with `(?i)(?:^|[^\\w-]|\\\\[nrt])` and carry capture groups, so Go's regexp has no literal prefix to skip on and runs its backtracker/NFA over every byte even when nothing matches, which is the normal case. Everything happens under the writer's mutex, so concurrent loggers serialise on it. Consequences measured on this checkout: an ordinary five-attribute record is about 20x (text) to 53x (JSON) slower than plain slog and allocates 36 times where slog allocates none; raw or subprocess output piped through `cli.LogWriterFrom` moves at about 8 MB/s for short lines and under 3 MB/s for a long unterminated line; a large `slog.Any` value is 9x (text) to 67x (JSON) slower, because the encoded value is additionally scanned by `base64String`, `jsonKey`, the header and prefix regexps and then the whole line once more in the writer. A tool that streams verbose subprocess output (a build, a download log) through the log writer is throttled by it.",
+   "evidence": "Benchmarks in a scratch module against this commit (Xeon 2.1 GHz, go1.27.4), logger writing to io.Discard:\n BenchmarkLine/redact-text  34466 ns/op 1448 B/op 36 allocs/op   vs plain slog text 1702 ns/op 0 allocs\n BenchmarkLine/redact-json  54365 ns/op 1637 B/op 36 allocs/op   vs plain slog JSON 1027 ns/op 0 allocs\n (record: Info(\"request finished\", \"method\",\"GET\",\"url\",\"https://example.com/a/b/c?x=1\",\"status\",200,\"elapsed\",1234567,\"user\",\"alice\"))\n BenchmarkRawLines (100-byte lines to Result.Writer)  7.96 MB/s\n BenchmarkLongLine (100-byte writes, no newline)      2.78 MB/s\n BenchmarkBigSlice (slog.Any of []int, 1e6 elements): redact-json 1.42 s/op vs 21 ms plain; redact-text 0.89 s/op vs 97 ms plain\nCPU profile: regexp.(*Regexp).find 82% of samples, of which tryBacktrack/machine.step dominate; redactor.lineAs 74%.",
+   "suggestion": "Put a cheap literal pre-filter in front of the regexps: `lineAs` can return the input unchanged when it contains none of the header names (case-insensitive byte search, e.g. a small Aho-Corasick or per-name `bytes.Index` on a lowered copy / EqualFold scan) and none of the prefixes; only lines that pass the filter need the regexps. Skip the second (writer) pass's work the same way, avoid the `[]byte(s)` copy in `line` by checking the first non-space byte before converting, and consider matching the name with a hand-written scanner instead of a leading `(?:^|[^\\w-])` alternation so the engine can use a literal prefix."
+  }
+ ]
+}

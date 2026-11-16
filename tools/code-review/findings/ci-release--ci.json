@@ -1,0 +1,207 @@
+{
+ "unit": "ci-release:ci",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "release-tool publishes a release with no binaries for a raw-binary tool",
+   "category": "bug",
+   "severity": "high",
+   "locations": [
+    ".github/workflows/release-tool.yml:278",
+    ".github/workflows/release-tool.yml:259-264",
+    ".github/workflows/release-tool.yml:304-307",
+    ".github/workflows/release-tool.yml:321-327",
+    "source/update/goreleaser/render.go:356-358",
+    "docs/adr/0032-a-tool-renders-its-goreleaser-config-from-its-update-config.md:46",
+    "source/update/internal/releasetest/verify_test.go:159-166"
+   ],
+   "description": "goreleaser.Render supports a raw-binary AssetTemplate (no {ext}) and renders `formats: [\"binary\"]` for it (ADR-0032). For that format GoReleaser does not write the asset to the top of dist: it registers an uploadable artifact whose Name is the templated asset name and whose Path is still the build output inside the per-build directory (dist/<build>_<os>_<arch>_<v>/<binary>). The `Stage the artifact` step copies only regular files at the top of dist, and `publish` uploads only those. A raw-binary tool therefore gets a green run and a GitHub Release holding checksums.txt and checksums.txt.minisig only. checksums.txt lists the binaries by name but none is attached, so every updater fails to find its asset. Even copying the per-build files would not fix it, because the on-disk file is named after `binary`, not after the asset. The self-test only exercises the archive fixture, and the releasetest unit test for raw binaries fabricates the files at the top of dist, which is not GoReleaser's layout.",
+   "evidence": "release-tool.yml:278 `find dist -mindepth 1 -maxdepth 1 -type f -exec cp -- {} \"${stage}/dist/\" \\;` and the comment at 263-264 `The per-build directories of bare binaries are left out.` render.go:356-358 `if raw { return \"binary\" }`. GoReleaser v2.20.1 (the workflow's default version), internal/pipe/archive/archive.go func skip, lines 310-349: `art := &artifact.Artifact{Type: artifact.UploadableBinary, Name: finalName, Path: binary.Path, ...}` with no file copy. Trigger: a tool whose update.Config has AssetTemplate \"{name}_{os}_{arch}\" releases through this workflow by pushing vX.Y.Z. I read the GoReleaser source but could not run GoReleaser here (executing the downloaded binary was denied), so this is from source, not from an observed run.",
+   "suggestion": "Build the asset set from dist/artifacts.json: for each uploadable artifact copy `path` to the staged directory under `name` (types Archive, Checksum, Signature, and the binary entries carrying extra.Format == \"binary\"). Add a raw-binary fixture to the self-test so releaseverify runs on GoReleaser's real layout."
+  },
+  {
+   "title": "ROLLBACK_TAG names a Worker that cannot serve six of the eight current projects",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/deploy-vanity-worker.yml:43",
+    ".github/workflows/deploy-vanity-worker.yml:171-175",
+    ".github/workflows/deploy-vanity-worker.yml:211"
+   ],
+   "description": "When the post-deploy check fails, the workflow tells the operator to roll back to ROLLBACK_TAG = tools/vanity-worker/v0.1.2. That Worker serves the module list compiled into it at that commit: `cli`, `daemon`, `update`. Deploying it makes go.vipengele.org answer 404 for commons, config and filelock, and answer cli/core, cli/spec and cli/state with a go-import line for a module `go.vipengele.org/cli` in `source/cli`, which is a grouping directory with no go.mod on main. So the advised rollback cannot serve three of the four paths the failed check just reported (commons, cli/spec, cli/core). Meanwhile tools/vanity-worker/v0.2.0 exists, reads the list from R2, and its Worker source and wrangler.toml are identical to main's. The compiled-in fallback only helps for daemon and update.",
+   "evidence": "deploy-vanity-worker.yml:43 `ROLLBACK_TAG: tools/vanity-worker/v0.1.2`; line 211 `Roll back by running this workflow (workflow_dispatch) with tag ${ROLLBACK_TAG}, which serves its compiled-in module list.` In a scratch clone of the remote: `git ls-tree -r --name-only tools/vanity-worker/v0.1.2 | grep go.mod$` prints source/cli/go.mod, source/daemon/go.mod, source/update/go.mod; at that tag src/index.ts line 1 is `import { modules } from \"./modules.generated\"` and wrangler.toml has no r2_buckets. `git log tools/vanity-worker/v0.2.0..main -- tools/vanity-worker/src tools/vanity-worker/wrangler.toml` is empty. Current projects (find source -name go.mod): cli/core, cli/spec, cli/state, commons, config, daemon, filelock, update.",
+   "suggestion": "Name the last known-good R2-reading tag (v0.2.0 today) as the rollback for a bad code deploy, and say in the message that v0.1.2 is only a last resort for an R2 outage and what it stops serving. Or cut a fallback tag whose compiled-in list matches main."
+  },
+  {
+   "title": "The rollback dispatch as documented runs on main, which the cloudflare-production environment refuses",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/deploy-vanity-worker.yml:8-13",
+    ".github/workflows/deploy-vanity-worker.yml:33-38",
+    ".github/workflows/deploy-vanity-worker.yml:98-100",
+    ".github/workflows/deploy-vanity-worker.yml:211",
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:29-30",
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:62-65"
+   ],
+   "description": "The header and the failure message describe a redeploy or rollback as `a workflow_dispatch naming an existing tag`. The `tag` input only chooses what is checked out. The run's own ref is whatever the dispatch was started from, which is the default branch for the Run workflow button or a plain `gh workflow run`. ADR-0016 records that the `cloudflare-production` environment admits only the Worker tag pattern, so the `deploy` job of a dispatch from main is rejected by the environment before any step runs. A working rollback has to be dispatched from a ref matching tools/vanity-worker/v* (`--ref tools/vanity-worker/vX.Y.Z`), and then the workflow file, ROLLBACK_TAG and the probe list that run are that tag's copy, not main's. Nothing in the workflow or the docs says either thing, and the operator meets this during an incident. The environment policy lives outside git; I rely on ADR-0016 and a memory note recording the live setting, not on a live check.",
+   "evidence": "deploy-vanity-worker.yml:10-11 `A redeploy or a rollback is a workflow_dispatch naming an existing tag of that form`; line 211 `Roll back by running this workflow (workflow_dispatch) with tag ${ROLLBACK_TAG}`; lines 98-100 `environment: name: cloudflare-production`. ADR-0016:29-30 `as cloudflare-production allows only the Worker tag pattern` and 62-65 `cloudflare-production holds the token that deploys code and runs only from a Worker tag ... the Worker tag pattern for cloudflare-production`. Sequence: `gh workflow run deploy-vanity-worker.yml -f tag=tools/vanity-worker/v0.1.2` gives github.ref = refs/heads/main, so `tag` passes and `deploy` is refused by the deployment policy.",
+   "suggestion": "State in the header and in the failure message that the dispatch must be started from a Worker tag ref, with the exact command (`gh workflow run deploy-vanity-worker.yml --ref <latest Worker tag> -f tag=<tag to deploy>`), and that the workflow file of that ref is the one that runs."
+  },
+  {
+   "title": "The on-main gate for the Cloudflare deploy token is enforced only by a workflow file the pushed tag controls",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/deploy-vanity-worker.yml:8-9",
+    ".github/workflows/deploy-vanity-worker.yml:15-20",
+    ".github/workflows/deploy-vanity-worker.yml:84-92",
+    ".github/workflows/deploy-vanity-worker.yml:98-100",
+    ".github/workflows/publish-vanity-modules.yml:13-20",
+    "docs/adr/0033-a-tool-releases-through-the-update-release-workflow-pinned-at-the-update-tag.md:93-94"
+   ],
+   "description": "The header presents `A deploy runs only from a tag ... that points at a commit on main; no branch is ever deployed` and the tag/deploy seam as safety properties. GitHub runs the workflow file from the ref that triggers it, and the environment admits any ref matching the tag pattern tools/vanity-worker/v*. Anyone who can push a tag can push tools/vanity-worker/v9.9.9 at a commit that is not on main and whose copy of deploy-vanity-worker.yml drops the merge-base step, or simply prints the secret. That run is admitted to cloudflare-production and holds CLOUDFLARE_API_TOKEN, bypassing the pull request and the required checks on main. publish-vanity-modules.yml states this limitation honestly for its own environment; deploy-vanity-worker.yml claims the opposite. ADR-0033 asks for a tag ruleset on source/* tags only, and nothing asks for one on tools/vanity-worker/* (a memory note of 2026-10-17 records that the repository had no tag ruleset at all).",
+   "evidence": "deploy-vanity-worker.yml:8-9 and 15-16 (`Three jobs, and the seams between them are safety properties. tag decides whether the ref is a deployable Worker version`), versus publish-vanity-modules.yml:16-18 `GitHub runs this file from the ref that triggers it, so nothing written here restrains a branch that edits it or adds a workflow naming the same environment; only the policy does.` Sequence: branch commit X edits lines 84-92 away; `git tag tools/vanity-worker/v9.9.9 X && git push origin tools/vanity-worker/v9.9.9`; the push trigger at line 32 matches, the run uses X's workflow file, and the environment policy matches the tag name.",
+   "suggestion": "Add a tag ruleset restricting creation, update and deletion of tools/vanity-worker/v* (and source/**) tags, record it in the ADR as the control, and reword the header to say the in-workflow main check guards against mistakes only. Required reviewers on cloudflare-production would add a second control."
+  },
+  {
+   "title": "The release concurrency group cancels a queued release when a third tag is pushed",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/release.yml:29-33"
+   ],
+   "description": "The comment promises `One release at a time, and never cancel one in flight: a cancelled run leaves a version tagged but unannounced.` `cancel-in-progress: false` protects only the run that is executing. As GitHub documents it (to my knowledge of the feature; I did not observe a cancellation in this repository), a concurrency group holds at most one pending run, and a newly queued run replaces and cancels the pending one. With one release running and a second tag's run pending, pushing a third tag cancels the second run. That version is then tagged (permanent) but never validated, tested or announced, and nothing reports it beyond a cancelled run. This is exactly the state the comment says the group prevents. All projects share the one group `release`, so tagging several independent projects in a row, or the commons, cli/spec, cli/core chain, is the trigger.",
+   "evidence": "release.yml:31-33 `concurrency: group: release / cancel-in-progress: false`. Sequence: push source/commons/v0.1.0 (run A starts; its test job runs `go test -race`), push source/filelock/v0.1.0 (run B pending), push source/config/v0.1.0 (run C queued, so B is cancelled by the group). GitHub's concurrency documentation: any existing pending job or workflow in the same concurrency group will be canceled and the new queued one will take its place.",
+   "suggestion": "Scope the group to the project or the tag (`group: release-${{ github.ref }}`). Releases of different projects do not conflict, and a re-run of the same tag still serialises. Correct the comment, and have the skill tell the releaser to check every pushed tag got a completed run."
+  },
+  {
+   "title": "A re-run or out-of-order publish-vanity-modules run overwrites modules.json with an older commit's list",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/publish-vanity-modules.yml:98-101",
+    ".github/workflows/publish-vanity-modules.yml:54-58",
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:68-70"
+   ],
+   "description": "On a push the checkout has no `ref`, so the job generates the list from the event's commit, and a re-run uses the same commit again. The workflow and ADR-0016 rely on `the last run started is the list left published`, but the last run started is not necessarily the newest commit. Re-running an older run after a newer one has published (for example one that failed in `npm ci`) uploads the older list. Two pushes whose runs start in the opposite order do the same. If the newer commit added a project, that project disappears from go.vipengele.org (404 on ?go-get=1) until someone notices and dispatches again, and the announce job of a release of that project fails.",
+   "evidence": "publish-vanity-modules.yml:98-101 `- uses: actions/checkout@... with: persist-credentials: false` (no ref, so github.sha), then line 129 `npm run publish-modules`, which walks source/ of that checkout. Sequence: commit 1 changes source/update/go.mod and run A fails in Install; commit 2 adds source/new/go.mod and run B publishes a list containing `new`; a maintainer re-runs A; modules.json no longer contains `new`.",
+   "suggestion": "Always publish main's current head: check out `ref: main` (or fetch and reset to origin/main) for both triggers, so any run, including a re-run, converges on the same list."
+  },
+  {
+   "title": "ADR-0016 says the Worker does not read the published list; the workflows and CLAUDE.md say it does",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:8-9",
+    ".github/workflows/deploy-vanity-worker.yml:3-6",
+    ".github/workflows/deploy-vanity-worker.yml:171-175",
+    "agentic/vipengele-go.md:28-32",
+    "agentic/skills/release/SKILL.md:88-90",
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:159-160"
+   ],
+   "description": "ADR-0016, which CLAUDE.md cites for `a new project resolves once that workflow has run, with no Worker deploy (ADR-0016)`, states the opposite: the Worker keeps its own generated list and does not read the R2 object. Read together with ADR-0004 (`A new project needs a Worker deploy before its first tag`), the ADRs still describe a Worker tag as required for every new project. The deploy workflow, the Worker source, CLAUDE.md and the release skill all describe and implement request-time reads from R2. No ADR records that decision or its consequences: the 503 fail-closed answer, the 60 s cache, and the ROLLBACK_TAG to a compiled-in Worker.",
+   "evidence": "ADR-0016:8-9 `The Worker's own list is unchanged by this decision, and the Worker does not read the published object.` deploy-vanity-worker.yml:4-6 `Its module list is read at request time from the R2 object that publish-vanity-modules writes`. tools/vanity-worker/src/index.ts `modules = await cache.get(env.MODULE_LIST)`. `grep -rn \"R2\\|modules.json\" docs/adr` matches only ADR-0016.",
+   "suggestion": "Amend ADR-0016 (or add an ADR) recording that the Worker reads modules.json at request time, fails closed with 503, caches for a minute, and how a rollback is done. Mark the ADR-0004 consequence as superseded."
+  },
+  {
+   "title": "release.yml accepts v2+ and leading-zero tags that can only fail at announce, and a correct /v2 module cannot be released at all",
+   "category": "feature-gap",
+   "severity": "medium",
+   "locations": [
+    ".github/workflows/release.yml:61",
+    ".github/workflows/release.yml:104",
+    ".github/workflows/release.yml:131",
+    ".github/workflows/release.yml:141-146",
+    ".github/workflows/release.yml:263",
+    "agentic/rules/module-path-matches-the-vanity-map.md:28-29",
+    "agentic/skills/release/SKILL.md:28-29",
+    "docs/adr/0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md:135-141"
+   ],
+   "description": "The tag regexes take any `v[0-9]+.[0-9]+.[0-9]+`. For source/x/v2.0.0 on a module whose path has no /v2 suffix, the `tag` and `test` jobs pass, and only `announce` fails, on `go list -m go.vipengele.org/x@v2.0.0`, which Go rejects for a path without the major suffix. The failure message there blames the Worker or the module list. A module that correctly declares go.vipengele.org/x/v2 fails earlier, on the module-path comparison, and `module=` never carries the suffix, so no v2+ release can complete. ADR-0006 records the /v2 failure as a consequence. But the vanity-map rule and the release skill describe the v2 procedure (suffix the path, tag source/<path>/v2.0.0) as if the workflow supported it, and the skill only says to confirm with the user. Versions with leading zeros (v01.2.3), which are not semver, also pass both regexes.",
+   "evidence": "Ran both regexes from lines 61 and 131 in bash: `source/x/v2.0.0 accepted`, `source/x/v01.2.3 accepted`. release.yml:104 `echo \"module=go.vipengele.org/${project}\"`; 141-143 `want=\"${prefix}${PROJECT}\" ... if [[ \"$have\" != \"$want\" ]]`; 263 `go list -m \"${MODULE}@${VERSION}\"`. Rule file lines 28-29: `A major version v2 or above: the module path gains a /v2 suffix ... and the tag stays source/<path>/v2.0.0`. ADR-0006:135-137: `its module-path check expects go.vipengele.org/<path>, so a /v2 module fails`.",
+   "suggestion": "Either implement it (derive the /vN suffix from the tag's major, expect it in the module path, and use it for `module` and the sibling lookup), or reject a major of 2 or more and non-canonical numbers in the first `tag` step with a message saying so, and make the rule and the skill state that v2+ is not yet releasable."
+  },
+  {
+   "title": "deploy re-resolves the tag by name instead of deploying the commit the tag job verified",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    ".github/workflows/deploy-vanity-worker.yml:51-53",
+    ".github/workflows/deploy-vanity-worker.yml:78-92",
+    ".github/workflows/deploy-vanity-worker.yml:131-135",
+    ".github/workflows/deploy-vanity-worker.yml:103-107"
+   ],
+   "description": "The `tag` job checks that refs/tags/<tag> is an ancestor of origin/main and outputs only the tag name and version. `deploy` runs later, after waiting on the concurrency group and any environment gate, and checks out `refs/tags/<tag>` again. If the tag is moved between the two jobs, the commit built and deployed with the Cloudflare token is not the one that was verified. Nothing in the repository prevents a move of a tools/* tag.",
+   "evidence": "Outputs at lines 51-53 are `tag` and `version` only. Line 89 `git merge-base --is-ancestor HEAD origin/main` runs in the `tag` job's checkout. Lines 131-135 `ref: refs/tags/${{ needs.tag.outputs.tag }}` in `deploy`. Sequence: push the tag at a main commit; while `deploy` waits behind another deploy in the group, `git push -f origin <branch-commit>:refs/tags/tools/vanity-worker/vX.Y.Z`.",
+   "suggestion": "Have `tag` output `git rev-parse HEAD` and have `deploy` check out that SHA."
+  },
+  {
+   "title": "The GoReleaser binary that runs beside the signing key is pinned by version name only",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    ".github/workflows/release-tool.yml:65-68",
+    ".github/workflows/release-tool.yml:235-238",
+    ".github/workflows/release-tool.yml:170-188"
+   ],
+   "description": "The workflow pins minisign by a SHA-256 digest and explains why, and pins every action by SHA. GoReleaser runs in the same job with the secret key on disk, and is installed by release name from a free-form input. goreleaser-action v7.3.0 verifies the download only against checksums.txt fetched from the same release (cosign only if cosign happens to be on PATH), and skips verification with a warning when checksums.txt cannot be downloaded. A replaced release asset, or a caller passing `latest` or a range, changes the binary that can read the key. This weakens the ADR-0033 argument that the pin is a SHA because the build job holds the key.",
+   "evidence": "release-tool.yml:235-238 `uses: goreleaser/goreleaser-action@a4f02ab... with: version: ${{ inputs.goreleaser-version }} install-only: true`; default `v2.20.1` at line 68. goreleaser-action v7.3.0 src/goreleaser.ts:91-94: downloads `${baseUrl}/checksums.txt`, and on failure logs `Skipping checksum verification: unable to download checksums.txt`; lines 108-110 `cosign not found in PATH, skipping signature verification`. Contrast lines 179-185 `MINISIGN_SHA256: 9a599b48...` with `sha256sum --check --strict`; I confirmed that digest matches the upstream 0.12 tarball.",
+   "suggestion": "Install GoReleaser the way minisign is installed (fixed version plus a pinned SHA-256 of the linux archive), or keep the input but require a matching digest input."
+  },
+  {
+   "title": "publish reports success for an existing published release that has no assets",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    ".github/workflows/release-tool.yml:335-339",
+    ".github/workflows/release-tool-selftest.yml:218"
+   ],
+   "description": "The idempotence guard treats any non-draft release for the tag as a finished release and exits 0 without looking at its assets. A release created outside the workflow has none: GitHub's `Create new tag on publish` creates the release and pushes the tag, which triggers the tool's release workflow. The run builds, signs, then leaves the release as it is and goes green, while the tool's latest release holds no archives, checksums or signature, and its updater fails.",
+   "evidence": "release-tool.yml:335-339 `if draft=\"$(gh release view \"$TAG\" ... --jq .isDraft ...)\"; then if [[ \"$draft\" != \"true\" ]]; then echo \"release ${TAG} already exists\"; exit 0; fi`. The self-test pins this at line 218: `run_case published published false true 0 \"${view}\"` (no upload call expected).",
+   "suggestion": "For an existing published release, compare its asset names with the staged set and upload the missing ones (or fail naming them) instead of exiting 0 unconditionally."
+  },
+  {
+   "title": "The release skill omits *_windows_test.go from the Windows vet condition",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "agentic/skills/release/SKILL.md:78-79",
+    "agentic/skills/release/SKILL.md:126-127",
+    ".github/workflows/release.yml:215-230"
+   ],
+   "description": "The skill's mandatory local check and its description of the `test` job say the Windows cross-vet applies when the project holds a `*_windows.go` file. release.yml and CLAUDE.md's Release section apply it for `*_windows.go` or `*_windows_test.go`. A project whose only Windows-specific files are tests skips the local vet under the skill and first meets a failure in the release run, after the permanent tag is pushed.",
+   "evidence": "SKILL.md:78 `# only when the project holds a *_windows.go file, in any of its packages`; 126-127 `GOOS=windows go vet when the project holds a *_windows.go file`. release.yml:223 `find . \\( -name '*_windows.go' -o -name '*_windows_test.go' \\) ...`.",
+   "suggestion": "Name both patterns in steps 5 and 8 of the skill."
+  },
+  {
+   "title": "Prerelease handling in release.yml is contradictory: accepted by the tag pattern, rejected a step later, and handled again in announce",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    ".github/workflows/release.yml:61",
+    ".github/workflows/release.yml:131-134",
+    ".github/workflows/release.yml:284",
+    "agentic/skills/release/SKILL.md:21-26"
+   ],
+   "description": "The first `tag` step's regex admits a `-suffix`, and it also requires the notes file `docs/release-notes/<project>/v1.0.0-rc.1.md`. The next step fails every suffixed version. The `*-*` branch of the GitHub Release step can therefore never run. A releaser who writes rc notes and pushes an rc tag learns only from the failed run that prereleases are not released. The skill's version step does not mention it, and the pushed tag stays as a version the proxy will serve.",
+   "evidence": "Line 61 `(v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?)$`; lines 131-134 `if [[ ! \"$VERSION\" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then echo \"::error::... carries a prerelease suffix; only source/<project>/vX.Y.Z is released\"; exit 1`; line 284 `if [[ \"$VERSION\" == *-* || \"$VERSION\" == v0.* ]]`. Bash run of both regexes: `source/a/b/v1.0.0-rc.1 parse-ok, prerelease-rejected`.",
+   "suggestion": "Reject the suffix in the first regex with the same message and drop the dead branch, or support prereleases end to end. State the rule in step 1 of the skill."
+  },
+  {
+   "title": "The tag job's comment claims its failures leave nothing half-released, but the tag is already the publication",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    ".github/workflows/release.yml:52-56",
+    ".github/workflows/release.yml:5-7",
+    ".github/workflows/release.yml:47-50",
+    ".github/workflows/release.yml:96-100"
+   ],
+   "description": "The workflow starts from the pushed tag, and its own header says `The tag is the publication — the Go module proxy serves a module from the tag itself`. Every failure in the `tag` job (off-main commit, missing notes, leftover replace, untagged sibling) happens after a permanent version exists that any consumer can fetch, untested and unannounced. A failure there cannot be repaired by a re-run either: the jobs check out the tagged commit, so notes or a go.mod fix merged afterwards are not seen, and the version is burnt. The comment tells a reader the opposite, and CLAUDE.md's `Re-running finishes a partial release` holds only for failures in `announce`.",
+   "evidence": "release.yml:52-53 `Everything that can fail without leaving anything half-released fails here`, versus lines 5-7. The checkout at 47-50 has no ref, so it is the tagged commit; the notes check at 96-100 reads that tree.",
+   "suggestion": "Reword the comment to say these checks stop the test and announce jobs, that the tag is already public, and that a failure here means releasing the next version. Point to the skill's pre-tag checks as the real gate."
+  }
+ ]
+}

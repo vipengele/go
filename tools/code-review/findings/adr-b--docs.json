@@ -1,0 +1,119 @@
+{
+ "unit": "adr-b:docs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "ADR-0024 (service drivers): exported Config.Validate validates against the host GOOS, not a target",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0024-service-drivers-are-selected-at-runtime.md:26",
+    "docs/adr/0024-service-drivers-are-selected-at-runtime.md:43",
+    "source/daemon/service/config.go:71"
+   ],
+   "description": "The ADR states as a rule that `Config.Validate` checks the rules of the target GOOS, not of the host, and as a consequence that \"`Validate` has no host dependence. The same `Config` gives the same violations on every host\". The exported method takes no GOOS and hard-wires runtime.GOOS; only the unexported validate(goos), reached through New with WithGOOS, follows a target. A caller of the public Validate therefore gets host-dependent results, which is exactly what the ADR says cannot happen.",
+   "evidence": "config.go:68-73: `// Validate reports every way c is unusable on runtime.GOOS ...` / `func (c Config) Validate() error { return c.validate(runtime.GOOS) }`. validate sets `windows := goos == \"windows\"` and checks `isAbs(c.Binary, windows)` (config.go:101), where isAbs for non-windows is `strings.HasPrefix(p, \"/\")`. So `service.Config{Name: ..., Binary: `C:\\svc\\tool.exe`, ...}.Validate()` reports \"Binary ... is not an absolute path on linux\" on a Linux host and nil on a Windows host; `Binary: \"/usr/bin/tool\"` is the reverse.",
+   "suggestion": "Either reword the ADR rule and consequence to say that validation inside New follows the WithGOOS target while the exported Validate uses runtime.GOOS, or give Validate a target (e.g. a ValidateFor(goos) method) so the ADR's claim holds for the public API."
+  },
+  {
+   "title": "ADR-0024 (service drivers): the Windows service control manager driver the ADR describes does not exist",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0024-service-drivers-are-selected-at-runtime.md:10",
+    "docs/adr/0024-service-drivers-are-selected-at-runtime.md:18",
+    "source/daemon/service/manager.go:106"
+   ],
+   "description": "The ADR says the service package \"fronts the operating system's service manager (systemd, launchd, the Windows service control manager) behind one Manager interface\" and that in New \"A `case` per operating system returns that operating system's Driver\". ADR-0028 (driver settings) and ADR-0029 (container) repeat the three-driver framing (\"two of three operating systems\", \"Three copies of the check\"). The code has two drivers; the windows case exists only to return ErrUnsupported.",
+   "evidence": "manager.go:47-49: \"The drivers are systemd on linux and launchd on darwin; every other GOOS, windows included, has none.\" manager.go:106-107: `case \"windows\": return nil, fmt.Errorf(\"%w: %s\", ErrUnsupported, goos)`. `service.New(cfg, service.WithGOOS(\"windows\"))` with a valid Config returns ErrUnsupported; no file in source/daemon/service implements a Windows driver (ls shows only systemd*.go and launchd*.go).",
+   "suggestion": "State in ADR-0024 that the Windows driver is not implemented and that New returns ErrUnsupported for windows (validation of a Windows Config still runs), or implement the driver."
+  },
+  {
+   "title": "ADR-0029 (preflight): claims the updatetest release binary is a unix-only shell script and that Windows execution is untested",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0029-apply-preflights-the-staged-binary-with-version-json-before-the-swap.md:63",
+    "docs/adr/0029-apply-preflights-the-staged-binary-with-version-json-before-the-swap.md:97",
+    "docs/adr/0029-apply-preflights-the-staged-binary-with-version-json-before-the-swap.md:98",
+    "source/update/updatetest/server.go:120",
+    "source/update/updatetest/program.go:54"
+   ],
+   "description": "The ADR says the binary of updatetest.NewRelease \"is a `#!/bin/sh` script ... It is unix-only\", that \"Execution on Windows is not tested here; it is left to issue #60\", and as a consequence that \"`updatetest` releases need a shell. A test of a consumer that runs on Windows has to supply its own binary.\" None of that holds: on Windows NewRelease packs a Go program built at test time, and the preflight's real execution runs on the gated windows-latest job. The ADR's status line does not mark these statements as amended (ADR-0031 does not mention the test kit either).",
+   "evidence": "updatetest/server.go:120-130: `func ReleaseExecutable(t testing.TB, tag string) []byte` ... \"[releaseScript] for any goos but \\\"windows\\\", the Go program of [releaseProgramSource] built for the target on \\\"windows\\\"\"; updatetest/program.go:54 runs `go build` for it. source/update/AGENTS.md: \"The Windows job runs the preflight's real execution of a staged `.exe` ... so `TestApplyRunsTheStagedBinary` and `updatecmd`'s install tests run there too.\" .github/workflows/ci-test.yml:90-118 runs `go test -race -shuffle=on ./...` on windows-latest for update (it holds install_windows_test.go).",
+   "suggestion": "Update the `updatetest` rule and the two Windows consequences in ADR-0029 (or add an \"amended by\" note) to say the release binary is ReleaseExecutable: the shell script off Windows, a Go program built with the go command on Windows, and that Windows execution is covered by the test-windows job."
+  },
+  {
+   "title": "ADR-0021 (extraction): names asset.DefaultExt, a tar.gz-only default and a CreateTemp pattern the code no longer has",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0021-extraction-derives-the-format-from-config-and-stages-the-binary-in-the-callers-directory.md:15",
+    "docs/adr/0021-extraction-derives-the-format-from-config-and-stages-the-binary-in-the-callers-directory.md:18",
+    "docs/adr/0021-extraction-derives-the-format-from-config-and-stages-the-binary-in-the-callers-directory.md:57",
+    "source/update/asset/asset.go:64",
+    "source/update/extract.go:138",
+    "source/update/config.go:515"
+   ],
+   "description": "Three concrete claims of the ADR are contradicted by the code, and its status line (\"extends ADR-0020\") records no amendment: (1) \"An empty template or extension counts as `asset.DefaultTemplate` or `asset.DefaultExt`\" - there is no asset.DefaultExt; the default is the function asset.DefaultExtFor(goos). (2) \"An empty `AssetExt` resolves to `tar.gz`, as every empty field resolves to its default\" - it resolves to zip when the resolved GOOS is windows. (3) \"The file is created there with `os.CreateTemp(dir, TempPrefix+\\\"*\\\")`\" - the pattern carries the binary's extension. ADR-0031 lists only ADR-0022 and ADR-0023 as extended, so a reader of ADR-0021 is not pointed at the change.",
+   "evidence": "`grep -rn \"DefaultExt\\b\" source/update --include=*.go` finds only DefaultExtFor: asset/asset.go:64 `func DefaultExtFor(goos string) string { if goos == \"windows\" { return extZip ...`. config.go:515-516: `if r.AssetExt == \"\" { r.AssetExt = asset.DefaultExtFor(r.GOOS) }`, so `Config{GOOS: \"windows\", ...}` with an empty AssetExt extracts as zip, not tar.gz. extract.go:138: `f, err := os.CreateTemp(dir, r.TempPrefix+\"*\"+filepath.Ext(binaryFileName(r)))`, so a Windows target stages `<prefix><random>.exe`.",
+   "suggestion": "Amend ADR-0021 (or add \"amended by ADR-0029 and ADR-0031\" to its status) so the format rule names asset.DefaultExtFor(GOOS), the considered option says an empty AssetExt resolves to the per-GOOS default, and the staged-file rule gives the pattern TempPrefix+\"*\"+ext."
+  },
+  {
+   "title": "ADR-0017 and ADR-0021 (completion installer) name cli/core's internal/atomicfile, which does not exist",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0017-the-config-command-group-is-an-opt-in-app-option.md:43",
+    "docs/adr/0021-the-completion-installer-is-cli-spec-completioninstall-with-an-update-post-hook.md:22",
+    "source/cli/core/command/config/edit.go:119"
+   ],
+   "description": "ADR-0017 says a valid edit \"is chmodded 0600 and renamed over the file by `internal/atomicfile`\", and ADR-0021 (completion installer) justifies its own atomic writer with \"`cli/core`'s `internal/atomicfile` cannot be imported from `cli/spec`\". cli/core has no such package: `config edit` uses go.vipengele.org/cli/state. Neither ADR's status line records the change (ADR-0018 state store explains it only from its own side).",
+   "evidence": "`ls source/cli/core/internal` -> `cobra errrender`; `grep -rn atomicfile source --include=*.go` finds nothing. edit.go:119 `if err := state.Replace(temp, opts.Path, editMode); err != nil {` and edit.go:143 `state.WriteFile(temp, data, editMode)`.",
+   "suggestion": "Replace the `internal/atomicfile` references with `cli/state` (Replace / WriteFile), or annotate both ADRs as amended by ADR-0018 (state store). In ADR-0021 the rationale for a private writer in completioninstall should then be restated (cli/spec does not require cli/state)."
+  },
+  {
+   "title": "ADR-0019 (filelock): golang.org/x/sys is not a direct requirement of filelock only, nor does it reach consumers through filelock alone",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0019-the-file-lock-is-its-own-project-filelock.md:26",
+    "docs/adr/0019-the-file-lock-is-its-own-project-filelock.md:61",
+    "source/update/go.mod:13",
+    "source/cli/spec/go.mod:11",
+    "source/update/installscript/script_windows_test.go:15"
+   ],
+   "description": "The ADR decides \"`golang.org/x/sys` is a direct requirement of this project only\" and lists as a consequence \"`golang.org/x/sys` enters a consumer's graph through `filelock` alone; `cli/state`, `cli/spec` and `commons` keep their dependency sets\". update now requires x/sys directly (its installscript tests import it), and cli/spec already carries x/sys in its module graph through golang.org/x/term, independently of filelock.",
+   "evidence": "source/update/go.mod:13 `golang.org/x/sys v0.50.0` in the direct require block (no `// indirect`); imports at update/installscript/harness_pty_linux_test.go:10 (`golang.org/x/sys/unix`) and script_windows_test.go:15 (`golang.org/x/sys/windows/registry`). source/cli/spec/go.mod:8,11: `golang.org/x/term v0.47.0` direct and `golang.org/x/sys v0.49.0 // indirect`, while cli/spec does not require filelock.",
+   "suggestion": "Reword the decision to say filelock is the only project whose production code calls x/sys, and drop or qualify the \"through filelock alone\" consequence (cli/spec has it via x/term; update requires it for tests)."
+  },
+  {
+   "title": "ADR-0018 (state store) and ADR-0017 say a new project needs a Worker deploy before its first tag",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0018-the-state-store-is-its-own-project-cli-state.md:58",
+    "docs/adr/0017-the-config-command-group-is-an-opt-in-app-option.md:62",
+    ".github/workflows/publish-vanity-modules.yml:1"
+   ],
+   "description": "ADR-0018 (state store) lists as a consequence that `cli/state` \"needs a Worker deploy before its first tag\", and ADR-0017 counts \"a Worker deploy\" among the costs of a new project. The Worker reads its module list from the R2 object modules.json, which publish-vanity-modules.yml writes from source/**/go.mod on merge to main; a new project needs no Worker deploy, and a tools/vanity-worker tag deploys Worker code only. The sibling ADR-0019 (filelock) already states the current mechanism, so the two ADRs disagree with each other and with tools/ and .github/.",
+   "evidence": "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:17 (\"The object `modules.json` in a Cloudflare R2 bucket ...\") and :39 (\"A `tools/vanity-worker/v*` tag deploys the Worker's code\"); tools/vanity-worker/src/index.ts:48 reads the `MODULE_LIST` bucket; ADR-0019 filelock line 67-68: \"resolves through `go.vipengele.org` once `publish-vanity-modules.yml` has run (ADR-0001, ADR-0016)\".",
+   "suggestion": "Change both sentences to \"resolves through go.vipengele.org once publish-vanity-modules.yml has run (ADR-0016)\", as ADR-0019 (filelock) words it."
+  },
+  {
+   "title": "ADR-0021 (completion installer): says the update project imports nothing of completioninstall in non-test code",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "docs/adr/0021-the-completion-installer-is-cli-spec-completioninstall-with-an-update-post-hook.md:12",
+    "docs/adr/0021-the-completion-installer-is-cli-spec-completioninstall-with-an-update-post-hook.md:72",
+    "source/update/installscript/render.go:9",
+    "source/update/installscript/render.go:114"
+   ],
+   "description": "The ADR says \"The `update` project holds the hook that calls it, and imports nothing of it\" and \"`update` does not import `completioninstall` in non-test code; its `example_test.go` wires the two together\", and that \"The full `install.sh` is out of scope; a tool embeds the snippet in its own\". The update project's production package installscript imports completioninstall and renders the full install script around its snippet. ADR-0023 (install script) declares that it reconciles this, but ADR-0021's own status line carries no \"amended by\" note, so read alone it contradicts the code; the claim now holds only for the root package `update`.",
+   "evidence": "source/update/installscript/render.go:9 `\"go.vipengele.org/cli/spec/completioninstall\"` and :114 `snippet, err := completioninstall.Snippet(r.BinaryName)` in non-test code of module go.vipengele.org/update. source/update/AGENTS.md: \"Package `update` does not import `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that does (ADR-0023).\"",
+   "suggestion": "Add \"amended by ADR-0023 and ADR-0031\" to ADR-0021's status and narrow the two sentences to the root package `update`."
+  }
+ ]
+}

@@ -1,0 +1,82 @@
+{
+ "unit": "config:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "A removed key written as a nested mapping is reported as an unknown key, without its hint, when its group is no longer live",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/config/file.go:157-173",
+    "source/config/file.go:44-52",
+    "source/config/doc.go:69-76"
+   ],
+   "description": "fileLoader.pair asks Schema.Removed only for the key as accumulated so far, and descends into a mapping only when that key is the group of a live field. For a removed key such as \"old.thing\" whose group \"old\" has no live key left (the usual state after a whole section, or the last key of a section, is removed), the nested YAML spelling stops at \"old\": it is neither a field, nor a live group, nor itself a removed key, so it is reported as `unknown key \"old\"` and the migration hint is never shown. The dotted spelling of the same key, and the same key in Flags, do report the hint. This contradicts File's doc (\"Nested mappings and dotted keys share one key space\"; \"a key the Schema lists as removed (reported with its hint, whatever value it holds)\") and the package doc's promise that a removed key in a file is reported with its hint rather than as unknown. Tests only cover a removed key directly below a live group (server.max_conns) or a removed key that is itself the mapping (Old-Settings).",
+   "evidence": "Experiment (temp module replacing go.vipengele.org/config with the repo directory): type C with fields Name and Server{Port,Host}, and RemovedKeys() returning {\"old.thing\": \"use server.port\"}.\n- file \"old.thing: 1\"            -> `c.yaml:1: key \"old.thing\" was removed: use server.port`\n- file \"old:\\n  thing: 1\"       -> `c.yaml:1: unknown key \"old\"`\n- Flags{\"old.thing\":\"1\"}        -> `flag --old.thing: key was removed: use server.port`\nCode: file.go:160-171 `_, group := l.groups[matchKey(key)]` ... `default: if hint, removed := l.schema.Removed(key); removed {...}; l.fail(k.Line, \"unknown key %q\", key)`; groupKeys (file.go:217-228) is built from live fields only.",
+   "suggestion": "Treat every proper prefix of a removed key as a group the file loader may descend into (add the removed keys' prefixes to the groups set, or a separate set), so that the leaf is reached and reported with its hint; keys under that mapping that are neither live nor removed stay unknown."
+  },
+  {
+   "title": "snakeCase splits plural acronyms (UserIDs -> user_i_ds, IPv4 -> i_pv4), so the natural environment variable is silently ignored",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/config/key.go:36-63",
+    "source/config/env.go:38-52",
+    "source/config/doc.go:21-24"
+   ],
+   "description": "The word-boundary rule \"the last upper-case letter of a run followed by a lower-case one\" treats the trailing lower-case letter of common Go names as the start of a new word. An untagged field UserIDs gets the canonical key user_i_ds, the flag user-i-ds and the variable APP_USER_I_DS; IPv4 gets i_pv4 / APP_I_PV4 (URLs, APIs, IDs behave the same). File and Flags hide this because matching ignores \"_\", but Env looks up exactly one derived name and is lenient, so a user who sets APP_USER_IDS gets no error and no effect. The same wrong segment appears in Source.Key, error messages, the seeded file and Field.Flag(). The package doc only shows maxRetries/MaxRetries and gives no hint that such names need a config tag.",
+   "evidence": "Experiment: config.NewSchema(struct{ UserIDs []string; IPv4 string }{}, \"APP\") lists fields `user_i_ds APP_USER_I_DS user-i-ds` and `i_pv4 APP_I_PV4 i-pv4`. Load with Env(\"APP\", lookup) where lookup answers only APP_USER_IDS=\"a,b\" binds nothing and returns no error; Seed writes `user_i_ds: []` and `i_pv4: \"\"`.\nCode: key.go:49-53 `nextLower := i+1 < len(name) && isLower(name[i+1]); if isLower(prev) || isDigit(prev) || (isUpper(prev) && nextLower) { boundary = true }`.",
+   "suggestion": "Do not open a boundary before the last upper-case letter of a run when what follows is only a lower-case plural/suffix tail to the end of the name or to the next upper-case letter of length 1 (\"IDs\", \"URLs\", \"IPv4\"), or at least document the rule in doc.go and tell callers to tag such fields (`config:\"user_ids\"`)."
+  },
+  {
+   "title": "A group left with no value (all its keys commented out) is refused with a misleading message naming the value \"\"",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/config/file.go:160-165",
+    "source/config/file.go:243-255"
+   ],
+   "description": "When a key names a group and its value is not a mapping, pair reports it with kindName(v). For an explicit null (\"server:\" with nothing below it, which is exactly what remains when a user comments out every key of a group in a seeded file) kindName returns `the value \"\"`, so the message claims the user wrote an empty value. The null case has its own clear wording for a field key (\"is null; give it a value or remove it\") but the group branch never checks isNull. File's doc lists \"a value where the key names a group of keys\" and \"an explicit null\" as separate problems; the group-null case falls into the first with wrong text.",
+   "evidence": "Experiment with a schema holding server.port and server.host, file content \"server:\\n  # port: 1\\n\":\n`c.yaml:1: key \"server\" names a group of keys, not a value; it takes a mapping, not the value \"\"`.\nCode: file.go:164-165 `case group: l.fail(k.Line, \"key %q names a group of keys, not a value; it takes a mapping, not %s\", key, kindName(v))`; kindName's ScalarNode case formats n.Value, which is empty for a null.",
+   "suggestion": "Handle isNull(v) in the group branch: either accept an empty group as setting nothing (it cannot hide a misspelled key), or report `key \"server\" is null; give it a mapping of keys or remove it`."
+  },
+  {
+   "title": "Validation error text is rewritten by substring replacement, corrupting unrelated messages that contain a FieldError's text",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/config/validate.go:79-110"
+   ],
+   "description": "annotate builds the message of the returned error by running strings.NewReplacer over err.Error(), replacing each FieldError's text with the text of its annotated copy. The replacement is purely textual, so any other part of the Validate error that merely contains that text (another joined error, a wrapping prefix) is rewritten too and gains a value and origin that do not belong to it. Load's doc says \"Every other error in the tree is reported as Validate returned it\".",
+   "evidence": "Experiment: Validate returns errors.Join(errors.New(\"transport: must be set\"), &config.FieldError{Key: \"port\", Err: errors.New(\"must be set\")}) on a struct with field Port int. config.Load(V{}) prints:\n`transport: must be set: \"0\" from default`\n`port: must be set: \"0\" from default`\nThe first line is a plain error that names no key; \"port: must be set\" matched inside \"transport: must be set\".\nCode: validate.go:108 `msg := strings.NewReplacer(oldnew...).Replace(err.Error())`.",
+   "suggestion": "Build the message structurally instead of textually: walk the tree and render each node, substituting the annotated copy at the FieldError node (for errors.Join, join the children's rendered texts; for a single-Unwrap wrapper, replace only the suffix that equals the child's text), falling back to the original text when a wrapper's format cannot be reconstructed."
+  },
+  {
+   "title": "A named type over time.Duration is accepted as a key but parsed and written as a bare integer of nanoseconds",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/config/schema.go:246-260",
+    "source/config/bind.go:110-126",
+    "source/config/sources.go:33-35"
+   ],
+   "description": "supportedValue, convertValue and formatValue recognise a duration only by exact type identity with time.Duration, then fall back to Kind. A field of a defined type whose underlying type is time.Duration (`type Timeout time.Duration`) has Kind Int64, so the schema accepts it silently, a value such as \"5s\" is refused as an invalid int64, a bare number is taken as nanoseconds, and Seed and Source.Value write the nanosecond count. Other named scalar types (a named string, a named int) work as their kind, so nothing warns the author that the duration case differs.",
+   "evidence": "Experiment: `type MyDur time.Duration`, field `Timeout MyDur`. NewSchema succeeds (field type main.MyDur). Load with env APP_TIMEOUT=5s fails: `timeout: invalid int64 \"5s\" from env APP_TIMEOUT`. Seed with Timeout: MyDur(time.Second) writes `timeout: 1000000000`, while a time.Duration field in the same struct writes `d: 1m30s`.\nCode: bind.go:111 `if t == reflect.TypeFor[time.Duration]()`; schema.go:248 and sources.go:33 use the same identity test.",
+   "suggestion": "Either treat any type convertible to and with underlying type time.Duration as a duration (compare with t.ConvertibleTo and a PkgPath/Name check on the underlying definition is not possible via reflect, so document it), or state in the Schema and package docs that only the exact type time.Duration is read as a duration and a named type over it is an integer."
+  },
+  {
+   "title": "Seed's documented mode 0600 does not hold on Windows",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "source/config/seed.go:27-30",
+    "source/config/seed.go:49-54",
+    "source/config/doc.go:78-83"
+   ],
+   "description": "Seed, createExclusive and the package doc state unconditionally that the file is created with mode 0600, and ADR-0012 gives \"a world-readable file\" as the failure Seed exists to prevent. The implementation is a single os.OpenFile(..., 0o600) with no platform-specific file; on Windows os.OpenFile uses the permission argument only to decide the read-only attribute, and the new file takes the ACL inherited from its directory. A consumer on Windows who seeds a file holding a secret default into a directory readable by other users gets a file readable by them, contrary to the documented contract. The project has no *_windows.go file, so neither the Windows vet nor the Windows test job covers it.",
+   "evidence": "seed.go:53 `return os.OpenFile(filepath.Clean(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)` is the only creation path; `find source/config -name '*_windows*'` returns nothing. Doc: seed.go:27 \"Seed creates the file with mode 0600 and never replaces one\"; doc.go:81 \"it creates the file with mode 0600\". Go's os package documents that on Windows only the 0o200 bit of the mode is used.",
+   "suggestion": "Qualify the doc (\"mode 0600 on Unix; on Windows the file takes the ACL of its directory\"), or add a Windows implementation that creates the file with an owner-only security descriptor."
+  }
+ ]
+}

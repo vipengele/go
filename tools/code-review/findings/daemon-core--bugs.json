@@ -1,0 +1,86 @@
+{
+ "unit": "daemon-core:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "Run announces readiness (WithReady, READY=1, watchdog) without checking whether a Runner already exited during the start phase",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/daemon/supervisor.go:530",
+    "source/daemon/supervisor.go:531",
+    "source/daemon/supervisor.go:532",
+    "source/daemon/supervisor.go:449"
+   ],
+   "description": "The start phase only watches the Start call in progress; it never looks at the Done of Runners that have already started. When an earlier Runner exits while a later Runner's Start is still running, start() still returns complete=true. wait() then calls the WithReady callback, sends READY=1 to systemd and arms the watchdog before its select loop first looks at the exit. The loop sees the exit on its first iteration and begins shutdown.\n\nThe daemon therefore reports \"ready\" for a run that has already failed. Under a Type=notify unit, systemd marks the start job successful (`systemctl start` returns 0, dependants are started) for a daemon that is about to send STOPPING=1 and exit with an error. ADR-0028 says READY=1 \"must be sent exactly when the Supervisor is up\", and the supervisor.ready health check correctly reports not ready at the same moment (feed.ready checks closed(r.done)), so the two readiness signals disagree.",
+   "evidence": "supervisor.go:528-533:\n\n    s.ready()\n    s.notifySystemd(ctx, systemd.Ready)\n    s.armWatchdog(ctx)\n    for {\n        s.waiting()\n        select {\n\nNothing before these lines polls ctx or the Runners' Done channels.\n\nReproduced in a scratch module against the repo code: Runner \"a\" = daemon.Func returning errors.New(\"boom\") immediately (Order 0); Runner \"slow\" (Order 10) whose Start sleeps 200ms then returns nil; WithReady sets a flag. Result: `ready=true err=daemon: runner \"a\": boom`. The ready callback ran 200ms after \"a\" had already exited.",
+   "suggestion": "Before calling s.ready() and sending READY=1, do a non-blocking check of ctx.Done() and of each launched Runner's Done (the same test feed.ready applies). If either is already done, skip the ready callback, READY=1 and the watchdog, and go straight to the failure/shutdown path."
+  },
+  {
+   "title": "wait() can report a spurious ErrRunnerExited when Run's context is already done",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/supervisor.go:535",
+    "source/daemon/supervisor.go:542",
+    "source/daemon/supervisor.go:551"
+   ],
+   "description": "The select in wait() gives ctx.Done() and the exited channel equal priority, and the exited branch never checks ctx.Err(). If both are ready when the select is entered, Go picks at random. A Runner that exited because the context was cancelled is then reported about half the time as the failure that began shutdown, and Run returns non-nil for a normal shutdown.\n\nBoth are ready together whenever Run's goroutine is not parked in the select when the context ends: inside the WithReady callback (documented as allowed to block), inside the READY=1 write (up to one second), or while handling an isolated panic exit. Run's doc says it \"returns nil when ctx is cancelled and every Runner stops cleanly\"; here that outcome is non-deterministic.",
+   "evidence": "supervisor.go:535-553:\n\n    select {\n    case <-ctx.Done():\n        return nil\n    ...\n    case l := <-exited:\n        l.exited = true\n        o := guard(l.name, l.runner.Err)\n        ...\n        if o.err == nil {\n            return logProblem(..., fmt.Errorf(\"daemon: runner %q: %w\", l.name, ErrRunnerExited))\n\nReproduced in a scratch module: one Runner whose Done closes when the Run context is cancelled (Err nil); WithReady callback cancels that context, waits for the Runner's Done, then returns. Over 200 runs, Run returned `daemon: runner \"bound\": daemon: runner exited before shutdown` 94 times and nil 106 times.",
+   "suggestion": "In the exited branch, check ctx.Err() first and return nil when the context is already done (the stop phase then classifies the exit, dropping context.Canceled). Alternatively poll ctx.Done() non-blockingly before the select."
+  },
+  {
+   "title": "systemd.Listeners wraps a non-listening stream socket without error, contrary to its doc",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/daemon/systemd/listeners.go:142",
+    "source/daemon/systemd/listeners.go:148",
+    "source/daemon/systemd/listeners.go:43"
+   ],
+   "description": "The doc on Listeners says a descriptor that is not a listening stream socket is an error, and that every listener and inherited descriptor is then closed. adopt() relies on net.FileListener to enforce this, plus one explicit check for unixgram. net.FileListener only looks at the socket type: it accepts any SOCK_STREAM descriptor, including a connected socket (what a unit with Accept=yes passes) or one that is bound but not listening.\n\nSuch a descriptor is returned as a healthy net.Listener. The failure only shows later, as `accept4: invalid argument` from Accept. With NewHTTPServerListener that means Start reports ready and Serve then exits immediately as a Runner failure, instead of the clear start-up error and descriptor clean-up the doc and ADR-0030 (\"So is a descriptor that is not a stream ...\") promise.",
+   "evidence": "listeners.go:142-151:\n\n    l, err := net.FileListener(f)\n    _ = f.Close()\n    if err != nil {\n        return nil, err\n    }\n    if l.Addr().Network() == \"unixgram\" {\n\nThere is no SO_ACCEPTCONN check. Doc at listeners.go:43-48: \"A descriptor that is not a listening stream socket, such as one from ListenDatagram=, is an error too ... Sockets of a unit with Accept=yes are connections, not listeners, and are not supported.\"\n\nChecked on go1.27.4 linux: net.FileListener on the File() of a connected *net.TCPConn returned `*net.TCPListener err=<nil>`, and its Accept returned `accept4: invalid argument`.",
+   "suggestion": "After wrapping, read SO_ACCEPTCONN through the listener's SyscallConn (syscall.GetsockoptInt(fd, SOL_SOCKET, SO_ACCEPTCONN)) and treat 0 as \"not a listening socket\", going down the existing close-everything error path. Otherwise narrow the doc to what is actually checked."
+  },
+  {
+   "title": "The HealthChecker guarantee that CheckHealth never sees a stopping or exited Runner is a check-then-call race",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/supervisor.go:169",
+    "source/daemon/supervisor.go:173",
+    "source/daemon/runner.go:40"
+   ],
+   "description": "The per-Runner readiness check reads the feed under its mutex, releases it, and then calls CheckHealth. Nothing prevents shutdown from beginning, the Runner's Stop from being called, or the Runner from exiting between the two steps or while CheckHealth runs (it may run for the whole check timeout, 2s by default).\n\nThe HealthChecker doc states the opposite as an absolute: \"CheckHealth never sees a Runner that is starting, has exited or is being stopped.\" A Runner author who relies on that, for example by using resources in CheckHealth that Stop releases without synchronisation, has a data race or use-after-close that the contract says cannot happen.",
+   "evidence": "supervisor.go:169-174:\n\n    check: func(ctx context.Context) error {\n        if err := s.feed.running(name); err != nil {\n            return err\n        }\n        return hc.CheckHealth(ctx)\n    },\n\nfeed.running (supervisor.go:982-996) locks and unlocks f.mu before returning. Sequence: a /readyz request passes feed.running in phaseRunning; Run's context is cancelled; Run sets phaseStopping and calls the Runner's Stop (supervisor.go:270-282); CheckHealth is then called, or is still running, concurrently with Stop.\n\nrunner.go:40-42: \"At any other time the check fails without calling it, so CheckHealth never sees a Runner that is starting, has exited or is being stopped.\"",
+   "suggestion": "Weaken the doc to say CheckHealth is not started once shutdown has begun but may overlap Stop and the Runner's exit, so it must be safe to run concurrently with them. A hard guarantee would need the stop phase to wait for in-flight CheckHealth calls."
+  },
+  {
+   "title": "daemontest.Start leaks the Handler's listener when Run ends before the HTTP Runner starts",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/daemontest/daemon.go:63",
+    "source/daemon/daemontest/daemon.go:69",
+    "source/daemon/daemontest/daemon.go:94"
+   ],
+   "description": "With Config.Handler set, start() binds 127.0.0.1:0 itself and hands the listener to daemon.NewHTTPServerListener. That Runner's contract (http.go:90-91) is that \"a listener Start never served stays the caller's to close\". The HTTP Runner has Order 100, so it starts last. If any earlier Runner fails to start, a start timeout fires, or the instance lock is held, its Start is never called.\n\ndaemontest only closes the listener when daemon.New fails. Neither the cleanup nor Daemon.Stop closes it, so the socket stays bound and accepting into its backlog for the rest of the test binary. Start's doc presents an early Run return as a supported case (\"A Run that returns early does not fail the test\").",
+   "evidence": "daemon.go:63 `l, err = lc.Listen(t.Context(), \"tcp\", \"127.0.0.1:0\")`; the only `l.Close()` is at daemon.go:79-81, inside `if err != nil` after daemon.New. The cleanup at daemon.go:94-101 only releases Runners and calls d.Stop().\n\nReproduced in a scratch module: daemontest.Start with Handler set and a `daemontest.NewRunner(t, \"bad\", daemontest.FailStart(err))`. After the subtest finished and its cleanups had run, `net.DialTimeout(\"tcp\", d.Addr(), time.Second)` still connected successfully.",
+   "suggestion": "In the cleanup, after d.Stop(), close l when it is non-nil and ignore the error; closing a listener Serve already closed is harmless."
+  },
+  {
+   "title": "daemontest.Start silently discards a WithReady passed in Config.Options",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/daemon/daemontest/daemon.go:74",
+    "source/daemon/daemontest/daemon.go:24",
+    "source/daemon/option.go:87"
+   ],
+   "description": "Config.Options is documented as \"the Supervisor's options. Start adds daemon.WithReady after them.\" daemon.WithReady does not chain: it overwrites s.ready. Because Start appends its own WithReady last, a consumer's WithReady in Config.Options is replaced and never called, with no error.\n\nA test that uses daemontest.Start to exercise its own ready hook (for example the code that writes a pid file or signals a parent) passes or hangs without the hook ever running. The doc says \"adds\", not \"replaces\".",
+   "evidence": "daemon.go:74-76:\n\n    opts := append(slices.Clone(cfg.Options), daemon.WithReady(func() {\n        readyOnce.Do(func() { close(ready) })\n    }))\n\noption.go:87: `s.ready = ready`.\n\nReproduced in a scratch module: daemontest.Start with `Options: []daemon.Option{daemon.WithReady(func() { mine.Store(true) })}` and one default Runner returned normally with `mine` still false.",
+   "suggestion": "Either document that a WithReady in Config.Options is replaced and expose a Config.Ready hook that Start calls from its own callback, or have daemon.WithReady compose with a previously registered callback."
+  }
+ ]
+}

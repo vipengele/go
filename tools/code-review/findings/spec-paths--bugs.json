@@ -1,0 +1,48 @@
+{
+ "unit": "spec-paths:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "Snippet's _ci_clean fails under `set -u` when IFS is unset, and otherwise leaves IFS set to the empty string",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/spec/completioninstall/script.go:37",
+    "source/cli/spec/completioninstall/script.go:61",
+    "source/cli/spec/completioninstall/script.go:149"
+   ],
+   "description": "`_ci_clean` saves IFS with `_ci_ifs=$IFS` and restores it with `IFS=$_ci_ifs`. An unset IFS and an empty IFS are different states in POSIX sh: unset means default splitting on space, tab and newline, while empty means no field splitting at all. The save and restore cannot tell them apart.\n\nTwo consequences when the embedding script has IFS unset (for example after the common `unset IFS` idiom for restoring default splitting):\n\n- Under `set -u`, the plain `$IFS` expansion is an unbound-variable error, and a non-interactive shell exits. This contradicts the `Snippet` doc comment, which says \"The fragment is safe under `set -u`; the function restores IFS and the noglob option it changes.\"\n- Without `set -u`, the function returns with IFS set to the empty string, so every later unquoted expansion in the embedding script stops being split.\n\nThe repository's own `source/update/installscript/install.sh.in` never unsets IFS, so it is not affected. The exposure is to other scripts that embed the snippet, which is the documented use.",
+   "evidence": "Code: `_ci_ifs=$IFS` (script.go:37) and `IFS=$_ci_ifs` (script.go:61).\n\nReproduced with the rendered snippet under dash (/bin/sh) and bash, in a directory outside the repository:\n\n1. `set -eu; . ./snip.sh; unset IFS; HOME=/home/u completion_target bash` prints `IFS: parameter not set` and the shell exits with status 2.\n2. `. ./snip.sh; unset IFS; HOME=/home/u completion_target bash >/dev/null; words=\"a b c\"; n=0; for w in $words; do n=$((n+1)); done` gives n=1 instead of 3, and `${IFS+yes}` reports IFS set, with an empty value. dash and bash behave the same.",
+   "suggestion": "Record whether IFS was set and restore accordingly, for example `case ${IFS+x} in x) _ci_ifs=$IFS; _ci_ifs_set=1 ;; *) _ci_ifs_set= ;; esac` before the loop, then `if [ -n \"$_ci_ifs_set\" ]; then IFS=$_ci_ifs; else unset IFS; fi` after it. Add a snippet test that runs with IFS unset under `set -u`."
+  },
+  {
+   "title": "The Note's suggested shell lines are not quoted, so a path with a space or apostrophe yields a command that does not work",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/completioninstall/table.go:109",
+    "source/cli/spec/completioninstall/table.go:146",
+    "source/cli/spec/completioninstall/script.go:68",
+    "source/cli/spec/completioninstall/script.go:96",
+    "source/cli/spec/completioninstall/powershell.go:40"
+   ],
+   "description": "`Location.Note` and `Result.Note` are documented as \"what the user has to do for the shell to load the file\" and contain a literal line to paste. The path is interpolated into that line without escaping.\n\n- PowerShell: the note is `. '<file>'`. A home directory containing an apostrophe (for example `C:/Users/O'Brien`) produces an unterminated string.\n- zsh: the note is `fpath=(<dir> $fpath)` with no quoting. A home directory containing a space splits into two fpath entries, neither of which is the completion directory.\n\nThe PowerShell install fragment in the same package does escape this case, with `$ciFile.Replace(\"'\", \"''\")`, so the two renderings of the same instruction disagree. The sh snippet's `COMPLETION_NOTE` has the same defect as the Go table.",
+   "evidence": "table.go:146: `Note: fmt.Sprintf(\"dot-source %s from $PROFILE, as in . '%s'\", file, file)`.\ntable.go:109: `fmt.Sprintf(\"add %s to fpath before compinit runs, as in fpath=(%s $fpath) in ~/.zshrc\", dir, dir)`.\npowershell.go:40, by contrast: `Write-Host ('. ''' + $ciFile.Replace(\"'\", \"''\") + '''')`.\n\nRunning the rendered sh snippet outside the repository:\n\n- `HOME=\"/home/O'Brien\" completion_target powershell` sets the note to `... as in . '/home/O'Brien/.config/powershell/Completions/tool.ps1'`.\n- `HOME=\"/home/John Doe\" completion_target zsh` sets the note to `... as in fpath=(/home/John Doe/.zsh/completions $fpath) in ~/.zshrc`.\n\nThe Go `Target` builds the same strings from `Env.Home`.",
+   "suggestion": "Quote the path for the target shell when building the example line: double embedded apostrophes inside the PowerShell single-quoted string, and single-quote the zsh directory with `'\\''` escaping. Apply the same in the sh snippet so the equality test still holds."
+  },
+  {
+   "title": "Install's atomic writer replaces a symlinked completion file with a regular file, which breaks a Homebrew-linked completion",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/completioninstall/install.go:153",
+    "source/cli/spec/completioninstall/install.go:156",
+    "source/cli/spec/completioninstall/install.go:330"
+   ],
+   "description": "For zsh, `Target` prefers `<brew prefix>/share/zsh/site-functions/_<name>`. For a tool installed by a Homebrew formula, that path is a symlink that `brew link` created into the Cellar.\n\n`Install` compares content through the symlink (`readFile` follows it). When the content differs, it writes a temporary file beside the path and calls `rename(tmp, path)`. Renaming onto a symlink replaces the link itself, not its target. The Homebrew-managed link becomes an unmanaged regular file, and the formula's next `brew upgrade` or `brew link` reports a conflict because the target already exists.\n\nThe same applies to a completion file a user symlinks from a dotfiles repository: the link is silently severed.\n\nNeither the `Install` doc, the `WriteFile` seam doc (\"renames it over path\") nor the ADR mentions links. The ADR's Writes section specifies only \"a rename onto the target\".",
+   "evidence": "install.go:153: `if existing, err := s.readFile(res.Path); err == nil && bytes.Equal(existing, script) { return res, nil }` reads through a symlink.\ninstall.go:156 calls `s.writeFile(res.Path, script, 0o644)`, which reaches `atomicSteps.write` and its last statement at install.go:330, `return s.rename(tmp, path)`, where `rename` is `os.Rename` and `path` is the link.\n\nTriggering sequence: `_tool` in the Homebrew site-functions directory is a symlink to the Cellar copy from version N; the binary of version N+1 runs `Install` with Shell zsh; the script differs, so the symlink is replaced by a regular file. This was not run against a real Homebrew installation; it follows from POSIX rename(2) semantics and the code path above.",
+   "suggestion": "Before writing, `Lstat` the target. When it is a symlink, either skip with a distinct Reason (the file is managed by something else) or resolve it with `filepath.EvalSymlinks` and write atomically to the resolved file. Document the chosen behaviour on `Install` and `Options.WriteFile`."
+  }
+ ]
+}

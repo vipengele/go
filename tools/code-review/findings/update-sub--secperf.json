@@ -1,0 +1,51 @@
+{
+ "unit": "update-sub:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "Install scripts never check that the installed binary is the release they announce, so a replayed signed release installs silently",
+   "category": "feature-gap",
+   "severity": "medium",
+   "locations": [
+    "source/update/installscript/install.sh.in:212",
+    "source/update/installscript/install.sh.in:255",
+    "source/update/installscript/install.sh.in:265",
+    "source/update/installscript/install.ps1.in:319",
+    "source/update/installscript/install.ps1.in:352",
+    "source/update/asset/asset.go:10"
+   ],
+   "description": "The minisign signature covers only the bytes of the checksums file, and the default names (`{name}_{os}_{arch}.{ext}`, `checksums.txt`) carry no tag. The checksums file, signature and archives of any older release therefore verify under any tag. ADR-0024 accepts this for the signature (\"Downgrade and replay are not covered\") and hands it to ADR-0027 (the `HighestApplied` watermark) and ADR-0029 (the `version --json` preflight against the selected tag). Both live only in the Go updater. The sh and PowerShell installers have neither: after the signature and digest pass they extract and move the binary into place and print `installing <tag>` / `installed <path>`. Someone who can replace release assets but does not hold the signing key (the threat ADR-0024's signature exists for) can serve an old, vulnerable, correctly signed release to every fresh install, including one pinned with `<P>_VERSION`, with no warning.",
+   "evidence": "install.sh.in:212-236 verifies `$tmp/checksums` against `$tmp/checksums.minisig`. Lines 255-261 compare the asset digest with the listed one. Lines 265-271 run `cp \"$binary\" \"$stage\"; chmod 755; mv -f \"$stage\" \"$install_dir/$name\"; say \"installed ...\"`. The only time the script runs the binary is `\"$install_dir/$name\" completion \"$shell_name\"` at line 317, after the install. install.ps1.in:319-331 and 352-358 have the same shape and never run the binary. Sequence: release v2.0.0 has its `tool_linux_amd64.tar.gz`, `checksums.txt` and `checksums.txt.minisig` replaced by the v1.0.0 files; `minisign -V` succeeds, the digest matches, and the script prints `installing v2.0.0 for linux/amd64` while installing v1.0.0. The Go path refuses the same release in `CheckStaged` (ADR-0029). Not run end to end; this is from reading both templates and the ADRs.",
+   "suggestion": "After staging and before the rename, run the staged binary with `version --json` (or plain `version`) and refuse unless it reports `$tag`, mirroring `Config.CheckStaged`. Alternatively have the rendered GoReleaser `signs` block write the tag into the minisign trusted comment (`-t`) and have the scripts and `Download` compare it. At minimum, document in `installscript/doc.go` that the scripts do not cover replay."
+  },
+  {
+   "title": "The sh install script's curl requests have no connect, stall or total timeout",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/update/installscript/install.sh.in:73",
+    "source/update/installscript/install.sh.in:88",
+    "source/update/installscript/install.ps1.in:80"
+   ],
+   "description": "Every network call of the sh installer on the curl path (the default when curl exists) runs with no time bound. A server or middlebox that accepts the connection and then stalls, on the `releases/latest` probe or on any of the three downloads, hangs the installer indefinitely. The script is typically run unattended as `curl | sh` in a Dockerfile or CI step, so the job hangs until its own outer timeout. The wget path at least has wget's default 900 s read timeout. The PowerShell script is bounded by HttpClient's default 100 s timeout only until the response headers arrive, because it uses `ResponseHeadersRead`; the body copy has no bound. The Go updater bounds each request with `DownloadTimeout` (5 min) and the source `Timeout`. ADR-0023 lists the size limits as deliberately ignored by the script but says nothing about time.",
+   "evidence": "install.sh.in:73 `curl -sSL -o \"$2\" -w '%{http_code}' \"$1\"` and :88 `curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \"$1\"` carry no `--connect-timeout`, `--max-time` or `--speed-limit/--speed-time`, and curl has no default transfer timeout. install.ps1.in:74 uses `GetAsync($url, ResponseHeadersRead)` and :80 `$response.Content.CopyToAsync($file).GetAwaiter().GetResult()` has no cancellation. Trigger: a `<P>_BASE_URL` mirror or CDN edge that sends headers and then stops sending body bytes.",
+   "suggestion": "Add `--connect-timeout 30 --speed-limit 1 --speed-time 60` (or similar) to both curl calls and `--timeout`/`--tries` to wget. In PowerShell, pass a CancellationToken with a deadline to the copy."
+  },
+  {
+   "title": "Install scripts download the whole archive before deciding whether the release can be trusted",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/update/installscript/install.sh.in:198",
+    "source/update/installscript/install.sh.in:205",
+    "source/update/installscript/install.sh.in:215",
+    "source/update/installscript/install.ps1.in:296",
+    "source/update/installscript/install.ps1.in:310"
+   ],
+   "description": "Both scripts fetch the release asset first, with no size bound, and only then fetch the checksums file and the signature and evaluate the signature policy. Every refusal that needs no archive bytes still costs the full download: a release with no `.minisig` (404), a signature that verifies under no trusted key, or minisign absent with no terminal and no `<P>_ALLOW_UNSIGNED`. The last is a certain refusal known before any request. A hostile or wrong `<P>_BASE_URL` host can also make the script write an arbitrarily large body into the temp directory before any authenticity check. The Go updater does the opposite on purpose (Download contract, ADR-0020/0024): \"Trust is established before the checksums file is parsed and before the archive is requested\". The scripts are otherwise documented as following the same order.",
+   "evidence": "install.sh.in:198 `status=$(fetch \"$asset_url\" \"$tmp/asset\")` comes before :205 (checksums), :215 (signature) and the policy block at :228-252, whose `fail \"the signature cannot be checked and there is no terminal to ask...\"` (:250) runs only after all three downloads. install.ps1.in:296-299 fetches the asset before :301-304 (checksums) and :310-349 (signature and policy). Sequence: a non-interactive CI run on a machine without minisign downloads the full archive and then exits 1 with the remedies message.",
+   "suggestion": "Reorder both templates: checksums file, then signature and the minisign / opt-in decision, then the listed-digest lookup, and only then the asset download and its digest comparison. That gives the scripts the ordering guarantee `Config.Download` has."
+  }
+ ]
+}

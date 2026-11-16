@@ -1,0 +1,87 @@
+{
+ "unit": "update-core:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "A background check cancelled at CheckWait is never recorded, so a slow network makes every command pay the exit delay and query again, indefinitely",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/update/check.go:147",
+    "source/update/background.go:205",
+    "source/update/background.go:77"
+   ],
+   "description": "`afterAttempt` treats a check whose context is done as \"not an attempt\" and saves nothing. `Check.Finish` cancels the check `CheckWait` (250 ms by default, 2 s at most) after the command ends. When the source's answer takes longer than the command's run time plus `CheckWait` (a high-latency or packet-dropping route to github.com, combined with short commands), the check is cancelled on every run. No `LastAttempt` is written, so the throttle in `Start` never engages. Every later command is eligible again, makes another request, and delays its exit by the full `CheckWait`. No `LatestVersion` is ever learnt, so no notice is ever shown. A source that fails fast is recorded and throttled for `CheckInterval`; only the slow case has no backoff. The doc comment states the \"not an attempt\" rule deliberately, and no ADR covers it, but the unbounded repetition looks like an unintended consequence of it.",
+   "evidence": "check.go:147 `if ctx.Err() != nil || errors.Is(err, context.Canceled) { return st, false }`.\n\nReproduced in a scratch copy of the tree with an in-package test: a `Source` that answers after 400 ms, default `CheckWait`, and three consecutive `Start` + `Finish` pairs on the same `StateDir`. Output for each of runs 0, 1 and 2: `exit delayed 250ms, notice=... false, source calls=1/2/3, state file err=... update-state.json: no such file or directory`. Every run waited the full `CheckWait`, queried the source again, and wrote no state.",
+   "suggestion": "Record a check cancelled by the `Finish` timeout as an attempt with a shorter backoff (for example a `LastAttempt` that throttles for minutes rather than 24 hours), or count consecutive cancelled checks in `State` and back off after a few. Alternatively, let a check that has already sent its request finish and save detached from the command's exit."
+  },
+  {
+   "title": "On Windows, Install's first rename fails when the existing .old backup is still a running image, and the error tells the user to elevate",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/update/install.go:41",
+    "source/update/install.go:117",
+    "source/update/target.go:15"
+   ],
+   "description": "Install step 6 renames the executable onto `<target>.old`, and the doc says \"A backup already there is replaced\". The package's own premise (install.go:50-52, ADR-0022, ADR-0031) is that Windows lets a running executable be renamed but not overwritten or removed. After one update, `<exe>.old` is the image of every process that was running the old version. If any of them is still alive at the next update (a long-running `tool serve` or `watch`, or a daemon), the replace-rename onto that locked file is refused. The hook's `RemoveStaleBackup` cannot clear it either, for the same reason. The second update therefore fails until every old process exits.\n\nThe failure is an access denial, so `fsError` turns it into a `*PermissionError` whose hint says to reinstall into a writable directory or rerun with elevated privileges. That is wrong advice: elevation does not unlock a running image.\n\nADR-0031 covers only antivirus and indexer locks on the renames. `install_windows_test.go` covers a single install with a locked `Discard` and `RemoveStaleBackup`, not a second install over a locked backup. I could not run this on Windows; the finding follows from the code and the package's stated Windows premise.",
+   "evidence": "install.go:117-118 `if err := s.rename(target, backup); err != nil { return nil, abandon(fsError(\"rename\", target, err)) }`. There is no attempt to remove or move aside an existing backup first, and no `backupLocked` classification on this path, although `Discard` and `removeStaleBackup` both use one.\n\nSequence:\n1. Process A runs `tool.exe` v1 and stays up.\n2. `tool update` to v2 renames `tool.exe` to `tool.exe.old`, which is now A's image. `Discard` returns `BackupLockedError`, which the caller ignores.\n3. A later `tool update` to v3 tries to rename `tool.exe` onto the still-locked `tool.exe.old`. The rename is refused with access denied, and the user sees a `PermissionError` carrying `permissionHint`.",
+   "suggestion": "Before step 6, when a backup exists, try to remove it. If it is locked on Windows, rename the stale backup to a unique name (for example `<target>.old.<random>`) so the first rename has a free destination, and have `RemoveStaleBackup` sweep those names. At minimum, classify this failure with `backupLocked` and return an error that says an older instance of the tool is still running, instead of the elevation hint. Add a Windows test for a second install while the first backup is locked."
+  },
+  {
+   "title": "After Install on Linux, the same process resolves its executable to the .old backup, so later Target, CheckWritable, Apply and RemoveStaleBackup act on the wrong path",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/update/target.go:70",
+    "source/update/config.go:522",
+    "source/update/install.go:115",
+    "source/update/hook.go:7"
+   ],
+   "description": "The default `Config.Executable` is `os.Executable`, which on Linux re-reads `/proc/self/exe` on every call and follows the running file through a rename. Install step 6 renames the running binary to `<target>.old`. From then on, every Config method that locates the executable in that process resolves to the backup:\n- While the update is unsettled, `Target()` returns `<path>.old`. A second `Install` or `Apply` in the process (for example a retry without settling) would replace the backup and write `<path>.old.old`, leaving the real path untouched, and still raise `HighestApplied`.\n- After `Discard`, the link target no longer exists. `Target`, `CheckWritable`, `Apply` and `RemoveStaleBackup` all fail with \"no such file or directory\" until the process restarts. A long-running process that self-updates more than once without re-executing can never apply a second update.\n\nThe same applies to any long-running old process whose binary another process replaced. `hook.go` acknowledges that `os.Executable` \"would name the wrong file\" for PostUpdate hooks, but the Config methods carry no such caveat, and `Installed` does not feed its known path back.",
+   "evidence": "Reproduced with a small program built against a scratch copy of the package. It calls `Config.Target()`, performs Install's two renames on its own executable, then calls `Target()` again:\n\n`Target before: /tmp/tmp.jJQv4bpqZ4/atk <nil>`\n`Target after Install's renames: /tmp/tmp.jJQv4bpqZ4/atk.old <nil>`\n`CheckWritable: <nil>`\n`Target after Discard:  update: resolving the executable \"/tmp/tmp.jJQv4bpqZ4/atk.old\": lstat /tmp/tmp.jJQv4bpqZ4/atk.old: no such file or directory`",
+   "suggestion": "Document on `Target`, `Apply`, `Install` and `RemoveStaleBackup` that the process must not locate its executable again after a successful Install on Linux. Better, make `resolveTarget` robust: refuse a resolved path that ends in `backupSuffix` when the path without the suffix exists, or cache the first resolved target per process."
+  },
+  {
+   "title": "Validate accepts a BinaryName or TempPrefix holding a path separator, and every later update step then fails",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/update/config.go:219",
+    "source/update/config.go:483",
+    "source/update/target.go:115",
+    "source/update/extract.go:138",
+    "source/update/archive.go:28"
+   ],
+   "description": "`Config.Validate` checks the Identity, the templates, `AssetExt`, the limits, detectors, signature policy, channel and intervals, but not `BinaryName` or `TempPrefix`. Its doc says it \"returns nil when the Config can be used\". Both fields are concatenated into `os.CreateTemp` patterns in `CheckWritable`, `Download` and `Extract`, and `os.CreateTemp` rejects a pattern containing a path separator. A Config with `BinaryName: \"my/tool\"` or `TempPrefix: \"../x\"` therefore validates, `UpdateCheckHooks` returns hooks, and background checks run, but every `Apply` fails at `CheckWritable` with an opaque \"pattern contains path separator\" error. `BinaryName` is also compared against `path.Base` of archive entries, which a name holding a slash can never equal.",
+   "evidence": "In-package test against a scratch copy:\n\n`c.BinaryName = \"my/tool\"` gives `Validate = <nil>` and `CheckWritable = update: create <dir>: createtemp my/tool-update-*: pattern contains path separator`.\n\n`c.TempPrefix = \"../x\"` gives `Validate = <nil>` and `CheckWritable = update: create <dir>: createtemp ../x*: pattern contains path separator`.",
+   "suggestion": "Have `Validate` reject a non-empty `BinaryName` or `TempPrefix` that contains `/`, `\\` or a NUL byte, as a `validate.FieldError` wrapping `validate.ErrInvalid` like the other fields. `BinaryName` could reuse the single-path-segment rule."
+  },
+  {
+   "title": "A Retry-After delay above about 9.2e9 seconds overflows time.Duration and yields a wrong RateLimitError.Reset",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/update/github.go:608",
+    "source/update/github.go:609"
+   ],
+   "description": "`retryAfter` accepts any non-negative int64 number of seconds and multiplies it by `time.Second` as a `time.Duration`. For values above 9,223,372,036 the product overflows int64 and wraps, so `Reset` (and the \"resets at\" text in `RateLimitError.Error`) is a time in the past or otherwise unrelated to the header. The value is controlled by the server.",
+   "evidence": "github.go:608-609 `if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs >= 0 { return s.now().Add(time.Duration(secs) * time.Second).UTC() }`.\n\nIn-package test with `Now` fixed at 2026-01-01T00:00:00Z: `retryAfter(\"9223372037\")` returns `1733-09-22 00:12:43.290448384 +0000 UTC`, and `retryAfter(\"99999999999\")` returns `2272-02-08 11:53:50 UTC` instead of a time about 3,170 years ahead.",
+   "suggestion": "Clamp the delay before multiplying (for example `secs > math.MaxInt64/int64(time.Second)` saturates or is treated as unknown and returns the zero time), and add boundary cases to the test."
+  },
+  {
+   "title": "Pre-release tags without a dot after rc or beta (v1.2.3-rc1, v1.2.3-beta1) are classified Edge, so Beta followers never receive them",
+   "category": "feature-gap",
+   "severity": "low",
+   "locations": [
+    "source/update/channel.go:91",
+    "source/update/channel.go:96",
+    "source/update/channel.go:103"
+   ],
+   "description": "`channelOf` compares the first dot-separated pre-release identifier exactly with \"beta\" or \"rc\". ADR-0027 states the rule the same way (\"first suffix identifier is beta or rc\"), and the test pins `betamax.1` as Edge, so this is deliberate. The consequence is that the very common tag shapes `v1.2.3-rc1`, `v1.2.3-beta2`, `v1.2.3-rc-1` and upper-case `-RC.1` are Edge. GitHub's pre-release flag cannot rescue them: the flag only raises a release to at least Beta, and `max(Edge, Beta)` stays Edge. A tool that tags release candidates as `-rc1` and tells users to follow the beta channel silently delivers nothing to them. `highestListed` skips those releases and may return an older one or the \"no release the channel receives\" error.",
+   "evidence": "channel.go:94-100 `id, _, _ := strings.Cut(pre, \".\"); switch id { case \"beta\", \"rc\": c = Beta; default: c = Edge }`.\n\nIn-package test output: `v1.2.3-rc1 flag=false -> edge, flag=true -> edge ; Beta.Receives=false`. The results are identical for `v1.2.3-beta1`, `v1.2.3-rc-1`, `v1.2.3-RC.1` and `v1.2.3-Beta.1`.",
+   "suggestion": "Either match the identifier by its alphabetic prefix (`rc` or `beta` followed by digits, optionally a hyphen), or state the exact-identifier requirement and the `rcN` consequence in the `Beta` constant's doc, in `Config.Channel` and in the goreleaser guidance, so tool authors pick `-rc.1`."
+  }
+ ]
+}

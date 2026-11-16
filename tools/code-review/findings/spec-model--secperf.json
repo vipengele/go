@@ -1,0 +1,58 @@
+{
+ "unit": "spec-model:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "table.Render passes terminal control characters in cell values straight to the terminal (escape-sequence injection, and cells can still break a line)",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    "source/cli/spec/table/table.go:133-141",
+    "source/cli/spec/table/table.go:145-151",
+    "source/cli/spec/table/doc.go:35-36"
+   ],
+   "description": "newCell neutralises only tab, newline and carriage return. Every other C0/C1 control character in a cell value (ESC, BEL, backspace, vertical tab, form feed, U+0085, U+2028/2029) is written unchanged to the writer, which is normally the user's terminal. The in-repo callers put data the tool does not author into cells: `config show` renders configuration values read from files and the environment (source/cli/core/command/config/show.go:45-46), and `daemon status` renders check names and error strings decoded from the daemon's status response (source/daemon/daemoncmd/status.go:199-205). A value containing CSI/OSC sequences can therefore clear the screen, retitle the window, rewrite earlier lines of the table (hiding or spoofing rows such as a config value's ORIGIN), or on some terminals trigger OSC 52 clipboard writes. Separately, the package doc and ADR-0015 state that 'a cell never breaks a line', but \\v, \\f and U+2028 still move to a new line on terminals. The escape bytes are also counted as runes in the width, so alignment of every row is thrown off. ADR-0015 only discusses not stripping ANSI from pre-styled cells for measuring; it does not decide to pass raw control bytes from data through.",
+   "evidence": "table.go:134-140: `switch r { case '\\t', '\\n', '\\r': return ' '; default: return r }`. Experiment (scratch module replacing the spec module): `t.Add(\"a\", \"x\\x1b[2J\\x1b]0;pwned\\x07y\"); t.Add(\"b\", \"one\\vtwo\\fthree four\\x08\\x08\"); t.Render(&b, spec.Styler{})` produced `\"KEY  VALUE\\na    x\\x1b[2J\\x1b]0;pwned\\ay\\nb    one\\vtwo\\fthree four\\b\\b\\nc    ok\\n\"` - ESC [2J (clear screen), an OSC title sequence, BEL, VT, FF and backspaces all reach the output verbatim.",
+   "suggestion": "In controlSpaces (text path only; JSON is already safe) map every rune for which unicode.IsControl is true, plus U+2028/U+2029, to a space or a visible escape such as `\\x1b`, before the style function runs, so only the Styler's own SGR sequences ever reach the terminal. Update the doc sentence to match."
+  },
+  {
+   "title": "Command.Validate recurses without cycle detection: a command tree containing a cycle kills the process instead of returning an error",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/command.go:118-125",
+    "source/cli/spec/command.go:182-193"
+   ],
+   "description": "validate walks c.Commands recursively with no visited set, extending `path` (and, for inherited flags, cloning the flag scope) at each level. A tree in which a command appears among its own descendants never terminates: memory grows until the runtime's stack limit or the OOM killer ends the process, which no recover can intercept. Validate is the gate cli/core runs on every Execute (source/cli/core/execute.go:225) precisely to turn tree-construction mistakes into a joined error, and its doc lists the rejected shapes without mentioning cycles.",
+   "evidence": "`c := &spec.Command{Name: \"a\", Run: f}; c.Commands = []*spec.Command{c}; c.Validate()` - run in a scratch module, the process was terminated with `signal: killed` (kernel OOM) rather than returning. command.go:192 `sub.validate(path, children, errs)` is unconditional apart from the nil check and the per-parent duplicate-name check at :188.",
+   "suggestion": "Track the set of *Command pointers on the current path (or all visited) in validate and report `%w: command is its own ancestor` instead of descending."
+  },
+  {
+   "title": "WriteJSON holds roughly four copies of the payload and parses it three times",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/json.go:26-48",
+    "source/cli/spec/json.go:65-80"
+   ],
+   "description": "WriteJSON marshals v (`data`), then checkEnvelopeObject re-tokenises it and decodes every top-level value into a fresh json.RawMessage (a full copy of each value, scanned again by Decode), then builds `spliced` (a second full copy), then json.Indent writes a third, larger copy into `out` before the single Write. For a command whose payload is a large list (e.g. table rows under one key, the pattern ADR-0015 prescribes) peak memory is about 4x the encoded size and the bytes are scanned by Marshal, the token decoder, Decode-into-RawMessage and Indent. The single-write guarantee only requires one buffered output, not the intermediate copies.",
+   "evidence": "json.go:26 `data, err := json.Marshal(v)`; :77-78 `var skip json.RawMessage; dec.Decode(&skip)` per top-level key (RawMessage.UnmarshalJSON appends a copy); :35-41 `spliced = append(spliced, data[1:]...)`; :43-44 `json.Indent(&out, spliced, \"\", \"  \")`.",
+   "suggestion": "Indent directly into `out` after writing the `{\"schema\":N,` prefix by hand (or json.Indent on data and splice the schema line after the opening brace), and check the top-level keys by skipping values with the token stream / a depth counter instead of materialising each as a RawMessage."
+  },
+  {
+   "title": "table.Render invokes each Column.Style twice per cell and Validate copies the inherited-flag maps once per inherited flag",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/table/table.go:150",
+    "source/cli/spec/table/table.go:116",
+    "source/cli/spec/command.go:103-116",
+    "source/cli/spec/command.go:177-179"
+   ],
+   "description": "Two small repeated-work spots. (1) newCell calls the column's style function twice for every styled cell, once with the real Styler and once with the zero Styler to measure, even when the real Styler has colour off and both calls return the identical string; every header cell (always styled with Bold) pays this too, and writeLine allocates a new padding string with strings.Repeat per cell. For large tables with styled columns this doubles the style work and allocations. (2) flagScope.with rebuilds both scope maps from scratch for each inherited flag a command declares, so a command with K inherited flags under A inherited ancestor flags does O(K*(A+K)) map inserts instead of O(A+K); it runs on every Execute through root.Validate.",
+   "evidence": "table.go:150 `return cell{text: style(st, text), width: utf8.RuneCountInString(style(spec.Styler{}, text))}`; table.go:116 `out.WriteString(strings.Repeat(\" \", pending))`. command.go:104-110 `next := flagScope{names: map[string]string{}, shorts: map[string]string{}}; for k, v := range s.names {...}; for k, v := range s.shorts {...}` called from the per-flag loop at :177-179 `if f.Inherited() { children = children.with(f, path) }`.",
+   "suggestion": "In newCell, when `!st.Color()` reuse the single styled string for both text and width. In validate, clone the inherited scope once per command (lazily, on the first inherited flag) and add the remaining flags to that clone."
+  }
+ ]
+}

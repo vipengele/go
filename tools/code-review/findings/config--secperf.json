@@ -1,0 +1,62 @@
+{
+ "unit": "config:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "A 1 KB YAML file with aliases makes File.Load run for seconds and build hundreds of MB of errors (alias fan-out bypasses yaml.v3's expansion guard)",
+   "category": "performance",
+   "severity": "medium",
+   "locations": [
+    "source/config/file.go:77-79",
+    "source/config/file.go:141-153",
+    "source/config/file.go:162-163",
+    "source/config/file.go:231-236"
+   ],
+   "description": "FileProvider.Load decodes into a yaml.Node, which skips the alias-expansion limit yaml.v3 applies when decoding into Go values, and then expands aliases itself: mapping() calls resolve() on every key and value, and pair() recurses into any mapping value whose key matches a group. Because key matching is relaxed (case, '-' and '_' ignored), k different spellings of the same group key are each accepted as the group and each walked. If every spelling's value is an alias to the next level's mapping, the walk visits k^depth leaves, where depth is the schema's nesting depth. Duplicate detection only happens at leaf field keys (l.seen), after the walk reached them, and every visit appends a formatted error to l.problems, so memory grows with the same exponent. The cost is polynomial in file size but with the schema depth as exponent, so a schema with 3+ levels of nesting is enough for a tiny file to stall or OOM a tool or a daemon that reloads its config.",
+   "evidence": "Measured on a copy of the package in /tmp with a schema nested 5 groups deep (A.B.C.D.E.V int) and a file of the shape\n\nx5: &l5\n  v: 1\n  v_: 1\n  ...\nx4: &l4\n  e: *l5\n  e_: *l5\n  ...\n...\na: *l1\na_: *l1\n\n(k spellings per level): k=4, 276 bytes -> 16 ms, 336 KB of error text; k=8, 608 bytes -> 561 ms, 24.6 MB; k=12, 1036 bytes -> 7.7 s, 317 MB of error text. Growth is k^6. Code path: file.go:143 `k, v := resolve(n.Content[i]), resolve(n.Content[i+1])`, file.go:162-163 `case group && v.Kind == yaml.MappingNode: l.mapping(v, key)`, with no visited set, no depth/visit budget, and no duplicate check for group keys.",
+   "suggestion": "Record each group key in l.seen (by matchKey) the same way field keys are, so a group opened twice under two spellings is reported once and not walked again; and/or keep a budget of visited nodes (or refuse an alias whose target is a mapping, since the documented use of aliases is for values) and cap the number of collected problems."
+  },
+  {
+   "title": "Seed opens filepath.Clean(path) but removes and reports the uncleaned path; File reads the uncleaned path, so a path with 'symlink/..' seeds one file, loads another, and on a failed write deletes an unrelated file",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/config/seed.go:53",
+    "source/config/seed.go:69",
+    "source/config/seed.go:73",
+    "source/config/file.go:69"
+   ],
+   "description": "createExclusive creates the file at filepath.Clean(path). Clean resolves '..' lexically, while the kernel resolves it after following symlinks, so for a path such as cfg/link/../c.yaml where cfg/link is a symlink to real/sub, Clean names cfg/c.yaml and the kernel names real/c.yaml. Every other operation uses the path as given: writeNew's cleanup calls os.Remove(path) (seed.go:69, 73) and FileProvider.Load calls os.ReadFile(p.path) (file.go:69). Two consequences: (1) when the write or close fails, Seed deletes whatever pre-existing file the kernel resolves path to and leaves its own partial file behind, the opposite of the documented 'removes it, leaving no partial file behind'; (2) Seed(path) followed by Load(File(path)) do not address the same file: the seeded defaults are never read, and Seed returns created=true while the path the tool reads still does not exist (or is a different, pre-existing file).",
+   "evidence": "Reproduced in a copy of the package under /tmp. Layout: d/real/sub/, d/cfg/link -> d/real/sub, path = d+\"/cfg/link/../c.yaml\". Seed(path, C{Port:1}) returned (true, nil); os.Stat(path) -> 'no such file or directory'; os.Stat(d/cfg/c.yaml) -> exists. After writing 'port: 9' to d/real/c.yaml, Load(C{Port:1}, File(path)) returned Port 9, not the seeded file. With a writer that fails (simulated disk full) through writeNew and createExclusive: the pre-existing d/real/c.yaml was deleted ('victim=stat .../real/c.yaml: no such file or directory') and the file Seed created at d/cfg/c.yaml remained ('partial=<nil>'). Code: seed.go:53 `os.OpenFile(filepath.Clean(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)` versus seed.go:69/73 `_ = os.Remove(path)`.",
+   "suggestion": "Use one spelling throughout: either open the path as given (drop the Clean, with the linter suppression it was added for), or clean once at the top of Seed/writeNew and use that value for create, Remove and error text, and have File clean the same way so Seed and File always name the same file."
+  },
+  {
+   "title": "No way to mark a key as secret: Sources and every Load error echo raw values, so a credential in the 0600 config or environment reaches stdout, stderr and logs",
+   "category": "security",
+   "severity": "medium",
+   "locations": [
+    "source/config/sources.go:9-23",
+    "source/config/config.go:41-45",
+    "source/config/validate.go:52",
+    "source/config/validate.go:94",
+    "source/config/bind.go:159",
+    "source/config/file.go:251"
+   ],
+   "description": "The package treats the configuration file as sensitive (Seed creates it 0600; ADR-0012 rejects the alternative because a mistake would leave a 'world-readable file'), but it has no notion of a sensitive key. Result.Sources returns the plain text of every bound value; Load's validation path copies the bound value of the key into the FieldError it reports (`%q from origin`); conversion errors quote the offending text; and the file loader quotes a scalar found where a group was expected. A tool that keeps a token, password or DSN in a key therefore prints it whenever the key fails Validate (to stderr, typically also to logs and CI output), and the in-repo consumer `config show` (source/cli/core/command/config/show.go:44-45) prints every value, in table and JSON form, with no redaction hook available from the schema. Neither ADR-0012 nor ADR-0017 records this as a decision.",
+   "evidence": "validate.go:94 `c := &FieldError{Key: s.Key, Value: s.Value, Origin: s.Origin, Err: fe.Err}` and validate.go:52 `msg += fmt.Sprintf(\": %q from %s\", e.Value, e.Origin)`: a Validate returning &FieldError{Key:\"api.token\", Err: errors.New(\"must be 40 characters\")} makes Load return `api.token: must be 40 characters: \"<the token>\" from env APP_API_TOKEN`. bind.go:159 `fmt.Sprintf(\"%s: invalid %s %q%s from %s\", key, name, text, where, origin)`. config.go:41 Sources() and sources.go:13-18 Value hold the plain value of every key; show.go:44-45 `for _, s := range res.Sources() { tbl.Add(s.Key, s.Value, s.Origin) }`. A search of source/config and ADR-0012/0017 for secret/redact/sensitive/mask finds nothing.",
+   "suggestion": "Add a struct tag (for example `secret:\"true\"`) recorded on Field with an accessor, and have Source.Value, the annotated FieldError and conversionError substitute a fixed placeholder for such keys (keeping the origin), so `config show` and error output never carry the value."
+  },
+  {
+   "title": "File.Load reads the configuration file with no size bound and no regular-file check",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/config/file.go:69"
+   ],
+   "description": "Load calls os.ReadFile on the path as given and hands the whole buffer to the YAML parser, which builds a node tree several times the size of the input. There is no cap on the size and no check that the path is a regular file, so a path that names a very large file allocates all of it (plus the node tree), and a path that names a FIFO or a device such as /dev/zero blocks forever or grows until the process is killed. The path commonly comes from a flag or an environment variable of the consuming tool, and a daemon that reloads on SIGHUP (ADR-0025) repeats the read on every reload.",
+   "evidence": "file.go:69 `data, err := os.ReadFile(p.path)` followed by file.go:77 `dec := yaml.NewDecoder(bytes.NewReader(data))`; no os.Stat, no io.LimitReader, no size constant anywhere in the package.",
+   "suggestion": "Open the file, refuse a non-regular file, and read through io.LimitReader with a generous documented maximum (for example 1 MiB), reporting a file above it as an error naming the limit."
+  }
+ ]
+}

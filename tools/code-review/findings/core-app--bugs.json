@@ -1,0 +1,122 @@
+{
+ "unit": "core-app:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "On Windows, cobra's mousetrap makes every execution print a splash and os.Exit(1) when the tool is started from Explorer",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/core/internal/cobra/cobra.go:123",
+    "source/cli/core/execute.go:118",
+    "source/cli/core/doc.go:67"
+   ],
+   "description": "internal/cobra.Run calls cmd.ExecuteContext without clearing cobra's package-level MousetrapHelpText. On Windows, cobra's ExecuteC runs preExecHook first: when the parent process is explorer.exe (double-click, a Start Menu / Startup-folder shortcut, including one that carries arguments), it prints \"This is a command line tool. You need to open cmd.exe and run it from there.\", sleeps 5 seconds and calls os.Exit(1). No run function, hook, PostRun, log flush or exit-code mapping happens, and the process is ended from inside the library. This contradicts the ExecuteArgs contract (\"It touches no part of the process that env does not give it\", doc.go \"touch nothing else of the process\") and makes a tool built on cli/core unusable from a shortcut, e.g. `tool.exe daemon run` placed in the Startup folder. Nothing in the repository mentions or disables the mousetrap (grep for 'mousetrap' in *.go and *.md finds nothing outside go.sum/go.mod).",
+   "evidence": "cobra v1.10.2 command_win.go: `func preExecHook(c *Command) { if MousetrapHelpText != \"\" && mousetrap.StartedByExplorer() { c.Print(MousetrapHelpText); if MousetrapDisplayDuration > 0 { time.Sleep(MousetrapDisplayDuration) } ...; os.Exit(1) } }`, called from ExecuteC (command.go:1095) before argument handling; cobra.go:72 sets MousetrapHelpText to a non-empty default and MousetrapDisplayDuration to 5s. source/cli/core/internal/cobra/cobra.go:106-123 builds the tree and calls `cmd.ExecuteContext(ctx)` with no `spf.MousetrapHelpText = \"\"` anywhere in the module. Trigger: build any App for GOOS=windows and start the .exe from Explorer or a shortcut. (Reasoned from the code; not executed on Windows.)",
+   "suggestion": "Disable the mousetrap in internal/cobra (set spf.MousetrapHelpText = \"\" once, e.g. in an init of the adapter package), so the adapter never exits the process; if a splash is wanted, make it an explicit App option implemented outside ExecuteArgs."
+  },
+  {
+   "title": "Errors of cobra's own completion command bypass the usage-error mapping: an unknown shell exits 0 with help on stdout, an extra argument exits 1",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/core/internal/cobra/cobra.go:111",
+    "source/cli/core/internal/cobra/cobra.go:113",
+    "source/cli/core/app.go:106",
+    "source/cli/core/execute.go:24"
+   ],
+   "description": "Under WithCompletion the root gets cobra's default `completion` command, which is not built by build() and therefore has neither the `unknownCommand` Args check nor a *UsageError wrapper for positional-argument errors (only flag errors are wrapped, through SetFlagErrorFunc). Consequences: (1) `tool completion <unsupported-shell>` (e.g. `elvish`, `nushell`, a typo such as `bsh`) is treated by cobra as a non-runnable command with an argument: it writes the completion command's help to env.Stdout and returns nil, so the exit code is 0. Every other unknown subcommand in the tree exits 2 with `unknown command`. A user or install script running `tool completion ksh > file` or `eval \"$(tool completion ksh)\"` gets help text where a script is expected and a success status. (2) `tool completion bash extra` returns cobra's plain NoArgs error, which is not a *UsageError, so it exits ExitError (1), not ExitUsage (2) as the ExitUsage doc promises for 'a number of positional arguments' / 'an unknown subcommand'.",
+   "evidence": "Probe test in a copy of the module (package cli, App with WithCompletion, WithVerbose, WithQuiet):\nargs=[\"completion\" \"bogus\"] code=0 stdout=\"Generate the autocompletion script for tool for the specified shell.\\nSee each sub-command's help ...\" stderr=\"\"\nargs=[\"completion\" \"bash\" \"extra\"] code=1 stderr=\"tool: unknown command \\\"extra\\\" for \\\"tool completion bash\\\"\\n\"\nargs=[\"completion\" \"bash\" \"--bogus\"] code=2 stderr=\"tool: completion bash: unknown flag: --bogus\\n\"\nargs=[\"bogus\"] code=2 stderr=\"tool: unknown command \\\"bogus\\\" for \\\"tool\\\"\\n\".\nexecute.go:24-29 documents ExitUsage for 'an unknown subcommand, or a number of positional arguments the command's ArgPolicy rejects'; WithCompletion's doc (app.go:106-109) describes only `completion <shell>` for bash, zsh, fish, powershell. Existing tests cover only `completion`, `completion bash` and `completion --help`.",
+   "suggestion": "After cobra has added the completion command (or by adding an own equivalent before Execute), set its Args to the adapter's unknownCommand and wrap the subcommands' Args errors in *UsageError, or post-process: map any error returned for a command under `completion` that is not a run error to *UsageError. Add tests for `completion <unknown>` and `completion bash extra`."
+  },
+  {
+   "title": "config edit: the first Ctrl-C at the \"re-edit? [Y/n]\" prompt is ignored, and the second leaves the .edit-* directory with a copy of the configuration behind",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/edit.go:96",
+    "source/cli/core/command/config/edit.go:126",
+    "source/cli/core/command/config/edit.go:163",
+    "source/cli/core/command/config/edit.go:50",
+    "source/cli/core/execute.go:252"
+   ],
+   "description": "askReEdit blocks in bufio.Reader.ReadString on env.Stdin and never looks at the run's context. Execute/App.Execute turn SIGINT into Interrupts values, and the first value only cancels the context, so Ctrl-C at the prompt has no visible effect. The second Ctrl-C makes ExecuteArgs return 130 at once while the run goroutine is still blocked in the read; main then calls os.Exit, so the deferred `os.RemoveAll(tempDir)` never runs. The `.edit-<random>/config.yaml` copy (the edited, invalid configuration, which may hold secrets) stays beside the configuration file, and nothing ever removes stale `.edit-*` directories. This contradicts newEdit's doc: \"the temporary directory is removed however the command ends\".",
+   "evidence": "Probe test (package cli, package-level ExecuteArgs, config.New with an Editor that writes invalid YAML, Stdin a pipe that never delivers, Terminal true, Interrupts a test channel):\n\"first interrupt: still blocked at prompt\"\n\"second: code=130\"\n\"left behind: [/tmp/.../001/.edit-1882866106/config.yaml]\".\nCode: edit.go:96 `defer func() { _ = os.RemoveAll(tempDir) }()`, edit.go:163 `line, err := r.ReadString('\\n')` with no ctx; execute.go:252-253 `case <-second: return ExitInterrupted`.",
+   "suggestion": "Make the prompt cancellable: read the answer on a goroutine and select on ctx.Done(), returning ctx.Err() (context.Canceled, so the exit is a silent 130 after cleanup) on the first interrupt. Optionally sweep stale `.edit-*` directories on entry."
+  },
+  {
+   "title": "config edit: cancelling the run SIGKILLs a terminal editor, leaving the terminal in the editor's raw/alternate-screen state",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/edit.go:210"
+   ],
+   "description": "The default launcher starts the editor with exec.CommandContext(ctx, ...). The run's context is cancelled by the first interrupt (SIGINT or SIGTERM delivered to the tool by Execute). exec.CommandContext's default Cancel is Process.Kill, i.e. SIGKILL on Unix, which a full-screen editor (vim, nano, emacs -nw) cannot catch to restore termios and leave the alternate screen. A `kill -TERM <tool pid>` (or a Ctrl-C that reaches only the tool) while the editor is open therefore leaves the user's terminal in raw mode with no echo, and the editor's swap/recovery handling is skipped. The command then fails with `config edit: editor: vim: signal: killed` (exit 1) rather than the silent 130 of an interrupted run, because the error is not context.Canceled.",
+   "evidence": "edit.go:210-215: `cmd := exec.CommandContext(ctx, argv[0], args...)`; `cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr`; no `cmd.Cancel` and no `cmd.WaitDelay` are set, so os/exec kills the process with os.Process.Kill when ctx is done. execute.go:339-340: the first Interrupts value calls cancel() on the context every run function receives.",
+   "suggestion": "Set cmd.Cancel to send os.Interrupt/SIGTERM (keeping Kill on Windows) with a WaitDelay before the hard kill, or run the editor with a context that is not cancelled by the first interrupt and let the editor own the terminal until it exits; return ctx.Err() when the run was interrupted so the exit code is 130."
+  },
+  {
+   "title": "config edit replaces a symlinked configuration file with a regular file instead of updating its target",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/edit.go:119",
+    "source/cli/core/command/config/edit.go:140"
+   ],
+   "description": "prepareCopy reads opts.Path with os.ReadFile, which follows a symbolic link, but the validated copy is moved back with state.Replace(temp, opts.Path, 0600), an os.Rename over opts.Path. When config.yaml is a symlink (dotfile managers such as GNU stow, or a link into a synced/secret-managed directory), the link itself is replaced by a regular file: the link target keeps the old content, and the two silently diverge. A dangling symlink is treated as a missing file (ErrNotExist -> seeded copy) and is likewise replaced. Neither the command's doc nor ADR-0017 mentions symlinks; the doc says only that the copy is 'renamed over opts.Path'.",
+   "evidence": "edit.go:140 `data, err := os.ReadFile(opts.Path)` (follows links); edit.go:119 `state.Replace(temp, opts.Path, editMode)`; source/cli/state/write.go:61-78 documents Replace as 'moves tmp over final' by rename. Sequence: `ln -s ~/dotfiles/tool/config.yaml ~/.config/tool/config.yaml; tool config edit` and save a valid change -> ~/.config/tool/config.yaml is now a regular 0600 file and ~/dotfiles/tool/config.yaml is unchanged.",
+   "suggestion": "Resolve opts.Path with filepath.EvalSymlinks (when it exists) and create the temp directory beside, and rename over, the resolved target; or refuse with a clear error when opts.Path is a symlink."
+  },
+  {
+   "title": "config edit splits $VISUAL/$EDITOR on whitespace only, so an editor path or argument containing a space cannot be used",
+   "category": "feature-gap",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/edit.go:184",
+    "source/cli/core/command/config/edit.go:187"
+   ],
+   "description": "editorCommand uses strings.Fields on the variable's value. That is documented, but it means no quoting form works: on Windows the usual `EDITOR=C:\\Program Files\\Notepad++\\notepad++.exe` (or VS Code's default install path under `Program Files`) becomes program `C:\\Program` with arguments, and on any platform `EDITOR='vim -c \"set ft=yaml\"'` or `'emacsclient -a \"\"'` is split inside the quotes. The failure is an opaque exec error (`config edit: editor: C:\\Program: executable file not found`) with no hint that the value was split. Git and most tools pass these variables through a shell, so values users already have set commonly contain quoting.",
+   "evidence": "edit.go:185-190: `if value, ok := lookup(name); ok { if argv := strings.Fields(value); len(argv) > 0 { return argv, nil } }`; launcher (edit.go:208-210) runs `exec.CommandContext(ctx, argv[0], args...)` without a shell. Input: VISUAL=`C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd -w` -> argv[0] = `C:\\Program`.",
+   "suggestion": "Parse the value with shell-style quoting (single/double quotes, backslash escapes), and/or first try the whole value as a single executable path when it names an existing file; mention the rule in the ErrNoEditor / exec failure message."
+  },
+  {
+   "title": "ExecuteArgs hangs forever when a run function or hook ends its goroutine with runtime.Goexit while Interrupts is set",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/execute.go:237",
+    "source/cli/core/execute.go:245"
+   ],
+   "description": "With a non-nil env.Interrupts the run executes on its own goroutine, whose deferred function sends an outcome only when recover() returns a non-nil value. runtime.Goexit (called directly, or through testing.T.FailNow / require.* inside a run function or hook of a test that injects an Interrupts channel, as AGENTS.md recommends) unwinds the goroutine with recover() == nil, so nothing is ever sent on `done`. ExecuteArgs then blocks in its select until a second interrupt arrives, which in a test or with no further signal is never. With a nil Interrupts the same code runs inline and Goexit behaves normally, so behaviour differs between the two modes although the doc says a panic propagates 'whether env.Interrupts is nil or not'. App.Execute/Execute always set Interrupts, so this is the production path.",
+   "evidence": "execute.go:237-244:\n`go func() { defer func() { if v := recover(); v != nil { done <- outcome{panicked: true, value: v} } }(); done <- outcome{err: runThenEnd(...)} }()`\nProbe test: root Run calls runtime.Goexit(); `ExecuteArgs(&spec.Env{Interrupts: make(chan struct{})}, root, nil)` had not returned after 2s (logged \"HANG\").",
+   "suggestion": "Track normal completion with a flag and, in the deferred function, always send an outcome: when neither a result nor a panic was recorded (Goexit), send a distinct outcome so the caller returns an error/ExitError (or calls runtime.Goexit itself) instead of blocking."
+  },
+  {
+   "title": "Error tree rendering breaks on messages that contain newlines: continuation lines are written at column 0 without indentation or marker",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/internal/errrender/render.go:59",
+    "source/cli/core/internal/errrender/render.go:76",
+    "source/cli/core/internal/errrender/render.go:142"
+   ],
+   "description": "Render and write emit each node's text verbatim followed by one newline. A leaf or opaque node whose message spans several lines (a YAML/parser error with context lines, captured subprocess output, a third-party multi-error whose Error() is not the exact newline-join of its children, a fmt.Errorf with several %w, or a PostRun hook's errors.Join, which arrives as an opaque *HookError) prints its second and later lines flush left, outside the tree, so they read as separate top-level output and the '→'/'•' structure the package documents is lost. Only a renderer's output (typed) is split into detail rows; default rows are not.",
+   "evidence": "Probe: a run function returning `fmt.Errorf(\"outer: %w\", fmt.Errorf(\"mid: %w\", errors.New(\"a\\nb\")))` writes\n\"tool: outer\\n  → mid\\n  → a\\nb\\n\"\nand `errors.New(\"line one\\nline two\")` writes \"tool: line one\\nline two\\n\". render.go:76 `b.WriteString(n.text + \"\\n\")` and render.go:59 `b.WriteString(root.text + \"\\n\")` do no line splitting; chain's default/opaque branches (render.go:114, 118, 125, 142) pass err.Error() whole.",
+   "suggestion": "Split a default node's text on newlines as typed() does for renderer output: the first line is the row and the rest become detail rows indented under it."
+  },
+  {
+   "title": "The hidden completion request reads process environment variables and can write a debug file, outside the Env that ExecuteArgs is documented to be confined to",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/internal/cobra/cobra.go:102",
+    "source/cli/core/internal/cobra/cobra.go:123",
+    "source/cli/core/execute.go:118"
+   ],
+   "description": "ExecuteArgs promises to touch 'no part of the process that env does not give it', and the adapter's doc says the __complete request only writes candidates. Cobra's completion path, which is live in every App and in the package-level entry points, calls os.Getenv directly: BASH_COMP_DEBUG_FILE (when set, completion debug output is appended to that file in the real filesystem), <TOOL>_COMPLETION_DESCRIPTIONS / COBRA_COMPLETION_DESCRIPTIONS, and <TOOL>_ACTIVE_HELP / COBRA_ACTIVE_HELP. These bypass env.LookupEnv, so a test or embedder that passes a fake Env still has completion behaviour (and a file write) driven by the real process environment.",
+   "evidence": "cobra v1.10.2 completions.go:957 `if path := os.Getenv(\"BASH_COMP_DEBUG_FILE\"); path != \"\" {` (opens and appends to the file), completions.go:1015-1017 `os.Getenv(configEnvVar(cmd.Root().Name(), suffix))`, active_help.go:48-50 `os.Getenv(activeHelpGlobalEnvVar)`. internal/cobra/cobra.go:106-123 runs `__complete` through cmd.ExecuteContext with no override; execute.go:118-121 and doc.go:67-69 state the confinement.",
+   "suggestion": "Either document the exception for the completion request in ExecuteArgs/Run, or neutralise it (cobra offers no injection point for these lookups, so documenting is the realistic fix)."
+  }
+ ]
+}

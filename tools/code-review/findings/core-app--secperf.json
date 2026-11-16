@@ -1,0 +1,73 @@
+{
+ "unit": "core-app:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "config edit replaces a symlinked config.yaml with a regular file, leaving the link target stale",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/core/command/config/edit.go:140",
+    "source/cli/core/command/config/edit.go:119",
+    "source/cli/state/write.go:119"
+   ],
+   "description": "`config edit` reads the current file through a symbolic link (os.ReadFile follows links) but installs the result with state.Replace, whose final step is os.Rename(temp, opts.Path). rename(2) replaces the directory entry itself, so when config.yaml is a symlink (the usual layout under stow, chezmoi symlink mode, a dotfiles repo, or a mounted secret/config volume) the link is silently swapped for a private 0600 regular file. The link target keeps the old content, so the dotfiles repo / shared source and the live file diverge without any message, and a later re-link discards the edit. Nothing in edit.go, cli/state or ADR-0017 resolves the link (no Lstat/EvalSymlinks/Readlink anywhere in the non-test code) or documents the behaviour.",
+   "evidence": "edit.go:140 `data, err := os.ReadFile(opts.Path)` (follows the link) -> edit.go:119 `state.Replace(temp, opts.Path, editMode)` -> state/write.go:119 `s.Rename(tmp, final)` with `Rename: os.Rename`. Sequence: `ln -s ~/dotfiles/tool.yaml ~/.config/tool/config.yaml; tool config edit` (change a value, save) -> ~/.config/tool/config.yaml is now a regular file, ~/dotfiles/tool.yaml is unchanged, and the command prints \"<path> updated\". `grep -rn 'EvalSymlinks\\|Lstat\\|Readlink'` over source/cli/state and source/cli/core non-test files returns nothing.",
+   "suggestion": "Resolve opts.Path with filepath.EvalSymlinks (when it exists and is a link) before creating the temp directory and renaming, so the copy is made beside, and renamed over, the link target; or refuse/warn when the path is a symlink, and document the choice."
+  },
+  {
+   "title": "config edit overwrites concurrent changes: the file is not re-checked or locked between the copy and the rename",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/edit.go:99",
+    "source/cli/core/command/config/edit.go:113",
+    "source/cli/core/command/config/edit.go:119"
+   ],
+   "description": "The edit session snapshots config.yaml once (prepareCopy), then blocks for as long as the user keeps the editor open, and finally renames the copy over opts.Path unconditionally. The only comparison made is between the edited copy and the snapshot (`bytes.Equal(edited, start)`); the live file is never re-read and no lock (the repo has a filelock project) is taken. Anything written to config.yaml in the meantime -- a second `config edit` in another terminal, or the tool itself or a provisioning script rewriting the file -- is silently discarded, and the command reports success.",
+   "evidence": "edit.go:99 `start, err := prepareCopy(opts, temp)` (reads opts.Path once); the loop at 105-133 only compares `edited` with `start` (line 113) and then calls `state.Replace(temp, opts.Path, editMode)` (line 119). Sequence: terminal A runs `tool config edit` and leaves the editor open; terminal B runs `tool config edit`, changes key x, saves (\"updated\"); A changes key y, saves -> \"updated\", and B's change to x is gone with no warning.",
+   "suggestion": "Before Replace, re-read opts.Path and compare it with `start` (or compare mtime/size/inode captured at copy time); on a mismatch refuse or prompt. Alternatively hold a try-lock from the filelock project for the duration of the edit."
+  },
+  {
+   "title": "config edit leaves a copy of the configuration in .edit-* when the process dies, and nothing ever sweeps stale ones",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/edit.go:92",
+    "source/cli/core/command/config/edit.go:96",
+    "source/cli/core/execute.go:77",
+    "source/cli/core/execute.go:252"
+   ],
+   "description": "The temporary directory holding a full copy of the configuration file is removed only by a deferred os.RemoveAll in edit. The doc comment (\"the temporary directory is removed however the command ends\") and ADR-0017 (\"removed on every exit\") overstate this: the defer does not run when the process is ended by a signal Execute does not register (only SIGINT and SIGTERM are; SIGHUP from closing the terminal window while the editor is open, SIGQUIT, SIGKILL) or when ExecuteArgs abandons the run on a second interrupt and main calls os.Exit. Each such exit leaves `<config dir>/.edit-XXXX/config.yaml` behind permanently, since no later `config edit` (or any other command) removes stale `.edit-*` directories. The file mode is tight (0700 dir, 0600 file), so this is residue of possibly secret-bearing content plus unbounded accumulation rather than exposure to other users.",
+   "evidence": "edit.go:92-96 `tempDir, err := os.MkdirTemp(dir, \".edit-*\")` / `defer func() { _ = os.RemoveAll(tempDir) }()` is the only cleanup. execute.go:77 `signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)` -- SIGHUP keeps its default action (terminate without running defers). execute.go:252-253 `case <-second: return ExitInterrupted` returns while the run goroutine (and its defer) is still pending, after which the documented `os.Exit(app.Execute())` ends the process. Sequence: `tool config edit`, close the terminal window while the editor is open -> `.edit-123456/config.yaml` remains beside config.yaml forever.",
+   "suggestion": "At the start of edit, remove `.edit-*` directories beside the file that are stale (e.g. older than some age or not locked), and correct the doc comment/ADR wording; optionally also handle SIGHUP in executeProcess."
+  },
+  {
+   "title": "A cancelled run SIGKILLs the interactive editor of config edit, leaving the terminal in raw mode",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/edit.go:210",
+    "source/cli/core/command/config/edit.go:213",
+    "source/cli/core/execute.go:340"
+   ],
+   "description": "The default launcher starts the editor with exec.CommandContext(ctx, ...) and sets neither cmd.Cancel nor cmd.WaitDelay. The run context is cancelled by the first SIGINT/SIGTERM delivered to the tool (watchInterrupts -> cancel()), and exec's default cancel action is Process.Kill, i.e. SIGKILL. A full-screen editor (vim, nano, emacs -nw) holds the terminal in raw mode / alternate screen; killed with SIGKILL it cannot restore the tty or remove its swap/lock files, so a `kill <tool pid>` (SIGTERM from a supervisor, a session manager, or a timeout wrapper) leaves the user's terminal unusable until `reset`, and the edit fails with \"editor: vim: signal: killed\".",
+   "evidence": "edit.go:210 `cmd := exec.CommandContext(ctx, argv[0], args...)` with no `cmd.Cancel` / `cmd.WaitDelay` set before `cmd.Run()` at line 213; os/exec documents that with a nil Cancel the context's Done kills the process with os.Process.Kill. execute.go:339-340 `seen = true; cancel()` cancels that ctx on the first interrupt value, which executeProcess feeds from SIGINT and SIGTERM (execute.go:77). Sequence: `tool config edit` opens vim; from another shell `kill -TERM <tool pid>` -> vim receives SIGKILL, the terminal stays in raw mode on the alternate screen.",
+   "suggestion": "Set `cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }` (os.Interrupt where SIGTERM is unavailable) with a `cmd.WaitDelay` grace period before the kill, so the editor can restore the terminal."
+  },
+  {
+   "title": "config show prints every configuration value in clear, with no way to mark a key as secret",
+   "category": "feature-gap",
+   "severity": "low",
+   "locations": [
+    "source/cli/core/command/config/show.go:44",
+    "source/cli/core/command/config/show.go:48",
+    "source/cli/core/command/config/edit.go:39"
+   ],
+   "description": "The group treats the configuration file as sensitive when writing it (edit forces mode 0600, Seed creates it 0600), and the logging side of the same module has a redaction baseline, but `config show` writes each key's bound value verbatim to stdout in both text and JSON form, including values that came from environment variables (`<PREFIX>_TOKEN`). Neither command/config nor the go.vipengele.org/config schema has any notion of a secret/sensitive key (no tag, no mask), so a tool that keeps an API token in its config cannot stop `tool config show` -- the natural thing to paste into a bug report or run in CI for diagnostics -- from disclosing it; stdout is also explicitly outside WithLogging's redaction.",
+   "evidence": "show.go:44-45 `for _, s := range res.Sources() { tbl.Add(s.Key, s.Value, s.Origin) }` then show.go:48/50 `spec.WriteJSON(inv.Env.Stdout, schema, showJSON{... Values: tbl.Rows()})` / `tbl.Render(inv.Env.Stdout, ...)`. edit.go:39 `const editMode = 0o600`. `grep -rni 'secret\\|sensitive\\|redact\\|mask'` over source/config/*.go and source/cli/core/command/config/*.go (non-test) returns no hit. Input: config type with `Token string`, env `TOOL_TOKEN=ghp_xxx`, `tool config show` -> row `token  ghp_xxx  TOOL_TOKEN`.",
+   "suggestion": "Add a struct tag (e.g. `secret:\"true\"`) that the schema carries into Source, and have `config show` print a fixed mask for such keys (with an explicit opt-in flag to reveal), in text and JSON."
+  }
+ ]
+}

@@ -1,0 +1,52 @@
+{
+ "unit": "spec-paths:secperf",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "completioninstall honours a relative XDG_DATA_HOME / XDG_CONFIG_HOME (and HOMEBREW_PREFIX), writing the completion file relative to the working directory",
+   "category": "security",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/completioninstall/table.go:155-163",
+    "source/cli/spec/completioninstall/install.go:229-230",
+    "source/cli/spec/completioninstall/install.go:238-246",
+    "source/cli/spec/completioninstall/script.go:95-96",
+    "source/cli/spec/completioninstall/script.go:106-107",
+    "source/cli/spec/paths/layout.go:62-64"
+   ],
+   "description": "Target takes any non-empty XDG_DATA_HOME / XDG_CONFIG_HOME as the base directory, and targetEnv takes any non-empty HOMEBREW_PREFIX, without checking that the value is absolute. Install then creates directories (MkdirAll 0755) and writes the completion file under a path relative to whatever directory the tool, or its self-update post-hook, happens to run in. The XDG Base Directory Specification says a relative value is invalid and must be ignored, and the sibling package cli/spec/paths in the same module does exactly that (filepath.IsAbs check, documented in paths/doc.go: \"an XDG base directory that is not an absolute path\" counts as unset). So one tool resolves its config directory from ~/.config while its completion installer writes into ./<relative>/fish/completions/ of the current directory, where the shell never reads it, and Install reports success (Changed: true). The POSIX snippet mirrors the same behaviour, and script_test.go has an \"xdg relative\" case that pins it, so it is consistent between the two renderings but inconsistent with the spec and with paths. ADR-0021 only says the variables are honoured identically by table and snippet; it does not decide to accept relative values.",
+   "evidence": "table.go xdgOrHome: `if xdg != \"\" { return xdg, true }` with no absolute check; install.go targetEnv: `XDGDataHome: filepath.ToSlash(s.env(\"XDG_DATA_HOME\"))` and `prefix := s.env(\"HOMEBREW_PREFIX\") ... env.BrewDirUsable = s.dirWritable(...)`. script.go: `if [ -n \"${XDG_DATA_HOME:-}\" ]; then _ci_base=$XDG_DATA_HOME`. Contrast paths/layout.go: `if v := r.env(envVar); filepath.IsAbs(v) { return filepath.Join(v, r.app), nil }`. Trigger: XDG_DATA_HOME=data, cwd=/some/project, `tool update` with the completion hook -> writes /some/project/data/bash-completion/completions/tool and returns Changed=true with no Note; bash never loads it.",
+   "suggestion": "Treat a non-absolute XDG_DATA_HOME / XDG_CONFIG_HOME (and HOMEBREW_PREFIX) as unset in targetEnv and in the snippet (`case $XDG_DATA_HOME in /*) ...`), matching cli/spec/paths, and update the \"xdg relative\" snippet test accordingly."
+  },
+  {
+   "title": "Install runs `brew --prefix` and `<exe> completion <shell>` with no timeout or cancellation",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/completioninstall/install.go:262-275",
+    "source/cli/spec/completioninstall/install.go:252-258",
+    "source/cli/spec/completioninstall/install.go:147",
+    "source/cli/spec/completioninstall/install.go:106"
+   ],
+   "description": "The default Run seam uses exec.Command(...).Output() with no context, and Install takes no context.Context, so neither subprocess can be bounded or cancelled by the caller. Install is designed to run as an update post-update hook (ADR-0021; update.PostUpdate is `func(installedPath string) error`, also context-free), in the old process right after the binary swap. A `brew` on PATH that blocks (for example a brew invocation waiting on a lock held by a concurrent `brew upgrade`, which is precisely when a brew-managed environment is busy) or a freshly installed binary whose `completion` command hangs leaves the update command blocked indefinitely on an optional, explicitly non-fatal step. The standard output of the child is also buffered in memory without a cap.",
+   "evidence": "install.go:264 `out, err := exec.Command(exe, args...).Output()`; brewPrefix() at :253 calls `run(\"brew\", \"--prefix\")` whenever the shell is zsh off windows and HOMEBREW_PREFIX is empty (targetEnv :238-243); Install :147 `script, err := s.run(exe, \"completion\", string(shell))`. No exec.CommandContext, no WaitDelay, no deadline anywhere in the package.",
+   "suggestion": "Run both commands with exec.CommandContext under a bounded context (a few seconds for `brew --prefix`, a larger bound for the completion command), ideally by adding a context or a Timeout to Options, and treat a brew timeout as an absent prefix."
+  },
+  {
+   "title": "Notes embed the resolved path in shell command lines without quoting or escaping",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/spec/completioninstall/table.go:109",
+    "source/cli/spec/completioninstall/table.go:146",
+    "source/cli/spec/completioninstall/script.go:91",
+    "source/cli/spec/completioninstall/script.go:119",
+    "source/cli/spec/completioninstall/powershell.go:40"
+   ],
+   "description": "Location.Note / Result.Note and COMPLETION_NOTE give the user a literal line to paste into ~/.zshrc or $PROFILE, built by interpolating the resolved path verbatim. The PowerShell note wraps the path in single quotes without doubling an embedded quote, and the zsh note puts the directory inside `fpath=(...)` with no quoting at all. A home directory containing an apostrophe (C:\\Users\\O'Brien is an ordinary Windows profile name) or a space therefore yields a line that does not parse, or that parses as something other than the intended path, when pasted into a profile that is executed on every shell start. The package's own PowerShell snippet shows the intended handling: it escapes with `$ciFile.Replace(\"'\", \"''\")`, so the Go table and the sh snippet disagree with it for the same file.",
+   "evidence": "table.go:146 `Note: fmt.Sprintf(\"dot-source %s from $PROFILE, as in . '%s'\", file, file)` -> for Home `C:/Users/O'Brien`: `. 'C:/Users/O'Brien/Documents/PowerShell/Completions/tool.ps1'` (unbalanced quote). table.go:109 `fmt.Sprintf(\"add %s to fpath before compinit runs, as in fpath=(%s $fpath) in ~/.zshrc\", dir, dir)` -> for Home `/Users/Jo Smith`: `fpath=(/Users/Jo Smith/.zsh/completions $fpath)`, which adds two wrong entries. script.go:119 `COMPLETION_NOTE=\"dot-source $COMPLETION_PATH from \\$PROFILE, as in . '$COMPLETION_PATH'\"` has the same gap. powershell.go:40 escapes: `Write-Host ('. ''' + $ciFile.Replace(\"'\", \"''\") + '''')`.",
+   "suggestion": "Quote the path for the target shell in the notes: double embedded single quotes in the PowerShell line (as powershell.go does) and single-quote the directory in the zsh fpath example, in both table.go and the sh snippet, with the equality test covering a home containing a space and an apostrophe."
+  }
+ ]
+}

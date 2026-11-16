@@ -1,0 +1,76 @@
+{
+ "unit": "worker:worker",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "ADR-0016 says the Worker does not read the published module list, but the Worker serves exclusively from it",
+   "category": "docs-drift",
+   "severity": "medium",
+   "locations": [
+    "docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md:8",
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:159",
+    "tools/vanity-worker/src/modules-source.ts:24",
+    "tools/vanity-worker/src/index.ts:78",
+    "tools/vanity-worker/wrangler.toml:11"
+   ],
+   "description": "ADR-0016 (status: accepted) states that the Worker keeps its own list and never reads the R2 object. The code does the opposite: the Worker has no compiled-in list and answers every go-get request from `modules.json` in the `MODULE_LIST` bucket. The decisions that actually govern runtime behaviour are recorded in no ADR: reading R2 at request time, the 60 s per-isolate TTL, answering 503 when the object is absent, unreadable or invalid, and never serving an expired list. ADR-0004's consequence \"A new project needs a Worker deploy before its first tag\" is also still written as current and is only implicitly superseded by ADR-0016's header. CLAUDE.md, CONTEXT.md and the header of deploy-vanity-worker.yml describe the real behaviour, so the ADR is the outlier. CLAUDE.md tells readers to consult `docs/adr/` before revisiting a decision, so anyone doing that gets the wrong architecture, including the wrong failure model (R2 is now a hard runtime dependency of every resolution).",
+   "evidence": "ADR-0016 lines 8-9: \"The Worker's own list is unchanged by this decision, and the Worker does not read the published object.\"\nADR-0004 lines 159-161: \"A new project needs a Worker deploy before its first tag. The Worker's module list is generated from `source/**/go.mod`, so until the deploy that includes the new `go.mod`, the project's path does not resolve\".\nCode: `const object = await bucket.get(MODULE_LIST_KEY);` (src/modules-source.ts:27), `modules = await cache.get(env.MODULE_LIST);` (src/index.ts:78), and `[[r2_buckets]] binding = \"MODULE_LIST\"` (wrangler.toml:11-14). `grep -rn 'R2\\|modules.json' docs/adr` finds no other ADR recording the request-time read.",
+   "suggestion": "Amend ADR-0016, or add a new ADR, to record that the Worker reads `modules.json` from R2 at request time, with the TTL, the 503-on-unavailable choice and the no-stale-list choice. Mark ADR-0004's \"needs a Worker deploy\" consequence as superseded."
+  },
+  {
+   "title": "A still-valid cached module list is discarded at TTL expiry, so any R2 read failure turns every go-get into a 503",
+   "category": "feature-gap",
+   "severity": "medium",
+   "locations": [
+    "tools/vanity-worker/src/modules-source.ts:74",
+    "tools/vanity-worker/src/modules-source.ts:60",
+    "tools/vanity-worker/src/index.ts:79",
+    "tools/vanity-worker/src/modules-source.test.ts:112"
+   ],
+   "description": "`ModuleListCache.get` only answers from `cached` while `now() < expiresAt`. Once the 60 s TTL passes, a failed re-read rejects and the handler answers 503, even though the isolate still holds the last good list in memory. That list changes only when a `go.mod` is added or removed on `main`, so it is almost always still correct. The result is that a transient R2 error, a brief R2 outage, or a bad object written to the bucket makes every `go get` not already in the proxy fail within 60 s, on every isolate, and also fails every release's `announce` step. The behaviour is deliberate in the code (docstring and the test at line 112) but no ADR records or justifies it. ADR-0004 lists only \"a Worker outage breaks resolution\" as a consequence; this makes R2 availability and object validity a second single point of failure with no degradation path. The 503 response also carries no `Retry-After` header.",
+   "evidence": "```ts\nif (this.cached !== undefined && this.now() < this.cached.expiresAt) {\n  return Promise.resolve(this.cached.modules);\n}\n...\nthis.inFlight = readModuleList(bucket).then(...)\n```\nDocstring, lines 59-64: \"A failed read is never cached and leaves no list to answer from ... a list past its TTL is never served.\" Test: `it(\"serves no expired list when the read after it fails\")`.\nSequence: t=0 a read succeeds with `[\"cli/core\",...]`; t=61 s `bucket.get` throws; `GET /cli/core?go-get=1` returns `503 Module list unavailable`, although `this.cached.modules` still contains `cli/core`.",
+   "suggestion": "On a failed refresh, keep serving the last successfully validated list (stale-if-error), log the failure, and retry on a short backoff. Answer 503 only when the isolate has never read a valid list. Record the choice in the ADR."
+  },
+  {
+   "title": "Removing or moving a project makes its already-released versions unresolvable through go.vipengele.org",
+   "category": "feature-gap",
+   "severity": "medium",
+   "locations": [
+    "tools/vanity-worker/scripts/generate-modules.ts:10",
+    "tools/vanity-worker/src/index.ts:84",
+    "tools/vanity-worker/src/resolve.ts:20",
+    "docs/adr/0004-projects-nest-and-take-vanity-module-paths.md:172"
+   ],
+   "description": "The served list is exactly the set of `source/**/go.mod` directories at `main`'s head, and any path not in it gets a 404. When a project directory is renamed, moved or deleted, its old vanity path leaves the list at the next publish, and within 60 s `go.vipengele.org/<old>?go-get=1` answers 404. ADR-0004 and the module-path rule both say the old tags \"stay where they are\", and those tags are still perfectly fetchable: the go command reads the module from `source/<old>` at the tagged commit. Without the `go-import` answer, though, the go command and the module proxy cannot locate the repository. Every released version of the old path then fails for `GOPROXY=direct` or `GONOPROXY` consumers and for any version the public proxy has not cached. A 404 is the answer the handler's own comment says \"would tell the Go command a served module does not exist\". ADR-0004's \"answers for exactly the projects that exist\" is deliberate, so this is a gap, not a bug: nothing keeps a retired path that has pushed tags.",
+   "evidence": "`findGoModDirs(root)` walks only the current tree (scripts/generate-modules.ts:10-25). `resolve()` returns `undefined` for anything not in the list, and index.ts:85-87 answers `new Response(\"Not Found\\n\", { status: 404 })`.\nSequence: `source/update` is released as `source/update/v0.3.0`, then moved to `source/cli/update` on main. The publish workflow writes a list without `update`; `GOPROXY=direct go get go.vipengele.org/update@v0.3.0` then fails on a 404 from the vanity host, although the tag `source/update/v0.3.0` and its tree still exist.\nADR-0004 lines 172-173: \"A renamed or moved project starts a new version history ... tags under the old directory stay where they are.\"",
+   "suggestion": "Keep retired paths resolvable. Either derive the list from the union of current `go.mod` directories and directories that have `source/<path>/v*` tags, or keep an explicit retired-paths list in the published object. If dropping them is intended, state it in the ADR."
+  },
+  {
+   "title": "An empty module list is accepted by the publisher and by the Worker, which then answers 404 for every module",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "tools/vanity-worker/src/module-list.ts:16",
+    "tools/vanity-worker/src/modules-source.ts:45",
+    "tools/vanity-worker/scripts/publish-modules.ts:89",
+    "tools/vanity-worker/scripts/generate-modules.ts:24"
+   ],
+   "description": "`validateModuleList([])` returns `[]` without error. The publisher therefore uploads `[]` if the walk finds no `go.mod` (for example a `sourceRoot` that exists but holds no projects, or a partial checkout). The Worker accepts `[]` as a valid list and answers 404 to every go-get. The handler's own doc comment gives exactly this as the reason it prefers 503: \"a 404 would tell the Go command a served module does not exist\". No test covers the empty list on either side. An empty list can never be a legitimate state for this repository, so it should be treated like an invalid object.",
+   "evidence": "`validateModuleList`: `const modules = [...new Set(paths)].sort(); for (...) {...} return modules;` has no minimum length.\n`readModuleList`: `Array.isArray(parsed) && parsed.every(...)` is true for `[]`, then `return validateModuleList(parsed)`.\nIn index.test.ts:104-107 a bucket holding `\"[]\"` is treated as a normal list. With the object body `[]`, `GET /cli/core?go-get=1` yields `resolve([], \"cli/core\") === undefined`, so the answer is `404 Not Found`, not 503.",
+   "suggestion": "Make `validateModuleList` (or both callers) reject an empty list, so the publisher fails before uploading and the Worker answers 503 or keeps its previous list."
+  },
+  {
+   "title": "Failed module-list reads are not negatively cached, so every go-get request during a failure issues its own R2 read",
+   "category": "performance",
+   "severity": "low",
+   "locations": [
+    "tools/vanity-worker/src/modules-source.ts:78",
+    "tools/vanity-worker/src/index.ts:76"
+   ],
+   "description": "`ModuleListCache` caches successes only. While `modules.json` is absent, invalid or unreadable, each go-get request that is not concurrent with another performs a fresh `bucket.get`, plus `text()`, `JSON.parse` and the O(n^2) validation. The endpoint is unauthenticated and the path is not checked before the read: `/anything?go-get=1` reaches `cache.get` before `resolve`. During a failure window, request volume therefore maps one-to-one onto R2 operations and repeated console.error logging. This includes retries from the go command and the proxy, and any deliberate flood. In the healthy state it is one read per isolate per 60 s.",
+   "evidence": "```ts\nthis.inFlight = readModuleList(bucket)\n  .then((modules) => { this.cached = {...}; return modules; })\n  .finally(() => { this.inFlight = undefined; });\n```\nA rejection sets no state. The test `\"reads the object again on the call after a failed read\"` (src/modules-source.test.ts:121) confirms a new read per call. index.ts:76-82 calls `cache.get(env.MODULE_LIST)` for every request with `go-get=1`, before `resolve(modules, requestPath)` at line 84.",
+   "suggestion": "Remember a failure for a few seconds (short negative TTL or backoff) before reading again. Combined with stale-if-error, requests during the window are answered from memory."
+  }
+ ]
+}

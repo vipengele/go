@@ -1,0 +1,123 @@
+{
+ "unit": "small:bugs",
+ "commit": "e83a35a",
+ "status": "reviewed-unverified",
+ "findings": [
+  {
+   "title": "filelock: the lock is silently released when the returned unlock function becomes unreachable (GC closes the descriptor)",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/filelock/filelock.go:157",
+    "source/filelock/filelock.go:23",
+    "source/filelock/doc.go:1"
+   ],
+   "description": "The only reference to the locked *os.File is the closure returned by release(). If a caller discards the unlock function (or holds it in a variable that is dead after its last use) in order to keep the lock for the life of the process, the *os.File becomes unreachable, the runtime's cleanup closes the descriptor at the next GC, and the OS drops the flock/LockFileEx lock. The process still believes it holds the lock while another process acquires it. Nothing in the Locker doc, New's doc or doc.go says the unlock function must be kept reachable; the package doc says the lock is released \"when the holder closes the file or exits\". In-repo callers (daemon/instance.go, update) happen to keep the function, so this is a contract an external consumer can break without noticing, e.g. a single-instance guard written as `if _, err := filelock.New(p).TryLock(); err != nil { exit }`.",
+   "evidence": "filelock.go:157-166: `func (l *fileLocker) release(f *os.File) func() { var once sync.Once; return func() { once.Do(func() { _ = l.calls.unlockFile(f); _ = f.Close() }) } }` - f is captured only by the closure.\nReproduced on linux/go1.27.4 in a scratch module:\n  if _, err := filelock.New(p).TryLock(); err != nil { panic(err) }   // unlock discarded\n  _, err := filelock.New(p).TryLock()   // -> \"filelock: lock ...: file is locked\"\n  runtime.GC() x5 with short sleeps\n  _, err = filelock.New(p).TryLock()    // -> <nil>: second lock granted while the first was never unlocked",
+   "suggestion": "Either document on Locker/New that the lock lives only as long as the unlock function is reachable, or pin the file for the process lifetime until unlock is called (e.g. keep held files in a package-level registry keyed by the closure, removed in unlock), so a discarded unlock means 'held until exit' as the package doc implies."
+  },
+  {
+   "title": "state.WriteFile/Replace cannot replace a read-only destination on Windows, so a file written with a mode lacking owner-write can never be rewritten",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/state/write.go:39",
+    "source/cli/state/write.go:119",
+    "source/cli/state/write.go:139",
+    "source/cli/state/write_windows_test.go:33"
+   ],
+   "description": "On Windows (*os.File).Chmod with a mode without 0o200 sets FILE_ATTRIBUTE_READONLY on the temp file, which then becomes the destination. The Rename step is os.Rename, which in the pinned toolchain (go1.27.4) is MoveFileEx(MOVEFILE_REPLACE_EXISTING); MoveFileEx refuses with ERROR_ACCESS_DENIED when the existing destination carries the read-only attribute. On Unix the same call sequence succeeds, because rename needs only directory write permission (write_test.go's 0o400 case). So WriteFile(path, data, 0o400) succeeds once on Windows and every later WriteFile/Replace/SaveJSON/SaveYAML to that path fails, as does any write to a file the user or another tool marked read-only. Neither the doc of WriteFile/Replace nor doc.go's Windows paragraph mentions it, and the Windows test only covers replacing a writable (0o600) file with a 0o400 one, never replacing the read-only result.",
+   "evidence": "write.go:39 `Rename: os.Rename`; write.go:139 `s.Chmod(f, mode)`; write.go:119 `s.Rename(tmp, final)`.\nGo 1.27.4 src/os/file_windows.go:263 `windows.Rename(...)` -> internal/syscall/windows/syscall_windows.go:366 `MoveFileEx(from, to, MOVEFILE_REPLACE_EXISTING)`; internal/poll/fd_windows.go:1242-1246 Fchmod sets FILE_ATTRIBUTE_READONLY when mode&S_IWRITE == 0.\nSequence on Windows: WriteFile(p, a, 0o400) -> ok; WriteFile(p, b, 0o400) (or 0o600) -> \"state: rename ...: Access is denied\". write_windows_test.go:33-37 writes 0o600 first and 0o400 second only. Not executed here (no Windows host); it follows from the documented MoveFileEx behaviour for read-only targets.",
+   "suggestion": "On Windows, clear the read-only attribute of an existing destination before the rename (os.Chmod(final, 0o600) best effort), or document that a mode without owner write makes the file unreplaceable on Windows; add a Windows test that writes twice at 0o400."
+  },
+  {
+   "title": "state.WriteFile/Replace on a symlinked path replaces the link with a regular file and leaves the link's target stale, undocumented",
+   "category": "bug",
+   "severity": "medium",
+   "locations": [
+    "source/cli/state/write.go:81",
+    "source/cli/state/write.go:61",
+    "source/cli/state/write.go:119",
+    "source/cli/state/doc.go:1"
+   ],
+   "description": "The rename targets the path as given, so when path is a symbolic link the link itself is replaced by the new regular file and the file it pointed to keeps the old content. The docs describe the operation as replacing the file at path with new content and say nothing about symlinks. The in-repo consumer `config edit` (cli/core/command/config/edit.go:105-119) reads opts.Path with os.ReadFile, which follows the link, then calls state.Replace(temp, opts.Path, ...), so a configuration file symlinked from a dotfiles repository (stow, chezmoi symlink mode) is silently detached: the repository copy is never updated and the link is gone.",
+   "evidence": "Reproduced on linux in a scratch module: real.json contains \"old\"; os.Symlink(real, link); state.WriteFile(link, []byte(\"new\"), 0o600) returns nil; afterwards os.Lstat(link).Mode() is `-rw-------` (no longer a symlink) and real.json still contains \"old\".\nwrite.go:119 `s.Rename(tmp, final)` with final unresolved; write.go:90-95 creates the temp beside the link, not beside its target.",
+   "suggestion": "Either resolve final with filepath.EvalSymlinks (when it exists and is a link) and create/rename in the target's directory, or document on WriteFile, Replace and in doc.go that a symlink at the destination is replaced, and resolve the path in config edit."
+  },
+  {
+   "title": "state: on Windows a write fails while any reader holds the destination open; the package doc promises reader atomicity without mentioning it",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "source/cli/state/doc.go:1",
+    "source/cli/state/write.go:119",
+    "source/cli/state/load.go:56"
+   ],
+   "description": "doc.go describes the package as replacing files \"so that a reader sees either the old content or the new\" and lists the Windows differences (write-access handle for sync, no directory sync), but not that the rename fails on Windows while another handle is open on the destination. Go opens files without FILE_SHARE_DELETE, so a concurrent LoadJSON/LoadYAML (os.ReadFile) in another process or goroutine makes the writer's MoveFileEx fail with a sharing violation, and SaveJSON returns an error although nothing is wrong with the data. ADR-0023 records exactly this as an accepted failure mode for the daemon's own holder record (\"Go opens files on Windows without FILE_SHARE_DELETE, so a winner's rename or remove can fail while a loser reads the record\"), but ADR-0018 and the cli/state docs do not, and update's check state and GitHub cache are read and written by concurrent tool invocations through these helpers.",
+   "evidence": "load.go:56 `os.ReadFile(filepath.Clean(path))`; Go 1.27.4 src/syscall/syscall_windows.go:395 `sharemode := uint32(FILE_SHARE_READ | FILE_SHARE_WRITE)` (no FILE_SHARE_DELETE); write.go:119 rename via MoveFileEx(MOVEFILE_REPLACE_EXISTING). Sequence: process A is inside LoadJSON(path) while process B calls SaveJSON(path, v) on Windows -> B gets \"state: rename ...\" error. Not executed here (no Windows host).",
+   "suggestion": "Document the Windows sharing failure in doc.go and on WriteFile/Replace, or retry the rename briefly on ERROR_SHARING_VIOLATION/ERROR_ACCESS_DENIED on Windows."
+  },
+  {
+   "title": "cli/state does not compile on plan9: syscall.ENOTSUP is undefined",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/state/write.go:171",
+    "source/cli/state/write.go:53"
+   ],
+   "description": "syncDir references syscall.ENOTSUP in a file without build constraints. Plan 9's syscall package does not define ENOTSUP, so the package, and with it every dependent (cli/core, update), fails to build for GOOS=plan9. syncDirFor is written as if every non-Windows GOOS were supported (\"Every other goos gets syncDir\"), and the sibling filelock project deliberately builds on every other system (lock_other.go; its AGENTS.md lists `GOOS=plan9 go vet ./...`).",
+   "evidence": "`GOWORK=off GOOS=plan9 GOARCH=amd64 go build ./...` in source/cli/state prints `./write.go:171:90: undefined: syscall.ENOTSUP`. The same build for js/wasm, wasip1, solaris, aix and windows succeeds, and filelock builds for plan9.",
+   "suggestion": "Compare with errors.ErrUnsupported (which ENOTSUP/EOPNOTSUPP satisfy via Errno.Is on Unix) plus syscall.EINVAL, or move the errno test into build-tagged files."
+  },
+  {
+   "title": "filelock: on an unsupported platform Lock/TryLock create the lock file and can return errors that do not wrap ErrUnsupported",
+   "category": "docs-drift",
+   "severity": "low",
+   "locations": [
+    "source/filelock/filelock.go:15",
+    "source/filelock/filelock.go:102",
+    "source/filelock/filelock.go:134",
+    "source/filelock/doc.go:34"
+   ],
+   "description": "ErrUnsupported is documented as \"wrapped by every Lock error on a platform the package has no lock for\", and doc.go says \"On every other system Lock and TryLock fail with an error that wraps ErrUnsupported\". Both methods open (and create, at 0600) the lock file before the platform tryLock is consulted, so on such a platform a missing directory or an unwritable file yields an \"open\" error that does not match ErrUnsupported, a done context yields the context error, and in the ordinary case a lock file is left behind on a system that can never lock it. A caller that falls back to NewNoop on errors.Is(err, ErrUnsupported) does not get the documented answer in those cases.",
+   "evidence": "filelock.go:98-105: ctx check, then `os.OpenFile(l.path, os.O_RDWR|os.O_CREATE, 0o600)` returning `l.wrap(\"open\", err)`; only afterwards line 114 `l.calls.tryLock(f)`, which in lock_other.go:7-9 returns ErrUnsupported. TryLock is the same at 134-143. Input: New(\"/missing-dir/x.lock\").TryLock() on GOOS=plan9/solaris/js -> \"filelock: open ...: no such file or directory\", errors.Is(err, ErrUnsupported) == false.",
+   "suggestion": "Expose a per-platform `supported` constant and return the ErrUnsupported error before opening the file, or relax the two doc comments."
+  },
+  {
+   "title": "validate.PathSegment accepts names that are not a single distinct directory entry on Windows (reserved device names, trailing dot)",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/commons/validate/validate.go:156",
+    "source/commons/validate/validate.go:158",
+    "source/commons/validate/validate.go:174"
+   ],
+   "description": "The doc states that an accepted value \"holds no separator, so it names exactly one directory entry\". The rule admits lowercase letters, digits, '.', '_' and '-', which includes the Windows reserved device names (con, nul, aux, prn, com1..com9, lpt1..lpt9, also with an extension such as nul.txt) and names ending in '.', which Win32 strips so that \"foo.\" and \"foo\" are the same entry. cli/spec uses PathSegment for Identity's name and DirName (cli/spec/identity.go:71, 96), which become the tool's config/state/cache directory names on Windows too, so a tool named \"aux\" or \"con\" validates and then fails at directory creation, and \"tool.\" collides with \"tool\".",
+   "evidence": "validate.go:170-178: first byte must be a-z or 0-9, remaining bytes a-z, 0-9, '.', '_', '-'; no check for reserved names or a trailing '.'. PathSegment(\"DirName\", \"nul\"), PathSegment(\"DirName\", \"com1\") and PathSegment(\"DirName\", \"tool.\") all return nil.",
+   "suggestion": "Reject a trailing '.' and the Windows reserved base names (case-insensitively, before the first '.'), or narrow the doc claim to Unix."
+  },
+  {
+   "title": "state.WriteFile fails for valid file names within about 15 bytes of the filesystem name limit",
+   "category": "bug",
+   "severity": "low",
+   "locations": [
+    "source/cli/state/write.go:95"
+   ],
+   "description": "The temporary file is named \".\" + base + \".tmp-\" + a random decimal suffix, in the destination's directory. That adds 6 fixed bytes plus up to 10 digits to the base name, so a destination whose name is legal but longer than roughly 239 bytes (NAME_MAX 255) cannot be written: CreateTemp fails with ENAMETOOLONG although the destination itself could be created. The docs give no bound on the base name.",
+   "evidence": "write.go:95 `s.Create(dir, \".\"+base+\".tmp-*\")`. Reproduced on linux: for a 250-byte base name, state.WriteFile(path, []byte(\"x\"), 0o600) returns an error while os.WriteFile(path, []byte(\"x\"), 0o600) succeeds.",
+   "suggestion": "Use a temp name that does not embed the full base (e.g. truncate base in the pattern), or document the limit."
+  },
+  {
+   "title": "validate.GitHubOwner rejects GitHub Enterprise Managed User account names, which contain an underscore",
+   "category": "feature-gap",
+   "severity": "low",
+   "locations": [
+    "source/commons/validate/validate.go:83",
+    "source/commons/validate/validate.go:94"
+   ],
+   "description": "GitHubOwner is documented as accepting \"a GitHub user or organization name\" and admits only letters, digits and hyphens. Accounts of an enterprise with managed users are named `<handle>_<shortcode>` and always contain an underscore, so a repository owned by such a user account cannot be expressed in a config validated with this check.",
+   "evidence": "validate.go:92-96: `if !isLower(c) && !isUpper(c) && !isDigit(c) && c != '-' { return invalid(field, value, \"must contain only A-Z, a-z, 0-9 and '-'\") }`. GitHubOwner(\"owner\", \"octocat_acme\") returns ErrInvalid.",
+   "suggestion": "Allow a single '_' followed by an alphanumeric shortcode suffix, or state in the doc that managed-user accounts are out of scope."
+  }
+ ]
+}
