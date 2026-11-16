@@ -95,7 +95,16 @@ golangci-lint run
 - `daemoncmd/` — `NewStatus`, the `status` command: an HTTP client of `/status` that prints the
   snapshot as tables through `cli/spec/table`, or as the same JSON through `spec.WriteJSON` when
   the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
-  `testdata/status.keys` pins its JSON keys.
+  `testdata/status.keys` pins its JSON keys. `service.go` holds the service commands:
+  `NewService`, the `service` group of install, uninstall, start, stop, restart and status, and
+  `NewInstall`, `NewUninstall`, `NewStart`, `NewStop`, `NewRestart` and `NewServiceStatus` for
+  flat mounting (a tool mounting `NewServiceStatus` beside `NewStatus` sets its `Name`). Each
+  calls its `ManagerFunc` once per run; every command but status calls `CheckPrivileges` first.
+  install runs `Prepare`, the `WithBeforeInstall` hooks, `Install`, the `WithAfterInstall` hooks
+  and `Status`; every `ServiceOption` is install-only. A `ManagerFunc` error matching
+  `service.ErrContainer` becomes one error carrying `ContainerError.Instead`; other errors are
+  returned unchanged. `testdata/service-status.keys` pins the status JSON keys; the tests run
+  against a fake `service.Manager` in `service_test.go`.
 - `httpserver/` — package `go.vipengele.org/daemon/httpserver`, the hardened `*http.Server` the
   HTTP Runner serves; read its `doc.go` and
   `docs/adr/0026-the-http-server-kit-has-a-fixed-middleware-order-and-pluggable-auth.md`.
