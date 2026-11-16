@@ -100,7 +100,9 @@ golangci-lint run
   (100 a page, newest-created first) until a page holds a release the channel receives, a page is
   short or empty, or 10 pages are read, and returns the highest receivable release across the pages
   read; drafts and non-release tags are skipped, and none within the bound is an error. Stable tags
-  must be plain release versions; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for tests.
+  must be plain release versions. `Latest` returns an error matching `ErrNoRelease` when no
+  release is eligible; on `Stable`, a 404 from the REST API (which keeps its `*StatusError` in the
+  chain) is one too, so a misnamed or private repository reads as "no release yet"; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for tests.
   `Token` (`Config.Token`; nil reads `GH_TOKEN`, then `GITHUB_TOKEN`, through `Getenv`; `""` opts
   out; a provider error fails the API request, wrapped) authenticates REST API requests only
   (ADR-0028). `latestByAPI` and `highestListed` each build the API client once from the injected one
@@ -149,8 +151,8 @@ golangci-lint run
   `SizeLimitError`, `SignatureMalformedError` (unwraps to the minisign parse error),
   `UnknownKeyError` (carries the signature's key id as minisign prints it),
   `SignatureMismatchError` (carries the key id, unwraps to the minisign verification error),
-  `ManagedInstallError`, `ErrPrerelease` (the `Stable` channel's latest release is a pre-release)
-  and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns;
+  `ManagedInstallError`, `ErrPrerelease` (the `Stable` channel's latest release is a pre-release),
+  `ErrNoRelease` (a source holds no release the channel receives) and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns;
   `DevBuildError`, the error `CheckRelease` returns; `DowngradeError` (`Name`, `Version`, `Floor`),
   the error `CheckDowngrade` returns. `classifyError` maps deadline and timeout failures to
   `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
@@ -174,7 +176,7 @@ golangci-lint run
 - `hook.go` — `PostUpdate`, a step that receives the installed binary's path (the old process is still
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
   runs the hooks in order and joins their errors. A failure is report-only: the caller keeps the
-  update. `Install` and `Apply` run no hook. Package `update` does not import
+  update. `Install` and `Apply` run no `PostUpdate` hook. Package `update` does not import
   `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that does
   (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
@@ -306,16 +308,19 @@ golangci-lint run
   kills the run. The binary's standard output is capped at 64 KiB. Every refusal is a
   `*PreflightError`; a done `ctx` returns its own error. It closes the staged file's write
   descriptor (a file open for writing cannot be run) and neither keeps nor discards the `*Staged`.
-- `apply.go` — `Config.Apply(ctx, sel, opts...)`, nine steps stopping at the first error: 1
+- `apply.go` — `Config.Apply(ctx, sel, opts...)`, ten steps stopping at the first error: 1
   CheckManaged, 2 CheckWritable, 3 CheckDowngrade of `sel.Tag` (skipped, with its State read, by
   `AllowDowngrade()`), 4 Download, 5 Target, 6 Extract into the target's directory, 7 CheckStaged
-  (a refusal discards the staged file), 8 Install, 9 the record (`recordApplied`): under the
+  (a refusal discards the staged file), 8 the `BeforeInstall` hooks, each given the `InstallPlan`
+  (`Target`, `Backup`, `Version`) and, unlike a `Preflight` hook, free to have side effects (a
+  self-update records itself pending there; an error discards the staged file and stops Apply,
+  ADR-0035), 9 Install, 10 the record (`recordApplied`): under the
   Locker, load the State, raise `HighestApplied` to the tag when newer, save the whole State. The
   guard fails closed (an unreadable State refuses the install); the record fails open (a failed
   lock, load or save is ignored, since the new binary's `Version` floors the next run). Steps 1 to 3
-  make no request. It returns the `*Installed` with the backup kept, runs no hook and calls neither
+  make no request. It returns the `*Installed` with the backup kept, runs no `PostUpdate` hook and calls neither
   `Discard` nor `Rollback`. It closes the archive itself only when Target fails.
-  `WithDownloadOptions` passes options to Download.
+  `WithDownloadOptions` passes options to Download; `BeforeInstall(hook)` adds a step-8 hook.
 - `updatecmd/` — `Commands(cfg, opts...) []*spec.Command`: one `update` command with `--check`,
   `--yes`/`-y`, `--to`, `--allow-downgrade` and `--channel`, carrying `spec.SkipUpdateCheck`.
   - `ExitUpdateAvailable = 10` is the exit code of `--check` when a newer release exists; the
@@ -479,7 +484,7 @@ golangci-lint run
   PowerShell 5.1 or later, and `tar.exe` (Windows 10 and later) for a tar.gz asset.
 - The seams are the unexported `fsSteps`, set by in-package tests; `Config` has no field for them.
   Tests run as root in CI, so injection is what covers the permission path.
-- `Install` and `Apply` run no `PostUpdate` hook. The caller runs `RunPostUpdate` with
+- `Install` and `Apply` run no `PostUpdate` hook (`Apply` runs `BeforeInstall` hooks only). The caller runs `RunPostUpdate` with
   `Installed.Path()`; a hook failure is report-only and the caller keeps the update.
 
 ## Background check contract

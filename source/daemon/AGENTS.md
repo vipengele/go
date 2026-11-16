@@ -100,7 +100,14 @@ golangci-lint run
   update of its own binary (idle, pending, confirmed, rolled_back) over a `Store`, with `FileStore`
   as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
   backup binary before it records `rolled_back`; `rollback_windows.go` moves the running binary
-  aside instead of overwriting it.
+  aside instead of overwriting it. `Machine.Begin` records the update pending from the
+  `update.BeforeInstall` hook (ADR-0035), before the swap; `Machine.Abandon` settles it as
+  `rolled_back` when the install then fails with the executable as it was
+  (`ErrNoPendingUpdate`, `ErrUpdateRunning`). `NewRunner[T]` (`cycle.go`) returns the `Runner[T]`,
+  a `daemon.Runner` and `Reloader[T]` that checks on a schedule (`runner.go`, the scheduler; `jitter.go`;
+  `settings.go`, the `interval` and `auto_apply` keys; `options.go`, `RunnerOption`) and ends with an
+  error matching `daemon.ErrRestartRequired` after an install, keeping the backup for the
+  Machine's rollback.
 - `httpserver/` — package `go.vipengele.org/daemon/httpserver`, the hardened `*http.Server` the
   HTTP Runner serves; read its `doc.go` and
   `docs/adr/0026-the-http-server-kit-has-a-fixed-middleware-order-and-pluggable-auth.md`.
@@ -303,7 +310,8 @@ The launchd driver:
 - The root `daemon` package is not stdlib-only: it requires `go.vipengele.org/filelock` and
   `go.vipengele.org/cli/spec` (for `spec.Identity` and `cli/spec/paths`), which bring in
   `go.vipengele.org/commons` and `golang.org/x/sys` indirectly. Only `daemoncmd` imports any
-  other `cli/spec` package.
+  other `cli/spec` package. `go.vipengele.org/update` is required, with a directory `replace`
+  (`../update`), for `selfupdate` alone.
 - The grace period's context is made from `context.Background()`, never from the cancelled run context.
 - Work that outlives `Start` is never bound to the start context, which is cancelled when the start
   phase ends: `Func` and the HTTP Runner derive theirs with `context.WithoutCancel`.
@@ -316,10 +324,11 @@ The launchd driver:
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
   `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and
   `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
-- `selfupdate/` has its own depguard rule: the same list plus `go.vipengele.org/cli/state`, which
-  its file store writes through. It imports the root `daemon` for `Clock` (ADR-0028); the root
-  rule does not allow `selfupdate`, so the root `daemon` never imports it. Its tests are internal
-  (`package selfupdate`) and use their own fake clock, never `daemontest`.
+- `selfupdate/` has its own depguard rule: the same list plus `cli/spec/version`, `cli/state`
+  (its file store writes through it), `daemon/daemontest`, `update` and `update/updatetest`. It
+  imports the root `daemon` for `Clock` and `Runner` (ADR-0028) and `update` for `Config.Apply`; the
+  root rule does not allow `selfupdate`, so the root `daemon` never imports it. Its tests are
+  internal (`package selfupdate`); the runner and cycle tests use `daemontest.Clock`.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by
