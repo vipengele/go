@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"os"
+	"strings"
 
 	"go.vipengele.org/daemon"
 )
@@ -24,12 +27,21 @@ type Pending struct {
 
 // Machine moves a Record in a Store through the statuses of a self-update, judged against the
 // version of the running build. Each method reads and writes the record within one Store.Update,
-// so steps run by different processes never interleave.
+// so steps run by different processes never interleave. A version is compared with a leading "v"
+// ignored on both sides, so "1.2.3" and "v1.2.3" are the same build.
 type Machine struct {
 	store           Store
 	running         string
 	clock           daemon.Clock
 	maxBootAttempts int
+
+	// logger is the logger given to WithLogger, nil when none was: Apply then logs through
+	// slog.Default(), read when it runs.
+	logger *slog.Logger
+	// label is the service label Apply's supervisor check matches against XPC_SERVICE_NAME.
+	label string
+	// lookupEnv reads the environment for Apply's supervisor check, as os.LookupEnv does.
+	lookupEnv func(string) (string, bool)
 
 	// restore puts the backup the record names back over its target. It returns *NoBackupError
 	// when the backup is absent, having touched nothing.
@@ -54,6 +66,7 @@ func New(store Store, runningVersion string, opts ...Option) (*Machine, error) {
 		maxBootAttempts: defaultMaxBootAttempts,
 		restore:         func(rec Record) error { return restoreBackup(ops, rec) },
 		removeFile:      ops.remove,
+		lookupEnv:       os.LookupEnv,
 	}
 
 	for _, opt := range opts {
@@ -148,7 +161,7 @@ func (m *Machine) Boot(ctx context.Context) (bool, error) {
 		case rec.Status != StatusPending:
 			target = rec.Target
 			return nil, nil
-		case rec.ToVersion != m.running:
+		case !sameVersion(rec.ToVersion, m.running):
 			rec.Status = StatusRolledBack
 			rec.Reason = m.notRunningReason(rec)
 			rec.UpdatedAt = m.clock.Now()
@@ -209,7 +222,7 @@ func (m *Machine) Confirm(ctx context.Context) error {
 		switch {
 		case rec.Status != StatusPending:
 			return nil, nil
-		case rec.ToVersion != m.running:
+		case !sameVersion(rec.ToVersion, m.running):
 			return nil, ErrNotUpdatedBuild
 		}
 
@@ -242,12 +255,12 @@ func (m *Machine) rollBack(ctx context.Context, op, reason string) (bool, error)
 
 	err := m.change(ctx, op, func(rec Record) (*Record, error) {
 		switch {
-		case rec.Status == StatusRolledBack && rec.ToVersion == m.running:
+		case rec.Status == StatusRolledBack && sameVersion(rec.ToVersion, m.running):
 			rolledBack = true
 			return nil, nil
 		case rec.Status != StatusPending:
 			return nil, nil
-		case rec.ToVersion != m.running:
+		case !sameVersion(rec.ToVersion, m.running):
 			return nil, ErrNotUpdatedBuild
 		}
 
@@ -269,13 +282,20 @@ func (m *Machine) rollBack(ctx context.Context, op, reason string) (bool, error)
 // notRunningReason says why a record pending for another version than the running one is rolled
 // back without a restore.
 func (m *Machine) notRunningReason(rec Record) string {
-	if rec.FromVersion != "" && m.running == rec.FromVersion {
+	if rec.FromVersion != "" && sameVersion(m.running, rec.FromVersion) {
 		return fmt.Sprintf("%s is running instead of %s: the update did not install, or its rollback was not recorded",
 			m.running, rec.ToVersion)
 	}
 
 	return fmt.Sprintf("%s is running instead of %s: the binary was replaced outside the update",
 		m.running, rec.ToVersion)
+}
+
+// sameVersion reports whether a and b name the same version, ignoring a leading "v" on either, so
+// a build that reports "1.2.3" is the one a release tagged "v1.2.3" installed. Compared exactly,
+// such a build never counts its boots against its own update, and its rollback never happens.
+func sameVersion(a, b string) bool {
+	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
 }
 
 // change applies fn to the stored record under one Store.Update. fn returns the record to store,

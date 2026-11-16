@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.vipengele.org/daemon"
@@ -40,6 +41,40 @@ func WithMaxBootAttempts(n int) Option {
 		}
 
 		m.maxBootAttempts = n
+
+		return nil
+	}
+}
+
+// WithLogger sets the logger Apply reports through: a post-update hook that failed and a process
+// no service supervisor restarts. Without it Apply uses slog.Default(), read when Apply runs. A nil
+// logger is rejected by New.
+func WithLogger(logger *slog.Logger) Option {
+	return func(m *Machine) error {
+		if logger == nil {
+			return errors.New("selfupdate: nil logger")
+		}
+
+		m.logger = logger
+
+		return nil
+	}
+}
+
+// WithSupervisorCheck sets what Apply's check for a service supervisor reads: label is the name the
+// service is installed under, matched against launchd's XPC_SERVICE_NAME, and lookup reads the
+// environment as os.LookupEnv does. The check is daemon.UnderSupervisor with the process's own pid;
+// when it fails, Apply logs that nothing restarts the process into the installed binary. Without
+// this option the label is empty, so launchd never matches, and lookup is os.LookupEnv. A nil
+// lookup is rejected by New.
+func WithSupervisorCheck(label string, lookup func(string) (string, bool)) Option {
+	return func(m *Machine) error {
+		if lookup == nil {
+			return errors.New("selfupdate: nil environment lookup")
+		}
+
+		m.label = label
+		m.lookupEnv = lookup
 
 		return nil
 	}

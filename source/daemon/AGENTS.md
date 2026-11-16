@@ -120,7 +120,14 @@ golangci-lint run
   update of its own binary (idle, pending, confirmed, rolled_back) over a `Store`, with `FileStore`
   as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
   backup binary before it records `rolled_back`; `rollback_windows.go` moves the running binary
-  aside instead of overwriting it.
+  aside instead of overwriting it. Versions compare with a leading `v` ignored on both sides.
+  `apply.go` holds `(*Machine).Apply`: it sets the Config's `BackupGuard` to the Machine, runs
+  `update.Config.Apply`, records the update with `Begin` (rolling the install back when that
+  fails), runs the post-update hooks and logs their failure, logs a warning when
+  `daemon.UnderSupervisor` is false, and returns an error wrapping `ErrRestartRequired` alone.
+  `WithLogger` and `WithSupervisorCheck` (label and environment lookup) are its options. Tests that
+  run a real Apply never call `t.Parallel` (a forked staged binary fails with `ETXTBSY`) and compare
+  the installed bytes with `updatetest.ReleaseExecutable`.
 - `httpserver/` — package `go.vipengele.org/daemon/httpserver`, the hardened `*http.Server` the
   HTTP Runner serves; read its `doc.go` and
   `docs/adr/0026-the-http-server-kit-has-a-fixed-middleware-order-and-pluggable-auth.md`.
@@ -367,9 +374,11 @@ install, kill, reinstall, crash loop and uninstall through `service.New`. Read i
   `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and
   `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
 - `selfupdate/` has its own depguard rule: the same list plus `go.vipengele.org/cli/state`, which
-  its file store writes through. It imports the root `daemon` for `Clock` (ADR-0028); the root
-  rule does not allow `selfupdate`, so the root `daemon` never imports it. Its tests are internal
-  (`package selfupdate`) and use their own fake clock, never `daemontest`.
+  its file store writes through, and `go.vipengele.org/update`, which `Apply` installs through; its
+  tests also import `go.vipengele.org/update/updatetest`. It imports the root `daemon` for `Clock`
+  (ADR-0028); the root rule allows neither `selfupdate` nor `update`, so the root `daemon` never
+  imports them. Its tests are internal (`package selfupdate`) and use their own fake clock and
+  hand-written Runners, never `daemontest`.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by

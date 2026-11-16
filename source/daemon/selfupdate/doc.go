@@ -12,6 +12,14 @@
 // rollback restores the backup binary over the target before it records rolled_back: a record
 // never says rolled back while the new binary is still in place.
 //
+// Machine.Apply installs a release through go.vipengele.org/update with the Machine as the
+// Config's BackupGuard, so no update starts while another is pending, records the update pending
+// with the backup update keeps, and returns an error wrapping daemon.ErrRestartRequired. A Runner
+// that returns that error ends Supervisor.Run with a restart, and the service supervisor starts the
+// installed binary, whose boots Boot judges. A record that cannot be stored rolls the install back.
+// A version is compared with a leading "v" ignored, so a build reporting "1.2.3" is the release
+// tagged "v1.2.3".
+//
 // FileStore is the Store over one JSON file. It creates no directory, and a missing file is idle.
 // A corrupt file is an error rather than idle, so that a pending update is never forgotten; an
 // operator clears it by deleting the file.
