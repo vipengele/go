@@ -246,14 +246,16 @@ func requiredVersions(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	replaced := false
 	for _, r := range f.Replace {
 		t.Errorf("go.mod replaces %s with %s; the example requires releases", r.Old.Path, r.New.Path)
+		replaced = true
 	}
 	versions := map[string]string{}
 	for _, r := range f.Require {
 		versions[r.Mod.Path] = r.Mod.Version
 	}
-	if t.Failed() {
+	if replaced {
 		t.FailNow()
 	}
 	return versions
