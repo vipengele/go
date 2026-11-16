@@ -47,14 +47,18 @@ result as one **Health snapshot** over HTTP and through a `status` command.
 - **Exit codes.** The `status` command exits 0 only when the overall status is `ok`. It exits 1
   when the status is `unready` or `down`, after printing the snapshot, and when the daemon is
   unreachable, with the error on stderr.
-- **Wire contract.** The keys of the snapshot are lower snake_case and exactly these:
+- **Wire contract.** The keys of the snapshot are lower snake_case and exactly these, with `update`
+  present only when the `Health` has an update reporter
+  (`0036-daemon-update-status-is-reported-outside-the-check-model.md`), which `/livez` and `/readyz`
+  never call:
   - `status`: `ok`, `unready` or `down`;
   - `live` and `ready`: booleans;
   - `started_at`: an RFC 3339 timestamp in UTC;
   - `uptime_seconds`: an integer, truncated;
   - `checks`: an array, sorted by `name`, of objects with `name`; `kinds`, an array of
     `"liveness"` and `"readiness"`; `status`, `pass` or `fail`; `error`, omitted when the check
-    passes; and `duration_ms`, an integer, truncated.
+    passes; and `duration_ms`, an integer, truncated;
+  - `update`: an object, omitted without a reporter, that never affects `status`, `live` or `ready`.
 
   The body is the envelope `{"schema":1,...}`: a flat object with `schema` first, indented by two
   spaces and ending in a newline, the layout `spec.WriteJSON` produces. The handler's `/status`

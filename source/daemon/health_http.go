@@ -21,7 +21,8 @@ const statusSchema = 1
 //     its overall status: "ok", "unready" or "down".
 //   - Both write their status and a newline as text/plain.
 //   - /status always answers 200 with the snapshot as an application/json envelope whose first key
-//     is "schema".
+//     is "schema". It alone calls the UpdateReporter, and carries its result as "update"; /livez
+//     and /readyz never call it, so a slow reporter delays no probe.
 //
 // Any other path answers 404 and any method but GET and HEAD answers 405 with an Allow header. A
 // HEAD request gets the headers of the GET response and no body. Every response carries
@@ -55,7 +56,13 @@ func (h *Health) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap := h.snapshot(r.Context(), only)
+	// A probe's snapshot never calls the UpdateReporter; only /status, whose route is nil, does.
+	var snap Snapshot
+	if route != nil {
+		snap = h.snapshot(r.Context(), only)
+	} else {
+		snap = h.Snapshot(r.Context())
+	}
 	code, contentType := http.StatusOK, "application/json"
 	var body bytes.Buffer
 	if route != nil {
