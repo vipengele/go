@@ -790,6 +790,132 @@ func TestMarkFailed(t *testing.T) {
 	})
 }
 
+func TestAbandonRecordsRolledBackWithoutFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	rec := pendingRecord()
+	rec.Target = filepath.Join(dir, "tool")
+	rec.Backup = filepath.Join(dir, "tool.old")
+	rec.BootAttempts = 1
+	writeRaw(t, rec.Target, "old binary")
+	writeRaw(t, rec.Backup, "backup binary")
+
+	store := storeWith(t, rec)
+
+	m, err := New(store, oldVersion, WithClock(fakeClock{now: testTime()}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := m.Abandon(t.Context(), "download failed"); err != nil {
+		t.Fatalf("Abandon = %v", err)
+	}
+
+	got := load(t, store)
+	want := rec
+	want.Status = StatusRolledBack
+	want.Reason = "download failed"
+	want.UpdatedAt = testTime()
+
+	if !got.UpdatedAt.Equal(want.UpdatedAt) || !got.StartedAt.Equal(want.StartedAt) {
+		t.Errorf("times = %v, %v, want %v, %v", got.StartedAt, got.UpdatedAt, want.StartedAt, want.UpdatedAt)
+	}
+
+	got.StartedAt, got.UpdatedAt = want.StartedAt, want.UpdatedAt
+	if got != want {
+		t.Errorf("record = %+v, want %+v", got, want)
+	}
+
+	for path, content := range map[string]string{rec.Target: "old binary", rec.Backup: "backup binary"} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != content {
+			t.Errorf("%s = %q, %v, want %q untouched", path, data, err, content)
+		}
+	}
+}
+
+func TestAbandonTouchesNoFileOperation(t *testing.T) {
+	t.Parallel()
+
+	store := storeWith(t, pendingRecord())
+	m, ops := newMachine(t, store, "v9.0.0")
+
+	if err := m.Abandon(t.Context(), "install failed"); err != nil {
+		t.Fatalf("Abandon = %v", err)
+	}
+
+	if got := load(t, store); got.Status != StatusRolledBack || got.Reason != "install failed" {
+		t.Errorf("record = %+v, want rolled_back with the reason", got)
+	}
+
+	if n, removed := ops.restoreCount(), ops.removedPaths(); n != 0 || len(removed) != 0 {
+		t.Errorf("file operations: %d restores, removed %v, want none", n, removed)
+	}
+}
+
+func TestAbandonRefusesAndStoresNothing(t *testing.T) {
+	t.Parallel()
+
+	rolledBack := pendingRecord()
+	rolledBack.Status = StatusRolledBack
+	confirmed := pendingRecord()
+	confirmed.Status = StatusConfirmed
+
+	for name, tc := range map[string]struct {
+		rec  Record
+		want error
+	}{
+		"idle":                          {rec: Record{}, want: ErrNoPendingUpdate},
+		"confirmed":                     {rec: confirmed, want: ErrNoPendingUpdate},
+		"rolled back":                   {rec: rolledBack, want: ErrNoPendingUpdate},
+		"pending for the running build": {rec: pendingRecord(), want: ErrUpdateRunning},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &fakeStore{rec: tc.rec}
+			m, ops := newMachine(t, store, newVersion)
+
+			if err := m.Abandon(t.Context(), "install failed"); !errors.Is(err, tc.want) {
+				t.Errorf("Abandon = %v, want %v", err, tc.want)
+			}
+
+			if n := store.writeCount(); n != 0 {
+				t.Errorf("store wrote %d times, want 0", n)
+			}
+
+			if store.rec != tc.rec {
+				t.Errorf("record = %+v, want it unchanged", store.rec)
+			}
+
+			if n, removed := ops.restoreCount(), ops.removedPaths(); n != 0 || len(removed) != 0 {
+				t.Errorf("file operations: %d restores, removed %v, want none", n, removed)
+			}
+		})
+	}
+}
+
+func TestBeginAfterAbandon(t *testing.T) {
+	t.Parallel()
+
+	store := storeWith(t, pendingRecord())
+	m, _ := newMachine(t, store, oldVersion)
+
+	if err := m.Abandon(t.Context(), "install failed"); err != nil {
+		t.Fatalf("Abandon = %v", err)
+	}
+
+	p := Pending{FromVersion: oldVersion, ToVersion: newVersion, Target: "/t", Backup: "/t.old"}
+	if err := m.Begin(t.Context(), p); err != nil {
+		t.Fatalf("Begin after Abandon = %v", err)
+	}
+
+	if got := load(t, store); got.Status != StatusPending || got.Reason != "" || got.Target != "/t" {
+		t.Errorf("record = %+v, want the new update pending", got)
+	}
+}
+
 func TestConfirm(t *testing.T) {
 	t.Parallel()
 
