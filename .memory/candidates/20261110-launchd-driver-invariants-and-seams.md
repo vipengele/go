@@ -12,8 +12,8 @@ saw:
 ---
 
 - `New` builds the launchd driver in `case "darwin"` (manager.go:96) with the real seams: `execRunner`,
-  `os.Geteuid`, `os.Getuid`, `os.LookupEnv` and `sleepContext` (manager.go:115). Only windows and every
-  other GOOS but linux and darwin return ErrUnsupported.
+  `os.Geteuid`, `os.Getuid`, `os.LookupEnv` and `sleepContext` (manager.go:115). Every GOOS but linux,
+  darwin and windows (the SCM driver, `service/windows.go`) returns ErrUnsupported.
 - Status semantics live in `resolve` (state.go:104): a driver reports a relaunching job as StateStarting, and
   Starting with restarts>0 becomes Failed. The launchd driver keeps systemd's "a restart after a clean exit is
   not a failure" rule by counting `runs - 1` as restarts only when the last run failed

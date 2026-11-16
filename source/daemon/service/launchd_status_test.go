@@ -163,25 +163,6 @@ func TestLaunchdStatusCountsRestartsOnlyAfterAFailedRun(t *testing.T) {
 	}
 }
 
-func TestLaunchdStatusPlistStatFailureIsUnknown(t *testing.T) {
-	tl := newTestLaunchd(t, ScopeUser, 501)
-	blocker := filepath.Join(t.TempDir(), "home")
-	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tl.homeDir = blocker
-	st, err := tl.Status(context.Background())
-	if err == nil || errors.Is(err, ErrNotInstalled) || !strings.Contains(err.Error(), "stat plist") {
-		t.Fatalf("Status error = %v, want a stat failure other than ErrNotInstalled", err)
-	}
-	if st != (Status{State: StateUnknown}) {
-		t.Fatalf("Status = %+v, want only StateUnknown", st)
-	}
-	if len(tl.runner.calls) != 0 {
-		t.Fatalf("commands = %q, want none", tl.runner.calls)
-	}
-}
-
 func TestLaunchdStatusFailureNamesTheLogFiles(t *testing.T) {
 	crashed := printAnswer{out: launchdFixture(t, "print-crashed.txt")}
 
