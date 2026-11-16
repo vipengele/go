@@ -8,7 +8,7 @@ require (
 	go.vipengele.org/config v0.1.0
 	go.vipengele.org/update v0.1.0
 	go.yaml.in/yaml/v3 v3.0.6
-	golang.org/x/mod v0.42.0
+	golang.org/x/mod v0.43.0
 )
 
 require (
