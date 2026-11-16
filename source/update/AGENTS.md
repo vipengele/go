@@ -86,10 +86,12 @@ golangci-lint run
 - `checkhooks.go` — `Config.UpdateCheckHooks`: the pre-run and post-run hooks a tool passes to
   `core.WithPreRun` and `core.WithPostRun`, typed with `spec` types only. The `*Check` travels from
   one to the other in the context, under an unexported key. The pre-run hook first calls
-  `removeStaleBackupOnHost(runtime.GOOS)`, which removes a stale backup on a Windows host only.
-- `stale.go` — `Config.RemoveStaleBackup` (removes `<Target>.old`; none is nil; a held-open backup
-  is a `*BackupLockedError` and stays) and `removeStaleBackupOnHost`, which does nothing unless the
-  host GOOS it is given is `windows` (ADR-0031).
+  `removeStaleBackupOnHost(ctx, runtime.GOOS)`, which removes a stale backup on a Windows host only.
+- `stale.go` — `Config.RemoveStaleBackup(ctx)` (removes `<Target>.old`; none is nil; a held-open
+  backup is a `*BackupLockedError` and stays; a `Config.BackupGuard` that reports it in use keeps
+  it with a nil result, and one that errors keeps it and returns the error wrapped) and
+  `removeStaleBackupOnHost`, which does nothing unless the host GOOS it is given is `windows`
+  (ADR-0031).
 - `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
   `Source.Latest(ctx, ch)` takes the channel; `Release` carries none.
@@ -98,7 +100,9 @@ golangci-lint run
   (100 a page, newest-created first) until a page holds a release the channel receives, a page is
   short or empty, or 10 pages are read, and returns the highest receivable release across the pages
   read; drafts and non-release tags are skipped, and none within the bound is an error. Stable tags
-  must be plain release versions; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for tests.
+  must be plain release versions. `Latest` returns an error matching `ErrNoRelease` when no
+  release is eligible; on `Stable`, a 404 from the REST API (which keeps its `*StatusError` in the
+  chain) is one too, so a misnamed or private repository reads as "no release yet"; `WebURL`, `APIURL`, `Timeout` and `Now` are overridable for tests.
   `Token` (`Config.Token`; nil reads `GH_TOKEN`, then `GITHUB_TOKEN`, through `Getenv`; `""` opts
   out; a provider error fails the API request, wrapped) authenticates REST API requests only
   (ADR-0028). `latestByAPI` and `highestListed` each build the API client once from the injected one
@@ -147,8 +151,8 @@ golangci-lint run
   `SizeLimitError`, `SignatureMalformedError` (unwraps to the minisign parse error),
   `UnknownKeyError` (carries the signature's key id as minisign prints it),
   `SignatureMismatchError` (carries the key id, unwraps to the minisign verification error),
-  `ManagedInstallError`, `ErrPrerelease` (the `Stable` channel's latest release is a pre-release)
-  and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns;
+  `ManagedInstallError`, `ErrPrerelease` (the `Stable` channel's latest release is a pre-release),
+  `ErrNoRelease` (a source holds no release the channel receives) and `ErrAssetsNotListed`, the typed errors a source, `Select` or `Download` returns;
   `DevBuildError`, the error `CheckRelease` returns; `DowngradeError` (`Name`, `Version`, `Floor`),
   the error `CheckDowngrade` returns. `classifyError` maps deadline and timeout failures to
   `TimeoutError` and passes cancellation through unchanged. `ExtractLimitError`,
@@ -157,7 +161,8 @@ golangci-lint run
   `PreflightError` (`Path`, `Reason`, `Stderr`, `Err`; unwraps to `Err`) is the error `CheckStaged`
   returns. `PermissionError` (unwraps to
   `fs.ErrPermission`, carries a user-facing `Hint`), `BackupLockedError` and `RestoreError` are the
-  errors `CheckWritable`, `Install` and `Installed` return.
+  errors `CheckWritable`, `Install` and `Installed` return. `ErrBackupInUse` is the refusal of
+  `Apply` and `Install` while `Config.BackupGuard` reports the backup in use.
 - `managed.go` — `Config.CheckManaged`, `Detector` and `Install`: resolves the symlinks of the
   executable (an unresolvable path is matched as it is) and returns a `*ManagedInstallError` for
   the first match among the built-in Nix, Homebrew and container detectors, then `Config.Detectors`.
@@ -172,7 +177,7 @@ golangci-lint run
 - `hook.go` — `PostUpdate`, a step that receives the installed binary's path (the old process is still
   running, so `os.Executable` names the wrong file), `Config.PostUpdate` and `RunPostUpdate`, which
   runs the hooks in order and joins their errors. A failure is report-only: the caller keeps the
-  update. `Install` and `Apply` run no hook. Package `update` does not import
+  update. `Install` and `Apply` run no `PostUpdate` hook. Package `update` does not import
   `cli/spec/completioninstall` outside tests (ADR-0021); `installscript` is the package that does
   (ADR-0023).
 - `installscript/` — `Render(cfg update.Config) ([]byte, error)`: the POSIX-sh install script of a
@@ -294,8 +299,8 @@ golangci-lint run
   (create and remove a temp file in the target's directory), `fsSteps` (the unexported filesystem
   seam: createTemp, remove, chmod, rename, evalSymlinks, stat, abs, run), `defaultSteps` and `fsError`,
   which maps a permission failure to `*PermissionError`.
-- `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`) and
-  `backupLocked`. `install_windows_test.go` replaces a running executable on Windows.
+- `install.go` — `Config.Install`, `Installed` (`Path`, `Backup`, `Discard`, `Rollback`),
+  `checkBackupGuard` (shared by `Apply` and `Install`) and `backupLocked`. `install_windows_test.go` replaces a running executable on Windows.
 - `release.go` — `Config.CheckRelease`: refuses a development build with a `*DevBuildError`.
 - `preflight.go` — `Preflight` (a tool's hook over a `StagedBinary`; an error vetoes the install),
   `StagedBinary` and `Config.CheckStaged(ctx, s, sel)`: runs the staged binary with `version --json`
@@ -304,16 +309,20 @@ golangci-lint run
   kills the run. The binary's standard output is capped at 64 KiB. Every refusal is a
   `*PreflightError`; a done `ctx` returns its own error. It closes the staged file's write
   descriptor (a file open for writing cannot be run) and neither keeps nor discards the `*Staged`.
-- `apply.go` — `Config.Apply(ctx, sel, opts...)`, nine steps stopping at the first error: 1
+- `apply.go` — `Config.Apply(ctx, sel, opts...)`, eleven steps stopping at the first error: 1
   CheckManaged, 2 CheckWritable, 3 CheckDowngrade of `sel.Tag` (skipped, with its State read, by
-  `AllowDowngrade()`), 4 Download, 5 Target, 6 Extract into the target's directory, 7 CheckStaged
-  (a refusal discards the staged file), 8 Install, 9 the record (`recordApplied`): under the
+  `AllowDowngrade()`), 4 the `BackupGuard` (`ErrBackupInUse` when in use, its error wrapped when it
+  fails), 5 Download, 6 Target, 7 Extract into the target's directory, 8 CheckStaged (a refusal
+  discards the staged file), 9 the `BeforeInstall` hooks, each given the `InstallPlan` (`Target`,
+  `Backup`, `Version`) and, unlike a `Preflight` hook, free to have side effects (a self-update
+  records itself pending there; an error discards the staged file and stops Apply, ADR-0035), 10
+  Install (which asks the guard again, with `ctx`), 11 the record (`recordApplied`): under the
   Locker, load the State, raise `HighestApplied` to the tag when newer, save the whole State. The
   guard fails closed (an unreadable State refuses the install); the record fails open (a failed
-  lock, load or save is ignored, since the new binary's `Version` floors the next run). Steps 1 to 3
-  make no request. It returns the `*Installed` with the backup kept, runs no hook and calls neither
+  lock, load or save is ignored, since the new binary's `Version` floors the next run). Steps 1 to 4
+  make no request. It returns the `*Installed` with the backup kept, runs no `PostUpdate` hook and calls neither
   `Discard` nor `Rollback`. It closes the archive itself only when Target fails.
-  `WithDownloadOptions` passes options to Download.
+  `WithDownloadOptions` passes options to Download; `BeforeInstall(hook)` adds a step-9 hook.
 - `updatecmd/` — `Commands(cfg, opts...) []*spec.Command`: one `update` command with `--check`,
   `--yes`/`-y`, `--to`, `--allow-downgrade` and `--channel`, carrying `spec.SkipUpdateCheck`.
   - `ExitUpdateAvailable = 10` is the exit code of `--check` when a newer release exists; the
@@ -333,6 +342,11 @@ golangci-lint run
     framework's `*spec.UsageError` (exit 2).
   - After `Apply`, a `RunPostUpdate` failure and a `Discard` failure (naming the backup path) are
     warnings and the exit stays 0.
+  - `WithInstalled(hook InstalledHook)`: `InstalledHook` is `func(ctx, *spec.Invocation, Applied)
+    error` and `Applied` is `{Installed *update.Installed; From, To string}`. When set (non-nil)
+    the hook runs after `RunPostUpdate` in place of `Discard`, and owns the backup: the command
+    never discards or rolls it back. A hook error is the run's error (exit 1) and the success line
+    is not printed. A later `WithInstalled` replaces an earlier one.
 - `updatetest/` — the public fake-release kit for tests: an `httptest` server (`NewServer`) serving a
   `Release` in the redirect and REST-API modes, the release binary `NewRelease` packs
   (`ReleaseExecutable`: the shell script `ReleaseBinary` off Windows, a Go program built at test
@@ -432,8 +446,12 @@ golangci-lint run
 - `Install` order (ADR-0022): reject a nil `*Staged`; `resolve` the `Config`; resolve the target
   (`Executable`, `filepath.EvalSymlinks`, `filepath.Abs`); stat it for its mode; check the staged
   file's directory is the target's; `Keep` the staged file; chmod it by path to the target's
-  `Mode().Perm()` (setuid, setgid and sticky are dropped); rename the target to `<target>.old`;
-  rename the staged file to the target. Nothing at the target changes before the first rename.
+  `Mode().Perm()` (setuid, setgid and sticky are dropped); ask `Config.BackupGuard`, when set, and
+  refuse with `ErrBackupInUse` when it reports the backup in use (a failing guard refuses with its
+  error wrapped); rename the target to `<target>.old`; rename the staged file to the target.
+  Nothing at the target or its backup changes before the first rename. The public `Install` asks
+  the guard with `context.Background()`; `Apply` passes its `ctx` through the unexported
+  `installWithin`.
 - `Install` owns the `*Staged`. On every failure the staged file is removed by path and a failed
   removal is joined onto the error. When the rename into place fails the backup is renamed back
   first; if that fails too the error is a `*RestoreError` carrying the backup path.
@@ -441,7 +459,7 @@ golangci-lint run
   overwritten or deleted, so the old binary must move aside before the new one moves in. Never
   collapse them into one rename over the target, or into a copy onto it.
 - `Installed` is in memory only. A backup orphaned by a crash is invisible to the API; the next
-  `Install` overwrites it. `Discard` and `Rollback` settle once: the first call decides and later
+  `Install` overwrites it unless `BackupGuard` reports it in use. `Discard` and `Rollback` settle once: the first call decides and later
   calls of either return nil.
 - Only the resolved path is replaced. A symlink to it follows the new binary; another hard link to
   the same file keeps the old one.
@@ -455,8 +473,13 @@ golangci-lint run
   the process exits. Off Windows the hook removes none: an open file can be removed there, so a
   removal could take the backup an unsettled update's `Rollback` needs, and `Discard` always removes
   the backup, so only a crash leaves one, which the next `Install` replaces (ADR-0031).
-  `RemoveStaleBackup` itself removes on every OS; never call it between `Install` and the settling
-  `Discard` or `Rollback`.
+  `RemoveStaleBackup` itself removes on every OS unless `Config.BackupGuard` reports the backup in
+  use; without a guard, never call it between `Install` and the settling `Discard` or `Rollback`.
+  `BackupGuard` (`BackupInUse(ctx) (bool, error)`) is an interface `update` declares so a caller's
+  state machine can keep the backup of an update awaiting confirmation; `update` imports none.
+  `Apply` asks it before any request and `Install` again immediately before the first rename, so a
+  second update while one is pending is refused with `ErrBackupInUse`, and an update racing
+  another process's leaves only the window between that check and the rename.
 - `*PermissionError` comes from `CheckWritable` and from any write step of `Install`, `Discard` and
   `Rollback`. `CheckWritable` is best-effort; `Install` is the authority.
 - One code path for every OS, no `_windows.go` file. Windows behaviour is tested on the gated
@@ -475,7 +498,7 @@ golangci-lint run
   PowerShell 5.1 or later, and `tar.exe` (Windows 10 and later) for a tar.gz asset.
 - The seams are the unexported `fsSteps`, set by in-package tests; `Config` has no field for them.
   Tests run as root in CI, so injection is what covers the permission path.
-- `Install` and `Apply` run no `PostUpdate` hook. The caller runs `RunPostUpdate` with
+- `Install` and `Apply` run no `PostUpdate` hook (`Apply` runs `BeforeInstall` hooks only). The caller runs `RunPostUpdate` with
   `Installed.Path()`; a hook failure is report-only and the caller keeps the update.
 
 ## Background check contract
@@ -500,8 +523,9 @@ golangci-lint run
 - A command carrying `spec.SkipUpdateCheck` starts no check; `updatecmd`'s `update` command
   carries it.
 - `Start` does no executable I/O. On a Windows host the pre-run hook calls `RemoveStaleBackup`
-  before it looks at `SkipUpdateCheck`, so every command removes a stale backup, the update command
-  included; its error is dropped. Off Windows the hook removes nothing.
+  before it looks at `SkipUpdateCheck`, so every command removes a stale backup its `BackupGuard`
+  does not hold, the update command included; its error is dropped. Off Windows the hook removes
+  nothing.
 
 ## Conventions
 

@@ -97,7 +97,8 @@ func WithReady(ready func()) Option {
 // Run sends READY=1 once, at the point WithReady's callback is called, after it returns: after
 // every Runner's Start has returned, synchronously on Run's goroutine. It sends STOPPING=1 when
 // the stop phase begins, also after a failed start phase, which sends no READY=1. A Run that
-// cannot take the instance lock of WithInstanceLock sends neither.
+// cannot take the instance lock of WithInstanceLock sends neither, nor does one whose update guard
+// of WithUpdateGuard fails its Boot or reports a rollback.
 //
 // When WATCHDOG_USEC is set, and WATCHDOG_PID, if set, names this process, Run arms a watchdog
 // after READY=1: every half of WATCHDOG_USEC, on the clock of WithClock, it sends WATCHDOG=1. With
@@ -120,6 +121,43 @@ func WithSystemd(lookup func(key string) (string, bool)) Option {
 			return errors.New("daemon: nil systemd lookup")
 		}
 		s.systemd = lookup
+		return nil
+	}
+}
+
+// WithWindowsService has Run serve the run as a Windows service when the process runs under the
+// Windows service control manager (SCM). Off Windows, and on Windows when the SCM did not start the
+// process, it does nothing and Run behaves as without it. An error finding out whether the SCM
+// started the process is returned by Run, which then starts no Runner.
+//
+// Under the SCM, Run hands the whole run to the SCM, the instance lock of WithInstanceLock
+// included, and reports its progress: start-pending, accepting no control, with a wait hint of the
+// start timeout of WithStartTimeout, until the point WithReady's callback is called, then running,
+// accepting Stop and Shutdown. A Stop or Shutdown reports stop-pending, with a wait hint of the
+// grace period of WithGrace plus a margin, and cancels the context the run uses, which carries the
+// values and the cancellation of ctx. Interrogate is answered with the current status.
+//
+// The service is registered with the dispatcher under no name, which the SCM ignores for a service
+// that runs in its own process. A program must reach Run promptly: the SCM fails a service that
+// does not connect to its dispatcher within its start timeout, about 30 seconds by default, so
+// nothing slow belongs between the start of main and Run.
+//
+// When the run ends the service stops with a service-specific exit code (ADR-0034, "On Windows a
+// requested restart is a non-zero service exit"): 0 when the SCM asked for the stop, whatever the
+// run returned; WindowsRestartExitCode for an error RestartRequested reports; and
+// WindowsFailureExitCode for every other ending, a failed start and a nil error after ctx ended
+// included. A service installed by go.vipengele.org/daemon/service is relaunched by the SCM on any
+// non-zero code and stays stopped on 0. A second Run returns ErrAlreadyRan before it asks whether
+// the SCM started the process, so it never reaches the SCM: a process starts the SCM's dispatcher
+// once.
+//
+// Run returns once the SCM has recorded the stop, with what the run returned, so the caller's
+// handling of that error is the same as outside the SCM; the exit status of the process does not
+// reach the SCM, which has already recorded the exit code. Should the SCM's dispatcher fail, its
+// error is returned, joined after the run's error when the run took place.
+func WithWindowsService() Option {
+	return func(s *Supervisor) error {
+		s.windowsService = true
 		return nil
 	}
 }
@@ -161,6 +199,34 @@ func WithInstanceLock(id spec.Identity, opts paths.Options) Option {
 			return fmt.Errorf("daemon: instance lock: %w", err)
 		}
 		s.instance = &instanceLock{id: id, opts: opts}
+		return nil
+	}
+}
+
+// WithUpdateGuard has Run guard a self-update of the binary with g, typically a
+// *selfupdate.Machine of go.vipengele.org/daemon/selfupdate. A nil g is rejected by New.
+//
+// Run calls g.Boot with its context once the instance lock of WithInstanceLock, if any, is held,
+// before the first Start, under the Windows service control manager too. A Boot that returns an
+// error and no rollback fails closed: Run returns the error, wrapped as "daemon: update guard
+// boot:", and starts no Runner. A Boot that reports a rollback makes Run return, with no Runner
+// started, an error wrapping ErrRestartRequired alone, so RestartRequested is true and the process
+// exits for the restored binary to be started; under WithWindowsService that is a stop with
+// WindowsRestartExitCode. An error Boot returns beside a rollback, the restored binary's record not
+// stored, is logged at Warn as "update rollback not recorded" and left out of what Run returns.
+//
+// Run calls g.Confirm with its context once, after the callback of WithReady, READY=1 of
+// WithSystemd and the running status of WithWindowsService, so neither waits for it. It is called
+// synchronously on Run's goroutine: until it returns, the Supervisor does not notice a Runner
+// exiting or the cancellation of Run's context. A Confirm error is logged at Error as "update
+// confirm failed" and the run goes on. Confirm is never called when the start phase fails or ends
+// early.
+func WithUpdateGuard(g UpdateGuard) Option {
+	return func(s *Supervisor) error {
+		if g == nil {
+			return errors.New("daemon: nil update guard")
+		}
+		s.updateGuard = g
 		return nil
 	}
 }

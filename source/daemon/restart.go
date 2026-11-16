@@ -15,6 +15,11 @@ import "errors"
 //		return nil
 //	}
 //	return err
+//
+// The Windows service control manager does not relaunch a service that stops with exit code 0.
+// Under WithWindowsService, a Run error for which RestartRequested is true is therefore reported
+// to it as a stop with WindowsRestartExitCode, which the recovery action installed by
+// go.vipengele.org/daemon/service answers with a relaunch (ADR-0034).
 func RestartRequested(err error) bool {
 	if err == nil {
 		return false

@@ -76,7 +76,13 @@ const maxDrainBody = 64 << 10
 // pre-release suffix and GitHub's pre-release flag. Latest stops after the first page holding an
 // eligible release, after a page shorter than 100 releases, or after 10 pages, and returns the
 // eligible release with the highest tag in version order among the pages read, with every asset.
-// No eligible release within those pages is an error.
+// No eligible release within those pages is an error matching [ErrNoRelease].
+//
+// Latest returns an error matching [ErrNoRelease] when the repository has no release the channel
+// receives: on Beta and Edge, an empty release list or none eligible; on Stable, a 404 from the REST
+// API's latest-release endpoint, which also keeps the [*StatusError] in its chain. GitHub answers
+// that 404 for a repository with no release and equally for a misnamed or private one, so on Stable
+// the two are indistinguishable. A rate limit, a 5xx status and a network failure never match it.
 //
 // A channel other than Stable, Beta and Edge is an error, with no request made. A response with a
 // non-success status gives a [*StatusError]. From the REST API, a 403 or 429 that reports an
@@ -138,7 +144,9 @@ func NewGitHubSource(identity spec.Identity, httpClient *http.Client) *GitHubSou
 }
 
 // Latest returns the repository's highest release ch receives. ctx bounds the whole lookup and
-// each request is further bounded by Timeout.
+// each request is further bounded by Timeout. With no release to return it gives an error matching
+// [ErrNoRelease]; on Stable that includes a 404 from the REST API, so a misnamed or private
+// repository reads as "no release yet".
 func (s *GitHubSource) Latest(ctx context.Context, ch Channel) (Release, error) {
 	switch ch {
 	case Stable:
@@ -277,6 +285,11 @@ func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 		return nil
 	})
 	if err != nil {
+		var status *StatusError
+		if errors.As(err, &status) && status.StatusCode == http.StatusNotFound {
+			return Release{}, fmt.Errorf("%w: %w", ErrNoRelease, status)
+		}
+
 		return Release{}, err
 	}
 
@@ -287,11 +300,6 @@ func (s *GitHubSource) latestByAPI(ctx context.Context) (Release, error) {
 // repository publishing that many releases the channel does not receive, newer than every one it
 // does, has its older releases left unread.
 const maxListPages = 10
-
-// errNoListedRelease reports a release list with no release Latest may return within the pages
-// read: every entry is a draft, has a tag that is not a release version or is on a channel the
-// lookup does not receive, or the list is empty.
-var errNoListedRelease = errors.New("no release the channel receives")
 
 // highestListed reads the REST API's release list page by page and returns the release ch
 // receives with the highest tag in version order among the pages read. Drafts and releases whose
@@ -336,7 +344,7 @@ func (s *GitHubSource) highestListed(ctx context.Context, ch Channel) (Release, 
 	}
 
 	if best == nil {
-		return Release{}, fmt.Errorf("update: GET %s: %w: channel %s, %d pages read", base, errNoListedRelease, ch, pages)
+		return Release{}, fmt.Errorf("update: GET %s: %w: channel %s, %d pages read", base, ErrNoRelease, ch, pages)
 	}
 
 	return best.release(), nil

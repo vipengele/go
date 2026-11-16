@@ -42,23 +42,48 @@ golangci-lint run
   of `Kind` `Liveness` and/or `Readiness`; `Snapshot` runs every check concurrently under its
   timeout and returns a `Snapshot` (`ok`, `unready` or `down`, plus `Live`, `Ready`, uptime and a
   `CheckResult` per check) whose JSON keys are the wire contract of
-  `docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
+  `docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`. `UpdateState`,
+  `UpdateStatus` and `UpdateReporter` carry the self-update state; `WithUpdateReporter` sets the
+  reporter, and `Snapshot.Update` is its result, nil without one. The reporter is bounded like a
+  check (`report` over `bounded`: the check timeout, a recovered panic, at most one call in flight,
+  `unknown` with an error when stuck) and is not run for the probes
+  (`docs/adr/0036-daemon-update-status-is-reported-outside-the-check-model.md`).
 - `health_http.go` — `(*Health).Handler`, serving `/livez`, `/readyz` and `/status`;
-  the `/status` body is written by `spec.WriteJSON` at schema 1.
+  the `/status` body is written by `spec.WriteJSON` at schema 1. `/status` alone calls the
+  `UpdateReporter`; `/livez` and `/readyz` never do.
 - `func.go` — `Func`, the Runner adapter for a function run in its own goroutine, and `WithOrder`
   (`OrderOption`, shared with the HTTP Runner).
 - `http.go` — `NewHTTPServer` and `NewHTTPServerListener`, the `*http.Server` Runner, with
   `WithHTTPName` and `DefaultHTTPOrder`; it serves TLS with `ServeTLS` when the server's
   `TLSConfig` is non-nil, and `Start` fails with `ErrNoCertificate` when that config carries no
   certificate (`Certificates`, `GetCertificate` or `GetConfigForClient`).
+- `update_guard.go` — `UpdateGuard` (`Boot`, `Confirm`), the interface `*selfupdate.Machine`
+  satisfies, so the root `daemon` never imports `selfupdate`, and the `Run` steps of
+  `WithUpdateGuard`: `bootUpdate` after the instance lock and the SIGHUP subscription and before
+  the first `Start`, returning Boot's error or, for a rollback, an error wrapping
+  `ErrRestartRequired` alone (an error beside a rollback is logged, never joined, since a join
+  makes `RestartRequested` false), and `confirmUpdate` in `wait` after `READY=1`, `serviceReady`
+  and the watchdog, whose error is logged. Tests: `update_guard_test.go`.
 - `restart.go` — `RestartRequested`, true only when every leaf of an error is `ErrRestartRequired`
   and none is a `*PanicError`.
 - `reload.go` — `Reloader[T]`, the optional Runner interface for applying a new configuration, and
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
   the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam) and `WithSystemd`. Tests:
-  `systemd_test.go`.
+  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam), `WithSystemd`,
+  `WithWindowsService` and `WithUpdateGuard`. Tests: `systemd_test.go`.
+- `windows_service.go` — `WithWindowsService`'s behaviour: `Run` serves under the Windows service
+  control manager when the process runs as a service, and exits with `WindowsRestartExitCode` for a
+  requested restart and `WindowsFailureExitCode` for every other ending the SCM did not ask for
+  (ADR-0034). The Supervisor fields `isWindowsService` and `runWindowsService` are its
+  operating-system seams and `serviceReady` is called beside the systemd `READY=1`; `New` sets the
+  first two to the host's and tests replace them. `windows_service_windows.go` holds the real ones
+  on `golang.org/x/sys/windows/svc`, `windows_service_other.go` the stubs for every other GOOS.
+  Tests: `windows_service_test.go`, `windows_service_other_test.go`.
+- `supervised.go` — `UnderSupervisor(lookup, pid, label)`, the exact check that the process was
+  started as the service: `SYSTEMD_EXEC_PID` equals the pid, `XPC_SERVICE_NAME` equals the label, or
+  `hostIsWindowsService` reports a service (an error counts as not supervised). `underSupervisor`
+  takes that check as a parameter for the test. Tests: `supervised_test.go`.
 - `clock.go` — the `Clock` interface (`Now`, `AfterFunc`), the system clock, and `withDeadline`
   with its `clockContext`, the deadline context for any other clock. `Deadline` is the clock's
   deadline or the parent's when earlier, and `Err` is `context.DeadlineExceeded` when the clock's
@@ -87,7 +112,61 @@ golangci-lint run
 - `daemoncmd/` — `NewStatus`, the `status` command: an HTTP client of `/status` that prints the
   snapshot as tables through `cli/spec/table`, or as the same JSON through `spec.WriteJSON` when
   the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
-  `testdata/status.keys` pins its JSON keys.
+  `testdata/status.keys` pins its JSON keys; with an update in the snapshot it adds a table of the
+  update's state and error. `update_status.go` holds `NewUpdateStatus`, the flat `update-status`
+  command: it asks the daemon's `/status` first and then the fallback `daemon.UpdateReporter`, on a
+  transport error, timeout, resolve error, non-200 answer, unreadable body or a snapshot without
+  `update`, never on a cancelled parent context. It prints the flat JSON of `source` (`daemon`,
+  `store` or `none`), the update's keys and `daemon_error`, and returns
+  `spec.Reported(ErrUpdateNotOK)` for `rolled_back`, `unknown` or an update carrying an error.
+  `testdata/update-status.keys` pins its JSON keys. `service.go` holds the service commands:
+  `NewService`, the `service` group of install, uninstall, start, stop, restart and status, and
+  `NewInstall`, `NewUninstall`, `NewStart`, `NewStop`, `NewRestart` and `NewServiceStatus` for
+  flat mounting (a tool mounting `NewServiceStatus` beside `NewStatus` sets its `Name`). Each
+  calls its `ManagerFunc` once per run; every command but status calls `CheckPrivileges` first.
+  install runs `Prepare`, the `WithBeforeInstall` hooks, `Install`, the `WithAfterInstall` hooks
+  and `Status`; every `ServiceOption` is install-only. A `ManagerFunc` error matching
+  `service.ErrContainer` becomes one error carrying `ContainerError.Instead`; other errors are
+  returned unchanged. `testdata/service-status.keys` pins the status JSON keys; the tests run
+  against a fake `service.Manager` in `service_test.go`. `update.go` holds `NewUpdate(UpdateConfig)`:
+  `updatecmd.Commands` with the `Machine` as the Config's `BackupGuard` and an
+  `updatecmd.WithInstalled` hook that records the update with `Machine.Begin` (rolling the install
+  back when that fails), then, when the installed path and `ServiceBinary` resolve to the same file
+  and the service is running, calls `Restart` and polls `Status` every 500ms on the `Clock` until
+  running or `StartTimeout` (default `DefaultStartTimeout`, 15s); a restart error, failed, not
+  installed or a timeout fails the command. Every other state, an unmanaged binary
+  (`ErrNotInstalled`, `ErrContainer`, `ErrUnsupported`, not installed, another path) and a
+  `ManagerFunc` error are messages with exit 0. Its tests (`update_test.go`, the symlink case in
+  `update_unix_test.go`) run a real update against `updatetest`, never with `t.Parallel`, and drive
+  the poll with `daemontest.Clock`.
+- `selfupdate/` — package `go.vipengele.org/daemon/selfupdate`, the state machine of a daemon's
+  update of its own binary (idle, pending, confirmed, rolled_back) over a `Store`, with `FileStore`
+  as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
+  backup binary before it records `rolled_back`; `rollback_windows.go` moves the running binary
+  aside instead of overwriting it. Versions compare with a leading `v` ignored on both sides.
+  `apply.go` holds `(*Machine).Apply`, the one apply path, which the Runner's cycle calls too: it
+  records the update pending with `Begin` from an `update.BeforeInstall` hook (ADR-0035), before
+  the swap, and gives `update.Config.Apply` a call-scoped `BackupGuard` (`applyGuard`) that answers
+  as the Machine until that `Begin` succeeds and then does not count its own record, so the
+  install is not refused while every other Config guarded by the Machine stays refused. A refused
+  `Begin` (`ErrUpdatePending`) installs nothing; an install failing after `Begin` is settled with
+  `Abandon` (`ErrNoPendingUpdate`, `ErrUpdateRunning`), unless it is an `*update.RestoreError`,
+  which stays pending for `Boot`. On success it runs the post-update hooks and logs their failure,
+  logs a warning when `daemon.UnderSupervisor` is false, and returns an error wrapping
+  `ErrRestartRequired` alone. `WithLogger` and `WithSupervisorCheck` (label and environment lookup)
+  are its options; its unexported `apply` takes the `installFunc` seam tests use to fake an install.
+  Tests that run a real Apply never call `t.Parallel` (a forked staged binary fails with `ETXTBSY`)
+  and compare the installed bytes with `updatetest.ReleaseExecutable`. `NewRunner[T]` (`cycle.go`)
+  returns the `Runner[T]`, a `daemon.Runner` and `Reloader[T]` that checks on a schedule
+  (`runner.go`, the scheduler; `jitter.go`; `settings.go`, the `interval` and `auto_apply` keys;
+  `options.go`, `RunnerOption`, with `WithRunnerLogger` and `WithRunnerClock`) and ends with an
+  error matching `daemon.ErrRestartRequired` after an install, keeping the backup for the
+  Machine's rollback.
+  `report.go` holds `Reporter`, which turns the `Store`'s record into a `daemon.UpdateReporter` and
+  only reads it (`Load`), and `ReleaseInfo`, the channel and watermark as strings from the
+  consumer's `release` func. The consumer wires it twice, and `daemoncmd` does not import
+  `selfupdate`: `daemon.WithUpdateReporter(selfupdate.Reporter(store, release))` on the daemon side
+  and `daemoncmd.NewUpdateStatus(resolve, selfupdate.Reporter(store, release))` on the CLI side.
 - `httpserver/` — package `go.vipengele.org/daemon/httpserver`, the hardened `*http.Server` the
   HTTP Runner serves; read its `doc.go` and
   `docs/adr/0026-the-http-server-kit-has-a-fixed-middleware-order-and-pluggable-auth.md`.
@@ -113,16 +192,15 @@ golangci-lint run
 ## The `service` package
 
 `go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd on linux,
-launchd on darwin; no other GOOS has a driver) behind the `Manager` interface: `Prepare`, `Install`,
-`Uninstall`, `Start`, `Stop` and `Status`, each taking only a context. Read its `doc.go` first and
+launchd on darwin, the service control manager on windows; no other GOOS has a driver) behind the `Manager` interface: `Prepare`, `Install`,
+`Uninstall`, `Start`, `Stop`, `Restart`, `CheckPrivileges` and `Status`, each taking only a context. Read its `doc.go` first and
 `docs/adr/0024-service-drivers-are-selected-at-runtime.md`.
 
 - `manager.go` — `Manager` and `New(cfg, opts...)`, which checks, in order, the `WithIdentity`
   identity (`ErrInvalidConfig`), whether the process runs in a container (`*ContainerError`), the
   `Config` against the target GOOS, the `WithSystemdHardening` override, the `WithSystemdNotify`
   watchdog and the `WithLaunchdLogs` paths (`ErrInvalidConfig`), and then switches on the GOOS to
-  select the driver: systemd on linux, launchd on darwin, `ErrUnsupported` on every other GOOS,
-  windows included. `sleepContext`, the launchd driver's `sleep`, waits on a timer or the context.
+  select the driver: systemd on linux, launchd on darwin, the SCM on windows, `ErrUnsupported` on every other GOOS. `sleepContext`, the launchd driver's `sleep`, waits on a timer or the context.
 - `option.go` — `Option`, `WithGOOS`, `WithIdentity`, `WithContainer`,
   `WithSystemdHardening`, `WithSystemdNotify` and `WithLaunchdLogs`; `""` means `runtime.GOOS`,
   `"windows"` applies the Windows rules and every other value the POSIX rules. `WithLaunchdLogs`
@@ -145,8 +223,14 @@ launchd on darwin; no other GOOS has a driver) behind the `Manager` interface: `
   share: `execRunner`, whose allowlist is `systemctl`, `launchctl` and `id`, `exitCode`,
   `writeFileAtomic` and `checkAccount`.
 - `launchd.go`, `launchd_plist.go`, `launchd_status.go` — the launchd driver: the unexported
-  `launchd` struct with `Prepare`, `Install`, `Uninstall`, `Start` and `Stop`, the property list
-  rendering with the default log paths, and `Status`.
+  `launchd` struct with `Prepare`, `Install`, `Uninstall`, `Start`, `Stop`, `Restart` and
+  `CheckPrivileges`, the property list rendering with the default log paths, and `Status`.
+- `windows.go`, `scm_windows.go`, `scm_other.go` — the Windows driver. `windows.go` holds the
+  driver, written against the unexported `scm` seam (`elevated`, `connect`, and the `scmManager`
+  it returns) with `scmErrno` Win32 codes that an implementation wraps so the driver tells them
+  apart with `errors.Is` on any host. `scm_windows.go` is the real `scm` on
+  `golang.org/x/sys/windows/svc/mgr` and `registry`; `scm_other.go` is the stub whose every call
+  fails with `ErrUnsupported`.
 - `export_test.go` — `WithLookupEnv`, the test-only seam for the environment container detection
   reads.
 
@@ -155,8 +239,12 @@ Conventions of the package:
 - Validation follows the target GOOS, never the host's: no `filepath.IsAbs`. The rules come
   from the target GOOS; `runtime.GOOS` is only the default target (`New` without `WithGOOS`, and
   `Config.Validate`). Tests render and validate any OS's service on any host through `WithGOOS`.
-- No build tags and no `_windows.go` file. Only the operating-system calls themselves, the Windows
-  service control manager, could ever need one.
+- Build tags only where an operating-system call needs one: `scm_windows.go` and `scm_other.go`
+  (`!windows`) hold the SCM calls and everything else in the package builds on every GOOS. The
+  Windows driver is tested on any host against a fake `scm` (`windows_test.go`); only
+  `service_windows_test.go` runs against the real SCM, and builds `testdata/winsvc` by its explicit
+  path. Tests that need POSIX (`systemd_posix_test.go`, `launchd_posix_test.go`,
+  `systemd_exec_posix_test.go`) are `!windows` files.
 - `State` names go through `switch` in `String`, `MarshalText` and `UnmarshalText`, never a
   package-level table: `gochecknoglobals` is enabled.
 - `Validate` returns `errors.Join` of `ErrInvalidConfig`-wrapped violations in a fixed order: fields
@@ -164,13 +252,14 @@ Conventions of the package:
 - Every test passes `WithContainer` (or `WithLookupEnv` with a forced `<PREFIX>_CONTAINER`, or a
   `container` variable) so that no test result depends on the host being a container.
 - Standard library only, apart from `go.vipengele.org/cli/spec` and `cli/spec/paths`, for
-  `spec.Identity` and container detection.
+  `spec.Identity` and container detection, `go.vipengele.org/daemon` for the exit codes, and
+  `golang.org/x/sys` for the SCM (`scm_windows.go` only).
 
 The systemd driver:
 
 - Scopes. A system unit lives in `/etc/systemd/system`, is driven by `systemctl`, is `WantedBy=
   multi-user.target` with `After=`/`Wants=network-online.target`, and `Install`, `Uninstall`,
-  `Start`, `Stop` and `Prepare` need root (`ErrPrivilegesRequired`). A user unit lives in
+  `Start`, `Stop`, `Restart`, `Prepare` and `CheckPrivileges` need root (`ErrPrivilegesRequired`). A user unit lives in
   `$XDG_CONFIG_HOME/systemd/user` (default `$HOME/.config/systemd/user`), is driven by
   `systemctl --user`, is `WantedBy=default.target` with no network ordering, and needs no root;
   `Config.User` must be empty with `ScopeUser` on POSIX. `Type=simple` by default, `Type=notify`
@@ -184,8 +273,8 @@ The systemd driver:
   a running one, so `Install` also applies an update.
 - `Uninstall` with no unit file is `ErrNotInstalled`. A failing `disable --now` does not stop the
   removal of the unit file and the `daemon-reload`, and `Uninstall` then returns an error saying the
-  disable failed; data and the account stay. `Start` and `Stop` are `ErrNotInstalled` without a unit
-  file.
+  disable failed; data and the account stay. `Start`, `Stop` and `Restart` (`systemctl restart`,
+  which starts a stopped unit) are `ErrNotInstalled` without a unit file.
 - Escaping: values are escaped, never rejected.
 
   | Directive | Rule |
@@ -224,12 +313,21 @@ The systemd driver:
   `main_test.go`. `testdata/launchd/print-*.txt` are `launchctl print` and `print-disabled` outputs
   transcribed from public macOS output, not captured on a machine (`testdata/launchd/README.md`).
 
+The Windows driver (ADR-0034): a service is created in the SCM with a single restart recovery
+action (5 s delay) answering a non-zero exit, which is why a supervisor under `WithWindowsService`
+exits non-zero for a requested restart (`WindowsRestartExitCode`) and the driver's `Status` reads
+that as starting. Every wait on the SCM (a service marked for deletion, a stopping service) is
+bounded by `windowsWaitTimeout` and polled every `windowsPollInterval`. `Restart` is `Stop`'s
+`stopAndWait`, which outlasts a recovery delay, followed by a start; a service not in the SCM is
+`ErrNotInstalled`. Windows rules for `Config` (`User` as an account, `ScopeUser`, `WorkingDir`)
+live in `config.go` and `manager.go`.
+
 The launchd driver:
 
 - Scopes. The label is `Config.Name`. `ScopeSystem` is a LaunchDaemon in the `system` domain,
   `/Library/LaunchDaemons/<Name>.plist`, with `UserName` from `Config.User` (root when empty);
-  `Prepare`, `Install`, `Uninstall`, `Start` and `Stop` need root (`ErrPrivilegesRequired`).
-  `ScopeUser` is a LaunchAgent in `gui/<uid>`, `$HOME/Library/LaunchAgents/<Name>.plist`, needing no
+  `Prepare`, `Install`, `Uninstall`, `Start`, `Stop`, `Restart` and `CheckPrivileges` need root
+  (`ErrPrivilegesRequired`). `ScopeUser` is a LaunchAgent in `gui/<uid>`, `$HOME/Library/LaunchAgents/<Name>.plist`, needing no
   root. A user service is an agent because only an agent reaches the user's Keychain; the `gui`
   domain exists only while the user is logged in to the GUI (not over ssh or `sudo -u`), and
   `launchctl print gui/<uid>` failing is `ErrManagerUnreachable`. System-wide agents in
@@ -244,8 +342,10 @@ The launchd driver:
   back.
 - `Stop` is `bootout` plus the unload wait, because `KeepAlive` relaunches a killed process; the job
   stays installed and enabled. `Start` is `kickstart` when the job is loaded and `bootstrap` when it
-  is not. `Uninstall` is `bootout`, `disable` and the plist removal; a failing `bootout` or `disable`
-  does not keep the plist, and the logs stay. `Start`, `Stop` and `Uninstall` without a plist are
+  is not; `Restart` is `kickstart -k` when it is loaded and the same `bootstrap` when it is not,
+  since a job `Stop` booted out is unloaded and `kickstart -k` fails on it. `Uninstall` is
+  `bootout`, `disable` and the plist removal; a failing `bootout` or `disable` does not keep the
+  plist, and the logs stay. `Start`, `Stop`, `Restart` and `Uninstall` without a plist are
   `ErrNotInstalled`; a missing `launchctl` is `ErrUnsupported`.
 - Exit codes: 113 is a service the domain does not hold, 3 (`ESRCH`) the same from `bootout` and
   older releases, and both count as not loaded; 5 (`EIO`) from `bootstrap` names a race with an
@@ -268,22 +368,71 @@ The launchd driver:
   stream. The plist is 0644 and readable by every local account, so `Config.Env` must not carry
   secrets there either.
 
+## The `servicetest` package
+
+`go.vipengele.org/daemon/servicetest` proves a consumer's Linux service binary under a real systemd:
+`Run(t, Target)` boots a podman container with systemd as PID 1 for the `Config.Scope` and drives
+install, kill, reinstall, crash loop and uninstall through `service.New`. Read its `doc.go` first and
+`docs/adr/0035-the-service-harness-drives-the-library-in-a-podman-systemd-container.md`.
+
+- `servicetest.go` — `Target`, `Run`, `SkipUnlessEnabled` and the scenarios; `podman.go` the podman
+  command (`SERVICETEST_PODMAN`) and container lifecycle; `image.go` and `Containerfile` the image.
+- `driver/` — `package main`, the program the harness runs in the container: it calls `service.New`
+  with the options rebuilt from the request, then `Install`, `Uninstall` or `Status`.
+  `internal/wire` holds the request and response both sides import.
+- Environment: `SERVICETEST=1` runs the containers, otherwise `Run` skips; with it set, an unusable
+  podman fails, never skips. `SERVICETEST_PODMAN` is `podman` (the default) or `sudo podman`, which runs it
+  rootful; any other value fails the test, because each `exec` call names a constant program.
+- `depguard` allows `go.vipengele.org/daemon/servicetest/internal/wire$` for `servicetest` and
+  its driver, besides the list in Conventions.
+- The harness builds the driver from the caller's module with
+  `GOOS=linux CGO_ENABLED=0 go build go.vipengele.org/daemon/servicetest/driver`. That fails under
+  `vendor/` or outside a module; set `Target.Driver` to a prebuilt Linux driver then.
+- The Containerfile pins its Debian base by digest, and nothing bumps it: the steps are in the
+  file's header comment, and `Target.BaseImage` overrides the base.
+- Coverage comes from the tests that run the harness against a fake runner; the containers do not
+  run in the coverage suite. The repo's own `TestSupervisor` runs only in the `test-supervisor` job
+  of `ci-test.yml`.
+
 ## Conventions
 
 - The root `daemon` package is not stdlib-only: it requires `go.vipengele.org/filelock` and
   `go.vipengele.org/cli/spec` (for `spec.Identity` and `cli/spec/paths`), which bring in
   `go.vipengele.org/commons` and `golang.org/x/sys` indirectly. Only `daemoncmd` imports any
-  other `cli/spec` package.
+  other `cli/spec` package. `go.vipengele.org/update` is required, with a directory `replace`
+  (`../update`), for `selfupdate` alone.
 - The grace period's context is made from `context.Background()`, never from the cancelled run context.
 - Work that outlives `Start` is never bound to the start context, which is cancelled when the start
   phase ends: `Func` and the HTTP Runner derive theirs with `context.WithoutCancel`.
 - The package handles only SIGHUP, and only under `WithReload`: the context passed to `Run` drives
   shutdown, and SIGINT and SIGTERM stay with the caller (`cli/core` owns them).
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
+- `source/daemon/.gitattributes` keeps the golden and recorded-output fixtures LF on every
+  platform; they are compared byte for byte or parsed line by line, so a CRLF checkout fails them.
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
   `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and
   `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
+- `selfupdate/` has its own depguard rule: the same list plus `go.vipengele.org/cli/spec/version`,
+  `go.vipengele.org/cli/state`, which its file store writes through, and `go.vipengele.org/update`,
+  which `Apply` and the Runner install through; its tests also import
+  `go.vipengele.org/daemon/daemontest` and `go.vipengele.org/update/updatetest`. It imports the root
+  `daemon` for `Clock` and `Runner` (ADR-0028); the root rule allows neither `selfupdate` nor
+  `update`, so the root `daemon` never imports them. Its tests are internal (`package selfupdate`);
+  the runner and cycle tests use `daemontest.Clock`, the others their own fake clock and
+  hand-written Runners.
+- `daemoncmd/` has its own depguard rule: the module's own `daemon`, `daemon/service` and
+  `daemon/selfupdate`, `cli/spec`, `cli/spec/table`, `update` and `update/updatecmd`; its tests
+  also import `daemoncmd` itself, `daemontest`, `cli/spec/speccheck` and `update/updatetest`.
+- A consumer protects the backup of a pending update on Windows only by building one
+  `update.Config` with `BackupGuard` set to the Machine and passing it both to `NewUpdate` and to
+  the pre-run `RemoveStaleBackup` hook of `UpdateCheckHooks`; `NewUpdate` sets the guard on its own
+  copy and cannot enforce this.
+  `daemoncmd/example_test.go` (`Example_selfUpdate`) wires the whole flow: the shared Config, `NewUpdate`,
+  `WithUpdateGuard` and a Runner that stands in for `Machine.Apply` with an error of the shape
+  Apply returns (wrapping `ErrRestartRequired`), so `Run` ends with `RestartRequested` and the
+  process exits 0. A real Apply needs a signed release served over HTTP, so
+  `selfupdate/apply_test.go` exercises it, including the Supervisor case.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by

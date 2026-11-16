@@ -176,7 +176,7 @@ func TestInstallReplacesARunningExecutable(t *testing.T) {
 		t.Errorf("backup after a locked Discard holds %d bytes, want the running executable's %d", len(got), len(original))
 	}
 
-	if err := config.RemoveStaleBackup(); !errors.As(err, &lerr) {
+	if err := config.RemoveStaleBackup(t.Context()); !errors.As(err, &lerr) {
 		t.Fatalf("RemoveStaleBackup while the executable runs = %v, want a *BackupLockedError", err)
 	} else if lerr.Path != backup {
 		t.Errorf("BackupLockedError Path = %q, want %q", lerr.Path, backup)
@@ -188,7 +188,7 @@ func TestInstallReplacesARunningExecutable(t *testing.T) {
 
 	running.stop(t)
 
-	if err := config.RemoveStaleBackup(); err != nil {
+	if err := config.RemoveStaleBackup(t.Context()); err != nil {
 		t.Fatalf("RemoveStaleBackup once the executable has exited: %v", err)
 	}
 

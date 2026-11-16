@@ -1,0 +1,12 @@
+# The unit-file goldens are compared byte for byte with the rendered unit, whose lines end in "\n":
+# a CRLF checkout fails the comparison. They stay LF on every platform.
+service/testdata/systemd/*.golden text eol=lf
+
+# The plist goldens are compared byte for byte with the rendered property list, whose lines end in
+# "\n": a CRLF checkout fails the comparison. They stay LF on every platform.
+service/testdata/launchd/*.golden text eol=lf
+
+# The recorded `launchctl print` output is parsed line by line with "\n" as the line ending: a CRLF
+# checkout leaves "\r" on every value, so no state or exit code matches. It stays LF on every
+# platform.
+service/testdata/launchd/print-*.txt text eol=lf

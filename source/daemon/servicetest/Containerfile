@@ -1,0 +1,32 @@
+# The image servicetest boots with systemd as PID 1. image.go embeds this file
+# and tags the image with a hash of its contents and the BASE override, so an
+# unchanged file is built once and reused.
+#
+# BASE is Debian stable pinned by digest, so every run installs the same
+# systemd onto the same base. Nothing bumps the digest automatically. To move
+# to a newer image, run `podman pull docker.io/library/debian:trixie`, read the
+# new digest with `podman image inspect --format '{{.Digest}}'
+# docker.io/library/debian:trixie`, and replace the digest below; the changed
+# file changes the image tag, so the next run rebuilds. Target.BaseImage
+# overrides BASE without editing this file.
+ARG BASE=docker.io/library/debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install --yes --no-install-recommends \
+      systemd systemd-sysv dbus dbus-user-session \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# svc is the account a user-scope service runs as. Its linger file makes
+# systemd-logind start user@<uid>.service at boot, with no login session.
+RUN useradd --create-home --home-dir /home/svc --shell /bin/sh svc \
+ && mkdir -p /var/lib/systemd/linger \
+ && touch /var/lib/systemd/linger/svc
+
+# systemd shuts down cleanly on SIGRTMIN+3, not on the SIGTERM podman sends by
+# default.
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

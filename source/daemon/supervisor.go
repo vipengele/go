@@ -81,6 +81,10 @@ type Supervisor struct {
 	// reload, when set, is the configuration reload WithReload installed.
 	reload *reloadHook
 
+	// updateGuard, when set, is the update guard WithUpdateGuard installed: Run calls its Boot
+	// before the first Start and its Confirm once after the ready notifications.
+	updateGuard UpdateGuard
+
 	// newReloadContext returns the context handed to one reload round and the function that
 	// releases it. It carries the values and the cancellation of parent and bounds the round by the
 	// start timeout.
@@ -89,6 +93,17 @@ type Supervisor struct {
 	// notify and unnotify subscribe a channel to signals and cancel the subscription.
 	notify   func(c chan<- os.Signal, sig ...os.Signal)
 	unnotify func(c chan<- os.Signal)
+
+	// windowsService is set by WithWindowsService: Run asks isWindowsService whether the process
+	// runs under the Windows service control manager and, when it does, serves the whole run as
+	// the service through runWindowsService.
+	windowsService    bool
+	isWindowsService  func() (bool, error)
+	runWindowsService func(execute scmExecute) error
+
+	// serviceReady is called once per Run, beside the systemd READY=1; under the Windows service
+	// control manager it has the running status reported, and otherwise it does nothing.
+	serviceReady func()
 }
 
 // New returns a Supervisor for runners. It rejects an empty list, a nil Runner, a Runner whose
@@ -122,6 +137,7 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 		clock:        realClock{},
 		ready:        func() {},
 		waiting:      func() {},
+		serviceReady: func() {},
 	}
 	slices.SortStableFunc(s.runners, func(a, b Runner) int { return cmp.Compare(orderOf(a), orderOf(b)) })
 	for _, opt := range opts {
@@ -139,6 +155,7 @@ func New(runners []Runner, opts ...Option) (*Supervisor, error) {
 	}
 	s.newReloadContext = s.newStartContext
 	s.notify, s.unnotify = signal.Notify, signal.Stop
+	s.isWindowsService, s.runWindowsService = hostIsWindowsService, hostRunWindowsService
 	s.newStopContext = func() (context.Context, context.CancelFunc) {
 		return withDeadline(clock, context.Background(), grace)
 	}
@@ -230,12 +247,42 @@ func (s *Supervisor) checks() []namedCheck {
 // STOPPING=1; see WithSystemd. A notification that fails is logged and never changes what Run
 // returns.
 //
+// With WithUpdateGuard, Run calls the guard's Boot once the instance lock, if any, is held and the
+// SIGHUP subscription, if any, is made, before the first Start. A Boot that fails is returned
+// wrapped as "daemon: update guard boot:", and a Boot that reports a rollback makes Run return an
+// error wrapping ErrRestartRequired, for which RestartRequested is true; in both cases no Runner is
+// started and no systemd notification is sent. Run calls the guard's Confirm once, after the
+// callback of WithReady, READY=1 and the running status of the Windows service control manager,
+// and logs its error without ending the run; see WithUpdateGuard.
+//
+// With WithWindowsService, when the process runs under the Windows service control manager, all
+// of the above runs as the service, with the Stop and Shutdown controls of the manager taking the
+// place of a cancelled ctx, and Run returns what it would return outside it once the service has
+// stopped. An error finding out whether the manager started the process is returned wrapped as
+// "daemon: windows service:", with no Runner started; so is an error of the manager's dispatcher,
+// joined after the run's error when the run took place; see WithWindowsService.
+//
 // Run may be called once; a second call returns ErrAlreadyRan, even when the first returned
-// without starting a Runner.
+// without starting a Runner, and under WithWindowsService returns it without going to the service
+// control manager.
 func (s *Supervisor) Run(ctx context.Context) error {
 	if !s.ran.CompareAndSwap(false, true) {
 		return ErrAlreadyRan
 	}
+	if s.windowsService {
+		service, err := s.isWindowsService()
+		if err != nil {
+			return fmt.Errorf("daemon: windows service: %w", err)
+		}
+		if service {
+			return s.runUnderSCM(ctx)
+		}
+	}
+	return s.run(ctx)
+}
+
+// run is the body of Run, served as the service under the Windows service control manager.
+func (s *Supervisor) run(ctx context.Context) error {
 	defer s.feed.setPhase(phaseStopped)
 
 	s.log = s.logger
@@ -260,6 +307,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		s.notify(hangup, syscall.SIGHUP)
 		// Deferred, so the subscription is cancelled only after the stop phase below has ended.
 		defer s.unnotify(hangup)
+	}
+
+	if err := s.bootUpdate(ctx); err != nil {
+		return err
 	}
 
 	runs, failure, complete := s.start(ctx)
@@ -529,7 +580,10 @@ func (s *Supervisor) wait(ctx context.Context, runs []*launched, hangup <-chan o
 	// calls it again, and before the first waiting call, so whatever observes waiting sees it done.
 	s.ready()
 	s.notifySystemd(ctx, systemd.Ready)
+	s.serviceReady()
 	s.armWatchdog(ctx)
+	// After READY=1 and the running status, so a slow Confirm never delays either.
+	s.confirmUpdate(ctx)
 	for {
 		s.waiting()
 		select {

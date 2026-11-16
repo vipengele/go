@@ -865,3 +865,248 @@ func TestApplyJoinsTheDiscardFailureOntoThePreflightRefusal(t *testing.T) {
 
 	t.Cleanup(func() { _ = os.RemoveAll(pe.Path) })
 }
+
+func TestApplyRunsBeforeInstallAfterThePreflightAndBeforeAnyRename(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := &fakeStore{}
+	f.cfg.StateStore = store
+
+	var staged []StagedBinary
+	f.cfg.Preflight = []Preflight{
+		func(_ context.Context, b StagedBinary) error {
+			staged = append(staged, b)
+			return nil
+		},
+	}
+
+	r, err := f.cfg.resolve()
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	var log stepLog
+	var runs [][]string
+	s := loggedSteps(&log)
+	s.run = answering(versionJSON(dlTag, r.GOOS, r.GOARCH), "", nil, &runs).run
+
+	var plans []InstallPlan
+	hook := func(_ context.Context, plan InstallPlan) error {
+		plans = append(plans, plan)
+
+		if len(runs) != 1 || len(staged) != 1 {
+			t.Errorf("at the hook: runs = %d, Preflight hook calls = %d, want 1 and 1", len(runs), len(staged))
+		}
+
+		assertNoReplacement(t, &log)
+
+		if got := readFile(t, f.exe); got != "old" {
+			t.Errorf("at the hook: executable holds %q, want %q", got, "old")
+		}
+
+		if len(staged) == 1 {
+			if got, want := readFile(t, staged[0].Path), string(updatetest.ReleaseExecutable(t, dlTag)); got != want {
+				t.Errorf("at the hook: staged binary holds %.64q, want the release's binary %.64q", got, want)
+			}
+		}
+
+		return nil
+	}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, s, BeforeInstall(hook))
+	if err != nil {
+		t.Fatalf("apply error = %v", err)
+	}
+
+	t.Cleanup(func() { _ = installed.Discard() })
+
+	want := InstallPlan{Target: f.exe, Backup: f.exe + ".old", Version: dlTag}
+	if !slices.Equal(plans, []InstallPlan{want}) {
+		t.Fatalf("BeforeInstall plans = %+v, want [%+v]", plans, want)
+	}
+
+	if installed.Path() != want.Target || installed.Backup() != want.Backup {
+		t.Errorf("Path, Backup = %q, %q, want the plan's %q, %q", installed.Path(), installed.Backup(), want.Target, want.Backup)
+	}
+
+	if got, want := readFile(t, f.exe), string(updatetest.ReleaseExecutable(t, dlTag)); got != want {
+		t.Errorf("executable holds %.64q, want the release's binary %.64q", got, want)
+	}
+
+	if saves := store.recordedSaves(); !slices.Equal(saves, []State{{HighestApplied: dlTag}}) {
+		t.Errorf("saves = %+v, want one State with HighestApplied %q", saves, dlTag)
+	}
+}
+
+func TestApplyReturnsTheBeforeInstallErrorAndInstallsNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := &fakeStore{loads: []loadResult{{}}}
+	f.cfg.StateStore = store
+	cause := errors.New("pending update already recorded")
+
+	var log stepLog
+	s := loggedSteps(&log)
+	s.run = f.steps(t).run
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, s,
+		BeforeInstall(func(context.Context, InstallPlan) error { return cause }))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Fatalf("apply error = %v, want one matching %v", err, cause)
+	}
+
+	assertNoReplacement(t, &log)
+	f.assertUntouched(t)
+	assertNothingRecorded(t, store)
+}
+
+func TestApplyRunsBeforeInstallHooksInOrderUntilOneFails(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	cause := errors.New("refused")
+
+	var calls []string
+	hook := func(name string, err error) ApplyOption {
+		return BeforeInstall(func(context.Context, InstallPlan) error {
+			calls = append(calls, name)
+			return err
+		})
+	}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t),
+		hook("first", nil), hook("second", cause), hook("third", nil))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Fatalf("apply error = %v, want one matching %v", err, cause)
+	}
+
+	if want := []string{"first", "second"}; !slices.Equal(calls, want) {
+		t.Errorf("hook calls = %q, want %q", calls, want)
+	}
+
+	f.assertUntouched(t)
+}
+
+// sequenceGuard is a [BackupGuard] whose nth call answers inUse[n], and false once inUse runs
+// out, counting its calls.
+type sequenceGuard struct {
+	inUse []bool
+	calls atomic.Int32
+}
+
+func (g *sequenceGuard) BackupInUse(context.Context) (bool, error) {
+	n := int(g.calls.Add(1)) - 1
+	if n < len(g.inUse) {
+		return g.inUse[n], nil
+	}
+
+	return false, nil
+}
+
+func TestApplyRefusesABackupInUseBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	guard := &sequenceGuard{inUse: []bool{true}}
+	f.cfg.BackupGuard = guard
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, ErrBackupInUse) {
+		t.Fatalf("apply error = %v, want one matching ErrBackupInUse", err)
+	}
+
+	if got := guard.calls.Load(); got != 1 {
+		t.Errorf("guard calls = %d, want 1", got)
+	}
+
+	if got := f.requests(); got != 0 {
+		t.Errorf("requests = %d, want 0", got)
+	}
+
+	f.assertUntouched(t)
+}
+
+func TestApplyRefusesWhenTheBackupGuardFails(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	cause := errors.New("corrupt record")
+	f.cfg.BackupGuard = &stubGuard{err: cause}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Fatalf("apply error = %v, want one matching %v", err, cause)
+	}
+
+	if errors.Is(err, ErrBackupInUse) {
+		t.Errorf("apply error = %v, want it not to match ErrBackupInUse", err)
+	}
+
+	if got := f.requests(); got != 0 {
+		t.Errorf("requests = %d, want 0", got)
+	}
+
+	f.assertUntouched(t)
+}
+
+func TestApplyWithABackupNotInUseAsksTheGuardTwiceAndInstalls(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	guard := &sequenceGuard{}
+	f.cfg.BackupGuard = guard
+
+	f.apply(t)
+
+	if got := guard.calls.Load(); got != 2 {
+		t.Errorf("guard calls = %d, want 2: before the download and before the rename", got)
+	}
+}
+
+// A backup the guard reports in use only after the download, as when another process applies an
+// update meanwhile, is refused by Install before any rename.
+func TestApplyRefusesABackupThatComesInUseBeforeTheRename(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := &fakeStore{loads: []loadResult{{}}}
+	f.cfg.StateStore = store
+	f.cfg.BackupGuard = &sequenceGuard{inUse: []bool{false, true}}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, ErrBackupInUse) {
+		t.Fatalf("apply error = %v, want one matching ErrBackupInUse", err)
+	}
+
+	if f.srv.Requests(updatetest.TargetArchive) == 0 {
+		t.Error("archive requests = 0, want the release downloaded before the second check")
+	}
+
+	if saves := store.recordedSaves(); len(saves) != 0 {
+		t.Errorf("saves = %+v, want none", saves)
+	}
+
+	f.assertUntouched(t)
+}

@@ -76,7 +76,7 @@
 // called first decides. A lack of permission is a [*PermissionError] with a hint for the user, which
 // [Config.CheckWritable] can report before anything is downloaded. A [PostUpdate] hook receives
 // [Installed.Path]; Install runs none itself. [Config.RemoveStaleBackup] removes a backup left
-// beside the executable.
+// beside the executable unless [Config.BackupGuard] reports it in use.
 //
 // [Config.CheckStaged] preflights a [*Staged] binary before it is installed: it runs the binary
 // with "version --json", killing it after PreflightTimeout, 10 seconds by default, and refuses it
@@ -103,7 +103,10 @@
 // every channel. [Config.Channel] selects the channel, which a tool reads from its own
 // configuration through [ParseChannel], and every [Source] receives it in Latest. The
 // [GitHubSource] reads the latest-release redirect and then the API for Stable, and the release
-// list page by page for Beta and Edge. Following a lower channel never downgrades: a Stable tool
+// list page by page for Beta and Edge. A Source with no release the channel receives returns an
+// error matching [ErrNoRelease]; the GitHubSource also returns it for a 404 from the Stable
+// latest-release endpoint, so a misnamed or private repository is indistinguishable from one with no
+// release yet. Following a lower channel never downgrades: a Stable tool
 // running a beta stays on it until a stable release sorts above it.
 //
 // The State records HighestApplied, the highest version [Config.Apply] has installed, and the
@@ -159,9 +162,10 @@
 //
 // Windows lets a running executable be renamed but not removed, so [Installed.Discard] cannot
 // remove the backup of the process that ran the update and returns a [*BackupLockedError], which
-// the caller may ignore. [Config.RemoveStaleBackup] removes that backup once the process has exited,
-// and the pre-run hook of [Config.UpdateCheckHooks] calls it on every command, those carrying
-// [spec.SkipUpdateCheck] included, when the host is Windows, dropping its error. While an update is
+// the caller may ignore. [Config.RemoveStaleBackup] removes that backup once the process has exited
+// and [Config.BackupGuard], when set, reports it not in use, and the pre-run hook of
+// [Config.UpdateCheckHooks] calls it on every command, those carrying [spec.SkipUpdateCheck]
+// included, when the host is Windows, dropping its error. While an update is
 // unsettled its backup is the updating process's running file there, so the hook never takes it
 // from [Installed.Rollback]. On any other host the hook removes no backup: an open file can be
 // removed there, and Discard always removes the backup itself. [Config.Start] does no executable
@@ -177,7 +181,7 @@
 //     first rename leaves the executable untouched; a failed second rename renames the backup
 //     back, and the user runs the update again. A lock that keeps the backup from being removed
 //     leaves <exe>.old behind until the next run of the tool removes it, through the check hook or
-//     a call of RemoveStaleBackup. Install does not retry.
+//     a call of RemoveStaleBackup, unless a BackupGuard keeps it. Install does not retry.
 //   - Paths holding spaces are supported.
 //   - The sh install script refuses a zip asset, the Windows default; a Windows user installs with
 //     the PowerShell script of [go.vipengele.org/update/installscript.RenderPowerShell].

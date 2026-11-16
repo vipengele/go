@@ -17,9 +17,18 @@ const maxErrorBody = 1 << 10
 // on the [Stable] channel, which receives no pre-release.
 var ErrPrerelease = errors.New("update: latest release is a pre-release")
 
+// ErrNoRelease reports a source that holds no release the channel receives. A [Source] returns it,
+// possibly wrapped, so a caller can tell "nothing published yet" from a failed lookup.
+var ErrNoRelease = errors.New("update: no release the channel receives")
+
 // ErrAssetsNotListed reports a release whose assets the source did not list, from a [Source] that
 // cannot say where an asset of a given name is downloaded from: it is not an [AssetLocator].
 var ErrAssetsNotListed = errors.New("update: release assets are not listed")
+
+// ErrBackupInUse reports an update refused because [Config.BackupGuard] says the backup beside
+// the executable is in use: installing would replace the backup an unsettled update still needs.
+// [Config.Apply] and [Config.Install] return it, wrapped, before they change anything.
+var ErrBackupInUse = errors.New("update: the backup of the previous binary is in use")
 
 // StatusError reports a response with a non-success HTTP status.
 type StatusError struct {

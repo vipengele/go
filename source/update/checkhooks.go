@@ -24,8 +24,9 @@ type checkKey struct{}
 // because the process that ran it held the file open is removed by the next run of the tool. Its
 // error is dropped: a locked or missing backup never fails a command. The backup of an update not
 // yet settled by [Installed.Discard] or [Installed.Rollback] is the updating process's running
-// file there, so the removal fails and Rollback keeps it. On any other host the hook removes no
-// backup: an open file can be removed, so a run started between Install and Rollback, by a
+// file there, so the removal fails and Rollback keeps it, and a [Config.BackupGuard] that reports
+// the backup in use keeps it, whichever process ran the update. On any other host the hook removes
+// no backup: an open file can be removed, so a run started between Install and Rollback, by a
 // PostUpdate hook or by the user, would take the backup Rollback needs, and there Discard always
 // removes the backup.
 //
@@ -49,7 +50,7 @@ func (c Config) UpdateCheckHooks() (
 		return nil, nil, err
 	}
 	pre = func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
-		_ = c.removeStaleBackupOnHost(runtime.GOOS)
+		_ = c.removeStaleBackupOnHost(ctx, runtime.GOOS)
 		if _, skip := cmd.Annotation(spec.SkipUpdateCheck); skip {
 			return ctx, nil
 		}

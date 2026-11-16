@@ -6,8 +6,9 @@ import "context"
 // for its Identity.
 type Source interface {
 	// Latest returns the release a follower of ch should consider updating to: the highest
-	// release ch receives, as [Channel.Receives] defines it. It returns an error when the source
-	// cannot be reached or holds no release ch receives; ctx bounds the whole lookup.
+	// release ch receives, as [Channel.Receives] defines it. It returns an error matching
+	// [ErrNoRelease] when the source holds no release ch receives, and any other error when it
+	// cannot be reached; ctx bounds the whole lookup.
 	Latest(ctx context.Context, ch Channel) (Release, error)
 }
 

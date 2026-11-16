@@ -29,6 +29,15 @@
 // [go.vipengele.org/update.Config.CheckManaged] before any request is made; --check still reports a
 // newer release for it, and says what to run instead.
 //
+// After an update is installed, the Config's [go.vipengele.org/update.PostUpdate] hooks run, and
+// the backup of the previous binary is discarded; a failure of either is a warning and the update
+// stands. [WithInstalled] hands the installed update, as an [Applied], to a hook of the tool's
+// instead of discarding the backup, so the tool can keep it until the new build is confirmed and
+// roll back otherwise. The hook owns the backup from then on, and an error it returns fails the
+// command, with no success line. An update is refused with
+// [go.vipengele.org/update.ErrBackupInUse] while the Config's
+// [go.vipengele.org/update.BackupGuard] reports the backup of an earlier update in use.
+//
 // The result of --check is data, written to the standard output; every other line is a message on
 // the standard error. The command carries the [go.vipengele.org/cli/spec.SkipUpdateCheck]
 // annotation, so the background update check never runs around it.

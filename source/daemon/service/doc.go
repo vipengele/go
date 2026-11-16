@@ -1,11 +1,11 @@
 // Package service fronts the operating system's service manager through one
-// driver per operating system behind the Manager interface: systemd on linux
-// and launchd on darwin.
+// driver per operating system behind the Manager interface: systemd on linux,
+// launchd on darwin and the service control manager (SCM) on windows.
 //
 // A service is described by a Config, which New validates before it hands
 // back a Manager; a Config that fails validation is reported as
 // ErrInvalidConfig. New reports ErrUnsupported for a GOOS with no driver,
-// which is every GOOS but linux and darwin, windows included.
+// which is every GOOS but linux, darwin and windows.
 //
 // # Containers
 //
@@ -31,8 +31,8 @@
 //
 // systemd: a system unit is installed in /etc/systemd/system, driven by
 // systemctl, wanted by multi-user.target and ordered after
-// network-online.target. Install, Uninstall, Start, Stop and Prepare need root
-// and report ErrPrivilegesRequired otherwise. A user unit is installed in
+// network-online.target. Install, Uninstall, Start, Stop, Restart, Prepare and
+// CheckPrivileges need root and report ErrPrivilegesRequired otherwise. A user unit is installed in
 // $XDG_CONFIG_HOME/systemd/user (default $HOME/.config/systemd/user), driven
 // by systemctl --user and wanted by default.target; it needs no root, and
 // Config.User must be empty. Status reports ErrManagerUnreachable, with
@@ -43,16 +43,30 @@
 // ScopeSystem service is a LaunchDaemon in the system domain, whose property
 // list is /Library/LaunchDaemons/<Name>.plist; it starts at boot and runs as
 // Config.User, written as UserName, or as root when that is empty. Install,
-// Uninstall, Start, Stop and Prepare need root and report
-// ErrPrivilegesRequired otherwise. A ScopeUser service is a LaunchAgent in the
+// Uninstall, Start, Stop, Restart, Prepare and CheckPrivileges need root and
+// report ErrPrivilegesRequired otherwise. A ScopeUser service is a LaunchAgent in the
 // gui/<uid> domain of the user, whose property list is
 // $HOME/Library/LaunchAgents/<Name>.plist; it needs no root, and Config.User
 // must be empty. A user service is an agent because only an agent reaches the
 // user's Keychain. launchd creates the gui domain only while the user is
 // logged in to the GUI, which an ssh login or a sudo -u shell is not; Install,
-// and Uninstall, Start, Stop and Status of an installed agent, then report
-// ErrManagerUnreachable. A system-wide agent, one in
+// and Uninstall, Start, Stop, Restart and Status of an installed agent, then
+// report ErrManagerUnreachable. A system-wide agent, one in
 // /Library/LaunchAgents loaded for every user who logs in, is not supported.
+//
+// windows: a ScopeSystem service is an own-process service of the SCM named
+// Config.Name, started automatically at boot. The driver reaches the SCM
+// through golang.org/x/sys/windows/svc/mgr and the service's registry key, and
+// compiles on every host; on a host other than Windows, New with
+// WithGOOS("windows") returns it and every method fails with an error wrapping
+// ErrUnsupported. ScopeUser and Config.WorkingDir are not supported: New
+// returns an error wrapping ErrUnsupported that names the scope or the field.
+// An empty Config.User runs the service as LocalSystem; otherwise it is
+// NT AUTHORITY\LocalService, NT AUTHORITY\NetworkService or NT SERVICE\<Name>,
+// compared without regard to case, and no password can be given. Any other
+// User is reported as ErrInvalidConfig on every host. Install, Uninstall,
+// Start, Stop, Restart, Prepare and CheckPrivileges need an elevated process
+// and report ErrPrivilegesRequired otherwise; Status needs none.
 //
 // # Hardening
 //
@@ -77,11 +91,13 @@
 //
 // # Environment
 //
-// Both drivers write Config.Env into a file every local account can read: the
-// systemd unit, which "systemctl show" also reports, and the launchd property
-// list, as EnvironmentVariables; both are mode 0644. The values are therefore
-// public on the machine and must not carry secrets; a service that needs one
-// reads it from a file only its account may read.
+// The systemd and launchd drivers write Config.Env into a file every local
+// account can read: the systemd unit, which "systemctl show" also reports, and
+// the launchd property list, as EnvironmentVariables; both are mode 0644. The
+// windows driver writes it to the Environment value of the service's registry
+// key, which administrators can read. The values are therefore visible on the
+// machine and must not carry secrets; a service that needs one reads it from a
+// file only its account may read.
 //
 // # Logs
 //
@@ -116,21 +132,53 @@
 // that fails leaves the property list installed and the job not loaded; Start
 // loads it.
 //
-// Neither driver creates the account of Config.User; a missing account fails
-// before anything is written.
+// windows: Install creates the service, or rewrites the configuration of the
+// registered one, and sets one recovery action, a restart after 5 seconds,
+// with the flag that makes it apply to a stop with a non-zero exit code as
+// well as to a crash. It writes Env to the Environment value, or deletes that
+// value when Env is empty, and then restarts the service: a running copy is
+// stopped first, so that the new configuration and binary take effect. A name
+// still held by a service marked for deletion is waited out.
+//
+// No driver creates the account of Config.User; the systemd and launchd
+// drivers fail on a missing account before anything is written.
 //
 // # Start, Stop and restarts
 //
-// systemd starts and stops the unit with systemctl start and stop; the unit
-// stays enabled. It is Restart=always with RestartSec=5.
+// Restart leaves an installed service running on every driver: it restarts a
+// running service and starts a stopped one. Start, Stop and Restart of a
+// service that is not installed report ErrNotInstalled.
+//
+// systemd starts, stops and restarts the unit with systemctl start, stop and
+// restart; the unit stays enabled. It is Restart=always with RestartSec=5.
 //
 // launchd: Stop boots the job out, unloading it, because KeepAlive relaunches
 // a process that is merely killed; the job stays installed and enabled, so it
 // loads again at the next boot or login. Start kickstarts a loaded job and
-// bootstraps the property list of one that is not loaded. The job is
+// bootstraps the property list of one that is not loaded. Restart runs
+// "launchctl kickstart -k", which kills and relaunches the process, on a
+// loaded job, and bootstraps a job that is not loaded as Start does: a job
+// Stop booted out is unloaded, and kickstart fails on it. The job is
 // KeepAlive=true with ThrottleInterval=5, the counterpart of RestartSec=5, so
 // launchd relaunches it on every exit, including the exit status 0 of a
 // self-update.
+//
+// windows: the SCM does not relaunch a service that stops with exit code 0,
+// so a restart requested by a Runner is a non-zero service exit, which the
+// recovery action restarts (ADR-0034,
+// a-requested-restart-on-windows-is-a-non-zero-service-exit.md). Stop stops
+// the service and waits until it is stopped; a service stopped on request
+// exits 0 and is not restarted. A stop that finds the service stopped with
+// the restart exit code, inside its recovery delay, outlasts that delay: the
+// SCM gives no time of the stop, so the driver watches the service for the
+// whole delay and a margin from the moment it sees it, and stops the service
+// the recovery restart starts in that time. Stop, and the stop inside Install
+// and Uninstall, then take up to that long, and the service may run briefly
+// before it stops again. A stop the service cannot take yet, while it is
+// starting, is sent again until it does. Restart stops the service as Stop
+// does, outlasting a recovery delay, and then starts it. Uninstall stops the
+// service, deletes it and returns once the SCM no longer holds it; the
+// registry key goes with it, and the service's data and account stay.
 //
 // # Status
 //
@@ -141,4 +189,9 @@
 // print-disabled" for its domain, which says whether it is enabled. A property
 // list launchd has not loaded is StateStopped. The Detail of a failed job
 // names its log file, or both when the streams go to different files.
+//
+// windows: Status reads the SCM's state of the service. A service stopped
+// with the restart exit code is inside its recovery delay and is StateStarting;
+// one stopped with any other non-zero exit code is StateFailed, with the code in
+// Detail. Restarts is always 0, as the SCM keeps no restart count.
 package service
