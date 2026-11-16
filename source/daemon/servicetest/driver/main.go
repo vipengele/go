@@ -36,26 +36,28 @@ const (
 type newManager func(service.Config, ...service.Option) (service.Manager, error)
 
 func main() {
-	os.Exit(run(context.Background(), os.Stdin, os.Stdout, service.New))
+	os.Exit(run(context.Background(), os.Stdin, os.Stdout, os.Stderr, service.New))
 }
 
 // run performs the request read from stdin through the Manager that mk
-// returns, writes the response to stdout and returns the exit code.
-func run(ctx context.Context, stdin io.Reader, stdout io.Writer, mk newManager) int {
+// returns, writes the response to stdout and returns the exit code. A
+// response that cannot be written is reported on stderr.
+func run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, mk newManager) int {
+	out := output{stdout: stdout, stderr: stderr}
 	var req wire.Request
 	dec := json.NewDecoder(stdin)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
-		return fail(stdout, exitBadArgs, nil, fmt.Errorf("decode request: %w", err))
+		return out.fail(exitBadArgs, nil, fmt.Errorf("decode request: %w", err))
 	}
 	switch req.Op {
 	case wire.OpInstall, wire.OpUninstall, wire.OpStatus:
 	default:
-		return fail(stdout, exitBadArgs, nil, fmt.Errorf("unknown op %q", req.Op))
+		return out.fail(exitBadArgs, nil, fmt.Errorf("unknown op %q", req.Op))
 	}
 	m, err := mk(req.Config, req.Options()...)
 	if err != nil {
-		return fail(stdout, exitFailed, nil, err)
+		return out.fail(exitFailed, nil, err)
 	}
 	switch req.Op {
 	case wire.OpInstall:
@@ -66,26 +68,33 @@ func run(ctx context.Context, stdin io.Reader, stdout io.Writer, mk newManager) 
 		var st service.Status
 		st, err = m.Status(ctx)
 		if err != nil {
-			return fail(stdout, exitFailed, &st, err)
+			return out.fail(exitFailed, &st, err)
 		}
-		return write(stdout, wire.Response{Status: &st}, exitOK)
+		return out.write(wire.Response{Status: &st}, exitOK)
 	}
 	if err != nil {
-		return fail(stdout, exitFailed, nil, err)
+		return out.fail(exitFailed, nil, err)
 	}
-	return write(stdout, wire.Response{}, exitOK)
+	return out.write(wire.Response{}, exitOK)
+}
+
+// output holds the streams run writes to.
+type output struct {
+	stdout, stderr io.Writer
 }
 
 // fail writes err as the response and returns code.
-func fail(stdout io.Writer, code int, st *service.Status, err error) int {
-	return write(stdout, wire.Response{Status: st, Error: err.Error()}, code)
+func (o output) fail(code int, st *service.Status, err error) int {
+	return o.write(wire.Response{Status: st, Error: err.Error()}, code)
 }
 
-// write encodes r to stdout and returns code, or exitFailed when the write
-// fails.
-func write(stdout io.Writer, r wire.Response, code int) int {
-	if err := json.NewEncoder(stdout).Encode(r); err != nil {
-		fmt.Fprintln(os.Stderr, "driver: write response:", err)
+// write encodes r to stdout and returns code, or, after reporting the
+// failure on stderr, exitFailed when the write fails.
+func (o output) write(r wire.Response, code int) int {
+	if err := json.NewEncoder(o.stdout).Encode(r); err != nil {
+		// The exit code reports the failure whether or not stderr takes the
+		// message.
+		_, _ = fmt.Fprintln(o.stderr, "driver: write response:", err)
 		return exitFailed
 	}
 	return code

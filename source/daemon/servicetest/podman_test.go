@@ -109,9 +109,36 @@ type fakeTB struct {
 	fatal    string
 	skipped  bool
 	cleanups []func()
+	// helpers names, relative to the package, each function that called
+	// Helper, such as "boot" or "(*suite).step".
+	helpers []string
 }
 
-func (f *fakeTB) Helper() {}
+// Helper records the function that called it.
+func (f *fakeTB) Helper() {
+	pc := make([]uintptr, 1)
+	n := runtime.Callers(2, pc)
+	frame, _ := runtime.CallersFrames(pc[:n]).Next()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.helpers = append(f.helpers, strings.TrimPrefix(frame.Function, "go.vipengele.org/daemon/servicetest."))
+}
+
+// helped reports whether every one of names called Helper. A closure is
+// named after its enclosing function with a ".func" suffix, so the name
+// "boot.func" matches any closure of boot.
+func (f *fakeTB) helped(names ...string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, name := range names {
+		if !slices.ContainsFunc(f.helpers, func(h string) bool {
+			return h == name || strings.HasSuffix(name, ".func") && strings.HasPrefix(h, name)
+		}) {
+			return false
+		}
+	}
+	return true
+}
 
 func (f *fakeTB) Logf(format string, args ...any) {
 	f.mu.Lock()
@@ -341,6 +368,9 @@ func TestNewHarnessAcceptsAnAnsweringPodman(t *testing.T) {
 	f := runTB(t, func(tb *fakeTB) { newHarness(tb, lookup) })
 	if f.fatal != "" {
 		t.Errorf("newHarness failed: %s", f.fatal)
+	}
+	if !f.helped("newHarness") {
+		t.Errorf("helpers = %q, want newHarness marked a helper", f.helpers)
 	}
 }
 
@@ -621,6 +651,9 @@ func TestDiagnostics(t *testing.T) {
 	if !ft.logged("diagnostics of demo.service in container c0ffee") {
 		t.Errorf("logs = %q", ft.logs)
 	}
+	if !ft.helped("(*container).logDiagnostics") {
+		t.Errorf("helpers = %q, want logDiagnostics marked a helper", ft.helpers)
+	}
 }
 
 // bootRunner returns a fakeRunner for a container that boots, with fail
@@ -657,6 +690,9 @@ func TestBootSystem(t *testing.T) {
 	}
 	if c == nil || c.uid != "" {
 		t.Errorf("container = %+v, want one with no uid", c)
+	}
+	if !ft.helped("boot") {
+		t.Errorf("helpers = %q, want boot marked a helper", ft.helpers)
 	}
 	want := []string{
 		"run --detach --privileged --systemd=always --label servicetest --label servicetest.scope=system img",
@@ -730,6 +766,9 @@ func TestBootFails(t *testing.T) {
 			if tc.removed && !ft.logged("boot diagnostics of container c0ffee") {
 				t.Errorf("logs = %q, want the boot diagnostics", ft.logs)
 			}
+			if tc.removed && !ft.helped("boot", "boot.func") {
+				t.Errorf("helpers = %q, want boot and its failure closure marked helpers", ft.helpers)
+			}
 		})
 	}
 }
@@ -762,6 +801,9 @@ func TestSkipUnless(t *testing.T) {
 			if ft.skipped != tc.skip {
 				t.Errorf("skipped = %v, want %v", ft.skipped, tc.skip)
 			}
+			if !ft.helped("skipUnless") {
+				t.Errorf("helpers = %q, want skipUnless, which skips, marked a helper", ft.helpers)
+			}
 		})
 	}
 }
@@ -771,6 +813,9 @@ func TestSkipUnlessEnabledReadsTheEnvironment(t *testing.T) {
 	ft := runTB(t, func(tb *fakeTB) { SkipUnlessEnabled(tb) })
 	if !ft.skipped {
 		t.Error("SkipUnlessEnabled did not skip with SERVICETEST empty")
+	}
+	if !ft.helped("SkipUnlessEnabled", "skipUnless") {
+		t.Errorf("helpers = %q, want the skip attributed to the caller of SkipUnlessEnabled", ft.helpers)
 	}
 }
 
@@ -792,6 +837,9 @@ func TestImageTag(t *testing.T) {
 	}
 	if imageTag([]byte("FROM y"), "") == a || imageTag([]byte("FROM x"), "debian:13") == a {
 		t.Error("imageTag ignores the file or the base")
+	}
+	if imageTag([]byte("FROM xdebian:13"), "") == imageTag([]byte("FROM x"), "debian:13") {
+		t.Error("imageTag does not separate the file from the base")
 	}
 }
 

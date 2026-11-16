@@ -170,7 +170,7 @@ func scopeName(scope service.Scope) (string, error) {
 	case service.ScopeUser:
 		return "user", nil
 	default:
-		return "", fmt.Errorf("servicetest: scope %d is neither ScopeSystem nor ScopeUser", int(scope))
+		return "", fmt.Errorf("servicetest: scope %d is neither ScopeSystem nor ScopeUser", int(scope)) // [lydite:exclude_from_mutation][every caller discards the name when the error is set, so the name returned with it is unobservable]
 	}
 }
 
@@ -278,7 +278,7 @@ func (c *container) waitRunning(ctx context.Context, user bool) (string, error) 
 			return state, nil
 		}
 		if serr := c.h.sleep(ctx, pollInterval); serr != nil {
-			return "", fmt.Errorf("servicetest: %s manager did not finish booting, last state %q: %w",
+			return "", fmt.Errorf("servicetest: %s manager did not finish booting, last state %q: %w", // [lydite:exclude_from_mutation][boot fails the test without reading the state when the error is set, so the state returned with it is unobservable]
 				managerName(user), state, errors.Join(serr, err))
 		}
 	}

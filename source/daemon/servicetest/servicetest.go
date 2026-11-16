@@ -187,7 +187,7 @@ func goBuildDriver(ctx context.Context, out string) ([]byte, error) {
 func (h harness) buildDriver(ctx context.Context, dir string) (string, error) {
 	out := filepath.Join(dir, "servicetest-driver")
 	if msg, err := h.goBuild(ctx, out); err != nil {
-		return "", fmt.Errorf("servicetest: build the driver %s for linux/%s: %w: %s; "+
+		return "", fmt.Errorf("servicetest: build the driver %s for linux/%s: %w: %s; "+ // [lydite:exclude_from_mutation][setup fails the test without reading the path when the error is set, so the path returned with it is unobservable]
 			"run the test inside a module that requires go.vipengele.org/daemon and does not vendor it, "+
 			"or set Target.Driver to a driver built with `GOOS=linux CGO_ENABLED=0 go build %s`",
 			driverPackage, runtime.GOARCH, err, bytes.TrimSpace(msg), driverPackage)

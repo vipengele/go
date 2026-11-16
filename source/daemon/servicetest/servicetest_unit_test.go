@@ -273,9 +273,15 @@ func TestSuitePassesEveryScenarioInOrder(t *testing.T) {
 	if got := stepNames(steps); !slices.Equal(got, want) {
 		t.Errorf("steps = %q, want %q", got, want)
 	}
+	if !parent.helped("(*suite).run") {
+		t.Errorf("helpers = %q, want the suite's run marked a helper", parent.helpers)
+	}
 	for _, s := range steps {
 		if s.tb.fatal != "" || len(s.tb.logs) > 0 {
 			t.Errorf("%s: fatal %q, logs %q", s.name, s.tb.fatal, s.tb.logs)
+		}
+		if !s.tb.helped("(*suite).step") {
+			t.Errorf("%s: helpers = %q, want step marked a helper", s.name, s.tb.helpers)
 		}
 	}
 }
@@ -333,6 +339,15 @@ func TestSuiteStopsAtTheFirstFailingScenario(t *testing.T) {
 				return "", nil, slices.Contains(args, "sh")
 			}
 		}, "kill", []string{"was not restarted after kill -9 of its main PID 100", "pid 100"}},
+		{"new pid without a restart after kill", func() func(*fakeHost, []string, *wire.Request) (string, error, bool) {
+			return func(f *fakeHost, args []string, _ *wire.Request) (string, error, bool) {
+				if slices.Contains(args, "sh") {
+					f.start()
+					return "", nil, true
+				}
+				return "", nil, false
+			}
+		}, "kill", []string{"was not restarted after kill -9 of its main PID 100", "pid 101, restarts 0"}},
 		{"reinstall refused", func() func(*fakeHost, []string, *wire.Request) (string, error, bool) {
 			second := nth(wire.OpInstall, 2)
 			return func(_ *fakeHost, _ []string, req *wire.Request) (string, error, bool) {
@@ -350,6 +365,12 @@ func TestSuiteStopsAtTheFirstFailingScenario(t *testing.T) {
 				return "{}\n", nil, req != nil && req.Config.Binary == crashBinary && req.Op == wire.OpInstall
 			}
 		}, "crash_loop", []string{"did not report failed with restarts and a detail", "state running"}},
+		{"crash loop failed without restarts", func() func(*fakeHost, []string, *wire.Request) (string, error, bool) {
+			return func(f *fakeHost, _ []string, req *wire.Request) (string, error, bool) {
+				st := service.Status{State: service.StateFailed, Enabled: true, Detail: "sampled.service failed"}
+				return response(wire.Response{Status: &st}), nil, f.crashing && opIs(req, wire.OpStatus)
+			}
+		}, "crash_loop", []string{"did not report failed with restarts and a detail", "state failed", "restarts 0"}},
 		{"crash loop install refused", func() func(*fakeHost, []string, *wire.Request) (string, error, bool) {
 			return func(_ *fakeHost, _ []string, req *wire.Request) (string, error, bool) {
 				return `{"error":"job failed"}` + "\n", exit1, req != nil && req.Config.Binary == crashBinary && req.Op == wire.OpInstall
@@ -493,6 +514,9 @@ func TestSetup(t *testing.T) {
 	if ft.fatal != "" || driver != "/prebuilt/driver" || built {
 		t.Errorf("setup = %q, built %v, fatal %q, want the prebuilt driver", driver, built, ft.fatal)
 	}
+	if !ft.helped("setup") {
+		t.Errorf("helpers = %q, want setup marked a helper", ft.helpers)
+	}
 
 	tg.Driver = ""
 	ft = runTB(t, func(tb *fakeTB) { driver = setup(tb, h, tg) })
@@ -557,6 +581,9 @@ func TestPrepare(t *testing.T) {
 	if ft.fatal != "" || p.name != "user" || p.image != imageTag(containerfile, "b") {
 		t.Errorf("plan = %+v, fatal %q", p, ft.fatal)
 	}
+	if !ft.helped("prepare") {
+		t.Errorf("helpers = %q, want prepare marked a helper", ft.helpers)
+	}
 }
 
 func TestPrepareFails(t *testing.T) {
@@ -584,6 +611,26 @@ func TestRunScopeBootsOneContainer(t *testing.T) {
 	}
 	if !slices.Contains(f.commands(), "rm --force c0ffee") {
 		t.Errorf("commands = %q, want the container removed", f.commands())
+	}
+}
+
+func TestRunning(t *testing.T) {
+	cases := []struct {
+		name string
+		st   service.Status
+		old  int
+		want bool
+	}{
+		{"new pid", service.Status{State: service.StateRunning, PID: 7}, 5, true},
+		{"first pid", service.Status{State: service.StateRunning, PID: 1}, 0, true},
+		{"same pid", service.Status{State: service.StateRunning, PID: 5}, 5, false},
+		{"no pid", service.Status{State: service.StateRunning}, 5, false},
+		{"not running", service.Status{State: service.StateStarting, PID: 7}, 5, false},
+	}
+	for _, tc := range cases {
+		if got := running(tc.st, tc.old); got != tc.want {
+			t.Errorf("%s: running(%+v, %d) = %v, want %v", tc.name, tc.st, tc.old, got, tc.want)
+		}
 	}
 }
 

@@ -42,8 +42,11 @@ func provide(m service.Manager, err error) newManager {
 
 func runWith(t *testing.T, in string, mk newManager) (int, string) {
 	t.Helper()
-	var out bytes.Buffer
-	code := run(context.Background(), strings.NewReader(in), &out, mk)
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), strings.NewReader(in), &out, &errOut, mk)
+	if errOut.Len() > 0 {
+		t.Errorf("stderr = %q, want nothing", errOut.String())
+	}
 	return code, out.String()
 }
 
@@ -54,6 +57,20 @@ func TestRunRejectsMalformedInput(t *testing.T) {
 	}
 	if !strings.Contains(out, `"error":"decode request:`) {
 		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestRunRejectsAnUnknownField(t *testing.T) {
+	f := &fakeManager{}
+	code, out := runWith(t, `{"Op":"install","Restart":true}`, provide(f, nil))
+	if code != exitBadArgs {
+		t.Fatalf("code = %d, want %d", code, exitBadArgs)
+	}
+	if !strings.Contains(out, `"error":"decode request: json: unknown field \"Restart\""`) {
+		t.Fatalf("out = %q", out)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("calls = %v, want none", f.calls)
 	}
 }
 
@@ -154,9 +171,13 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("closed")
 
 func TestRunReportsAFailedWrite(t *testing.T) {
 	f := &fakeManager{}
-	code := run(context.Background(), strings.NewReader(`{"Op":"install"}`), failingWriter{}, provide(f, nil))
+	var errOut bytes.Buffer
+	code := run(context.Background(), strings.NewReader(`{"Op":"install"}`), failingWriter{}, &errOut, provide(f, nil))
 	if code != exitFailed {
 		t.Fatalf("code = %d, want %d", code, exitFailed)
+	}
+	if got, want := errOut.String(), "driver: write response: closed\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
