@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -18,7 +19,7 @@ import (
 )
 
 // helperEnv makes the test binary act as a stand-in podman: it prints its
-// arguments and its standard input, and when its first argument is "fail" it
+// arguments and its standard input, and when an argument is "fail" it
 // writes to standard error and exits 3.
 const helperEnv = "SERVICETEST_HELPER_PODMAN"
 
@@ -32,7 +33,7 @@ func TestMain(m *testing.M) {
 func helperPodman(args []string) int {
 	in, _ := io.ReadAll(os.Stdin)
 	fmt.Printf("args=%s stdin=%s", strings.Join(args, ","), in)
-	if len(args) > 0 && args[0] == "fail" {
+	if slices.Contains(args, "fail") {
 		fmt.Fprint(os.Stderr, "boom")
 		return 3
 	}
@@ -183,65 +184,147 @@ func execArgv(args []string) []string {
 
 func TestNewExecRunner(t *testing.T) {
 	cases := []struct {
-		name string
-		env  map[string]string
-		want []string
+		name    string
+		env     map[string]string
+		sudo    bool
+		wantErr bool
 	}{
-		{"unset", nil, []string{"podman"}},
-		{"blank", map[string]string{podmanEnv: "  "}, []string{"podman"}},
-		{"sudo", map[string]string{podmanEnv: " sudo  -n podman "}, []string{"sudo", "-n", "podman"}},
+		{"unset", nil, false, false},
+		{"blank", map[string]string{podmanEnv: "  "}, false, false},
+		{"podman", map[string]string{podmanEnv: " podman "}, false, false},
+		{"sudo", map[string]string{podmanEnv: " sudo  podman "}, true, false},
+		{"sudo with a flag", map[string]string{podmanEnv: "sudo -n podman"}, false, true},
+		{"another program", map[string]string{podmanEnv: "doas podman"}, false, true},
+		{"a path", map[string]string{podmanEnv: "/usr/bin/podman"}, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			lookup := func(k string) (string, bool) { v, ok := tc.env[k]; return v, ok }
-			if got := newExecRunner(lookup).argv; !slices.Equal(got, tc.want) {
-				t.Errorf("argv = %q, want %q", got, tc.want)
+			r, err := newExecRunner(lookup)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), podmanEnv) ||
+					!strings.Contains(err.Error(), `"podman"`) || !strings.Contains(err.Error(), `"sudo podman"`) {
+					t.Errorf("err = %v, want it to name %s and the two accepted values", err, podmanEnv)
+				}
+				return
+			}
+			if err != nil || r.sudo != tc.sudo {
+				t.Errorf("newExecRunner = %+v, %v, want sudo %v", r, err, tc.sudo)
 			}
 		})
 	}
 }
 
-// helperArgv returns the test binary as a podman command line with the
-// fixed argument prefix, after enabling the helper mode.
-func helperArgv(t *testing.T, prefix ...string) []string {
+// exeSuffix is the extension exec.LookPath needs to find an executable.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// standIn makes the test binary act as each of the programs names on a PATH
+// that holds nothing else. It links the binary, or copies it where symlinks
+// are unavailable.
+func standIn(t *testing.T, names ...string) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir := t.TempDir()
+	for _, name := range names {
+		dst := filepath.Join(dir, name+exeSuffix())
+		if os.Symlink(exe, dst) == nil {
+			continue
+		}
+		copyFile(t, exe, dst)
+	}
 	t.Setenv(helperEnv, "1")
-	return append([]string{exe}, prefix...)
+	t.Setenv("PATH", dir)
 }
 
-func TestExecRunnerRunsTheCommandLine(t *testing.T) {
-	r := execRunner{argv: helperArgv(t, "pre")}
-	out, err := r.run(t.Context(), strings.NewReader("input"), "version", "--x")
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	in, err := os.Open(src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(out), "args=pre,version,--x stdin=input"; got != want {
-		t.Errorf("stdout = %q, want %q", got, want)
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecRunnerRunsPodmanOrSudoPodman(t *testing.T) {
+	cases := []struct {
+		name string
+		r    execRunner
+		want string
+	}{
+		{"podman", execRunner{}, "args=version,--x stdin=input"},
+		{"sudo", execRunner{sudo: true}, "args=podman,version,--x stdin=input"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			standIn(t, "podman", "sudo")
+			out, err := tc.r.run(t.Context(), strings.NewReader("input"), "version", "--x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(out); got != tc.want {
+				t.Errorf("stdout = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestExecRunnerReportsStderrOnFailure(t *testing.T) {
-	argv := helperArgv(t)
-	r := execRunner{argv: argv}
-	out, err := r.run(t.Context(), nil, "fail", "now")
-	var ce *commandError
-	if !errors.As(err, &ce) {
-		t.Fatalf("err = %v, want a *commandError", err)
+	cases := []struct {
+		name   string
+		r      execRunner
+		prefix string
+	}{
+		{"podman", execRunner{}, "podman fail now: "},
+		{"sudo", execRunner{sudo: true}, "sudo podman fail now: "},
 	}
-	if !strings.Contains(string(out), "args=fail,now") {
-		t.Errorf("stdout = %q, want the helper's output", out)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			standIn(t, "podman", "sudo")
+			out, err := tc.r.run(t.Context(), nil, "fail", "now")
+			var ce *commandError
+			if !errors.As(err, &ce) {
+				t.Fatalf("err = %v, want a *commandError", err)
+			}
+			if !strings.Contains(string(out), "fail,now") {
+				t.Errorf("stdout = %q, want the helper's output", out)
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, tc.prefix) || !strings.HasSuffix(msg, ": boom") {
+				t.Errorf("err = %q, want the command line and the stderr", msg)
+			}
+			var ee interface{ ExitCode() int }
+			if !errors.As(err, &ee) || ee.ExitCode() != 3 {
+				t.Errorf("err = %v, want it to unwrap to exit code 3", err)
+			}
+		})
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, argv[0]+" fail now: ") || !strings.HasSuffix(msg, ": boom") {
-		t.Errorf("err = %q, want the command line and the stderr", msg)
-	}
-	var ee interface{ ExitCode() int }
-	if !errors.As(err, &ee) || ee.ExitCode() != 3 {
-		t.Errorf("err = %v, want it to unwrap to exit code 3", err)
+}
+
+func TestExecRunnerFailsWithoutTheProgram(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	for _, r := range []execRunner{{}, {sudo: true}} {
+		if _, err := r.run(t.Context(), nil, "version"); !errors.Is(err, exec.ErrNotFound) {
+			t.Errorf("run with sudo %v = %v, want exec.ErrNotFound", r.sudo, err)
+		}
 	}
 }
 
@@ -253,11 +336,8 @@ func TestCommandErrorWithoutStderr(t *testing.T) {
 }
 
 func TestNewHarnessAcceptsAnAnsweringPodman(t *testing.T) {
-	argv := helperArgv(t)
-	if strings.ContainsAny(argv[0], " \t") {
-		t.Skip("the test binary path holds whitespace, which SERVICETEST_PODMAN splits on")
-	}
-	lookup := func(string) (string, bool) { return argv[0], true }
+	standIn(t, "podman")
+	lookup := func(string) (string, bool) { return "", false }
 	f := runTB(t, func(tb *fakeTB) { newHarness(tb, lookup) })
 	if f.fatal != "" {
 		t.Errorf("newHarness failed: %s", f.fatal)
@@ -265,14 +345,19 @@ func TestNewHarnessAcceptsAnAnsweringPodman(t *testing.T) {
 }
 
 func TestNewHarnessFailsWhenPodmanDoesNotAnswer(t *testing.T) {
-	argv := helperArgv(t)
-	if strings.ContainsAny(argv[0], " \t") {
-		t.Skip("the test binary path holds whitespace, which SERVICETEST_PODMAN splits on")
-	}
-	lookup := func(string) (string, bool) { return argv[0] + " fail", true }
+	t.Setenv("PATH", t.TempDir())
+	lookup := func(string) (string, bool) { return "podman", true }
 	f := runTB(t, func(tb *fakeTB) { newHarness(tb, lookup) })
 	if !strings.Contains(f.fatal, "podman is not usable") || !strings.Contains(f.fatal, podmanEnv) {
 		t.Errorf("fatal = %q, want podman reported unusable", f.fatal)
+	}
+}
+
+func TestNewHarnessFailsOnAnInvalidValue(t *testing.T) {
+	lookup := func(string) (string, bool) { return "doas podman", true }
+	f := runTB(t, func(tb *fakeTB) { newHarness(tb, lookup) })
+	if !strings.Contains(f.fatal, podmanEnv) || !strings.Contains(f.fatal, `"sudo podman"`) || f.skipped {
+		t.Errorf("fatal = %q, skipped %v, want the invalid value reported as a failure", f.fatal, f.skipped)
 	}
 }
 

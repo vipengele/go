@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,12 +15,14 @@ import (
 )
 
 const (
-	// podmanEnv names the variable holding the podman command line, split on
-	// whitespace, such as "sudo podman".
+	// podmanEnv names the variable that selects how podman runs: rootless as
+	// defaultPodman, or rootful as sudoPodman.
 	podmanEnv = "SERVICETEST_PODMAN"
-	// defaultPodman is the podman command line when podmanEnv is unset or
-	// blank.
+	// defaultPodman is the value of podmanEnv that runs podman as the current
+	// user, and what an unset or blank variable means.
 	defaultPodman = "podman"
+	// sudoPodman is the value of podmanEnv that runs podman through sudo.
+	sudoPodman = "sudo podman"
 	// containerLabel labels every servicetest container, so a CI job can
 	// remove the ones a killed run left behind.
 	containerLabel = "servicetest"
@@ -66,35 +67,48 @@ func (e *commandError) Error() string {
 
 func (e *commandError) Unwrap() error { return e.err }
 
-// execRunner runs podman as a child process.
+// execRunner runs podman as a child process, through sudo when sudo is set.
 type execRunner struct {
-	// argv is the podman command line every command starts with.
-	argv []string
+	sudo bool
 }
 
-// newExecRunner returns the runner for the podman command line that lookup
-// reports for SERVICETEST_PODMAN, or plain "podman" when it is unset or
-// blank.
-func newExecRunner(lookup func(string) (string, bool)) execRunner {
-	argv := strings.Fields(defaultPodman)
-	if v, ok := lookup(podmanEnv); ok {
-		if f := strings.Fields(v); len(f) > 0 {
-			argv = f
-		}
+// newExecRunner returns the runner for the value lookup reports for
+// SERVICETEST_PODMAN. Only "podman", which an unset or blank variable also
+// means, and "sudo podman" are accepted, so the program that runs is always a
+// constant; any other value is an error.
+func newExecRunner(lookup func(string) (string, bool)) (execRunner, error) {
+	v, _ := lookup(podmanEnv)
+	switch strings.Join(strings.Fields(v), " ") {
+	case "", defaultPodman:
+		return execRunner{}, nil
+	case sudoPodman:
+		return execRunner{sudo: true}, nil
 	}
-	return execRunner{argv: argv}
+	return execRunner{}, fmt.Errorf("servicetest: %s is %q, want %q or %q", podmanEnv, v, defaultPodman, sudoPodman)
+}
+
+// commandLine returns the words every command starts with.
+func (e execRunner) commandLine() []string {
+	if e.sudo {
+		return []string{"sudo", "podman"}
+	}
+	return []string{"podman"}
 }
 
 func (e execRunner) run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
-	full := append(slices.Clone(e.argv[1:]), args...)
-	cmd := exec.CommandContext(ctx, e.argv[0], full...) // #nosec G204 -- the program and leading arguments are the podman command line the person running the tests chooses through SERVICETEST_PODMAN (default podman); the rest are the harness's own podman verbs and flags and container IDs and paths it generated; no shell is involved
+	var cmd *exec.Cmd
+	if e.sudo {
+		cmd = exec.CommandContext(ctx, "sudo", append([]string{"podman"}, args...)...) // #nosec G204 -- the program is the constant sudo running the constant podman; the arguments are the harness's own podman verbs and flags and container IDs and paths it generated, passed without a shell
+	} else {
+		cmd = exec.CommandContext(ctx, "podman", args...) // #nosec G204 -- the program is the constant podman; its arguments are the harness's own podman verbs and flags and container IDs and paths it generated, passed without a shell
+	}
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return stdout.Bytes(), &commandError{
-			args:   append(slices.Clone(e.argv), args...),
+			args:   append(e.commandLine(), args...),
 			stderr: stderr.String(),
 			err:    err,
 		}
@@ -111,12 +125,17 @@ type harness struct {
 	goBuild func(ctx context.Context, out string) ([]byte, error)
 }
 
-// newHarness returns the harness for the podman command line lookup reports,
-// and fails tb when that podman does not answer: a run that asked for the
-// containers with SERVICETEST=1 and cannot get them is a failure, not a skip.
+// newHarness returns the harness for the podman that lookup selects, and fails
+// tb when the selection is invalid or that podman does not answer: a run that
+// asked for the containers with SERVICETEST=1 and cannot get them is a
+// failure, not a skip.
 func newHarness(tb testing.TB, lookup func(string) (string, bool)) harness {
 	tb.Helper()
-	h := harness{r: newExecRunner(lookup), sleep: sleepContext, goBuild: goBuildDriver}
+	r, err := newExecRunner(lookup)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	h := harness{r: r, sleep: sleepContext, goBuild: goBuildDriver}
 	if err := h.checkPodman(tb.Context()); err != nil {
 		tb.Fatal(err)
 	}
@@ -138,7 +157,7 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // checkPodman reports whether podman answers at all.
 func (h harness) checkPodman(ctx context.Context) error {
 	if _, err := h.r.run(ctx, nil, "version"); err != nil {
-		return fmt.Errorf("servicetest: podman is not usable (%s sets its command line): %w", podmanEnv, err)
+		return fmt.Errorf("servicetest: podman is not usable (%s selects podman or sudo podman): %w", podmanEnv, err)
 	}
 	return nil
 }

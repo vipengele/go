@@ -35,9 +35,9 @@
 // go test run. With SERVICETEST=1, a podman that does not answer fails the
 // test rather than skipping it.
 //
-// SERVICETEST_PODMAN is the podman command line, split on whitespace; it
-// defaults to "podman". Set it to "sudo podman" where rootless podman cannot
-// run systemd in a container.
+// SERVICETEST_PODMAN is "podman" or "sudo podman" and defaults to "podman";
+// any other value fails the test. Set it to "sudo podman" where rootless podman
+// cannot run systemd in a container.
 //
 // # Requirements
 //

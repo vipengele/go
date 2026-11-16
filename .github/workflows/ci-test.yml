@@ -134,8 +134,8 @@ jobs:
         working-directory: source/daemon
     env:
       SERVICETEST: "1"
-      # The podman command line, split on whitespace by servicetest and by the
-      # steps below. ubuntu-latest ships podman, so nothing is installed.
+      # "podman" or "sudo podman", the two values servicetest accepts; the
+      # steps below expand it as a command line. ubuntu-latest ships podman, so nothing is installed.
       # Rootless podman runs systemd in a container only where the runner
       # delegates a cgroup v2 subtree to its user; set "sudo podman" to run it
       # rootful instead.

@@ -311,8 +311,8 @@ install, kill, reinstall, crash loop and uninstall through `service.New`. Read i
   with the options rebuilt from the request, then `Install`, `Uninstall` or `Status`.
   `internal/wire` holds the request and response both sides import.
 - Environment: `SERVICETEST=1` runs the containers, otherwise `Run` skips; with it set, an unusable
-  podman fails, never skips. `SERVICETEST_PODMAN` is the podman command line, default `podman`, and
-  `sudo podman` runs it rootful.
+  podman fails, never skips. `SERVICETEST_PODMAN` is `podman` (the default) or `sudo podman`, which runs it
+  rootful; any other value fails the test, because each `exec` call names a constant program.
 - `depguard` allows `go.vipengele.org/daemon/servicetest/internal/wire$` for `servicetest` and
   its driver, besides the list in Conventions.
 - The harness builds the driver from the caller's module with

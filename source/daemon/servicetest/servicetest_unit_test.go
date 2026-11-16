@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -534,12 +533,7 @@ func TestSetupFails(t *testing.T) {
 }
 
 func TestGoBuildDriverRunsTheGoCommand(t *testing.T) {
-	argv := helperArgv(t)
-	dir := t.TempDir()
-	if err := os.Symlink(argv[0], filepath.Join(dir, "go")); err != nil {
-		t.Skip("cannot link the test binary as go:", err)
-	}
-	t.Setenv("PATH", dir)
+	standIn(t, "go")
 	out, err := goBuildDriver(t.Context(), "/tmp/d")
 	if err != nil {
 		t.Fatal(err)

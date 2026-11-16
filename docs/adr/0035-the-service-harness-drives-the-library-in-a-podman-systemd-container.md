@@ -35,8 +35,11 @@ install, kill, reinstall, crash loop and uninstall through `service.New`.
   file and the base, so an unchanged image is built once. Digest bumps are manual; the
   Containerfile documents the steps.
 - **The container is privileged.** `podman run --privileged --systemd=always`, so hardening
-  directives apply as on a host. The podman command line is `SERVICETEST_PODMAN`, default
-  `podman`; `sudo podman` runs it rootful. Hosted ubuntu runners boot both scopes rootless.
+  directives apply as on a host. `SERVICETEST_PODMAN` accepts exactly two values,
+  `podman` (the default) and `sudo podman`, which runs it rootful; any other value fails the test.
+  Rejected: an arbitrary command line from the variable. A program chosen at run time is a
+  non-static exec that the repository's security scans refuse, and the two values cover rootless
+  and rootful. Hosted ubuntu runners boot both scopes rootless.
 - **The crash loop uses the consumer's config with `Binary` replaced by `/bin/false`.** The unit
   has `Restart=always`, `RestartSec=5` and systemd's default start limit (5 starts within 10
   seconds), which starts 5 seconds apart never reach. The unit therefore never settles in
