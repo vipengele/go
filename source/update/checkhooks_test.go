@@ -303,7 +303,7 @@ func TestHooksIgnoreAFailingBackupRemoval(t *testing.T) {
 	r := newHookRun(true)
 	c := hookConfig(t, srv)
 	c.Executable = func() (string, error) { return "", errors.New("no executable") }
-	if err := c.RemoveStaleBackup(); err == nil {
+	if err := c.RemoveStaleBackup(t.Context()); err == nil {
 		t.Fatal("RemoveStaleBackup() = nil, want the Executable error")
 	}
 	if err := runHooks(t, c, r, context.Background(), plainCommand(), nil); err != nil {

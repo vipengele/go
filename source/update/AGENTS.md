@@ -86,10 +86,12 @@ golangci-lint run
 - `checkhooks.go` — `Config.UpdateCheckHooks`: the pre-run and post-run hooks a tool passes to
   `core.WithPreRun` and `core.WithPostRun`, typed with `spec` types only. The `*Check` travels from
   one to the other in the context, under an unexported key. The pre-run hook first calls
-  `removeStaleBackupOnHost(runtime.GOOS)`, which removes a stale backup on a Windows host only.
-- `stale.go` — `Config.RemoveStaleBackup` (removes `<Target>.old`; none is nil; a held-open backup
-  is a `*BackupLockedError` and stays) and `removeStaleBackupOnHost`, which does nothing unless the
-  host GOOS it is given is `windows` (ADR-0031).
+  `removeStaleBackupOnHost(ctx, runtime.GOOS)`, which removes a stale backup on a Windows host only.
+- `stale.go` — `Config.RemoveStaleBackup(ctx)` (removes `<Target>.old`; none is nil; a held-open
+  backup is a `*BackupLockedError` and stays; a `Config.BackupGuard` that reports it in use keeps
+  it with a nil result, and one that errors keeps it and returns the error wrapped) and
+  `removeStaleBackupOnHost`, which does nothing unless the host GOOS it is given is `windows`
+  (ADR-0031).
 - `source.go` — `Source`, `Release` and `Asset`. A nil `Config.Source` resolves to the
   `GitHubSource` (`github.go`) for the Identity's Owner and Repo, using the resolved HTTP client.
   `Source.Latest(ctx, ch)` takes the channel; `Release` carries none.
@@ -455,8 +457,10 @@ golangci-lint run
   the process exits. Off Windows the hook removes none: an open file can be removed there, so a
   removal could take the backup an unsettled update's `Rollback` needs, and `Discard` always removes
   the backup, so only a crash leaves one, which the next `Install` replaces (ADR-0031).
-  `RemoveStaleBackup` itself removes on every OS; never call it between `Install` and the settling
-  `Discard` or `Rollback`.
+  `RemoveStaleBackup` itself removes on every OS unless `Config.BackupGuard` reports the backup in
+  use; without a guard, never call it between `Install` and the settling `Discard` or `Rollback`.
+  `BackupGuard` is an interface `update` declares so a caller's state machine can keep the backup of
+  an update awaiting confirmation; `update` imports none.
 - `*PermissionError` comes from `CheckWritable` and from any write step of `Install`, `Discard` and
   `Rollback`. `CheckWritable` is best-effort; `Install` is the authority.
 - One code path for every OS, no `_windows.go` file. Windows behaviour is tested on the gated
@@ -500,8 +504,9 @@ golangci-lint run
 - A command carrying `spec.SkipUpdateCheck` starts no check; `updatecmd`'s `update` command
   carries it.
 - `Start` does no executable I/O. On a Windows host the pre-run hook calls `RemoveStaleBackup`
-  before it looks at `SkipUpdateCheck`, so every command removes a stale backup, the update command
-  included; its error is dropped. Off Windows the hook removes nothing.
+  before it looks at `SkipUpdateCheck`, so every command removes a stale backup its `BackupGuard`
+  does not hold, the update command included; its error is dropped. Off Windows the hook removes
+  nothing.
 
 ## Conventions
 
