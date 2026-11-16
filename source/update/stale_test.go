@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -35,7 +36,7 @@ func TestRemoveStaleBackupWithoutABackupReturnsNil(t *testing.T) {
 
 	exe, backup, config := staleFixture(t, false)
 
-	if err := config.RemoveStaleBackup(); err != nil {
+	if err := config.RemoveStaleBackup(t.Context()); err != nil {
 		t.Fatalf("RemoveStaleBackup = %v, want nil", err)
 	}
 
@@ -51,7 +52,7 @@ func TestRemoveStaleBackupRemovesTheBackup(t *testing.T) {
 
 	exe, backup, config := staleFixture(t, true)
 
-	if err := config.RemoveStaleBackup(); err != nil {
+	if err := config.RemoveStaleBackup(t.Context()); err != nil {
 		t.Fatalf("RemoveStaleBackup = %v, want nil", err)
 	}
 
@@ -83,7 +84,7 @@ func TestRemoveStaleBackupOfASymlinkedExecutableRemovesTheTargetsBackup(t *testi
 
 	config.Executable = func() (string, error) { return link, nil }
 
-	if err := config.RemoveStaleBackup(); err != nil {
+	if err := config.RemoveStaleBackup(t.Context()); err != nil {
 		t.Fatalf("RemoveStaleBackup = %v, want nil", err)
 	}
 
@@ -127,7 +128,7 @@ func TestRemoveStaleBackupFailures(t *testing.T) {
 				return os.Remove(name)
 			}
 
-			err := config.removeStaleBackup(s)
+			err := config.removeStaleBackup(t.Context(), s)
 			if !errors.Is(err, tt.err) {
 				t.Errorf("RemoveStaleBackup = %v, want it to wrap %v", err, tt.err)
 			}
@@ -165,7 +166,7 @@ func TestRemoveStaleBackupMissingExecutableFailsWithoutRemoving(t *testing.T) {
 		return nil
 	}
 
-	if err := config.removeStaleBackup(s); !errors.Is(err, fs.ErrNotExist) {
+	if err := config.removeStaleBackup(t.Context(), s); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("RemoveStaleBackup = %v, want it to wrap fs.ErrNotExist", err)
 	}
 }
@@ -176,7 +177,7 @@ func TestRemoveStaleBackupInvalidConfig(t *testing.T) {
 	_, backup, config := staleFixture(t, true)
 	config.Name = ""
 
-	if err := config.RemoveStaleBackup(); err == nil {
+	if err := config.RemoveStaleBackup(t.Context()); err == nil {
 		t.Error("RemoveStaleBackup = nil, want the Validate error")
 	}
 
@@ -203,7 +204,7 @@ func TestRemoveStaleBackupOnHostRemovesOnlyOnWindows(t *testing.T) {
 
 			exe, backup, config := staleFixture(t, true)
 
-			if err := config.removeStaleBackupOnHost(tt.goos); err != nil {
+			if err := config.removeStaleBackupOnHost(t.Context(), tt.goos); err != nil {
 				t.Fatalf("removeStaleBackupOnHost(%q) = %v, want nil", tt.goos, err)
 			}
 
@@ -226,11 +227,90 @@ func TestRemoveStaleBackupOnHostOffWindowsLeavesAFailingConfigAlone(t *testing.T
 	_, _, config := staleFixture(t, true)
 	config.Executable = func() (string, error) { return "", errors.New("no executable") }
 
-	if err := config.removeStaleBackupOnHost("linux"); err != nil {
+	if err := config.removeStaleBackupOnHost(t.Context(), "linux"); err != nil {
 		t.Errorf("removeStaleBackupOnHost(%q) = %v, want nil", "linux", err)
 	}
 
-	if err := config.removeStaleBackupOnHost("windows"); err == nil {
+	if err := config.removeStaleBackupOnHost(t.Context(), "windows"); err == nil {
 		t.Errorf("removeStaleBackupOnHost(%q) = nil, want the Executable error", "windows")
+	}
+}
+
+// stubGuard is a [BackupGuard] that answers inUse and err, and records the context it was asked
+// with.
+type stubGuard struct {
+	inUse bool
+	err   error
+	ctx   context.Context
+}
+
+func (g *stubGuard) BackupInUse(ctx context.Context) (bool, error) {
+	g.ctx = ctx
+
+	return g.inUse, g.err
+}
+
+type guardCtxKey struct{}
+
+func TestRemoveStaleBackupHonoursTheBackupGuard(t *testing.T) {
+	t.Parallel()
+
+	guardErr := errors.New("corrupt record")
+
+	tests := []struct {
+		name    string
+		guard   BackupGuard
+		kept    bool
+		wantErr error
+	}{
+		{"nil guard", nil, false, nil},
+		{"in use", &stubGuard{inUse: true}, true, nil},
+		{"not in use", &stubGuard{}, false, nil},
+		{"guard error", &stubGuard{err: guardErr}, true, guardErr},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, backup, config := staleFixture(t, true)
+			config.BackupGuard = tt.guard
+
+			err := config.RemoveStaleBackup(t.Context())
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("RemoveStaleBackup = %v, want it to wrap %v", err, tt.wantErr)
+			}
+
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("RemoveStaleBackup = %v, want nil", err)
+			}
+
+			if tt.kept {
+				if got := readFile(t, backup); got != "old" {
+					t.Errorf("backup holds %q, want %q", got, "old")
+				}
+
+				return
+			}
+
+			assertMissing(t, backup)
+		})
+	}
+}
+
+func TestRemoveStaleBackupPassesItsContextToTheGuard(t *testing.T) {
+	t.Parallel()
+
+	_, _, config := staleFixture(t, true)
+	guard := &stubGuard{}
+	config.BackupGuard = guard
+
+	ctx := context.WithValue(t.Context(), guardCtxKey{}, "marker")
+	if err := config.RemoveStaleBackup(ctx); err != nil {
+		t.Fatalf("RemoveStaleBackup = %v, want nil", err)
+	}
+
+	if guard.ctx == nil || guard.ctx.Value(guardCtxKey{}) != "marker" {
+		t.Errorf("guard saw context %v, want the one passed in", guard.ctx)
 	}
 }

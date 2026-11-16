@@ -195,6 +195,17 @@ type Config struct {
 	// IsTerminal reports whether stderr is a terminal. Nil means the real standard streams, as
 	// [terminal.Detect] probes them.
 	IsTerminal func() bool
+	// BackupGuard says whether the backup beside the executable is still needed. Nil means it
+	// never is, and [Config.RemoveStaleBackup] removes whatever backup is there.
+	BackupGuard BackupGuard
+}
+
+// BackupGuard reports whether the backup [Config.Install] keeps beside the executable, the path
+// of [Config.Target] followed by ".old", must stay because something still depends on it, such as
+// a rollback of an update whose new build is not yet confirmed. [Config.RemoveStaleBackup] keeps
+// the backup while BackupInUse reports true, and keeps it and fails when BackupInUse fails.
+type BackupGuard interface {
+	BackupInUse(ctx context.Context) (bool, error)
 }
 
 // Validate returns nil when the Config can be used. Otherwise it returns one error listing every

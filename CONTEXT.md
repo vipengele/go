@@ -314,6 +314,30 @@ The detached minisign signature over a release's checksums file, published besid
 archive it lists (ADR-0024).
 _Avoid_: asset signature, manifest signature
 
+**Pending update**:
+A replacement of a daemon's **Managed binary** that has been installed and that the daemon has not
+yet confirmed or abandoned. It is recorded with the version it replaces and the version it installs
+(ADR-0033).
+_Avoid_: staged update (a staged binary is not yet installed), in-flight update
+
+**Boot attempt**:
+One start of the updated build of a daemon while its **Pending update** is unsettled. Each start is
+counted before the build is judged, and a build that has been started more than the allowed number
+of times without a **Confirm** is rolled back (ADR-0033).
+_Avoid_: retry, restart (the service manager's act), crash
+
+**Confirm**:
+The daemon's statement, once it is ready, that the updated build works. It settles a **Pending
+update** for good, and is refused unless the running version is the one the update installed
+(ADR-0033).
+_Avoid_: acknowledge, commit, accept
+
+**Rollback**:
+Putting the previous **Managed binary** back in place of an updated one that did not **Confirm**,
+and then recording that it was done. It happens when the **Boot attempt**s run out or when the build
+reports its own failure. It does not lower the **Watermark** (ADR-0027, ADR-0033).
+_Avoid_: revert, downgrade (a downgrade is a chosen older version), undo
+
 **Runner**:
 One unit of long-running work in a daemon (the HTTP server, a scheduled task, the update check)
 with a start that returns once it is ready, an exit it reports once its work has ended, and a stop
