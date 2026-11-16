@@ -67,6 +67,10 @@ golangci-lint run
   first two to the host's and tests replace them. `windows_service_windows.go` holds the real ones
   on `golang.org/x/sys/windows/svc`, `windows_service_other.go` the stubs for every other GOOS.
   Tests: `windows_service_test.go`, `windows_service_other_test.go`.
+- `supervised.go` — `UnderSupervisor(lookup, pid, label)`, the exact check that the process was
+  started as the service: `SYSTEMD_EXEC_PID` equals the pid, `XPC_SERVICE_NAME` equals the label, or
+  `hostIsWindowsService` reports a service (an error counts as not supervised). `underSupervisor`
+  takes that check as a parameter for the test. Tests: `supervised_test.go`.
 - `clock.go` — the `Clock` interface (`Now`, `AfterFunc`), the system clock, and `withDeadline`
   with its `clockContext`, the deadline context for any other clock. `Deadline` is the clock's
   deadline or the parent's when earlier, and `Err` is `context.DeadlineExceeded` when the clock's

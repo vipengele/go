@@ -115,6 +115,14 @@
 // elsewhere. It is the counterpart of WithSystemd, and the service side is a ScopeSystem service
 // installed by daemon/service on Windows.
 //
+// # Supervisor detection
+//
+// UnderSupervisor reports whether the process was started as a service by systemd, launchd or the
+// Windows service control manager. It matches exactly: SYSTEMD_EXEC_PID equal to the pid, the
+// launchd label XPC_SERVICE_NAME equal to the service label, or a service control manager host.
+// A process started from a terminal matches none of them. A check that cannot tell counts as not
+// supervised, which only makes a caller show a warning it could have skipped.
+//
 // # Single instance
 //
 // The instance lock lets one instance of a tool run at a time for one runtime directory. A program
