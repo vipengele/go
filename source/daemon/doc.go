@@ -100,8 +100,8 @@
 // WATCHDOG=1 ping at half the interval for as long as the run is live. The function it takes reads
 // the environment, so a test passes its own and no code reads os.Getenv. Outside systemd, and on
 // any operating system but Linux, nothing is sent. A notification that fails is logged and never
-// changes what Run returns. A Run that cannot take the WithInstanceLock lock sends neither READY=1
-// nor STOPPING=1. The unit side is service.WithSystemdNotify: a unit installed by daemon/service
+// changes what Run returns. A Run that cannot take the WithInstanceLock lock, or whose
+// WithUpdateGuard Boot fails or rolls back, sends neither READY=1 nor STOPPING=1. The unit side is service.WithSystemdNotify: a unit installed by daemon/service
 // is Type=notify only with it, and systemd gives a unit of any other type no NOTIFY_SOCKET.
 //
 // Socket activation is go.vipengele.org/daemon/systemd: Listeners returns the sockets systemd
@@ -114,6 +114,41 @@
 // started the process, reporting start-pending, running and stop-pending to it; it does nothing
 // elsewhere. It is the counterpart of WithSystemd, and the service side is a ScopeSystem service
 // installed by daemon/service on Windows.
+//
+// # Update guard
+//
+// WithUpdateGuard has Run guard a self-update of the binary with an UpdateGuard, typically a
+// *selfupdate.Machine of go.vipengele.org/daemon/selfupdate. Run calls its Boot once the instance
+// lock, if any, is held and before the first Start. A Boot that cannot judge the boot fails the
+// run closed: Run returns its error and starts no Runner. A Boot that rolls the update back makes
+// Run return an error wrapping ErrRestartRequired, with no Runner started, so the process exits
+// for the restored binary to be started; an error Boot reports beside the rollback is logged and
+// left out of that error, which RestartRequested would otherwise not report as a restart. Run
+// calls Confirm once, after the callback of WithReady, READY=1 and the running status of the
+// Windows service control manager, so the update is confirmed only by a run that started, and
+// neither notification waits for it. A Confirm that fails is logged and the run goes on.
+//
+// # Self-update
+//
+// A daemon that updates its own binary builds one go.vipengele.org/update Config with BackupGuard
+// set to a *selfupdate.Machine, and shares it. The update command, daemoncmd.NewUpdate, installs
+// a release, records it with Machine.Begin and restarts the service. A Runner that updates in
+// process calls Machine.Apply and returns its error, which wraps ErrRestartRequired, so Run ends
+// with a requested restart and the process exits 0 for its service supervisor to start the
+// installed binary. The Supervisor, built with WithUpdateGuard(machine), has Boot judge each boot
+// of the updated build, rolling it back when it is out of attempts, and Confirm the update once
+// the run is up. The same Config goes to the pre-run hooks of Config.UpdateCheckHooks, so a
+// stale-backup removal keeps the backup of a pending update. Example_selfUpdate in daemoncmd wires
+// the Config, the command, the pre-run hooks and the Supervisor, with a Runner that returns an
+// error of the shape Machine.Apply returns.
+//
+// # Supervisor detection
+//
+// UnderSupervisor reports whether the process was started as a service by systemd, launchd or the
+// Windows service control manager. It matches exactly: SYSTEMD_EXEC_PID equal to the pid, the
+// launchd label XPC_SERVICE_NAME equal to the service label, or a service control manager host.
+// A process started from a terminal matches none of them. A check that cannot tell counts as not
+// supervised, which only makes a caller show a warning it could have skipped.
 //
 // # Single instance
 //
@@ -200,8 +235,10 @@
 // IsWindowsService check is returned wrapped as "daemon: windows service:" and no Runner is
 // started; an error of the service control manager's dispatcher is wrapped the same way and joined
 // after the run's error when the run took place, and alone when it did not; a dispatcher that
-// returns without ever starting the service is an error saying so. Match with errors.Is and
-// errors.As.
+// returns without ever starting the service is an error saying so. Under WithUpdateGuard, a Boot
+// that fails is Run's only error, wrapped as "daemon: update guard boot:", and a Boot that rolls
+// the update back makes Run's only error one wrapping ErrRestartRequired; neither starts a Runner,
+// and a Confirm that fails is logged, never returned. Match with errors.Is and errors.As.
 //
 // # Restart
 //

@@ -210,6 +210,10 @@ func TestNewRefusesInvalidArguments(t *testing.T) {
 		"negative attempts": func() (*Machine, error) {
 			return New(store, newVersion, WithMaxBootAttempts(-1))
 		},
+		"nil logger": func() (*Machine, error) { return New(store, newVersion, WithLogger(nil)) },
+		"nil environment lookup": func() (*Machine, error) {
+			return New(store, newVersion, WithSupervisorCheck("label", nil))
+		},
 	} {
 		if m, err := build(); err == nil || m != nil {
 			t.Errorf("%s: New = %v, %v, want nil and an error", name, m, err)
@@ -231,6 +235,71 @@ func TestNewDefaults(t *testing.T) {
 
 	if _, ok := m.clock.(systemClock); !ok {
 		t.Errorf("clock = %T, want the system clock", m.clock)
+	}
+}
+
+func TestVersionsCompareIgnoringALeadingV(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ running, pending string }{
+		{running: "1.2.3", pending: "v1.2.3"},
+		{running: "v1.2.3", pending: "1.2.3"},
+	} {
+		t.Run(tc.running+" running "+tc.pending, func(t *testing.T) {
+			t.Parallel()
+
+			rec := pendingRecord()
+			rec.ToVersion = tc.pending
+			store := storeWith(t, rec)
+			m, ops := newMachine(t, store, tc.running)
+
+			rolledBack, err := m.Boot(t.Context())
+			if rolledBack || err != nil {
+				t.Fatalf("Boot = %v, %v, want false, nil", rolledBack, err)
+			}
+
+			if got := load(t, store); got.Status != StatusPending || got.BootAttempts != 1 {
+				t.Errorf("after Boot record = %+v, want pending with 1 boot attempt", got)
+			}
+
+			if err := m.Confirm(t.Context()); err != nil {
+				t.Fatalf("Confirm = %v, want nil", err)
+			}
+
+			if got := load(t, store); got.Status != StatusConfirmed {
+				t.Errorf("after Confirm status = %v, want confirmed", got.Status)
+			}
+
+			if removed := ops.removedPaths(); len(removed) != 1 || removed[0] != rec.Backup {
+				t.Errorf("removed %v, want [%s]", removed, rec.Backup)
+			}
+
+			if ops.restoreCount() != 0 {
+				t.Errorf("restores = %d, want 0", ops.restoreCount())
+			}
+		})
+	}
+}
+
+func TestMarkFailedComparesVersionsIgnoringALeadingV(t *testing.T) {
+	t.Parallel()
+
+	rec := pendingRecord()
+	rec.ToVersion = "v1.2.3"
+	store := storeWith(t, rec)
+	m, ops := newMachine(t, store, "1.2.3")
+
+	rolledBack, err := m.MarkFailed(t.Context(), "unhealthy")
+	if !rolledBack || err != nil {
+		t.Fatalf("MarkFailed = %v, %v, want true, nil", rolledBack, err)
+	}
+
+	if ops.restoreCount() != 1 {
+		t.Errorf("restores = %d, want 1", ops.restoreCount())
+	}
+
+	if got := load(t, store); got.Status != StatusRolledBack {
+		t.Errorf("status = %v, want rolled_back", got.Status)
 	}
 }
 

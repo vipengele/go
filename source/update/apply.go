@@ -41,24 +41,27 @@ func WithDownloadOptions(opts ...DownloadOption) ApplyOption {
 //  2. [Config.CheckWritable], so an update that cannot be installed is not fetched.
 //  3. [Config.CheckDowngrade] of sel's Tag, so a release below the highest version applied or
 //     running is refused unless [AllowDowngrade] is given, which skips this step.
-//  4. [Config.Download] of sel with the options of [WithDownloadOptions], which verifies the
+//  4. [Config.BackupGuard], when set, so an update is refused with [ErrBackupInUse] while the
+//     backup of an unsettled update is in use, and with the guard's error, wrapped, when the
+//     guard fails. Install asks the guard again before it renames anything.
+//  5. [Config.Download] of sel with the options of [WithDownloadOptions], which verifies the
 //     checksums file's signature with the trusted keys and the archive against its checksum.
-//  5. [Config.Target], the file the update replaces.
-//  6. [Config.Extract] of the archive into Target's directory, so that the rename into place
+//  6. [Config.Target], the file the update replaces.
+//  7. [Config.Extract] of the archive into Target's directory, so that the rename into place
 //     stays on one filesystem.
-//  7. [Config.CheckStaged] of the staged binary against sel, which runs it with "version --json"
+//  8. [Config.CheckStaged] of the staged binary against sel, which runs it with "version --json"
 //     and then the [Config.Preflight] hooks, so a binary that is not the selected release for the
 //     platform, or that a hook vetoes, is never installed.
-//  8. [Config.Install] of the staged binary.
-//  9. The record: under the Locker, the State is loaded, its HighestApplied raised to sel's Tag
+//  9. [Config.Install] of the staged binary, which asks the guard with ctx.
+//  10. The record: under the Locker, the State is loaded, its HighestApplied raised to sel's Tag
 //     when the Tag is newer in the order of [version.Newer], and the whole State saved back, so
 //     its other fields are kept.
 //
-// Steps 1 to 3 make no request, so a refused install never reaches the network. The downgrade
+// Steps 1 to 4 make no request, so a refused install never reaches the network. The downgrade
 // guard fails closed: a State that cannot be loaded refuses the install with the StateStore's
 // error, rather than guess at the floor. The record fails open: a failed lock, load or save is
 // ignored and Apply still returns the [*Installed], since the installed binary's Version floors
-// the next update as the watermark would. Nothing at the executable's path changes before step 8,
+// the next update as the watermark would. Nothing at the executable's path changes before step 9,
 // so a binary CheckStaged refuses leaves the installed executable as it was and HighestApplied
 // unchanged. No file Apply creates is left behind by a failure: Extract closes the archive and
 // Install removes the staged binary, whether they succeed or fail, Apply closes the archive itself
@@ -99,6 +102,10 @@ func (c Config) apply(ctx context.Context, sel Selection, s fsSteps, opts ...App
 		}
 	}
 
+	if err := r.checkBackupGuard(ctx); err != nil {
+		return nil, err
+	}
+
 	arc, err := r.Download(ctx, sel, o.download...)
 	if err != nil {
 		return nil, err
@@ -122,7 +129,7 @@ func (c Config) apply(ctx context.Context, sel Selection, s fsSteps, opts ...App
 		return nil, err
 	}
 
-	installed, err := r.install(staged, s)
+	installed, err := r.installWithin(ctx, staged, s)
 	if err != nil {
 		return nil, err
 	}
