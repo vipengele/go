@@ -29,9 +29,6 @@ Explored 2026-11-16 planning #82. No note covered it.
 - Manager has no Restart method (Prepare/Install/Uninstall/Start/Stop/Status). #80 (service
   commands in daemoncmd, ADR-0003) does not gate driving Manager directly; daemoncmd has only status.
 - Precedent for a public test kit: daemon/daemontest (ADR-0028), depguard restricts importers to
-  daemoncmd (AGENTS.md:335-337). ci-test.yml has no podman/build-tag/integration job; the only
-  go:build tags in daemon are !windows / windows. No prior integration harness or ADR (grep
-  podman|e2e|integration|harness over docs, agentic, .github, .lydite).
-- ci-test.yml runs plain `go test -race -shuffle=on ./...` on ubuntu-latest and windows-latest; a
-  build tag keeps a test out of both and out of lydite (components.yml args `-race ./...`).
-  Podman presence on ubuntu-latest and systemd-in-podman there: UNVERIFIED.
+  daemoncmd (source/daemon/AGENTS.md). The harness now exists as daemon/servicetest (ADR-0035) and
+  ci-test.yml carries its `test-supervisor` job; see the servicetest candidates of 2026-11-16 for
+  what the hosted runner was verified to do.
