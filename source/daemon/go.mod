@@ -6,7 +6,7 @@ require (
 	go.vipengele.org/cli/spec v0.1.0
 	go.vipengele.org/cli/state v0.1.0
 	go.vipengele.org/filelock v0.1.0
-	go.vipengele.org/update v0.0.0
+	go.vipengele.org/update v0.1.0
 	golang.org/x/sys v0.50.0
 )
 
@@ -17,13 +17,3 @@ require (
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 )
-
-replace go.vipengele.org/filelock => ../filelock
-
-replace go.vipengele.org/cli/spec => ../cli/spec
-
-replace go.vipengele.org/commons => ../commons
-
-replace go.vipengele.org/cli/state => ../cli/state
-
-replace go.vipengele.org/update => ../update
