@@ -17,6 +17,11 @@ under `source/`; the repository's own tooling that is not a Go project lives und
   differs from the repo default, `.golangci.yml`. A project may sit at any depth: a directory under
   `source/` is either a project, holding a `go.mod`, or a grouping directory (`source/cli`), holding
   projects and no `go.mod`; a project directory contains no other `go.mod` (ADR-0004).
+- `source/examples` — a grouping directory holding examples: projects that demonstrate released
+  projects. An example is never tagged and has no release notes; it requires its siblings at their
+  tags and carries no `replace`. `docs/guide/consumer.md` is checked by the tests of
+  `source/examples/greet` (`TestGuide`, `TestRelease`) and by `.github/workflows/guide-snippets.yml`,
+  which is path-filtered and not a `ci-*` file.
 - The module path is `go.vipengele.org/<path>`, not the repository path: `source/cli/core` is
   `go.vipengele.org/cli/core`, and its packages are `go.vipengele.org/cli/core/<package>`. The tag
   is the repository directory, `source/` included: `source/cli/core/vX.Y.Z`
