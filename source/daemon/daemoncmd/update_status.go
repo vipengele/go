@@ -47,7 +47,8 @@ var ErrUpdateNotOK = errors.New("self-update is not ok")
 // The command prints a table of field and value or, when [spec.Output.Format] is
 // [spec.FormatJSON], one object with [spec.WriteJSON] at schema 1: source, which is daemon, store
 // or none, the keys of [daemon.UpdateStatus], and daemon_error, why the daemon was not used, when
-// a failure of the daemon made the command ask fallback. Such a failure is also noted on Stderr.
+// a failure of the daemon made the command ask fallback. Such a failure is also noted on Stderr as
+// a warning, which --quiet drops.
 //
 // It returns nil for an update that is idle, pending or confirmed, and for a reachable daemon that
 // reports no update when there is no fallback. An update that is rolled_back or unknown, or that
@@ -77,11 +78,7 @@ func NewUpdateStatus(resolve Resolver, fallback daemon.UpdateReporter, opts ...S
 				return fmt.Errorf("update-status: %w", err)
 			}
 			if report.DaemonError != "" {
-				if _, err := fmt.Fprintf(inv.Env.Stderr,
-					"update-status: daemon not used (%s); read the update status from the store\n",
-					report.DaemonError); err != nil {
-					return fmt.Errorf("update-status: write: %w", err)
-				}
+				inv.Warning("daemon not used (%s); read the update status from the store", report.DaemonError)
 			}
 			if inv.Output.Format() == spec.FormatJSON {
 				err = spec.WriteJSON(inv.Env.Stdout, updateStatusSchema, report)
@@ -168,7 +165,7 @@ type updateReport struct {
 // omitted when empty.
 func (r updateReport) MarshalJSON() ([]byte, error) {
 	data, err := json.Marshal(nestedReport(r))
-	return liftUpdate(data), err
+	return liftUpdate(data, r.DaemonError != ""), err
 }
 
 // nestedReport is an updateReport, field for field, that encodes its update as an object of its
@@ -180,24 +177,26 @@ type nestedReport struct {
 }
 
 // liftUpdate replaces the "update" member of data, a compact nestedReport, with the keys of its
-// object, and returns data unchanged when it has none. Every quote inside a JSON string is
-// escaped, so the first `,"update":{` is the key and the last `,"daemon_error":` the key after
-// the update's object.
-func liftUpdate(data []byte) []byte {
-	const updateKey = `,"update":{`
-	start := bytes.Index(data, []byte(updateKey))
-	if start < 0 {
+// object, and returns data unchanged when it has none. hasDaemonError is whether data carries a
+// daemon_error member. Every quote inside a JSON string is escaped, so the first `,"update":{` is
+// the key and the last `,"daemon_error":` the key after the update's object.
+func liftUpdate(data []byte, hasDaemonError bool) []byte {
+	head, rest, found := bytes.Cut(data, []byte(`,"update":{`))
+	if !found {
 		return data
 	}
-	// end is the member after the update's object: daemon_error, or the report's closing brace.
-	end := len(data) - 1
-	if i := bytes.LastIndex(data, []byte(`,"daemon_error":`)); i >= 0 {
-		end = i
+	// rest is the update's members, the closing brace of its object, then the member after it:
+	// daemon_error, or the report's closing brace.
+	body, tail := rest[:len(rest)-2], rest[len(rest)-1:]
+	if hasDaemonError {
+		end := bytes.LastIndex(rest, []byte(`,"daemon_error":`))
+		body, tail = rest[:end-1], rest[end:]
 	}
 	out := make([]byte, 0, len(data))
-	out = append(out, data[:start+1]...)
-	out = append(out, data[start+len(updateKey):end-1]...)
-	return append(out, data[end:]...)
+	out = append(out, head...)
+	out = append(out, ',')
+	out = append(out, body...)
+	return append(out, tail...)
 }
 
 // renderUpdate writes r as a two-column table of field and value: the source and the update's

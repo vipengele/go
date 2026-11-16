@@ -480,20 +480,21 @@ func TestUpdateStatusUsesTheGivenClient(t *testing.T) {
 	}
 }
 
-func TestUpdateStatusNoteWriteErrorIsReturned(t *testing.T) {
-	fallback := &store{status: daemon.UpdateStatus{State: daemon.UpdateConfirmed}}
-	cmd := daemoncmd.NewUpdateStatus(func(context.Context, *spec.Invocation) (string, error) {
-		return "", errors.New("no listen address configured")
-	}, fallback.report)
-	errWrite := errors.New("broken pipe")
-	var stdout strings.Builder
-	inv := spec.NewInvocation(&spec.Env{Stdout: &stdout, Stderr: &limitWriter{err: errWrite}}, nil, nil)
-	inv.Output = spec.NewOutput(spec.OutputOptions{NoColorStdout: true, NoColorStderr: true})
-	err := cmd.Run(t.Context(), inv)
-	if !errors.Is(err, errWrite) {
-		t.Errorf("err = %v, want it to wrap the write error", err)
-	}
-	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want nothing printed after the note failed", stdout.String())
+func TestUpdateStatusQuietDropsTheNoteButKeepsTheReport(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		fallback := &store{status: daemon.UpdateStatus{State: daemon.UpdateConfirmed}}
+		cmd := daemoncmd.NewUpdateStatus(func(context.Context, *spec.Invocation) (string, error) {
+			return "", errors.New("no listen address configured")
+		}, fallback.report)
+		stdout, stderr, err := runOutput(t, cmd, spec.OutputOptions{Quiet: true, JSON: asJSON}, nil)
+		if err != nil {
+			t.Fatalf("json=%v: Run: %v", asJSON, err)
+		}
+		if stderr != "" {
+			t.Errorf("json=%v: stderr = %q, want empty under quiet output", asJSON, stderr)
+		}
+		if !strings.Contains(stdout, "confirmed") || !strings.Contains(stdout, "store") {
+			t.Errorf("json=%v: stdout does not carry the report:\n%s", asJSON, stdout)
+		}
 	}
 }

@@ -67,7 +67,7 @@
 //
 // A reachable daemon that reports no update, with no fallback, prints "self-update is not
 // configured". When a failure of the daemon makes the command read the fallback, it notes the
-// failure on Stderr, so Stdout carries the status alone.
+// failure on Stderr as a warning, which --quiet drops, so Stdout carries the status alone.
 //
 // # update-status JSON
 //
@@ -75,7 +75,7 @@
 // "daemon", "store" for the fallback or "none" for a daemon that reports no update with no
 // fallback, then the keys of [daemon.UpdateStatus], none for "none", then "daemon_error", the
 // failure of the daemon that made the command read the fallback. daemon_error is absent when the
-// daemon answered without an update. The Stderr note is written in this mode too.
+// daemon answered without an update. The Stderr warning is written in this mode too, unless quiet.
 //
 // # update-status exit
 //
