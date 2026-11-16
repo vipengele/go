@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"go.vipengele.org/cli/spec/version"
 	"go.vipengele.org/daemon"
+	"go.vipengele.org/update"
 )
 
 // The messages a runner logs.
@@ -113,6 +115,66 @@ func newRunner(
 	}
 
 	return r, nil
+}
+
+// NewRunner returns the Runner that keeps the binary cfg describes up to date on the schedule
+// settings describes, recording each update it installs in machine. settingsOf maps the
+// configuration a reload delivers to the Settings the Runner takes from it. NewRunner refuses a nil
+// machine or settingsOf, a cfg that fails Validate, Settings that fail Validate, and the error of any
+// RunnerOption that rejects its argument.
+//
+// The first check waits for the jitter of the path cfg's Target resolves, and each check after it
+// for the Interval. A check asks cfg's Source for the latest release of cfg's Channel, without the
+// throttle of update's own background check, whose state the Runner neither reads nor writes. What a
+// check does is described on Runner.
+//
+// cfg's BackupGuard must be machine: a nil BackupGuard is set to machine on the Runner's own copy,
+// and any other is refused. Every other update.Config the consumer uses for the same binary, such
+// as the one behind its update command and its update check hooks, must carry machine as its
+// BackupGuard too; without it, the check hook on Windows removes the backup of an update awaiting
+// confirmation, and a rollback finds nothing to restore (ADR-0033).
+func NewRunner[T any](
+	cfg update.Config,
+	machine *Machine,
+	settings Settings,
+	settingsOf func(T) Settings,
+	opts ...RunnerOption,
+) (*Runner[T], error) {
+	if machine == nil {
+		return nil, errors.New("selfupdate: nil machine")
+	}
+	if settingsOf == nil {
+		return nil, errors.New("selfupdate: nil settings function")
+	}
+	switch guard := cfg.BackupGuard.(type) {
+	case nil:
+		cfg.BackupGuard = machine
+	case *Machine:
+		if guard != machine {
+			return nil, errors.New("selfupdate: update.Config.BackupGuard is another Machine")
+		}
+	default:
+		return nil, fmt.Errorf("selfupdate: update.Config.BackupGuard is a %T, not the Machine", guard)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("selfupdate: %w", err)
+	}
+
+	c := &cycle{cfg: cfg, machine: machine, apply: applyWithHook}
+	sched, err := newRunner(c.run, cfg.Target, settings, opts...)
+	if err != nil {
+		return nil, err
+	}
+	c.sched = sched
+
+	return &Runner[T]{
+		sched:      sched,
+		check:      c,
+		settingsOf: settingsOf,
+		release:    version.IsRelease(cfg.Version),
+		version:    cfg.Version,
+		idleDone:   make(chan struct{}),
+	}, nil
 }
 
 // Name returns the runner's name, "selfupdate" unless WithName set another.
