@@ -87,7 +87,7 @@ func newExecRunner(lookup func(string) (string, bool)) execRunner {
 
 func (e execRunner) run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	full := append(slices.Clone(e.argv[1:]), args...)
-	cmd := exec.CommandContext(ctx, e.argv[0], full...)
+	cmd := exec.CommandContext(ctx, e.argv[0], full...) // #nosec G204 -- the program and leading arguments are the podman command line the person running the tests chooses through SERVICETEST_PODMAN (default podman); the rest are the harness's own podman verbs and flags and container IDs and paths it generated; no shell is involved
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

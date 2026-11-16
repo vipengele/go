@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -141,5 +144,53 @@ func TestRunPassesTheRequestToTheConstructor(t *testing.T) {
 	}
 	if nOpts != 2 {
 		t.Fatalf("options = %d, want 2 (container, notify)", nOpts)
+	}
+}
+
+// failingWriter fails every write.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
+
+func TestRunReportsAFailedWrite(t *testing.T) {
+	f := &fakeManager{}
+	code := run(context.Background(), strings.NewReader(`{"Op":"install"}`), failingWriter{}, provide(f, nil))
+	if code != exitFailed {
+		t.Fatalf("code = %d, want %d", code, exitFailed)
+	}
+}
+
+const asDriverEnv = "SERVICETEST_DRIVER_AS_MAIN"
+
+// TestMain runs main itself when the test binary is re-executed as the driver.
+func TestMain(m *testing.M) {
+	if os.Getenv(asDriverEnv) == "1" {
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func TestMainExitsWithTheRunCode(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-test.run=^$"}
+	if dir := flag.Lookup("test.gocoverdir"); dir != nil && dir.Value.String() != "" {
+		args = append(args, "-test.gocoverdir="+dir.Value.String())
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), asDriverEnv+"=1")
+	cmd.Stdin = strings.NewReader("{not json")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err = cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != exitBadArgs {
+		t.Fatalf("err = %v, want exit code %d", err, exitBadArgs)
+	}
+	if !strings.Contains(out.String(), `"error":"decode request:`) {
+		t.Fatalf("out = %q", out.String())
 	}
 }
