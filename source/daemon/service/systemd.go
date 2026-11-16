@@ -145,6 +145,12 @@ func (s *systemd) requirePrivileges(method string) error {
 		ErrPrivilegesRequired, method, s.unitName())
 }
 
+// CheckPrivileges fails with an error wrapping ErrPrivilegesRequired when the
+// unit is a system unit and the process is not root.
+func (s *systemd) CheckPrivileges(context.Context) error {
+	return s.requirePrivileges("manage")
+}
+
 // checkAccount fails when the system unit runs as an account that does not
 // exist, as the free checkAccount does.
 func (s *systemd) checkAccount(ctx context.Context) error {
@@ -307,6 +313,11 @@ func (s *systemd) Start(ctx context.Context) error {
 // Stop stops the installed unit.
 func (s *systemd) Stop(ctx context.Context) error {
 	return s.control(ctx, "Stop", "stop")
+}
+
+// Restart restarts the installed unit, starting it when it is stopped.
+func (s *systemd) Restart(ctx context.Context) error {
+	return s.control(ctx, "Restart", "restart")
 }
 
 // control runs `systemctl <verb> <unit>` once privileges are checked and the
