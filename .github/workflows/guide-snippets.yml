@@ -6,9 +6,12 @@
 # commit SHA release.yml pins for release-tool.yml is the commit of the tag its
 # comment names.
 #
-# A change to the guide or an example selects no project in ci-build or
-# ci-test, so this workflow runs on its own paths. It is not a ci-* file: a
-# change to one of those selects every project.
+# ci-build and ci-test select examples/greet like any project, when it or a
+# sibling it requires changes, and run its whole suite. A change to
+# docs/guide/** alone selects no project, so this workflow runs on its own
+# paths as well, and it is the one place the pinned SHA is checked against the
+# network. It is not a ci-* file: a change to one of those selects every
+# project.
 name: guide-snippets
 
 on:
