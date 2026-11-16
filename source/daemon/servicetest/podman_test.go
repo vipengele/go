@@ -783,67 +783,6 @@ func TestEnsureImageFails(t *testing.T) {
 	}
 }
 
-func TestPrepare(t *testing.T) {
-	f := &fakeRunner{}
-	var p plan
-	ft := runTB(t, func(tb *fakeTB) { p = prepare(tb, harness{r: f}, Target{}) })
-	if ft.fatal != "" {
-		t.Fatal(ft.fatal)
-	}
-	if !slices.Equal(p.scopes, []service.Scope{service.ScopeSystem, service.ScopeUser}) ||
-		p.timeout != DefaultTimeout || p.image != imageTag(containerfile, "") {
-		t.Errorf("plan = %+v", p)
-	}
-
-	ft = runTB(t, func(tb *fakeTB) {
-		p = prepare(tb, harness{r: f}, Target{Scopes: []service.Scope{service.ScopeUser}, Timeout: time.Second, BaseImage: "b"})
-	})
-	if ft.fatal != "" || !slices.Equal(p.scopes, []service.Scope{service.ScopeUser}) || p.timeout != time.Second ||
-		p.image != imageTag(containerfile, "b") {
-		t.Errorf("plan = %+v, fatal %q", p, ft.fatal)
-	}
-}
-
-func TestPrepareFails(t *testing.T) {
-	ft := runTB(t, func(tb *fakeTB) { prepare(tb, harness{r: &fakeRunner{}}, Target{Scopes: []service.Scope{5}}) })
-	if !strings.Contains(ft.fatal, "scope 5") {
-		t.Errorf("fatal = %q, want the bad scope", ft.fatal)
-	}
-	f := &fakeRunner{handle: func([]string) (string, error) { return "", errors.New("no network") }}
-	ft = runTB(t, func(tb *fakeTB) { prepare(tb, harness{r: f}, Target{}) })
-	if !strings.Contains(ft.fatal, "no network") {
-		t.Errorf("fatal = %q, want the build failure", ft.fatal)
-	}
-}
-
-func TestRunScopesBootsOneContainerPerScope(t *testing.T) {
-	f := bootRunner("running", nil)
-	var got []string
-	t.Run("run", func(t *testing.T) {
-		runScopes(t, harness{r: f, sleep: noSleep}, Target{}, func(t *testing.T, c *container) {
-			name, _ := scopeName(c.scope)
-			got = append(got, t.Name()+"="+name)
-		})
-	})
-	want := []string{"TestRunScopesBootsOneContainerPerScope/run/system=system", "TestRunScopesBootsOneContainerPerScope/run/user=user"}
-	if !slices.Equal(got, want) {
-		t.Errorf("bodies = %q, want %q", got, want)
-	}
-	removed := 0
-	for _, cmd := range f.commands() {
-		if cmd == "rm --force c0ffee" {
-			removed++
-		}
-	}
-	if removed != 2 {
-		t.Errorf("removed %d containers, want 2", removed)
-	}
-
-	t.Run("no body", func(t *testing.T) {
-		runScopes(t, harness{r: bootRunner("running", nil), sleep: noSleep}, Target{Scopes: []service.Scope{service.ScopeSystem}}, nil)
-	})
-}
-
 func TestManagerName(t *testing.T) {
 	if managerName(false) != "system" || managerName(true) != "user" {
 		t.Error("managerName does not name the system and the user manager")

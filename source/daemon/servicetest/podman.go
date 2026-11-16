@@ -102,10 +102,13 @@ func (e execRunner) run(ctx context.Context, stdin io.Reader, args ...string) ([
 	return stdout.Bytes(), nil
 }
 
-// harness drives podman through r and waits through sleep.
+// harness drives podman through r, waits through sleep and builds the
+// driver through goBuild, which builds it into the path it is given and
+// returns the go command's output.
 type harness struct {
-	r     runner
-	sleep func(context.Context, time.Duration) error
+	r       runner
+	sleep   func(context.Context, time.Duration) error
+	goBuild func(ctx context.Context, out string) ([]byte, error)
 }
 
 // newHarness returns the harness for the podman command line lookup reports,
@@ -113,7 +116,7 @@ type harness struct {
 // containers with SERVICETEST=1 and cannot get them is a failure, not a skip.
 func newHarness(tb testing.TB, lookup func(string) (string, bool)) harness {
 	tb.Helper()
-	h := harness{r: newExecRunner(lookup), sleep: sleepContext}
+	h := harness{r: newExecRunner(lookup), sleep: sleepContext, goBuild: goBuildDriver}
 	if err := h.checkPodman(tb.Context()); err != nil {
 		tb.Fatal(err)
 	}
