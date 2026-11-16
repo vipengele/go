@@ -9,10 +9,17 @@
 //
 // By default the command writes two tables separated by a blank line: the overall status, with
 // whether the daemon is live and ready and its uptime, then one row per check with its name, its
-// kinds, pass or fail, how long it ran and, for a failing check, its error:
+// kinds, pass or fail, how long it ran and, for a failing check, its error. A snapshot that
+// carries an update adds, between the two, a table of field and value with an "update" row for
+// its state and, when the update has an error, an "update error" row; a snapshot without an update
+// has no such table:
 //
 //	STATUS     LIVE  READY  UPTIME
 //	⚠ unready  true  false  1h2m3s
+//
+//	FIELD         VALUE
+//	update        pending
+//	update error  first boot exited 1
 //
 //	CHECK     KINDS               STATUS  DURATION  ERROR
 //	database  readiness           ✗ fail        2s  daemon: health check timed out after 2s
@@ -22,7 +29,8 @@
 //
 // When [spec.Output.Format] is [spec.FormatJSON], as it is under the App's --json or --output
 // json, the command writes the snapshot with [spec.WriteJSON] at schema 1, the same bytes the
-// daemon serves at "/status". The command declares no --json flag of its own.
+// daemon serves at "/status", including its "update" object when the daemon reports one. The
+// command declares no --json flag of its own.
 //
 // # Exit
 //
@@ -30,7 +38,8 @@
 // all the same, and the command returns [ErrNotOK] wrapped in [spec.Reported], so the App adds
 // no message of its own and exits 1. A daemon the command cannot reach, an answer other than
 // 200 and a body that is not the schema 1 envelope are ordinary errors: the command prints
-// nothing to Stdout and the App reports the error on Stderr.
+// nothing to Stdout and the App reports the error on Stderr. The update state never changes the
+// exit code.
 //
 // # Service commands
 //

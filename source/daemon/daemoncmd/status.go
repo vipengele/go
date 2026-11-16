@@ -178,8 +178,8 @@ func decode(body []byte) (daemon.Snapshot, error) {
 	return snap, nil
 }
 
-// render writes snap as two tables separated by a blank line: the overall status, then one row
-// per check.
+// render writes snap as tables separated by blank lines: the overall status, then, when the
+// snapshot carries an update, its state and error as field and value rows, then one row per check.
 func render(w io.Writer, st spec.Styler, snap daemon.Snapshot) error {
 	overall := table.New(
 		table.Column{Key: "status", Header: "STATUS", Style: styleState},
@@ -204,13 +204,31 @@ func render(w io.Writer, st spec.Styler, snap daemon.Snapshot) error {
 		checks.Add(c.Name, strings.Join(kinds, ","), c.Status, c.Duration, c.Error)
 	}
 
-	if err := overall.Render(w, st); err != nil {
-		return err
+	tables := []*table.Table{overall}
+	if snap.Update != nil {
+		update := table.New(
+			table.Column{Key: "field", Header: "FIELD"},
+			table.Column{Key: "value", Header: "VALUE"},
+		)
+		update.Add("update", snap.Update.State)
+		if snap.Update.Error != "" {
+			update.Add("update error", snap.Update.Error)
+		}
+		tables = append(tables, update)
 	}
-	if _, err := io.WriteString(w, "\n"); err != nil {
-		return fmt.Errorf("status: write: %w", err)
+	tables = append(tables, checks)
+
+	for i, t := range tables {
+		if i > 0 {
+			if _, err := io.WriteString(w, "\n"); err != nil {
+				return fmt.Errorf("status: write: %w", err)
+			}
+		}
+		if err := t.Render(w, st); err != nil {
+			return err
+		}
 	}
-	return checks.Render(w, st)
+	return nil
 }
 
 // styleState marks an overall status: ok as a success, unready as a warning, down as an error.
