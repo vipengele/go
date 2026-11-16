@@ -162,7 +162,8 @@ func (r *CheckResult) UnmarshalJSON(data []byte) error {
 // failed, else StateOK. Live is true when no liveness check failed. Ready is true when no check
 // failed, of either kind, so Ready holds exactly when Status is StateOK: a process that is not
 // live is not ready either. StartedAt is when the Health was created and Uptime the time since.
-// Checks is sorted by name.
+// Checks is sorted by name. Update is the self-update state from the Health's UpdateReporter, nil
+// when it has none or the snapshot was taken for a probe; it never changes Status, Live or Ready.
 //
 // A Snapshot carries no schema field: the envelope that versions it is added where it is written.
 type Snapshot struct {
@@ -172,6 +173,7 @@ type Snapshot struct {
 	StartedAt time.Time
 	Uptime    time.Duration
 	Checks    []CheckResult
+	Update    *UpdateStatus
 }
 
 // snapshotJSON is the wire form of a Snapshot.
@@ -182,11 +184,12 @@ type snapshotJSON struct {
 	StartedAt     string        `json:"started_at"`
 	UptimeSeconds int64         `json:"uptime_seconds"`
 	Checks        []CheckResult `json:"checks"`
+	Update        *UpdateStatus `json:"update,omitempty"`
 }
 
-// MarshalJSON encodes s with the keys status, live, ready, started_at, uptime_seconds and checks.
-// started_at is RFC 3339 in UTC to the second; uptime_seconds is the uptime in whole seconds,
-// truncated; checks is an array, never null.
+// MarshalJSON encodes s with the keys status, live, ready, started_at, uptime_seconds, checks and
+// update. started_at is RFC 3339 in UTC to the second; uptime_seconds is the uptime in whole
+// seconds, truncated; checks is an array, never null; update is omitted when Update is nil.
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	checks := s.Checks
 	if checks == nil {
@@ -199,6 +202,7 @@ func (s Snapshot) MarshalJSON() ([]byte, error) {
 		StartedAt:     s.StartedAt.UTC().Format(time.RFC3339),
 		UptimeSeconds: int64(s.Uptime / time.Second),
 		Checks:        checks,
+		Update:        s.Update,
 	})
 }
 
@@ -221,9 +225,162 @@ func (s *Snapshot) UnmarshalJSON(data []byte) error {
 		StartedAt: startedAt,
 		Uptime:    time.Duration(w.UptimeSeconds) * time.Second,
 		Checks:    w.Checks,
+		Update:    w.Update,
 	}
 	return nil
 }
+
+// UpdateState is where a daemon's self-update stands.
+type UpdateState string
+
+const (
+	// UpdateIdle is a daemon with no update in progress.
+	UpdateIdle UpdateState = "idle"
+
+	// UpdatePending is an update installed and booted that has not confirmed itself yet.
+	UpdatePending UpdateState = "pending"
+
+	// UpdateConfirmed is an update that confirmed itself.
+	UpdateConfirmed UpdateState = "confirmed"
+
+	// UpdateRolledBack is an update that failed to confirm and was replaced by the binary it
+	// updated.
+	UpdateRolledBack UpdateState = "rolled_back"
+
+	// UpdateUnknown is an update state that could not be read: the reporter failed, panicked or
+	// outlasted its timeout, or the state it gave is none of the others.
+	UpdateUnknown UpdateState = "unknown"
+)
+
+// valid reports whether s is one of the five UpdateState constants.
+func (s UpdateState) valid() bool {
+	switch s {
+	case UpdateIdle, UpdatePending, UpdateConfirmed, UpdateRolledBack, UpdateUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// known returns s when it is one of the five UpdateState constants and UpdateUnknown otherwise.
+// An empty state is therefore unknown, never idle: a daemon that cannot say where its update
+// stands must not read as one with no update in progress.
+func (s UpdateState) known() UpdateState {
+	if s.valid() {
+		return s
+	}
+	return UpdateUnknown
+}
+
+// UpdateStatus is the self-update state of a daemon, as a Snapshot carries it. FromVersion and
+// ToVersion are the versions an update moves between; BootAttempts counts the boots of the new
+// binary that have not confirmed it; Reason says why the update is in its state; StartedAt is when
+// the update began and UpdatedAt when its state last changed; Channel and Watermark are the
+// release channel and the newest release seen on it; Error is what went wrong reading the state,
+// or the update itself. Every field but State is optional.
+type UpdateStatus struct {
+	State        UpdateState
+	FromVersion  string
+	ToVersion    string
+	BootAttempts int
+	Reason       string
+	StartedAt    time.Time
+	UpdatedAt    time.Time
+	Channel      string
+	Watermark    string
+	Error        string
+}
+
+// updateStatusJSON is the wire form of an UpdateStatus.
+type updateStatusJSON struct {
+	Status       UpdateState `json:"status"`
+	FromVersion  string      `json:"from_version,omitzero"`
+	ToVersion    string      `json:"to_version,omitzero"`
+	BootAttempts int         `json:"boot_attempts,omitzero"`
+	Reason       string      `json:"reason,omitzero"`
+	StartedAt    string      `json:"started_at,omitzero"`
+	UpdatedAt    string      `json:"updated_at,omitzero"`
+	Channel      string      `json:"channel,omitzero"`
+	Watermark    string      `json:"watermark,omitzero"`
+	Error        string      `json:"error,omitzero"`
+}
+
+// MarshalJSON encodes u with the key status, always present, then from_version, to_version,
+// boot_attempts, reason, started_at, updated_at, channel, watermark and error, each omitted when
+// zero. status is "unknown" for a State that is none of the UpdateState constants, the empty
+// State included. started_at and updated_at are RFC 3339 in UTC to the second.
+func (u UpdateStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(updateStatusJSON{
+		Status:       u.State.known(),
+		FromVersion:  u.FromVersion,
+		ToVersion:    u.ToVersion,
+		BootAttempts: u.BootAttempts,
+		Reason:       u.Reason,
+		StartedAt:    formatUpdateTime(u.StartedAt),
+		UpdatedAt:    formatUpdateTime(u.UpdatedAt),
+		Channel:      u.Channel,
+		Watermark:    u.Watermark,
+		Error:        u.Error,
+	})
+}
+
+// UnmarshalJSON decodes the form MarshalJSON writes. A status that is missing, empty or none of
+// the UpdateState constants decodes as UpdateUnknown. StartedAt and UpdatedAt come back at second
+// resolution, in UTC, and zero when absent.
+func (u *UpdateStatus) UnmarshalJSON(data []byte) error {
+	var w updateStatusJSON
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	startedAt, err := parseUpdateTime(w.StartedAt)
+	if err != nil {
+		return fmt.Errorf("daemon: update started_at: %w", err)
+	}
+	updatedAt, err := parseUpdateTime(w.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("daemon: update updated_at: %w", err)
+	}
+	*u = UpdateStatus{
+		State:        w.Status.known(),
+		FromVersion:  w.FromVersion,
+		ToVersion:    w.ToVersion,
+		BootAttempts: w.BootAttempts,
+		Reason:       w.Reason,
+		StartedAt:    startedAt,
+		UpdatedAt:    updatedAt,
+		Channel:      w.Channel,
+		Watermark:    w.Watermark,
+		Error:        w.Error,
+	}
+	return nil
+}
+
+// formatUpdateTime is t in RFC 3339 in UTC to the second, or empty when t is zero.
+func formatUpdateTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// parseUpdateTime parses the form formatUpdateTime writes, the empty string as the zero time.
+func parseUpdateTime(text string) (time.Time, error) {
+	if text == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, text)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t.UTC(), nil
+}
+
+// UpdateReporter reports a daemon's self-update state for a Snapshot. It is bounded like a Check:
+// the context is cancelled when the check timeout expires, a reporter that panics or outlasts the
+// timeout makes the snapshot's Update UpdateUnknown with the Error saying why, and while such a
+// call is still running the reporter is not called again: every Snapshot in the meantime reports
+// UpdateUnknown without calling it.
+type UpdateReporter func(ctx context.Context) UpdateStatus
 
 // HealthOption configures a Health in NewHealth.
 type HealthOption func(*Health)
@@ -250,6 +407,15 @@ func WithHealthClock(clock Clock) HealthOption {
 	}
 }
 
+// WithUpdateReporter sets the reporter whose UpdateStatus a Snapshot carries as Update. It is
+// called for Health.Snapshot and the /status route, never for /livez or /readyz, so a slow
+// reporter cannot delay a probe. A nil reporter leaves Update nil, as without this option.
+func WithUpdateReporter(reporter UpdateReporter) HealthOption {
+	return func(h *Health) {
+		h.reporter = reporter
+	}
+}
+
 // Health is a registry of health checks that runs them all when asked for a Snapshot. Build one
 // with NewHealth. Add and Snapshot are safe to call from several goroutines at once.
 type Health struct {
@@ -258,6 +424,11 @@ type Health struct {
 
 	// clock is the clock behind StartedAt, Uptime, each check's Duration and its timeout.
 	clock Clock
+
+	// reporter is the source of a Snapshot's Update, nil when it has none. reporterState holds its
+	// abandoned calls as a check's state holds its abandoned runs.
+	reporter      UpdateReporter
+	reporterState *checkState
 
 	// mu guards checks.
 	mu     sync.Mutex
@@ -351,9 +522,10 @@ func (s *checkState) finish(r *checkRun) {
 // NewHealth returns an empty Health whose uptime counts from now on its clock.
 func NewHealth(opts ...HealthOption) *Health {
 	h := &Health{
-		timeout: defaultCheckTimeout,
-		clock:   realClock{},
-		checks:  make(map[string]registered),
+		timeout:       defaultCheckTimeout,
+		clock:         realClock{},
+		checks:        make(map[string]registered),
+		reporterState: newCheckState(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -413,14 +585,23 @@ func (h *Health) addAll(checks []namedCheck) error {
 // or is still running when its timeout expires or ctx is done fails; one that outlasts its timeout
 // fails with ErrCheckTimeout, and Snapshot returns without waiting for it to finish. Until that
 // run returns, the check is not run again: a Snapshot reports it as failing with ErrCheckTimeout
-// and a Duration of zero. Snapshot never fails: every problem is the result of a check.
+// and a Duration of zero. With an UpdateReporter, Snapshot calls it alongside the checks, under the
+// same timeout, and carries its result as Update. Snapshot never fails: every problem is the
+// result of a check, or an Update of UpdateUnknown.
 func (h *Health) Snapshot(ctx context.Context) Snapshot {
-	return h.snapshot(ctx, 0)
+	return h.collect(ctx, 0, true)
 }
 
-// snapshot is Snapshot over the checks of kind only, or of every kind when only is zero. A check
-// of both kinds is of each.
+// snapshot is the Snapshot a probe answers from: over the checks of kind only, or of every kind
+// when only is zero, a check of both kinds being of each. It never calls the UpdateReporter, so
+// its Update is nil.
 func (h *Health) snapshot(ctx context.Context, only Kind) Snapshot {
+	return h.collect(ctx, only, false)
+}
+
+// collect runs the checks of kind only, or of every kind when only is zero, and, when update is
+// true, the UpdateReporter alongside them, and adds up the Snapshot.
+func (h *Health) collect(ctx context.Context, only Kind, update bool) Snapshot {
 	h.mu.Lock()
 	checks := make([]namedCheck, 0, len(h.checks))
 	for name, r := range h.checks {
@@ -433,9 +614,13 @@ func (h *Health) snapshot(ctx context.Context, only Kind) Snapshot {
 	slices.SortFunc(checks, func(a, b namedCheck) int { return cmp.Compare(a.name, b.name) })
 
 	results := make([]CheckResult, len(checks))
+	var updateStatus *UpdateStatus
 	var wg sync.WaitGroup
 	for i, c := range checks {
 		wg.Go(func() { results[i] = h.run(ctx, c) })
+	}
+	if update && h.reporter != nil {
+		wg.Go(func() { updateStatus = h.report(ctx) })
 	}
 	wg.Wait()
 
@@ -446,6 +631,7 @@ func (h *Health) snapshot(ctx context.Context, only Kind) Snapshot {
 		StartedAt: h.startedAt,
 		Uptime:    h.clock.Now().Sub(h.startedAt),
 		Checks:    results,
+		Update:    updateStatus,
 	}
 	for _, r := range results {
 		if r.Status != CheckFail {
@@ -465,55 +651,85 @@ func (h *Health) snapshot(ctx context.Context, only Kind) Snapshot {
 	return snap
 }
 
-// run runs one check under its timeout and returns its result. The check runs in a goroutine of
-// its own, which run abandons when the timeout expires or ctx is done first. A check with an
-// abandoned run that has not returned fails at once, without being called.
+// run runs one check under its timeout and returns its result. A check with an abandoned run that
+// has not returned fails at once, without being called.
 func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 	result := CheckResult{Name: c.name, Kinds: slices.Clone(c.kinds), Status: CheckPass}
-	if c.state.stuck() {
-		result.Status = CheckFail
-		result.Error = fmt.Errorf("%w: an earlier run is still running", ErrCheckTimeout).Error()
-		return result
-	}
-
-	// The start is read before the deadline is armed, so that the clock cannot reach the deadline
-	// before the start is taken and Duration never exceeds the timeout on a clock that only moves
-	// when advanced.
-	start := h.clock.Now()
-	checkCtx, cancel := withDeadline(h.clock, ctx, h.timeout)
-	defer cancel()
-
-	// done is buffered so that an abandoned check can still deliver its error and exit.
-	done := make(chan error, 1)
-	cr := &checkRun{}
-	go func() {
-		defer c.state.finish(cr)
-		defer func() {
-			if v := recover(); v != nil {
-				done <- fmt.Errorf("daemon: health check %q panicked: %v", c.name, v)
-			}
-		}()
-		done <- c.check(checkCtx)
-	}()
-
-	var err error
-	select {
-	case err = <-done:
-	case <-checkCtx.Done():
-		err = checkCtx.Err()
-		c.state.abandon(cr)
-	}
-	// An abandoned check, and one that returns an error after its context has ended, fail with
-	// why the context ended.
-	if err != nil && checkCtx.Err() != nil {
-		err = h.endedErr(ctx, checkCtx)
-	}
-	result.Duration = h.clock.Now().Sub(start)
+	_, duration, err := bounded(h, ctx, c.state, fmt.Sprintf("health check %q", c.name),
+		func(ctx context.Context) (struct{}, error) { return struct{}{}, c.check(ctx) })
+	result.Duration = duration
 	if err != nil {
 		result.Status = CheckFail
 		result.Error = err.Error()
 	}
 	return result
+}
+
+// report calls the UpdateReporter under the check timeout and returns the status it gives, with a
+// State that is none of the UpdateState constants made UpdateUnknown. A reporter that panics, is
+// still running when the timeout expires or ctx is done, or has an abandoned call that has not
+// returned yields UpdateUnknown with the Error saying why.
+func (h *Health) report(ctx context.Context) *UpdateStatus {
+	status, _, err := bounded(h, ctx, h.reporterState, "update reporter",
+		func(ctx context.Context) (UpdateStatus, error) { return h.reporter(ctx), nil })
+	if err != nil {
+		return &UpdateStatus{State: UpdateUnknown, Error: err.Error()}
+	}
+	status.State = status.State.known()
+	return &status
+}
+
+// callOutcome is what one bounded call of fn delivers from the goroutine running it.
+type callOutcome[T any] struct {
+	value T
+	err   error
+}
+
+// bounded calls fn under a context derived from ctx that the check timeout bounds, and returns
+// what fn returned and how long it ran, up to the timeout. fn runs in a goroutine of its own, which
+// bounded abandons when the timeout expires or ctx is done first; state counts it as abandoned
+// until it returns, and while it does bounded fails at once with ErrCheckTimeout and a duration of
+// zero, without calling fn. A panic in fn is recovered as an error naming what, the thing fn runs.
+func bounded[T any](h *Health, ctx context.Context, state *checkState, what string, fn func(context.Context) (T, error)) (T, time.Duration, error) {
+	var zero T
+	if state.stuck() {
+		return zero, 0, fmt.Errorf("%w: an earlier run is still running", ErrCheckTimeout)
+	}
+
+	// The start is read before the deadline is armed, so that the clock cannot reach the deadline
+	// before the start is taken and the duration never exceeds the timeout on a clock that only
+	// moves when advanced.
+	start := h.clock.Now()
+	callCtx, cancel := withDeadline(h.clock, ctx, h.timeout)
+	defer cancel()
+
+	// done is buffered so that an abandoned call can still deliver its outcome and exit.
+	done := make(chan callOutcome[T], 1)
+	cr := &checkRun{}
+	go func() {
+		defer state.finish(cr)
+		defer func() {
+			if v := recover(); v != nil {
+				done <- callOutcome[T]{err: fmt.Errorf("daemon: %s panicked: %v", what, v)}
+			}
+		}()
+		value, err := fn(callCtx)
+		done <- callOutcome[T]{value: value, err: err}
+	}()
+
+	var out callOutcome[T]
+	select {
+	case out = <-done:
+	case <-callCtx.Done():
+		out = callOutcome[T]{err: callCtx.Err()}
+		state.abandon(cr)
+	}
+	// An abandoned call, and one that returns an error after its context has ended, fail with why
+	// the context ended.
+	if out.err != nil && callCtx.Err() != nil {
+		out.err = h.endedErr(ctx, callCtx)
+	}
+	return out.value, h.clock.Now().Sub(start), out.err
 }
 
 // endedErr is what a check fails with once checkCtx, its context under the caller's ctx, has

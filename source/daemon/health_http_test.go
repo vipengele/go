@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -288,5 +289,84 @@ func TestHandlerStatusAnswers500WhenTheSnapshotDoesNotMarshal(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q", got)
+	}
+}
+
+func TestHandlerProbesNeverCallTheUpdateReporter(t *testing.T) {
+	for _, path := range []string{"/livez", "/readyz"} {
+		t.Run(path, func(t *testing.T) {
+			var calls atomic.Int32
+			h := NewHealth(WithUpdateReporter(func(context.Context) UpdateStatus {
+				calls.Add(1)
+				return UpdateStatus{State: UpdateIdle}
+			}))
+			mustAdd(t, h, "self", pass, Liveness)
+
+			rec := serve(h, http.MethodGet, path)
+
+			if rec.Code != http.StatusOK || rec.Body.String() != "ok\n" {
+				t.Errorf("answer = %d %q, want 200 %q", rec.Code, rec.Body.String(), "ok\n")
+			}
+			if got := calls.Load(); got != 0 {
+				t.Errorf("reporter called %d times, want 0", got)
+			}
+		})
+	}
+}
+
+func TestHandlerStatusCarriesTheUpdate(t *testing.T) {
+	var calls atomic.Int32
+	h := NewHealth(
+		WithHealthClock(&manualClock{now: time.Date(2026, 11, 4, 3, 22, 0, 0, time.UTC)}),
+		WithUpdateReporter(func(context.Context) UpdateStatus {
+			calls.Add(1)
+			return UpdateStatus{State: UpdateRolledBack, FromVersion: "v1.4.0", ToVersion: "v1.5.0", Reason: "unconfirmed"}
+		}),
+	)
+
+	rec := serve(h, http.MethodGet, "/status")
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("reporter called %d times, want 1", got)
+	}
+	const exact = `{
+  "schema": 1,
+  "status": "ok",
+  "live": true,
+  "ready": true,
+  "started_at": "2026-11-04T03:22:00Z",
+  "uptime_seconds": 0,
+  "checks": [],
+  "update": {
+    "status": "rolled_back",
+    "from_version": "v1.4.0",
+    "to_version": "v1.5.0",
+    "reason": "unconfirmed"
+  }
+}
+`
+	if got := rec.Body.String(); got != exact {
+		t.Errorf("body = %s\nwant %s", got, exact)
+	}
+}
+
+func TestHandlerStatusAnswersWhenTheUpdateReporterPanics(t *testing.T) {
+	h := NewHealth(WithUpdateReporter(func(context.Context) UpdateStatus { panic("kaboom") }))
+	mustAdd(t, h, "self", pass, Liveness)
+
+	rec := serve(h, http.MethodGet, "/status")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("Unmarshal = %v", err)
+	}
+	if snap.Status != StateOK {
+		t.Errorf("status = %q, want %q", snap.Status, StateOK)
+	}
+	if u := snap.Update; u == nil || u.State != UpdateUnknown || !strings.Contains(u.Error, "panicked: kaboom") {
+		t.Errorf("update = %+v, want unknown naming the panic", u)
 	}
 }

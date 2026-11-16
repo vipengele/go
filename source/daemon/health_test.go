@@ -666,3 +666,310 @@ func TestEndedErr(t *testing.T) {
 		})
 	}
 }
+
+// fixedUpdate is an UpdateStatus with every field set, whose JSON form updateJSONBytes pins.
+func fixedUpdate() UpdateStatus {
+	return UpdateStatus{
+		State:        UpdatePending,
+		FromVersion:  "v1.4.0",
+		ToVersion:    "v1.5.0",
+		BootAttempts: 2,
+		Reason:       "awaiting confirmation",
+		StartedAt:    time.Date(2026, 11, 4, 3, 20, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 11, 4, 3, 21, 30, 0, time.UTC),
+		Channel:      "stable",
+		Watermark:    "v1.5.0",
+		Error:        "first boot exited 1",
+	}
+}
+
+const updateJSONBytes = `{"status":"pending","from_version":"v1.4.0","to_version":"v1.5.0","boot_attempts":2,` +
+	`"reason":"awaiting confirmation","started_at":"2026-11-04T03:20:00Z","updated_at":"2026-11-04T03:21:30Z",` +
+	`"channel":"stable","watermark":"v1.5.0","error":"first boot exited 1"}`
+
+func TestUpdateStatusMarshalJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		status UpdateStatus
+		want   string
+	}{
+		{name: "every field", status: fixedUpdate(), want: updateJSONBytes},
+		{name: "idle is spelled out", status: UpdateStatus{State: UpdateIdle}, want: `{"status":"idle"}`},
+		{name: "rolled back", status: UpdateStatus{State: UpdateRolledBack}, want: `{"status":"rolled_back"}`},
+		{name: "empty state is unknown", status: UpdateStatus{}, want: `{"status":"unknown"}`},
+		{name: "unrecognised state is unknown", status: UpdateStatus{State: "rebooting"}, want: `{"status":"unknown"}`},
+		{
+			name:   "times are UTC to the second",
+			status: UpdateStatus{State: UpdateConfirmed, UpdatedAt: time.Date(2026, 11, 4, 4, 21, 30, 900_000_000, time.FixedZone("CET", 3600))},
+			want:   `{"status":"confirmed","updated_at":"2026-11-04T03:21:30Z"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(tt.status)
+			if err != nil {
+				t.Fatalf("Marshal = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("Marshal =\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpdateStatusJSONRoundTrip(t *testing.T) {
+	var got UpdateStatus
+	if err := json.Unmarshal([]byte(updateJSONBytes), &got); err != nil {
+		t.Fatalf("Unmarshal = %v", err)
+	}
+	if got != fixedUpdate() {
+		t.Errorf("Unmarshal = %+v, want %+v", got, fixedUpdate())
+	}
+	again, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal = %v", err)
+	}
+	if string(again) != updateJSONBytes {
+		t.Errorf("Marshal after Unmarshal =\n%s\nwant\n%s", again, updateJSONBytes)
+	}
+}
+
+func TestUpdateStatusUnmarshalJSONStateIsNeverIdleByDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want UpdateState
+	}{
+		{name: "idle", body: `{"status":"idle"}`, want: UpdateIdle},
+		{name: "missing status", body: `{}`, want: UpdateUnknown},
+		{name: "empty status", body: `{"status":""}`, want: UpdateUnknown},
+		{name: "unrecognised status", body: `{"status":"rebooting"}`, want: UpdateUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got UpdateStatus
+			if err := json.Unmarshal([]byte(tt.body), &got); err != nil {
+				t.Fatalf("Unmarshal = %v", err)
+			}
+			if got.State != tt.want {
+				t.Errorf("State = %q, want %q", got.State, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpdateStatusUnmarshalJSONRejects(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "bad started_at", body: `{"status":"pending","started_at":"yesterday"}`},
+		{name: "bad updated_at", body: `{"status":"pending","updated_at":"today"}`},
+		{name: "not an object", body: `[]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var u UpdateStatus
+			if err := json.Unmarshal([]byte(tt.body), &u); err == nil {
+				t.Errorf("Unmarshal succeeded, want an error")
+			}
+		})
+	}
+}
+
+func TestSnapshotWithUpdateJSONRoundTrip(t *testing.T) {
+	snap := fixedSnapshot()
+	update := fixedUpdate()
+	snap.Update = &update
+	want := strings.TrimSuffix(snapshotJSONBytes, "}") + `,"update":` + updateJSONBytes + `}`
+
+	got, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("Marshal = %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("Marshal =\n%s\nwant\n%s", got, want)
+	}
+
+	var back Snapshot
+	if err := json.Unmarshal([]byte(`{"schema":1,`+strings.TrimPrefix(want, "{")), &back); err != nil {
+		t.Fatalf("Unmarshal = %v", err)
+	}
+	if back.Update == nil || *back.Update != update {
+		t.Errorf("Update = %+v, want %+v", back.Update, update)
+	}
+	again, err := json.Marshal(back)
+	if err != nil {
+		t.Fatalf("Marshal = %v", err)
+	}
+	if string(again) != want {
+		t.Errorf("Marshal after Unmarshal =\n%s\nwant\n%s", again, want)
+	}
+}
+
+func TestSnapshotWithoutUpdateDecodesToNil(t *testing.T) {
+	var got Snapshot
+	if err := json.Unmarshal([]byte(snapshotJSONBytes), &got); err != nil {
+		t.Fatalf("Unmarshal = %v", err)
+	}
+	if got.Update != nil {
+		t.Errorf("Update = %+v, want nil", got.Update)
+	}
+}
+
+func TestSnapshotUpdateAbsentWithoutReporter(t *testing.T) {
+	for name, opts := range map[string][]HealthOption{
+		"no option":  nil,
+		"nil option": {WithUpdateReporter(nil)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snap := NewHealth(opts...).Snapshot(t.Context())
+			if snap.Update != nil {
+				t.Errorf("Update = %+v, want nil", snap.Update)
+			}
+			got, err := json.Marshal(snap)
+			if err != nil {
+				t.Fatalf("Marshal = %v", err)
+			}
+			if strings.Contains(string(got), `"update"`) {
+				t.Errorf("Marshal = %s, want no update key", got)
+			}
+		})
+	}
+}
+
+func TestSnapshotCarriesTheReportedUpdate(t *testing.T) {
+	h := NewHealth(WithUpdateReporter(func(context.Context) UpdateStatus { return fixedUpdate() }))
+
+	snap := h.Snapshot(t.Context())
+
+	if snap.Update == nil || *snap.Update != fixedUpdate() {
+		t.Errorf("Update = %+v, want %+v", snap.Update, fixedUpdate())
+	}
+}
+
+func TestSnapshotReportedEmptyStateIsUnknown(t *testing.T) {
+	h := NewHealth(WithUpdateReporter(func(context.Context) UpdateStatus {
+		return UpdateStatus{Reason: "no record"}
+	}))
+
+	got := h.Snapshot(t.Context()).Update
+
+	if got == nil || got.State != UpdateUnknown || got.Reason != "no record" {
+		t.Errorf("Update = %+v, want unknown with the reporter's reason", got)
+	}
+}
+
+func TestSnapshotUpdateNeverChangesTheOverallState(t *testing.T) {
+	states := []UpdateState{UpdateIdle, UpdatePending, UpdateConfirmed, UpdateRolledBack, UpdateUnknown, ""}
+	for _, readyErr := range []string{"", "refused"} {
+		for _, state := range states {
+			t.Run(fmt.Sprintf("%q with readiness error %q", state, readyErr), func(t *testing.T) {
+				h := NewHealth(WithUpdateReporter(func(context.Context) UpdateStatus {
+					return UpdateStatus{State: state, Error: "update failed"}
+				}))
+				ready := Check(pass)
+				wantStatus, wantReady := StateOK, true
+				if readyErr != "" {
+					ready = failWith(readyErr)
+					wantStatus, wantReady = StateUnready, false
+				}
+				mustAdd(t, h, "db", ready)
+				mustAdd(t, h, "loop", pass, Liveness)
+
+				snap := h.Snapshot(t.Context())
+
+				if snap.Status != wantStatus || !snap.Live || snap.Ready != wantReady {
+					t.Errorf("Snapshot = status %q, live %v, ready %v; want %q, true, %v",
+						snap.Status, snap.Live, snap.Ready, wantStatus, wantReady)
+				}
+			})
+		}
+	}
+}
+
+func TestSnapshotUpdateReporterTimeout(t *testing.T) {
+	clock := newManualClock()
+	entered, release, returned := make(chan struct{}, 1), make(chan struct{}), make(chan struct{}, 1)
+	var calls atomic.Int32
+	h := NewHealth(WithHealthClock(clock), WithCheckTimeout(time.Minute),
+		WithUpdateReporter(func(context.Context) UpdateStatus {
+			defer func() { returned <- struct{}{} }()
+			if calls.Add(1) == 1 {
+				entered <- struct{}{}
+				<-release
+			}
+			return UpdateStatus{State: UpdateIdle}
+		}))
+
+	snap := snapshotAsync(h, t.Context())
+	<-entered
+	clock.Advance(time.Minute - time.Nanosecond)
+	select {
+	case s := <-snap:
+		t.Fatalf("Snapshot returned before the timeout: %+v", s)
+	default:
+	}
+	clock.Advance(time.Nanosecond)
+
+	first := <-snap
+	want := fmt.Errorf("%w after %v", ErrCheckTimeout, time.Minute).Error()
+	if first.Update == nil || first.Update.State != UpdateUnknown || first.Update.Error != want {
+		t.Fatalf("Update = %+v, want unknown with %q", first.Update, want)
+	}
+	if first.Status != StateOK {
+		t.Errorf("Status = %q, want %q: the update never changes it", first.Status, StateOK)
+	}
+	awaitNoTimers(t, clock)
+
+	second := h.Snapshot(t.Context()).Update
+	if second == nil || second.State != UpdateUnknown || !strings.Contains(second.Error, "still running") {
+		t.Errorf("Update during the abandoned call = %+v, want unknown naming the call still running", second)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("reporter called %d times while its abandoned call was still running, want 1", got)
+	}
+
+	close(release)
+	<-returned
+	<-h.reporterState.idleChan()
+
+	third := h.Snapshot(t.Context()).Update
+	if third == nil || third.State != UpdateIdle {
+		t.Errorf("Update after the abandoned call returned = %+v, want idle", third)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("reporter called %d times, want 2", got)
+	}
+}
+
+func TestSnapshotUpdateReporterGetsTheCheckDeadline(t *testing.T) {
+	clock := newManualClock()
+	h := NewHealth(WithHealthClock(clock), WithCheckTimeout(time.Minute),
+		WithUpdateReporter(func(ctx context.Context) UpdateStatus {
+			deadline, ok := ctx.Deadline()
+			if !ok || !deadline.Equal(clock.Now().Add(time.Minute)) {
+				return UpdateStatus{State: UpdateUnknown, Error: fmt.Sprintf("deadline %v, %v", deadline, ok)}
+			}
+			return UpdateStatus{State: UpdateConfirmed}
+		}))
+
+	if got := h.Snapshot(t.Context()).Update; got == nil || got.State != UpdateConfirmed {
+		t.Errorf("Update = %+v, want the reporter to see the check timeout as its deadline", got)
+	}
+}
+
+func TestSnapshotUpdateReporterPanic(t *testing.T) {
+	h := NewHealth(WithUpdateReporter(func(context.Context) UpdateStatus { panic("kaboom") }))
+	mustAdd(t, h, "db", pass)
+
+	snap := h.Snapshot(t.Context())
+
+	if snap.Status != StateOK {
+		t.Errorf("Status = %q, want %q", snap.Status, StateOK)
+	}
+	got := snap.Update
+	if got == nil || got.State != UpdateUnknown || !strings.Contains(got.Error, "update reporter panicked: kaboom") {
+		t.Errorf("Update = %+v, want unknown naming the panic", got)
+	}
+}

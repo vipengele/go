@@ -219,6 +219,47 @@ func TestStatusJSONIsTheHandlerBody(t *testing.T) {
 	}
 }
 
+func TestStatusJSONIsTheHandlerBodyWithAnUpdate(t *testing.T) {
+	update := daemon.UpdateStatus{
+		State:        daemon.UpdatePending,
+		FromVersion:  "v1.4.0",
+		ToVersion:    "v1.5.0",
+		BootAttempts: 2,
+		Reason:       "awaiting confirmation",
+		StartedAt:    time.Date(2026, 11, 4, 3, 20, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 11, 4, 3, 21, 30, 0, time.UTC),
+		Channel:      "stable",
+		Watermark:    "v1.5.0",
+		Error:        "first boot exited 1",
+	}
+	h := daemon.NewHealth(daemon.WithUpdateReporter(func(context.Context) daemon.UpdateStatus { return update }))
+	if err := h.Add("loop", func(context.Context) error { return nil }, daemon.Liveness, daemon.Readiness); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	srv, rec := serveHealth(t, h)
+
+	stdout, stderr, err := run(t, daemoncmd.NewStatus(at(srv.URL)), true)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body := rec.last()
+	if stdout != string(body) {
+		t.Errorf("stdout differs from the /status body:\n%s\nbody:\n%s", stdout, body)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
+	}
+	for _, key := range []string{"from_version", "to_version", "boot_attempts", "reason", "started_at",
+		"updated_at", "channel", "watermark", "error"} {
+		if !strings.Contains(string(body), `"`+key+`"`) {
+			t.Errorf("body has no %q key:\n%s", key, body)
+		}
+	}
+	if !strings.Contains(string(body), `"update": {`) {
+		t.Errorf("body has no update object:\n%s", body)
+	}
+}
+
 func TestStatusJSONKeys(t *testing.T) {
 	srv, _ := serveHealth(t, newHealth(t, daemon.StateUnready))
 	stdout, _, _ := run(t, daemoncmd.NewStatus(at(srv.URL)), true)
