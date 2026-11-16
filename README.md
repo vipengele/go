@@ -16,12 +16,16 @@ command-line tools. The repo holds **projects**, each a self-contained Go module
 | [`source/config`](source/config) | `go.vipengele.org/config` |
 | [`source/cli/state`](source/cli/state) | `go.vipengele.org/cli/state` |
 | [`source/filelock`](source/filelock) | `go.vipengele.org/filelock` |
+| [`source/examples/greet`](source/examples/greet) | `go.vipengele.org/examples/greet`, an example tool the [consumer guide](docs/guide/consumer.md) quotes; never tagged, not for `go get` |
 
 A project's module path is `go.vipengele.org/<project>`, which needs Go 1.25 or later:
 
 ```sh
 go get go.vipengele.org/<project>@latest
 ```
+
+To build a command-line tool on `cli/core`, `cli/spec`, `config` and `update`, from its first
+command to its signed releases, follow the [consumer guide](docs/guide/consumer.md).
 
 ## Develop
 

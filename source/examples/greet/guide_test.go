@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -228,6 +229,28 @@ func normalizeRegion(s string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// TestGuide checks the consumer guide, docs/guide/consumer.md, against the example's sources, and
+// every go.vipengele.org/<module>@<version> in its commands against the version of that module
+// linked into the test binary, which is the version go.mod requires.
+func TestGuide(t *testing.T) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Fatal("the test binary carries no build information")
+	}
+	versions := map[string]string{}
+	for _, dep := range info.Deps {
+		if dep.Replace != nil {
+			t.Errorf("%s is replaced by %s; the example requires releases", dep.Path, dep.Replace.Path)
+			continue
+		}
+		versions[dep.Path] = dep.Version
+	}
+	guide := filepath.Join("..", "..", "..", "docs", "guide", "consumer.md")
+	for _, err := range checkGuide(guide, ".", versions) {
+		t.Error(err)
+	}
 }
 
 // TestGuideChecker runs checkGuide over the cases in testdata/guide: a pass case yields no error,
