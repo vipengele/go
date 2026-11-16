@@ -5,9 +5,9 @@ go 1.27.4
 require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	go.vipengele.org/cli/spec v0.0.0
-	go.vipengele.org/cli/state v0.0.0
-	go.vipengele.org/config v0.0.0
+	go.vipengele.org/cli/spec v0.1.0
+	go.vipengele.org/cli/state v0.1.0
+	go.vipengele.org/config v0.1.0
 )
 
 require (
@@ -18,11 +18,3 @@ require (
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 )
-
-replace go.vipengele.org/cli/spec => ../spec
-
-replace go.vipengele.org/commons => ../../commons
-
-replace go.vipengele.org/config => ../../config
-
-replace go.vipengele.org/cli/state => ../state
