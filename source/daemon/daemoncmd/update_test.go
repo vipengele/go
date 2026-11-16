@@ -531,17 +531,10 @@ func TestUpdateRestartsNothingForAnotherBinary(t *testing.T) {
 
 func TestUpdateRestartsAServiceWhoseBinaryIsTheInstalledOneByARelativePath(t *testing.T) {
 	f := newUpdateFixture(t)
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	rel, err := filepath.Rel(wd, f.exe)
-	if err != nil {
-		t.Skipf("no relative path from %s to %s: %v", wd, f.exe, err)
-	}
+	t.Chdir(filepath.Dir(f.exe))
 	mgr := newSequence(nil, service.StateRunning)
 	cfg := f.config(mgr.managerFunc())
-	cfg.ServiceBinary = rel
+	cfg.ServiceBinary = filepath.Base(f.exe)
 
 	if r := runUpdate(t, cfg, f.clock); r.err != nil {
 		t.Fatalf("Run error = %v, want nil", r.err)
