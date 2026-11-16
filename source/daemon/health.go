@@ -655,7 +655,8 @@ func (h *Health) collect(ctx context.Context, only Kind, update bool) Snapshot {
 // has not returned fails at once, without being called.
 func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 	result := CheckResult{Name: c.name, Kinds: slices.Clone(c.kinds), Status: CheckPass}
-	_, duration, err := bounded(h, ctx, c.state, fmt.Sprintf("health check %q", c.name),
+	_, duration, err := bounded(h, ctx, c.state,
+		func() string { return fmt.Sprintf("health check %q", c.name) },
 		func(ctx context.Context) (struct{}, error) { return struct{}{}, c.check(ctx) })
 	result.Duration = duration
 	if err != nil {
@@ -670,7 +671,7 @@ func (h *Health) run(ctx context.Context, c namedCheck) CheckResult {
 // still running when the timeout expires or ctx is done, or has an abandoned call that has not
 // returned yields UpdateUnknown with the Error saying why.
 func (h *Health) report(ctx context.Context) *UpdateStatus {
-	status, _, err := bounded(h, ctx, h.reporterState, "update reporter",
+	status, _, err := bounded(h, ctx, h.reporterState, func() string { return "update reporter" },
 		func(ctx context.Context) (UpdateStatus, error) { return h.reporter(ctx), nil })
 	if err != nil {
 		return &UpdateStatus{State: UpdateUnknown, Error: err.Error()}
@@ -689,8 +690,9 @@ type callOutcome[T any] struct {
 // what fn returned and how long it ran, up to the timeout. fn runs in a goroutine of its own, which
 // bounded abandons when the timeout expires or ctx is done first; state counts it as abandoned
 // until it returns, and while it does bounded fails at once with ErrCheckTimeout and a duration of
-// zero, without calling fn. A panic in fn is recovered as an error naming what, the thing fn runs.
-func bounded[T any](h *Health, ctx context.Context, state *checkState, what string, fn func(context.Context) (T, error)) (T, time.Duration, error) {
+// zero, without calling fn. A panic in fn is recovered as an error naming the thing fn runs, which
+// what returns; what is called only then.
+func bounded[T any](h *Health, ctx context.Context, state *checkState, what func() string, fn func(context.Context) (T, error)) (T, time.Duration, error) {
 	var zero T
 	if state.stuck() {
 		return zero, 0, fmt.Errorf("%w: an earlier run is still running", ErrCheckTimeout)
@@ -710,7 +712,7 @@ func bounded[T any](h *Health, ctx context.Context, state *checkState, what stri
 		defer state.finish(cr)
 		defer func() {
 			if v := recover(); v != nil {
-				done <- callOutcome[T]{err: fmt.Errorf("daemon: %s panicked: %v", what, v)}
+				done <- callOutcome[T]{err: fmt.Errorf("daemon: %s panicked: %v", what(), v)}
 			}
 		}()
 		value, err := fn(callCtx)

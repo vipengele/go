@@ -58,6 +58,14 @@ func TestReporterMapsStatuses(t *testing.T) {
 	}
 }
 
+func TestUpdateStateOfAnUnknownStatusIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	if got := updateState(Status("upgrading")); got != daemon.UpdateUnknown {
+		t.Errorf("updateState(upgrading) = %q, want %q", got, daemon.UpdateUnknown)
+	}
+}
+
 func TestReporterCopiesRecordFields(t *testing.T) {
 	t.Parallel()
 

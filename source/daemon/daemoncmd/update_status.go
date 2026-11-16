@@ -167,32 +167,37 @@ type updateReport struct {
 // [daemon.UpdateStatus.MarshalJSON] writes them, none when Update is nil, then daemon_error,
 // omitted when empty.
 func (r updateReport) MarshalJSON() ([]byte, error) {
-	var buf bytes.Buffer
-	source, err := json.Marshal(r.Source)
-	if err != nil {
-		return nil, err
+	data, err := json.Marshal(nestedReport(r))
+	return liftUpdate(data), err
+}
+
+// nestedReport is an updateReport, field for field, that encodes its update as an object of its
+// own, which liftUpdate flattens into the report.
+type nestedReport struct {
+	Source      string               `json:"source"`
+	Update      *daemon.UpdateStatus `json:"update,omitempty"`
+	DaemonError string               `json:"daemon_error,omitempty"`
+}
+
+// liftUpdate replaces the "update" member of data, a compact nestedReport, with the keys of its
+// object, and returns data unchanged when it has none. Every quote inside a JSON string is
+// escaped, so the first `,"update":{` is the key and the last `,"daemon_error":` the key after
+// the update's object.
+func liftUpdate(data []byte) []byte {
+	const updateKey = `,"update":{`
+	start := bytes.Index(data, []byte(updateKey))
+	if start < 0 {
+		return data
 	}
-	buf.WriteString(`{"source":`)
-	buf.Write(source)
-	if r.Update != nil {
-		update, err := json.Marshal(*r.Update)
-		if err != nil {
-			return nil, err
-		}
-		// update is an object with at least its status key; its keys join the report's.
-		buf.WriteByte(',')
-		buf.Write(update[1 : len(update)-1])
+	// end is the member after the update's object: daemon_error, or the report's closing brace.
+	end := len(data) - 1
+	if i := bytes.LastIndex(data, []byte(`,"daemon_error":`)); i >= 0 {
+		end = i
 	}
-	if r.DaemonError != "" {
-		daemonErr, err := json.Marshal(r.DaemonError)
-		if err != nil {
-			return nil, err
-		}
-		buf.WriteString(`,"daemon_error":`)
-		buf.Write(daemonErr)
-	}
-	buf.WriteByte('}')
-	return buf.Bytes(), nil
+	out := make([]byte, 0, len(data))
+	out = append(out, data[:start+1]...)
+	out = append(out, data[start+len(updateKey):end-1]...)
+	return append(out, data[end:]...)
 }
 
 // renderUpdate writes r as a two-column table of field and value: the source and the update's

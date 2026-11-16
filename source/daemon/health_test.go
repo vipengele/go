@@ -283,6 +283,9 @@ func TestSnapshotDoesNotRerunCheckWithAbandonedRun(t *testing.T) {
 	if !strings.HasPrefix(second.Error, ErrCheckTimeout.Error()) {
 		t.Errorf("run during the abandoned one: Error = %q, want the timeout error", second.Error)
 	}
+	if second.Duration != 0 {
+		t.Errorf("run during the abandoned one: Duration = %v, want 0 for a check never called", second.Duration)
+	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("check called %d times while its abandoned run was still running, want 1", got)
 	}

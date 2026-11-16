@@ -462,3 +462,38 @@ func TestUpdateStatusNoneWriteErrorIsReturned(t *testing.T) {
 		t.Errorf("err = %v, want it to wrap the write error", err)
 	}
 }
+
+func TestUpdateStatusUsesTheGivenClient(t *testing.T) {
+	update := daemon.UpdateStatus{State: daemon.UpdateConfirmed}
+	srv := serveUpdate(t, &update)
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	cmd := daemoncmd.NewUpdateStatus(at(srv.URL), nil, nil, daemoncmd.WithHTTPClient(client))
+	if _, _, err := run(t, cmd, false); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("client made %d requests, want 1", calls)
+	}
+}
+
+func TestUpdateStatusNoteWriteErrorIsReturned(t *testing.T) {
+	fallback := &store{status: daemon.UpdateStatus{State: daemon.UpdateConfirmed}}
+	cmd := daemoncmd.NewUpdateStatus(func(context.Context, *spec.Invocation) (string, error) {
+		return "", errors.New("no listen address configured")
+	}, fallback.report)
+	errWrite := errors.New("broken pipe")
+	var stdout strings.Builder
+	inv := spec.NewInvocation(&spec.Env{Stdout: &stdout, Stderr: &limitWriter{err: errWrite}}, nil, nil)
+	inv.Output = spec.NewOutput(spec.OutputOptions{NoColorStdout: true, NoColorStderr: true})
+	err := cmd.Run(t.Context(), inv)
+	if !errors.Is(err, errWrite) {
+		t.Errorf("err = %v, want it to wrap the write error", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed after the note failed", stdout.String())
+	}
+}
