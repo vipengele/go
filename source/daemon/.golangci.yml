@@ -69,3 +69,38 @@ linters:
           deny:
             - pkg: go.vipengele.org/
               desc: selfupdate's tests import only what selfupdate may, and update/updatetest
+        daemoncmd-imports-the-root-service-selfupdate-and-update:
+          files:
+            - "**/daemoncmd/**"
+            - "!$test"
+          list-mode: lax
+          allow:
+            - go.vipengele.org/daemon$
+            - go.vipengele.org/daemon/service$
+            - go.vipengele.org/daemon/selfupdate$
+            - go.vipengele.org/cli/spec$
+            - go.vipengele.org/cli/spec/table$
+            - go.vipengele.org/update$
+            - go.vipengele.org/update/updatecmd$
+          deny:
+            - pkg: go.vipengele.org/
+              desc: daemoncmd imports only daemon, daemon/service, daemon/selfupdate, cli/spec, cli/spec/table, update and update/updatecmd among its siblings
+        daemoncmd-tests-also-import-the-test-kits:
+          files:
+            - "**/daemoncmd/**_test.go"
+          list-mode: lax
+          allow:
+            - go.vipengele.org/daemon$
+            - go.vipengele.org/daemon/service$
+            - go.vipengele.org/daemon/selfupdate$
+            - go.vipengele.org/cli/spec$
+            - go.vipengele.org/cli/spec/table$
+            - go.vipengele.org/update$
+            - go.vipengele.org/update/updatecmd$
+            - go.vipengele.org/daemon/daemoncmd$
+            - go.vipengele.org/daemon/daemontest$
+            - go.vipengele.org/cli/spec/speccheck$
+            - go.vipengele.org/update/updatetest$
+          deny:
+            - pkg: go.vipengele.org/
+              desc: daemoncmd's tests import only what daemoncmd may, daemoncmd itself, daemon/daemontest, cli/spec/speccheck and update/updatetest

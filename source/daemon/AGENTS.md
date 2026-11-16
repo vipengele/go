@@ -115,7 +115,17 @@ golangci-lint run
   and `Status`; every `ServiceOption` is install-only. A `ManagerFunc` error matching
   `service.ErrContainer` becomes one error carrying `ContainerError.Instead`; other errors are
   returned unchanged. `testdata/service-status.keys` pins the status JSON keys; the tests run
-  against a fake `service.Manager` in `service_test.go`.
+  against a fake `service.Manager` in `service_test.go`. `update.go` holds `NewUpdate(UpdateConfig)`:
+  `updatecmd.Commands` with the `Machine` as the Config's `BackupGuard` and an
+  `updatecmd.WithInstalled` hook that records the update with `Machine.Begin` (rolling the install
+  back when that fails), then, when the installed path and `ServiceBinary` resolve to the same file
+  and the service is running, calls `Restart` and polls `Status` every 500ms on the `Clock` until
+  running or `StartTimeout` (default `DefaultStartTimeout`, 15s); a restart error, failed, not
+  installed or a timeout fails the command. Every other state, an unmanaged binary
+  (`ErrNotInstalled`, `ErrContainer`, `ErrUnsupported`, not installed, another path) and a
+  `ManagerFunc` error are messages with exit 0. Its tests (`update_test.go`, the symlink case in
+  `update_unix_test.go`) run a real update against `updatetest`, never with `t.Parallel`, and drive
+  the poll with `daemontest.Clock`.
 - `selfupdate/` — package `go.vipengele.org/daemon/selfupdate`, the state machine of a daemon's
   update of its own binary (idle, pending, confirmed, rolled_back) over a `Store`, with `FileStore`
   as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
@@ -379,6 +389,13 @@ install, kill, reinstall, crash loop and uninstall through `service.New`. Read i
   (ADR-0028); the root rule allows neither `selfupdate` nor `update`, so the root `daemon` never
   imports them. Its tests are internal (`package selfupdate`) and use their own fake clock and
   hand-written Runners, never `daemontest`.
+- `daemoncmd/` has its own depguard rule: the module's own `daemon`, `daemon/service` and
+  `daemon/selfupdate`, `cli/spec`, `cli/spec/table`, `update` and `update/updatecmd`; its tests
+  also import `daemoncmd` itself, `daemontest`, `cli/spec/speccheck` and `update/updatetest`.
+- A consumer protects the backup of a pending update on Windows only by building one
+  `update.Config` with `BackupGuard` set to the Machine and passing it both to `NewUpdate` and to
+  the pre-run `RemoveStaleBackup` hook of `UpdateCheckHooks`; `NewUpdate` sets the guard on its own
+  copy and cannot enforce this.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by

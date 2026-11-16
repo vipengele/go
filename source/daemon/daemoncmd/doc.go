@@ -67,4 +67,16 @@
 // command, status included, turns a [ManagerFunc] error matching [service.ErrContainer] into one
 // error saying service management is unavailable in a container and what to do instead
 // ([service.ContainerError.Instead]); every other error is returned unchanged.
+//
+// # Update
+//
+// [NewUpdate] returns the update command of a daemon: the command of
+// [go.vipengele.org/update/updatecmd], guarded by a [selfupdate.Machine] so an update is refused
+// while an earlier one is pending. Each installed update is recorded as pending with
+// [selfupdate.Machine.Begin], and rolled back when that fails, so the daemon's next boots judge
+// the new build and confirm it or restore the previous binary. The command then restarts the
+// service when it runs the installed binary and is running, and waits until it runs again; a
+// stopped, starting, failed or unknown service is left alone with a message, and a binary no
+// service manager runs is reported as one nothing restarts. Only a restarted service that does not
+// come up fails the command once the update is recorded.
 package daemoncmd
