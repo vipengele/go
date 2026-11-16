@@ -1,5 +1,5 @@
 ---
-about: "What constrains a daemoncmd service-command layer: spec.Command only, cli/spec only (cobra and cli/core denied by depguard), no up-front privilege API on Manager, no ADR for uninstall/data/elevation"
+about: "What constrains the daemoncmd service-command layer: spec.Command only, cli/spec only (cobra and cli/core denied by depguard), privileges checked up front through Manager.CheckPrivileges, no ADR for uninstall/data/elevation"
 saw:
   - docs/adr/0003-the-library-is-three-projects-cli-update-and-daemon.md
   - docs/adr/0005-commands-are-a-framework-neutral-model-in-cli-spec-and-cobra-is-an-internal-adapter.md
@@ -14,9 +14,10 @@ saw:
   - source/daemon/service/doc.go
   - source/daemon/service/state.go
   - source/daemon/AGENTS.md
+  - source/daemon/daemoncmd/service.go
 ---
 
-Checked 2026-11-16 while planning the "Standard service commands" issue.
+Checked 2026-11-16 against the service commands in daemoncmd/service.go.
 
 - ADR-0003's "daemoncmd may hold cobra" is superseded by ADR-0005: commands are `*spec.Command`
   (cli/spec), cobra lives only in `cli/core/internal/cobra`. `source/daemon/.golangci.yml`
@@ -25,11 +26,11 @@ Checked 2026-11-16 while planning the "Standard service commands" issue.
   lets daemoncmd import any sibling but cobra/cli/core stay denied. `daemoncmd/status.go` (NewStatus)
   is the precedent: `*spec.Command`, writes `spec.WriteJSON` at schema 1, no own --json flag
   (reads `inv.Output.Format()`; ADR-0014), returns `spec.Reported` for a printed-not-ok result.
-- `service.Manager` (manager.go) has Prepare/Install/Uninstall/Start/Stop/Status and NO restart
-  method and NO privilege-probe method: privilege is checked inside each driver
-  (`ErrPrivilegesRequired`; systemd euid, launchd euid, windows `scm.elevated()` seam in
-  scm_windows.go:47), and Status needs none. An "up front" check in commands must call the
-  driver's own method or add API to service.
+- `service.Manager` (manager.go) has Prepare/Install/Uninstall/Start/Stop/Restart/CheckPrivileges/
+  Status. `CheckPrivileges` is each driver's own `requirePrivileges("manage")` (systemd euid,
+  launchd euid, windows `scm.elevated()`), nil for a user scope; Status needs no privileges.
+  `daemoncmd/service.go` calls `CheckPrivileges` right after the ManagerFunc in every command but
+  status, so an unprivileged run fails before Prepare or any hook.
 - `service.New` order (manager.go): identity, container refusal (*ContainerError, `.Instead` text,
   ErrContainer), cfg validate, options, GOOS switch. ADR-0029. So a command can show `.Instead`.
 - Status states (state.go): unknown, not_installed, stopped, starting, running, failed; `resolve`
@@ -37,6 +38,6 @@ Checked 2026-11-16 while planning the "Standard service commands" issue.
 - Install = enable + restart, never `enable --now` (AGENTS.md systemd section, doc.go "Install and
   updates"). Uninstall leaves data, account, log files (doc.go). No ADR for "uninstall leaves
   data", elevation messages, or --json for service status: all unspecified.
-- No service-command layer other than `status` has been tried; no abandoned attempt found in
-  docs/adr, CONTEXT.md or candidates. docs/release-notes holds only commons/v0.1.0.md, so daemon
+- `daemoncmd/service.go` holds the service commands (NewService and the flat constructors); no
+  abandoned attempt found in docs/adr, CONTEXT.md or candidates. docs/release-notes holds only commons/v0.1.0.md, so daemon
   is not in strict mode.
