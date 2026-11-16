@@ -5,9 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/modfile"
 )
 
 var (
@@ -64,9 +65,9 @@ func checkGuide(guidePath, baseDir string, versions map[string]string) []error {
 				have, ok := versions[mod]
 				switch {
 				case !ok:
-					errs = append(errs, fmt.Errorf("%s: %s is not in the build info", where, mod))
+					errs = append(errs, fmt.Errorf("%s: %s is not required by go.mod", where, mod))
 				case have != m[2]:
-					errs = append(errs, fmt.Errorf("%s: %s@%s, but the build info has %s", where, mod, m[2], have))
+					errs = append(errs, fmt.Errorf("%s: %s@%s, but go.mod requires %s", where, mod, m[2], have))
 				}
 			}
 		}
@@ -231,24 +232,38 @@ func normalizeRegion(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// TestGuide checks the consumer guide, docs/guide/consumer.md, against the example's sources, and
-// every go.vipengele.org/<module>@<version> in its commands against the version of that module
-// linked into the test binary, which is the version go.mod requires.
-func TestGuide(t *testing.T) {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		t.Fatal("the test binary carries no build information")
+// requiredVersions returns the module versions the example's go.mod requires, by module path: the
+// versions a consumer's "go get" resolves. go.mod is read rather than the build information of the
+// test binary, which reports "(devel)" for a module the workspace resolves from the working tree.
+// A replace directive fails the test: the example requires releases.
+func requiredVersions(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range f.Replace {
+		t.Errorf("go.mod replaces %s with %s; the example requires releases", r.Old.Path, r.New.Path)
 	}
 	versions := map[string]string{}
-	for _, dep := range info.Deps {
-		if dep.Replace != nil {
-			t.Errorf("%s is replaced by %s; the example requires releases", dep.Path, dep.Replace.Path)
-			continue
-		}
-		versions[dep.Path] = dep.Version
+	for _, r := range f.Require {
+		versions[r.Mod.Path] = r.Mod.Version
 	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	return versions
+}
+
+// TestGuide checks the consumer guide, docs/guide/consumer.md, against the example's sources, and
+// every go.vipengele.org/<module>@<version> in its commands against the version go.mod requires.
+func TestGuide(t *testing.T) {
 	guide := filepath.Join("..", "..", "..", "docs", "guide", "consumer.md")
-	for _, err := range checkGuide(guide, ".", versions) {
+	for _, err := range checkGuide(guide, ".", requiredVersions(t)) {
 		t.Error(err)
 	}
 }
@@ -266,6 +281,8 @@ func TestGuideChecker(t *testing.T) {
 		{"indented", ""},
 		{"wholefile", ""},
 		{"yaml", ""},
+		{"ymlmarker", ""},
+		{"ymlnomarker", "has no <!-- snippet"},
 		{"nomarker", "has no <!-- snippet"},
 		{"unknownregion", `has no region "missing"`},
 		{"unknownfile", "snippet file"},
@@ -273,8 +290,8 @@ func TestGuideChecker(t *testing.T) {
 		{"unterminated", "is not terminated"},
 		{"strayend", "snippet:end without a start"},
 		{"bashexempt", ""},
-		{"bashversion", "build info has v0.1.0"},
-		{"bashunknown", "is not in the build info"},
+		{"bashversion", "go.mod requires v0.1.0"},
+		{"bashunknown", "is not required by go.mod"},
 		{"noguide", "no such file"},
 	}
 	for _, tt := range tests {

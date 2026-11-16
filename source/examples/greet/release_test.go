@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"slices"
 	"testing"
 
@@ -177,23 +176,12 @@ func mappingValue(n *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// requiredUpdateVersion returns the version of go.vipengele.org/update linked into the test binary,
-// which is the version go.mod requires.
+// requiredUpdateVersion returns the version of go.vipengele.org/update that go.mod requires.
 func requiredUpdateVersion(t *testing.T) string {
 	t.Helper()
-	info, ok := debug.ReadBuildInfo()
+	version, ok := requiredVersions(t)["go.vipengele.org/update"]
 	if !ok {
-		t.Fatal("the test binary carries no build information")
+		t.Fatal("go.mod does not require go.vipengele.org/update")
 	}
-	for _, dep := range info.Deps {
-		if dep.Path != "go.vipengele.org/update" {
-			continue
-		}
-		if dep.Replace != nil {
-			t.Fatalf("go.vipengele.org/update is replaced by %s; the example requires a release", dep.Replace.Path)
-		}
-		return dep.Version
-	}
-	t.Fatal("go.vipengele.org/update is not in the build information")
-	return ""
+	return version
 }
