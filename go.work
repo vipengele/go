@@ -14,3 +14,4 @@ use ./source/config
 
 use ./source/cli/state
 use ./source/filelock
+use ./source/examples/greet

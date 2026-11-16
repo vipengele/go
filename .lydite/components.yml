@@ -49,6 +49,10 @@ components:
     dir: source/filelock
     runner: go-test
     args: ["-race", "./..."]
+  - name: examples-greet
+    dir: source/examples/greet
+    runner: go-test
+    args: ["-race", "./..."]
   - name: vanity-worker
     dir: tools/vanity-worker
     runner: vitest

@@ -1,0 +1,4 @@
+package x
+
+// snippet:start a
+x

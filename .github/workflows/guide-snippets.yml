@@ -1,0 +1,94 @@
+# guide-snippets — checks docs/guide/consumer.md against the example it quotes.
+#
+# The tests of source/examples/greet compare each snippet of the guide with the
+# example's sources (TestGuide) and check its .goreleaser.yaml and release.yml
+# (TestRelease). They cannot reach the network, so the last step checks that the
+# commit SHA release.yml pins for release-tool.yml is the commit of the tag its
+# comment names.
+#
+# ci-build and ci-test select examples/greet like any project, when it or a
+# sibling it requires changes, and run its whole suite. A change to
+# docs/guide/** alone selects no project, so this workflow runs on its own
+# paths as well, and it is the one place the pinned SHA is checked against the
+# network. It is not a ci-* file: a change to one of those selects every
+# project.
+name: guide-snippets
+
+on:
+  pull_request:
+    paths:
+      - 'docs/guide/**'
+      - 'source/examples/**'
+      - '.github/workflows/guide-snippets.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/guide/**'
+      - 'source/examples/**'
+      - '.github/workflows/guide-snippets.yml'
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the run in flight.
+concurrency:
+  group: guide-snippets-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guide-snippets:
+    name: guide-snippets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/examples/greet/go.mod
+          cache-dependency-path: source/examples/greet/go.sum
+
+      - name: The guide matches the example
+        working-directory: source/examples/greet
+        run: go test -run 'TestGuide|TestRelease' ./...
+
+      # release.yml pins `release-tool.yml@<sha> # source/update/vX.Y.Z`. The SHA
+      # must be the commit the tag points at: the peeled ref of an annotated
+      # tag, the plain ref of a lightweight one.
+      - name: The pinned release-tool SHA is the commit of its tag
+        env:
+          RELEASE_YML: source/examples/greet/release.yml
+          REPO_URL: https://github.com/vipengele/go
+        run: |
+          set -euo pipefail
+          line="$(grep -E '^[[:space:]]*uses:[[:space:]]*vipengele/go/\.github/workflows/release-tool\.yml@' "$RELEASE_YML" || true)"
+          if [[ -z "$line" || "$(printf '%s\n' "$line" | wc -l)" != "1" ]]; then
+            echo "::error file=${RELEASE_YML}::expected exactly one release-tool.yml uses: line"
+            exit 1
+          fi
+          re='@([0-9a-f]{40})[[:space:]]+#[[:space:]]*(source/update/v[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*)'
+          if [[ ! "$line" =~ $re ]]; then
+            echo "::error file=${RELEASE_YML}::the uses: line is not '@<40-hex sha> # source/update/vX.Y.Z': ${line}"
+            exit 1
+          fi
+          sha="${BASH_REMATCH[1]}"
+          tag="${BASH_REMATCH[2]}"
+
+          refs="$(git ls-remote "$REPO_URL" "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          commit="$(awk -v r="refs/tags/${tag}^{}" '$2 == r {print $1}' <<<"$refs")"
+          if [[ -z "$commit" ]]; then
+            commit="$(awk -v r="refs/tags/${tag}" '$2 == r {print $1}' <<<"$refs")"
+          fi
+          if [[ -z "$commit" ]]; then
+            echo "::error file=${RELEASE_YML}::the tag ${tag} does not exist in ${REPO_URL}"
+            exit 1
+          fi
+          if [[ "$sha" != "$commit" ]]; then
+            echo "::error file=${RELEASE_YML}::release.yml pins ${sha}, but the tag ${tag} is commit ${commit}"
+            exit 1
+          fi
+          echo "ok: ${tag} is ${commit}"

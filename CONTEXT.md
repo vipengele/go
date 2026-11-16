@@ -8,8 +8,9 @@ command-line tools, each versioned and released on its own.
 **Project**:
 A self-contained Go module in a directory at any depth under `source/`, with the **Vanity path**
 `go.vipengele.org/<path>` as its module path. Its identifier is its `<path>`, its directory
-relative to `source/` (`update`, `cli/core`). A project is released alone, by the tag
-`source/<path>/vX.Y.Z` (ADR-0001, ADR-0004). A project's directory contains no other `go.mod`.
+relative to `source/` (`update`, `cli/core`). A library project is released alone, by the tag
+`source/<path>/vX.Y.Z` (ADR-0001, ADR-0004); an **Example** is never tagged. A project's directory
+contains no other `go.mod`.
 _Avoid_: module in prose about the repo's layout (the Go toolchain's word, used when talking about
 `go.mod` itself), repo, package
 
@@ -18,6 +19,11 @@ A directory under `source/` that holds projects and has no `go.mod` of its own (
 not a project: it is never built, tested or released, and a change inside it but outside every
 project selects nothing.
 _Avoid_: parent project, namespace
+
+**Example**:
+A project that is never tagged and demonstrates released projects, requiring them at their tags and
+replacing none. It has no release notes and no **Release** (`source/examples/greet`).
+_Avoid_: sample, demo, template
 
 **Package**:
 One Go package inside a project, imported as `go.vipengele.org/<project>/<package>`.

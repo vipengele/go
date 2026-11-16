@@ -1,0 +1,13 @@
+package x
+
+// snippet:start a
+
+func a() int {
+	return 1
+}
+
+// snippet:end
+
+// snippet:start a
+x
+// snippet:end

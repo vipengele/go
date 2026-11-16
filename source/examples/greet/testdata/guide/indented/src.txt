@@ -1,0 +1,11 @@
+package x
+
+func f() {
+	// snippet:start a
+
+	if true {
+		g()
+	}
+
+	// snippet:end
+}
