@@ -1,35 +1,52 @@
 package servicetest
 
 import (
-	"os"
-	"strings"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"go.vipengele.org/daemon/service"
 )
 
-// TestSupervisor boots a container for each scope under real podman and
-// checks that its system manager is up and, for the user scope, that the
-// lingering user manager is active. It runs only with SERVICETEST=1.
+// TestSupervisor proves the sample daemon under systemd in a podman container,
+// as a system service, a user service and a system service of Type=notify. It
+// runs only with SERVICETEST=1.
 func TestSupervisor(t *testing.T) {
 	SkipUnlessEnabled(t)
-	h := newHarness(t, os.LookupEnv)
-	for _, scope := range []service.Scope{service.ScopeSystem, service.ScopeUser} {
-		runScope(t, h, scope, "", func(t *testing.T, c *container) {
-			ctx := t.Context()
-			out, _ := c.exec(ctx, execOptions{}, "systemctl", "is-system-running")
-			if s := strings.TrimSpace(string(out)); s != "running" && s != "degraded" {
-				t.Errorf("system manager state = %q, want running or degraded", s)
-			}
-			if c.scope != service.ScopeUser {
-				return
-			}
-			unit := c.userManagerUnit()
-			out, err := c.exec(ctx, execOptions{}, "systemctl", "is-active", unit)
-			if s := strings.TrimSpace(string(out)); s != "active" {
-				t.Errorf("%s = %q (%v), want active", unit, s, err)
-				c.logDiagnostics(ctx, t, unit, false)
-			}
+
+	binary := filepath.Join(t.TempDir(), "sampled")
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "./testdata/sampled") // #nosec G204 -- the program is the constant go; its arguments are the constant build verb and package and an output path under the test's temporary directory; no shell is involved
+	build.Env = append(build.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building testdata/sampled: %v\n%s", err, out)
+	}
+
+	targets := []struct {
+		name   string
+		target Target
+	}{
+		{"system", Target{Config: config("sampled", service.ScopeSystem)}},
+		{"user", Target{Config: config("sampled", service.ScopeUser)}},
+		{"system_notify", Target{
+			Config: config("sampled-notify", service.ScopeSystem),
+			Notify: &Notify{},
+		}},
+	}
+	for _, tc := range targets {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.target.Binary = binary
+			Run(t, tc.target)
 		})
+	}
+}
+
+// config is the sample daemon installed under name in scope.
+func config(name string, scope service.Scope) service.Config {
+	return service.Config{
+		Name:        name,
+		Description: "servicetest sample daemon",
+		Binary:      "/usr/local/bin/sampled",
+		Scope:       scope,
 	}
 }
