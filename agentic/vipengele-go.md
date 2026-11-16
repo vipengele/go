@@ -85,6 +85,11 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
   Its `test-windows` job also runs that command on `windows-latest`, for each affected project
   holding a `*_windows.go` or `*_windows_test.go` file, and is skipped when none does. It gates
   merges like the Linux job (ADR-0030). Coverage stays Linux-only.
+- `ci-test.yml`'s `test-supervisor` job runs when `changed-projects` selects `daemon`:
+  `SERVICETEST=1 go test -v -run '^TestSupervisor$' ./servicetest/` on `ubuntu-latest` with rootless
+  podman. It fails unless the log shows `--- PASS: TestSupervisor`, since a skipped test exits 0, and
+  an `always()` step removes the containers labelled `servicetest`. It gates merges through the test
+  stage.
 - A change to a shared CI file (`ci-*.yml`, the actions, `.lydite/`) selects every project; a change
   that touches no project (docs, agentic instructions) selects none and the stages skip.
 - A new project needs a component in `.lydite/components.yml`, a `gomod` entry in `.gt-repo.yaml`

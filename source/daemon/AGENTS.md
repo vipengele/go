@@ -311,6 +311,32 @@ The launchd driver:
   stream. The plist is 0644 and readable by every local account, so `Config.Env` must not carry
   secrets there either.
 
+## The `servicetest` package
+
+`go.vipengele.org/daemon/servicetest` proves a consumer's Linux service binary under a real systemd:
+`Run(t, Target)` boots a podman container with systemd as PID 1 for the `Config.Scope` and drives
+install, kill, reinstall, crash loop and uninstall through `service.New`. Read its `doc.go` first and
+`docs/adr/0035-the-service-harness-drives-the-library-in-a-podman-systemd-container.md`.
+
+- `servicetest.go` — `Target`, `Run`, `SkipUnlessEnabled` and the scenarios; `podman.go` the podman
+  command (`SERVICETEST_PODMAN`) and container lifecycle; `image.go` and `Containerfile` the image.
+- `driver/` — `package main`, the program the harness runs in the container: it calls `service.New`
+  with the options rebuilt from the request, then `Install`, `Uninstall` or `Status`.
+  `internal/wire` holds the request and response both sides import.
+- Environment: `SERVICETEST=1` runs the containers, otherwise `Run` skips; with it set, an unusable
+  podman fails, never skips. `SERVICETEST_PODMAN` is `podman` (the default) or `sudo podman`, which runs it
+  rootful; any other value fails the test, because each `exec` call names a constant program.
+- `depguard` allows `go.vipengele.org/daemon/servicetest/internal/wire$` for `servicetest` and
+  its driver, besides the list in Conventions.
+- The harness builds the driver from the caller's module with
+  `GOOS=linux CGO_ENABLED=0 go build go.vipengele.org/daemon/servicetest/driver`. That fails under
+  `vendor/` or outside a module; set `Target.Driver` to a prebuilt Linux driver then.
+- The Containerfile pins its Debian base by digest, and nothing bumps it: the steps are in the
+  file's header comment, and `Target.BaseImage` overrides the base.
+- Coverage comes from the tests that run the harness against a fake runner; the containers do not
+  run in the coverage suite. The repo's own `TestSupervisor` runs only in the `test-supervisor` job
+  of `ci-test.yml`.
+
 ## Conventions
 
 - The root `daemon` package is not stdlib-only: it requires `go.vipengele.org/filelock` and
