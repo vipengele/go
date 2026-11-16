@@ -154,3 +154,60 @@ func TestOptionsApplyEachSetting(t *testing.T) {
 		})
 	}
 }
+
+func TestZeroResponseEncodesAsEmptyObject(t *testing.T) {
+	b, err := json.Marshal(wire.Response{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "{}" {
+		t.Errorf("zero Response encodes as %s, want {}", b)
+	}
+}
+
+func TestResponseRoundTripsThroughJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		in   wire.Response
+		json string
+	}{
+		{
+			"status",
+			wire.Response{Status: &service.Status{State: service.StateRunning, Enabled: true, PID: 7, Restarts: 1, Detail: "d"}},
+			`{"status":{"state":"running","enabled":true,"pid":7,"restarts":1,"detail":"d"}}`,
+		},
+		{"error", wire.Response{Error: "boom"}, `{"error":"boom"}`},
+		{
+			"failed status",
+			wire.Response{Status: &service.Status{State: service.StateUnknown, Detail: "no bus"}, Error: "unreachable"},
+			`{"status":{"state":"unknown","enabled":false,"pid":0,"restarts":0,"detail":"no bus"},"error":"unreachable"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(tt.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != tt.json {
+				t.Errorf("encoded %s, want %s", b, tt.json)
+			}
+			var out wire.Response
+			if err := json.Unmarshal(b, &out); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(tt.in, out) {
+				t.Errorf("round trip differs:\n in: %+v\nout: %+v", tt.in, out)
+			}
+		})
+	}
+}
+
+func TestResponseErr(t *testing.T) {
+	if err := (wire.Response{}).Err(); err != nil {
+		t.Errorf("Err of an empty response = %v, want nil", err)
+	}
+	if err := (wire.Response{Error: "boom"}).Err(); err == nil || err.Error() != "boom" {
+		t.Errorf("Err = %v, want boom", err)
+	}
+}

@@ -1,9 +1,11 @@
 // Package wire is the request the servicetest harness sends to the in-container
-// driver as JSON on its standard input. Both sides import it, so the two cannot
+// driver as JSON on its standard input, and the response the driver writes back
+// as JSON on its standard output. Both sides import it, so the two cannot
 // disagree on the shape.
 package wire
 
 import (
+	"errors"
 	"time"
 
 	"go.vipengele.org/cli/spec"
@@ -59,4 +61,24 @@ func (r Request) Options() []service.Option {
 		opts = append(opts, service.WithSystemdNotify(r.Notify.Watchdog))
 	}
 	return opts
+}
+
+// Response is the JSON object the driver writes to standard output. A
+// successful status operation carries Status, a successful install or
+// uninstall is the empty object {}, and a failure carries Error; a failed
+// status operation also carries the Status the Manager returned with its error.
+type Response struct {
+	// Status is the service.Status as the Manager reports it; its state is
+	// encoded as the lower-case State name, such as "running".
+	Status *service.Status `json:"status,omitempty"`
+	// Error is the message of the failure, empty on success.
+	Error string `json:"error,omitempty"`
+}
+
+// Err returns the failure the response carries, or nil when Error is empty.
+func (r Response) Err() error {
+	if r.Error == "" {
+		return nil
+	}
+	return errors.New(r.Error)
 }
