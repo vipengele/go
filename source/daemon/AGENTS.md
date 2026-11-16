@@ -42,9 +42,15 @@ golangci-lint run
   of `Kind` `Liveness` and/or `Readiness`; `Snapshot` runs every check concurrently under its
   timeout and returns a `Snapshot` (`ok`, `unready` or `down`, plus `Live`, `Ready`, uptime and a
   `CheckResult` per check) whose JSON keys are the wire contract of
-  `docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`.
+  `docs/adr/0025-health-is-checked-on-demand-with-distinct-liveness-and-readiness.md`. `UpdateState`,
+  `UpdateStatus` and `UpdateReporter` carry the self-update state; `WithUpdateReporter` sets the
+  reporter, and `Snapshot.Update` is its result, nil without one. The reporter is bounded like a
+  check (`report` over `bounded`: the check timeout, a recovered panic, at most one call in flight,
+  `unknown` with an error when stuck) and is not run for the probes
+  (`docs/adr/0036-daemon-update-status-is-reported-outside-the-check-model.md`).
 - `health_http.go` — `(*Health).Handler`, serving `/livez`, `/readyz` and `/status`;
-  the `/status` body is written by `spec.WriteJSON` at schema 1.
+  the `/status` body is written by `spec.WriteJSON` at schema 1. `/status` alone calls the
+  `UpdateReporter`; `/livez` and `/readyz` never do.
 - `func.go` — `Func`, the Runner adapter for a function run in its own goroutine, and `WithOrder`
   (`OrderOption`, shared with the HTTP Runner).
 - `http.go` — `NewHTTPServer` and `NewHTTPServerListener`, the `*http.Server` Runner, with
@@ -95,7 +101,14 @@ golangci-lint run
 - `daemoncmd/` — `NewStatus`, the `status` command: an HTTP client of `/status` that prints the
   snapshot as tables through `cli/spec/table`, or as the same JSON through `spec.WriteJSON` when
   the App's output is JSON, and returns `spec.Reported(ErrNotOK)` when the daemon is not ok.
-  `testdata/status.keys` pins its JSON keys. `service.go` holds the service commands:
+  `testdata/status.keys` pins its JSON keys; with an update in the snapshot it adds a table of the
+  update's state and error. `update_status.go` holds `NewUpdateStatus`, the flat `update-status`
+  command: it asks the daemon's `/status` first and then the fallback `daemon.UpdateReporter`, on a
+  transport error, timeout, resolve error, non-200 answer, unreadable body or a snapshot without
+  `update`, never on a cancelled parent context. It prints the flat JSON of `source` (`daemon`,
+  `store` or `none`), the update's keys and `daemon_error`, and returns
+  `spec.Reported(ErrUpdateNotOK)` for `rolled_back`, `unknown` or an update carrying an error.
+  `testdata/update-status.keys` pins its JSON keys. `service.go` holds the service commands:
   `NewService`, the `service` group of install, uninstall, start, stop, restart and status, and
   `NewInstall`, `NewUninstall`, `NewStart`, `NewStop`, `NewRestart` and `NewServiceStatus` for
   flat mounting (a tool mounting `NewServiceStatus` beside `NewStatus` sets its `Name`). Each
@@ -110,6 +123,11 @@ golangci-lint run
   as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
   backup binary before it records `rolled_back`; `rollback_windows.go` moves the running binary
   aside instead of overwriting it.
+  `report.go` holds `Reporter`, which turns the `Store`'s record into a `daemon.UpdateReporter` and
+  only reads it (`Load`), and `ReleaseInfo`, the channel and watermark as strings from the
+  consumer's `release` func. The consumer wires it twice, and `daemoncmd` does not import
+  `selfupdate`: `daemon.WithUpdateReporter(selfupdate.Reporter(store, release))` on the daemon side
+  and `daemoncmd.NewUpdateStatus(resolve, selfupdate.Reporter(store, release))` on the CLI side.
 - `httpserver/` — package `go.vipengele.org/daemon/httpserver`, the hardened `*http.Server` the
   HTTP Runner serves; read its `doc.go` and
   `docs/adr/0026-the-http-server-kit-has-a-fixed-middleware-order-and-pluggable-auth.md`.
