@@ -62,8 +62,8 @@ jobs:
           REPO_URL: https://github.com/vipengele/go
         run: |
           set -euo pipefail
-          line="$(grep -E '^[[:space:]]*uses:[[:space:]]*vipengele/go/\.github/workflows/release-tool\.yml@' "$RELEASE_YML")"
-          if [[ "$(printf '%s\n' "$line" | wc -l)" != "1" ]]; then
+          line="$(grep -E '^[[:space:]]*uses:[[:space:]]*vipengele/go/\.github/workflows/release-tool\.yml@' "$RELEASE_YML" || true)"
+          if [[ -z "$line" || "$(printf '%s\n' "$line" | wc -l)" != "1" ]]; then
             echo "::error file=${RELEASE_YML}::expected exactly one release-tool.yml uses: line"
             exit 1
           fi
