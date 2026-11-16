@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
@@ -212,9 +213,9 @@ func TestSystemdUnitPath(t *testing.T) {
 		want  string
 		fails bool
 	}{
-		{"system", ScopeSystem, nil, "/etc/systemd/system/x.service", false},
-		{"xdg", ScopeUser, map[string]string{"XDG_CONFIG_HOME": "/c", "HOME": "/h"}, "/c/systemd/user/x.service", false},
-		{"home", ScopeUser, map[string]string{"HOME": "/h"}, "/h/.config/systemd/user/x.service", false},
+		{"system", ScopeSystem, nil, filepath.FromSlash("/etc/systemd/system/x.service"), false},
+		{"xdg", ScopeUser, map[string]string{"XDG_CONFIG_HOME": "/c", "HOME": "/h"}, filepath.FromSlash("/c/systemd/user/x.service"), false},
+		{"home", ScopeUser, map[string]string{"HOME": "/h"}, filepath.FromSlash("/h/.config/systemd/user/x.service"), false},
 		{"neither", ScopeUser, nil, "", true},
 	}
 	for _, tc := range tests {

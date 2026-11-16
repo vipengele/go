@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -173,7 +174,7 @@ func TestLaunchdInstallPlacesThePlistByScope(t *testing.T) {
 	}
 	daemon := newTestLaunchd(t, ScopeSystem, 0)
 	daemon.daemonDir = ""
-	if got, want := daemon.plist(t), "/Library/LaunchDaemons/demo.plist"; got != want {
+	if got, want := daemon.plist(t), filepath.FromSlash("/Library/LaunchDaemons/demo.plist"); got != want {
 		t.Fatalf("daemon plist = %q, want %q", got, want)
 	}
 }
@@ -297,13 +298,7 @@ func TestLaunchdInstallWritesTheRenderedPlist(t *testing.T) {
 			if want := renderPlist(tl.cfg, p.logs); !bytes.Equal(got, want) {
 				t.Fatalf("plist =\n%s\nwant\n%s", got, want)
 			}
-			fi, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if fi.Mode().Perm() != 0o644 {
-				t.Fatalf("plist mode = %v, want 0644", fi.Mode().Perm())
-			}
+			wantPerm(t, path, 0o644)
 			entries, err := os.ReadDir(filepath.Dir(path))
 			if err != nil {
 				t.Fatal(err)
@@ -324,7 +319,7 @@ func TestLaunchdLogPathsTakeTheOptionOverTheDefault(t *testing.T) {
 	}
 	got := p.logs
 	want := launchdLogs{
-		stdout: filepath.Join(tl.homeDir, "Library", "Logs", "demo", "demo.log"),
+		stdout: path.Join(tl.homeDir, "Library", "Logs", "demo", "demo.log"),
 		stderr: "/var/log/demo.err",
 	}
 	if got != want {
@@ -348,9 +343,7 @@ func TestLaunchdPrepareCreatesThePlistAndLogDirectories(t *testing.T) {
 		if err != nil || !fi.IsDir() {
 			t.Fatalf("stat %s = %v, want a directory", dir, err)
 		}
-		if fi.Mode().Perm() != 0o750 {
-			t.Fatalf("%s mode = %v, want 0750", dir, fi.Mode().Perm())
-		}
+		wantPerm(t, dir, 0o750)
 	}
 	if len(tl.runner.calls) != 0 {
 		t.Fatalf("commands = %q, want none", tl.runner.calls)
@@ -545,6 +538,7 @@ func TestLaunchdNotInstalled(t *testing.T) {
 }
 
 func TestLaunchdUnreadablePlistDirIsNotNotInstalled(t *testing.T) {
+	skipStatUnderAFileOnWindows(t)
 	tl := newTestLaunchd(t, ScopeUser, 501)
 	blocker := filepath.Join(t.TempDir(), "home")
 	if err := os.WriteFile(blocker, nil, 0o644); err != nil {

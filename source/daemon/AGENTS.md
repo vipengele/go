@@ -162,6 +162,10 @@ Conventions of the package:
   `Config.Validate`). Tests render and validate any OS's service on any host through `WithGOOS`.
 - No build tags and no `_windows.go` file. Only the operating-system calls themselves, the Windows
   service control manager, could ever need one.
+- The tests pass on a Windows host too, where CI runs them: the goldens stay LF through
+  `source/daemon/.gitattributes`, an expected path is built as the driver builds it (`filepath`
+  or `path`), permission bits are checked only off Windows (`wantPerm`), and a test whose premise
+  is a Unix-only error, such as ENOTDIR from a path under a regular file, skips on Windows.
 - `State` names go through `switch` in `String`, `MarshalText` and `UnmarshalText`, never a
   package-level table: `gochecknoglobals` is enabled.
 - `Validate` returns `errors.Join` of `ErrInvalidConfig`-wrapped violations in a fixed order: fields

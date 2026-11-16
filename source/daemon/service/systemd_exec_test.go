@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,6 +40,9 @@ func TestExecRunnerAcceptsLaunchctl(t *testing.T) {
 }
 
 func TestExecRunnerReturnsStdout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no effective user id on windows")
+	}
 	out, err := execRunner(context.Background(), []string{"id", "-u"})
 	if err != nil {
 		t.Fatalf("execRunner: %v", err)

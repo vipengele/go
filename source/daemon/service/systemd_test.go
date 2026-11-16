@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -125,13 +127,7 @@ func TestSystemdInstallWritesTheRenderedUnit(t *testing.T) {
 			if want := renderUnit(s.cfg, s.hardening, s.notify); !bytes.Equal(got, want) {
 				t.Fatalf("unit file =\n%s\nwant\n%s", got, want)
 			}
-			fi, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if fi.Mode().Perm() != 0o644 {
-				t.Fatalf("unit file mode = %v, want 0644", fi.Mode().Perm())
-			}
+			wantPerm(t, path, 0o644)
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				t.Fatal(err)
@@ -314,7 +310,10 @@ func TestSystemdInstalledUnitPathIsEmptyOnAnError(t *testing.T) {
 		{"unit directory unknown", func(_ *testing.T, s *systemd) {
 			s.lookupEnv = func(string) (string, bool) { return "", false }
 		}},
-		{"unit directory under a regular file", blockUserUnitDir},
+		{"unit directory under a regular file", func(t *testing.T, s *systemd) {
+			skipStatUnderAFileOnWindows(t)
+			blockUserUnitDir(t, s)
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -348,6 +347,33 @@ func TestSystemdWriteUnitRemovesItsTemporaryFileWhenTheRenameFails(t *testing.T)
 		if e.Name() != "demo.service" {
 			t.Errorf("leftover file %q in the unit directory", e.Name())
 		}
+	}
+}
+
+// wantPerm fails t unless the file at path carries the permission bits want.
+// Windows has no Unix permission bits, so there it checks only that the file
+// exists.
+func wantPerm(t *testing.T, path string, want fs.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %v, want %#o", path, got, want)
+	}
+}
+
+// skipStatUnderAFileOnWindows skips a test whose premise is a stat failure
+// other than not-exist, produced by a path under a regular file: Windows
+// reports such a path as not existing, where Unix fails with ENOTDIR.
+func skipStatUnderAFileOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("a path under a regular file does not exist on windows, and fails with ENOTDIR only on unix")
 	}
 }
 
@@ -421,6 +447,7 @@ func TestSystemdUnreadableUnitDirIsNotNotInstalled(t *testing.T) {
 	}
 	for name, method := range methods {
 		t.Run(name, func(t *testing.T) {
+			skipStatUnderAFileOnWindows(t)
 			s, f, _ := newTestSystemd(t, ScopeUser, 1000)
 			blockUserUnitDir(t, s)
 			err := method(s, context.Background())
@@ -607,13 +634,7 @@ func TestCommitUnitFileWritesWithMode0644AndRenames(t *testing.T) {
 	if _, err := os.Stat(f.Name()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("temporary file stat err = %v, want it renamed away", err)
 	}
-	fi, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o644 {
-		t.Fatalf("mode = %v, want 0644", fi.Mode().Perm())
-	}
+	wantPerm(t, target, 0o644)
 	if data, err := os.ReadFile(target); err != nil || string(data) != "[Unit]\n" {
 		t.Fatalf("unit file = %q, %v, want the data", data, err)
 	}

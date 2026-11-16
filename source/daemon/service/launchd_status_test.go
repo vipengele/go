@@ -164,6 +164,7 @@ func TestLaunchdStatusCountsRestartsOnlyAfterAFailedRun(t *testing.T) {
 }
 
 func TestLaunchdStatusPlistStatFailureIsUnknown(t *testing.T) {
+	skipStatUnderAFileOnWindows(t)
 	tl := newTestLaunchd(t, ScopeUser, 501)
 	blocker := filepath.Join(t.TempDir(), "home")
 	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
