@@ -764,3 +764,98 @@ func TestRunnerEndsWithARequiredRestartOnceItHasInstalled(t *testing.T) {
 	}
 	e.wantTarget(updatetest.ReleaseExecutable(t, newerVersion))
 }
+
+func TestCycleWhoseConfigDoesNotResolveWarnsAndChecksNothing(t *testing.T) {
+	t.Parallel()
+	e := newCycleEnv(t, envOptions{autoApply: true})
+
+	// An empty StateDir is resolved from the environment when the check runs, and with no
+	// variable set and no home directory it cannot be.
+	cfg := e.cfg
+	cfg.StateDir = ""
+	cfg.Getenv = func(string) string { return "" }
+	cfg.UserHomeDir = func() (string, error) { return "", errors.New("no home directory") }
+	r, err := NewRunner(cfg, e.machine, Settings{AutoApply: true}, func(s Settings) Settings { return s },
+		WithLogger(slog.New(captureHandler{mu: &e.logMu, records: &e.records})))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	if err := r.check.run(t.Context()); err != nil {
+		t.Fatalf("check = %v, want nil", err)
+	}
+
+	e.logged(slog.LevelWarn, msgCheckFailed)
+	if n := e.srv.Requests(updatetest.TargetLatest) + e.srv.Requests(updatetest.TargetLatestAPI); n != 0 {
+		t.Errorf("latest requests = %d, want 0", n)
+	}
+}
+
+// fixedSource is an update.Source whose latest release is rel.
+type fixedSource struct{ rel update.Release }
+
+func (s fixedSource) Latest(context.Context, update.Channel) (update.Release, error) {
+	return s.rel, nil
+}
+
+func TestCycleReleaseWithoutThePlatformsAssetsWarnsAndDownloadsNothing(t *testing.T) {
+	t.Parallel()
+	e := newCycleEnv(t, envOptions{
+		autoApply: true,
+		source:    fixedSource{rel: update.Release{Tag: newerVersion, Assets: []update.Asset{}}},
+	})
+
+	e.runSwallowed()
+
+	rec := e.logged(slog.LevelWarn, msgApplyFailed)
+	var notFound *update.AssetNotFoundError
+	if err, ok := rec.attrs["err"].Any().(error); !ok || !errors.As(err, &notFound) {
+		t.Errorf("err attr = %v, want a *update.AssetNotFoundError", rec.attrs["err"])
+	}
+	if got := e.record().Status; got != StatusIdle {
+		t.Errorf("status = %v, want idle", got)
+	}
+	e.wantNoDownload()
+	e.wantTarget(oldBinary())
+}
+
+func TestCycleInstallFailingAfterAnotherProcessSettledTheRecordWarns(t *testing.T) {
+	t.Parallel()
+	e := newCycleEnv(t, envOptions{autoApply: true})
+
+	// Another process settles the pending record between the hook and the failure of the install,
+	// so the check finds nothing pending to abandon.
+	e.r.check.apply = func(
+		ctx context.Context,
+		r update.Config,
+		sel update.Selection,
+		beforeInstall func(context.Context, update.InstallPlan) error,
+	) (*update.Installed, error) {
+		target, err := r.Target()
+		if err != nil {
+			return nil, err
+		}
+		if err := beforeInstall(ctx, update.InstallPlan{Target: target, Backup: target + ".old", Version: sel.Tag}); err != nil {
+			return nil, err
+		}
+		other, err := New(NewFileStore(e.storePath), runningVersion)
+		if err != nil {
+			return nil, err
+		}
+		if err := other.Abandon(ctx, "settled elsewhere"); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("rename staged: refused")
+	}
+
+	e.runSwallowed()
+
+	e.logged(slog.LevelWarn, msgApplyFailed)
+	rec := e.logged(slog.LevelWarn, msgAbandonFailed)
+	if err, ok := rec.attrs["err"].Any().(error); !ok || !errors.Is(err, ErrNoPendingUpdate) {
+		t.Errorf("err attr = %v, want ErrNoPendingUpdate", rec.attrs["err"])
+	}
+	if got := e.record(); got.Status != StatusRolledBack || got.Reason != "settled elsewhere" {
+		t.Errorf("record = %+v, want rolled_back by the other process", got)
+	}
+}

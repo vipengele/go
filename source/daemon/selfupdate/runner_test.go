@@ -739,3 +739,51 @@ func TestNewRunnerRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestRunnerStopWhileStartResolvesThePathArmsNothing(t *testing.T) {
+	t.Parallel()
+
+	clock := armingClock{Clock: daemontest.NewClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)), armed: make(chan time.Duration, 64)}
+	var r *runner
+	stopErr := make(chan error, 1)
+	path := func() (string, error) {
+		stopErr <- r.Stop(context.Background())
+		return testPath, nil
+	}
+	r, err := newRunner(func(context.Context) error {
+		t.Error("cycle called on a runner stopped before it armed")
+		return nil
+	}, path, DefaultSettings(), WithRunnerClock(clock))
+	if err != nil {
+		t.Fatalf("newRunner() error = %v", err)
+	}
+
+	if err := r.Start(t.Context()); !errors.Is(err, context.Canceled) {
+		t.Errorf("Start() = %v, want context.Canceled", err)
+	}
+	if err := <-stopErr; err != nil {
+		t.Errorf("Stop() = %v, want nil", err)
+	}
+	waitDone(t, r)
+	select {
+	case d := <-clock.armed:
+		t.Errorf("armed a timer for %v, want none", d)
+	default:
+	}
+}
+
+func TestRunnerTimerCallbackOfADisarmedTimerDoesNothing(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, DefaultSettings(), nil)
+	j := h.begin()
+
+	h.r.mu.Lock()
+	stale := h.r.gen - 1
+	h.r.mu.Unlock()
+	h.r.fire(stale)
+	h.wantNoCall()
+	h.wantNoArm()
+
+	h.check(j, nil, DefaultInterval)
+}

@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"hash/fnv"
+	"math/big"
 	"time"
 )
 
@@ -17,5 +18,8 @@ func jitter(path string, interval time.Duration) time.Duration {
 	}
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(path))
-	return time.Duration(h.Sum64() % uint64(window))
+	// The remainder is taken over the big-endian digest as an unsigned integer, which is
+	// Sum64 modulo window, and is below window, so it always fits a Duration.
+	sum := new(big.Int).SetBytes(h.Sum(nil))
+	return time.Duration(sum.Mod(sum, big.NewInt(int64(window))).Int64())
 }
