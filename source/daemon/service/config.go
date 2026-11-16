@@ -21,9 +21,8 @@ const (
 )
 
 const (
-	maxNameLen           = 128
-	maxPOSIXAccountLen   = 32
-	maxWindowsAccountLen = 104
+	maxNameLen         = 128
+	maxPOSIXAccountLen = 32
 )
 
 // Config describes a service to install. Validate checks it against the
@@ -57,9 +56,11 @@ type Config struct {
 	WorkingDir string
 	// User is the account the service runs as. When empty the service
 	// manager's default for Scope applies. It must be empty with ScopeUser
-	// on every GOOS but Windows. On Windows it is an account name
-	// with an optional "DOMAIN\" prefix ("." for the local machine); on
-	// every other GOOS it is a POSIX user name.
+	// on every GOOS but Windows. On Windows it is empty, for LocalSystem, or one
+	// of `NT AUTHORITY\LocalService`, `NT AUTHORITY\NetworkService` and
+	// `NT SERVICE\<Name>` with Name the service's own, compared without regard
+	// to case; no password can be given. On every other GOOS it is a POSIX user
+	// name.
 	User string
 	// Scope selects a system-wide or a per-user service.
 	Scope Scope
@@ -165,8 +166,8 @@ func (c Config) validateUser(windows bool, fail func(format string, args ...any)
 		switch {
 		case textProblem(c.User) != "":
 			fail("User: %s", textProblem(c.User))
-		case windows && !validWindowsAccount(c.User):
-			fail("User: %q is not a Windows account name", c.User)
+		case windows && !validWindowsAccount(c.User, c.Name):
+			fail(`User: %q is none of "NT AUTHORITY\LocalService", "NT AUTHORITY\NetworkService" and "NT SERVICE\%s"`, c.User, c.Name)
 		case !windows && !validPOSIXAccount(c.User):
 			fail("User: %q is not a POSIX user name", c.User)
 		}
@@ -270,30 +271,14 @@ func validPOSIXAccount(s string) bool {
 	return true
 }
 
-// validWindowsAccount reports whether s is a Windows account name with an
-// optional "DOMAIN\" prefix, at most 104 bytes in all. Domain and name each
-// hold ASCII letters, digits, ' ', '.', '_' or '-', are non-empty and neither
-// start nor end with a space; "." as the domain names the local machine.
-func validWindowsAccount(s string) bool {
-	if len(s) > maxWindowsAccountLen {
-		return false
+// validWindowsAccount reports whether s is an account a Windows service can
+// run as without a password: LocalService, NetworkService or the virtual
+// account of the service called name, compared case-insensitively.
+func validWindowsAccount(s, name string) bool {
+	switch {
+	case strings.EqualFold(s, `NT AUTHORITY\LocalService`),
+		strings.EqualFold(s, `NT AUTHORITY\NetworkService`):
+		return true
 	}
-	domain, name, hasDomain := strings.Cut(s, `\`)
-	if !hasDomain {
-		return validWindowsAccountPart(s)
-	}
-	return validWindowsAccountPart(domain) && validWindowsAccountPart(name)
-}
-
-func validWindowsAccountPart(s string) bool {
-	if s == "" || s[0] == ' ' || s[len(s)-1] == ' ' {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		b := s[i]
-		if !isASCIILetter(b) && !isASCIIDigit(b) && b != ' ' && b != '.' && b != '_' && b != '-' {
-			return false
-		}
-	}
-	return true
+	return name != "" && strings.EqualFold(s, `NT SERVICE\`+name)
 }

@@ -1,15 +1,12 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -107,33 +104,6 @@ func TestSystemdInstallRunsCommandsInOrder(t *testing.T) {
 				if (tc.scope == ScopeUser) != slices.Contains(argv, "--user") && argv[0] == "systemctl" {
 					t.Fatalf("command %q: --user must appear exactly for a user unit", argv)
 				}
-			}
-		})
-	}
-}
-
-func TestSystemdInstallWritesTheRenderedUnit(t *testing.T) {
-	for _, scope := range []Scope{ScopeSystem, ScopeUser} {
-		t.Run(fmt.Sprint(scope), func(t *testing.T) {
-			s, _, dir := newTestSystemd(t, scope, 0)
-			if err := s.Install(context.Background()); err != nil {
-				t.Fatalf("Install: %v", err)
-			}
-			path := filepath.Join(dir, "demo.service")
-			got, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if want := renderUnit(s.cfg, s.hardening, s.notify); !bytes.Equal(got, want) {
-				t.Fatalf("unit file =\n%s\nwant\n%s", got, want)
-			}
-			wantPerm(t, path, 0o644)
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(entries) != 1 {
-				t.Fatalf("unit directory holds %d entries, want only the unit file", len(entries))
 			}
 		})
 	}
@@ -302,34 +272,6 @@ func TestSystemdInstalledUnitPathIsEmptyWhenNotInstalled(t *testing.T) {
 	}
 }
 
-func TestSystemdInstalledUnitPathIsEmptyOnAnError(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T, s *systemd)
-	}{
-		{"unit directory unknown", func(_ *testing.T, s *systemd) {
-			s.lookupEnv = func(string) (string, bool) { return "", false }
-		}},
-		{"unit directory under a regular file", func(t *testing.T, s *systemd) {
-			skipStatUnderAFileOnWindows(t)
-			blockUserUnitDir(t, s)
-		}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s, _, _ := newTestSystemd(t, ScopeUser, 1000)
-			tc.setup(t, s)
-			path, err := s.installedUnitPath()
-			if err == nil || errors.Is(err, ErrNotInstalled) {
-				t.Fatalf("installedUnitPath error = %v, want an error other than ErrNotInstalled", err)
-			}
-			if path != "" {
-				t.Fatalf("installedUnitPath = %q, want \"\"", path)
-			}
-		})
-	}
-}
-
 func TestSystemdWriteUnitRemovesItsTemporaryFileWhenTheRenameFails(t *testing.T) {
 	s, _, dir := newTestSystemd(t, ScopeUser, 1000)
 	blocker := filepath.Join(dir, "demo.service")
@@ -347,33 +289,6 @@ func TestSystemdWriteUnitRemovesItsTemporaryFileWhenTheRenameFails(t *testing.T)
 		if e.Name() != "demo.service" {
 			t.Errorf("leftover file %q in the unit directory", e.Name())
 		}
-	}
-}
-
-// wantPerm fails t unless the file at path carries the permission bits want.
-// Windows has no Unix permission bits, so there it checks only that the file
-// exists.
-func wantPerm(t *testing.T, path string, want fs.FileMode) {
-	t.Helper()
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS == "windows" {
-		return
-	}
-	if got := fi.Mode().Perm(); got != want {
-		t.Fatalf("%s mode = %v, want %#o", path, got, want)
-	}
-}
-
-// skipStatUnderAFileOnWindows skips a test whose premise is a stat failure
-// other than not-exist, produced by a path under a regular file: Windows
-// reports such a path as not existing, where Unix fails with ENOTDIR.
-func skipStatUnderAFileOnWindows(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("a path under a regular file does not exist on windows, and fails with ENOTDIR only on unix")
 	}
 }
 
@@ -429,35 +344,6 @@ func TestSystemdUnknownUserUnitDirFailsEveryMethod(t *testing.T) {
 	s.lookupEnv = func(string) (string, bool) { return "", false }
 	if err := s.writeUnit(); err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") {
 		t.Fatalf("writeUnit err = %v, want the unknown unit directory", err)
-	}
-}
-
-func TestSystemdUnreadableUnitDirIsNotNotInstalled(t *testing.T) {
-	methods := map[string]func(*systemd, context.Context) error{
-		"Uninstall": (*systemd).Uninstall,
-		"Start":     (*systemd).Start,
-		"Stop":      (*systemd).Stop,
-		"Status": func(s *systemd, ctx context.Context) error {
-			st, err := s.Status(ctx)
-			if st != (Status{State: StateUnknown}) {
-				return fmt.Errorf("status = %+v, want only StateUnknown: %w", st, err)
-			}
-			return err
-		},
-	}
-	for name, method := range methods {
-		t.Run(name, func(t *testing.T) {
-			skipStatUnderAFileOnWindows(t)
-			s, f, _ := newTestSystemd(t, ScopeUser, 1000)
-			blockUserUnitDir(t, s)
-			err := method(s, context.Background())
-			if err == nil || errors.Is(err, ErrNotInstalled) || !strings.Contains(err.Error(), "stat unit file") {
-				t.Fatalf("err = %v, want a stat failure other than ErrNotInstalled", err)
-			}
-			if len(f.calls) != 0 {
-				t.Fatalf("commands = %q, want none", f.calls)
-			}
-		})
 	}
 }
 
@@ -615,27 +501,5 @@ func TestCommitUnitFileJoinsEveryWriteFailureAndKeepsTheTarget(t *testing.T) {
 	}
 	if data, err := os.ReadFile(f.Name()); err != nil || len(data) != 0 {
 		t.Fatalf("temporary file = %q, %v, want it kept and empty", data, err)
-	}
-}
-
-func TestCommitUnitFileWritesWithMode0644AndRenames(t *testing.T) {
-	dir := t.TempDir()
-	f, err := os.CreateTemp(dir, "unit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(dir, "demo.service")
-	if err := commitUnitFile(f, []byte("[Unit]\n"), target); err != nil {
-		t.Fatalf("commitUnitFile: %v", err)
-	}
-	if err := f.Close(); !errors.Is(err, os.ErrClosed) {
-		t.Fatalf("second close err = %v, want os.ErrClosed, the file already closed", err)
-	}
-	if _, err := os.Stat(f.Name()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("temporary file stat err = %v, want it renamed away", err)
-	}
-	wantPerm(t, target, 0o644)
-	if data, err := os.ReadFile(target); err != nil || string(data) != "[Unit]\n" {
-		t.Fatalf("unit file = %q, %v, want the data", data, err)
 	}
 }

@@ -44,9 +44,15 @@ type Manager interface {
 //  3. An invalid cfg, then an invalid Hardening from WithSystemdHardening,
 //     then an invalid watchdog from WithSystemdNotify, then an invalid log
 //     path from WithLaunchdLogs, returns an error wrapping ErrInvalidConfig.
-//  4. A GOOS without a driver returns an error wrapping ErrUnsupported. The
-//     drivers are systemd on linux and launchd on darwin; every other GOOS,
-//     windows included, has none.
+//  4. On windows, ScopeUser and a WorkingDir return an error wrapping
+//     ErrUnsupported that names the scope or the field.
+//  5. A GOOS without a driver returns an error wrapping ErrUnsupported. The
+//     drivers are systemd on linux, launchd on darwin and the service control
+//     manager on windows; every other GOOS has none.
+//
+// The windows driver reaches the service control manager of the host. On a
+// host other than Windows, New with WithGOOS("windows") returns it, and every
+// method of the Manager fails with an error wrapping ErrUnsupported.
 func New(cfg Config, opts ...Option) (Manager, error) {
 	var o options
 	for _, opt := range opts {
@@ -104,7 +110,17 @@ func New(cfg Config, opts ...Option) (Manager, error) {
 			sleep:     sleepContext,
 		}, nil
 	case "windows":
-		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
+		if cfg.Scope == ScopeUser {
+			return nil, fmt.Errorf("%w: Scope: ScopeUser on %s", ErrUnsupported, goos)
+		}
+		if cfg.WorkingDir != "" {
+			return nil, fmt.Errorf("%w: WorkingDir on %s", ErrUnsupported, goos)
+		}
+		return &windowsDriver{
+			cfg:   cfg,
+			scm:   hostSCM(),
+			sleep: sleepContext,
+		}, nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, goos)
 	}

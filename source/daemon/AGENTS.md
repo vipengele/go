@@ -57,8 +57,16 @@ golangci-lint run
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
   the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam) and `WithSystemd`. Tests:
-  `systemd_test.go`.
+  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam), `WithSystemd` and
+  `WithWindowsService`. Tests: `systemd_test.go`.
+- `windows_service.go` — `WithWindowsService`'s behaviour: `Run` serves under the Windows service
+  control manager when the process runs as a service, and exits with `WindowsRestartExitCode` for a
+  requested restart and `WindowsFailureExitCode` for every other ending the SCM did not ask for
+  (ADR-0034). The Supervisor fields `isWindowsService` and `runWindowsService` are its
+  operating-system seams and `serviceReady` is called beside the systemd `READY=1`; `New` sets the
+  first two to the host's and tests replace them. `windows_service_windows.go` holds the real ones
+  on `golang.org/x/sys/windows/svc`, `windows_service_other.go` the stubs for every other GOOS.
+  Tests: `windows_service_test.go`, `windows_service_other_test.go`.
 - `clock.go` — the `Clock` interface (`Now`, `AfterFunc`), the system clock, and `withDeadline`
   with its `clockContext`, the deadline context for any other clock. `Deadline` is the clock's
   deadline or the parent's when earlier, and `Err` is `context.DeadlineExceeded` when the clock's
@@ -118,7 +126,7 @@ golangci-lint run
 ## The `service` package
 
 `go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd on linux,
-launchd on darwin; no other GOOS has a driver) behind the `Manager` interface: `Prepare`, `Install`,
+launchd on darwin, the service control manager on windows; no other GOOS has a driver) behind the `Manager` interface: `Prepare`, `Install`,
 `Uninstall`, `Start`, `Stop` and `Status`, each taking only a context. Read its `doc.go` first and
 `docs/adr/0024-service-drivers-are-selected-at-runtime.md`.
 
@@ -126,8 +134,7 @@ launchd on darwin; no other GOOS has a driver) behind the `Manager` interface: `
   identity (`ErrInvalidConfig`), whether the process runs in a container (`*ContainerError`), the
   `Config` against the target GOOS, the `WithSystemdHardening` override, the `WithSystemdNotify`
   watchdog and the `WithLaunchdLogs` paths (`ErrInvalidConfig`), and then switches on the GOOS to
-  select the driver: systemd on linux, launchd on darwin, `ErrUnsupported` on every other GOOS,
-  windows included. `sleepContext`, the launchd driver's `sleep`, waits on a timer or the context.
+  select the driver: systemd on linux, launchd on darwin, the SCM on windows, `ErrUnsupported` on every other GOOS. `sleepContext`, the launchd driver's `sleep`, waits on a timer or the context.
 - `option.go` — `Option`, `WithGOOS`, `WithIdentity`, `WithContainer`,
   `WithSystemdHardening`, `WithSystemdNotify` and `WithLaunchdLogs`; `""` means `runtime.GOOS`,
   `"windows"` applies the Windows rules and every other value the POSIX rules. `WithLaunchdLogs`
@@ -152,6 +159,12 @@ launchd on darwin; no other GOOS has a driver) behind the `Manager` interface: `
 - `launchd.go`, `launchd_plist.go`, `launchd_status.go` — the launchd driver: the unexported
   `launchd` struct with `Prepare`, `Install`, `Uninstall`, `Start` and `Stop`, the property list
   rendering with the default log paths, and `Status`.
+- `windows.go`, `scm_windows.go`, `scm_other.go` — the Windows driver. `windows.go` holds the
+  driver, written against the unexported `scm` seam (`elevated`, `connect`, and the `scmManager`
+  it returns) with `scmErrno` Win32 codes that an implementation wraps so the driver tells them
+  apart with `errors.Is` on any host. `scm_windows.go` is the real `scm` on
+  `golang.org/x/sys/windows/svc/mgr` and `registry`; `scm_other.go` is the stub whose every call
+  fails with `ErrUnsupported`.
 - `export_test.go` — `WithLookupEnv`, the test-only seam for the environment container detection
   reads.
 
@@ -160,12 +173,12 @@ Conventions of the package:
 - Validation follows the target GOOS, never the host's: no `filepath.IsAbs`. The rules come
   from the target GOOS; `runtime.GOOS` is only the default target (`New` without `WithGOOS`, and
   `Config.Validate`). Tests render and validate any OS's service on any host through `WithGOOS`.
-- No build tags and no `_windows.go` file. Only the operating-system calls themselves, the Windows
-  service control manager, could ever need one.
-- The tests pass on a Windows host too, where CI runs them: the goldens stay LF through
-  `source/daemon/.gitattributes`, an expected path is built as the driver builds it (`filepath`
-  or `path`), permission bits are checked only off Windows (`wantPerm`), and a test whose premise
-  is a Unix-only error, such as ENOTDIR from a path under a regular file, skips on Windows.
+- Build tags only where an operating-system call needs one: `scm_windows.go` and `scm_other.go`
+  (`!windows`) hold the SCM calls and everything else in the package builds on every GOOS. The
+  Windows driver is tested on any host against a fake `scm` (`windows_test.go`); only
+  `service_windows_test.go` runs against the real SCM, and builds `testdata/winsvc` by its explicit
+  path. Tests that need POSIX (`systemd_posix_test.go`, `launchd_posix_test.go`,
+  `systemd_exec_posix_test.go`) are `!windows` files.
 - `State` names go through `switch` in `String`, `MarshalText` and `UnmarshalText`, never a
   package-level table: `gochecknoglobals` is enabled.
 - `Validate` returns `errors.Join` of `ErrInvalidConfig`-wrapped violations in a fixed order: fields
@@ -173,7 +186,8 @@ Conventions of the package:
 - Every test passes `WithContainer` (or `WithLookupEnv` with a forced `<PREFIX>_CONTAINER`, or a
   `container` variable) so that no test result depends on the host being a container.
 - Standard library only, apart from `go.vipengele.org/cli/spec` and `cli/spec/paths`, for
-  `spec.Identity` and container detection.
+  `spec.Identity` and container detection, `go.vipengele.org/daemon` for the exit codes, and
+  `golang.org/x/sys` for the SCM (`scm_windows.go` only).
 
 The systemd driver:
 
@@ -233,6 +247,13 @@ The systemd driver:
   `main_test.go`. `testdata/launchd/print-*.txt` are `launchctl print` and `print-disabled` outputs
   transcribed from public macOS output, not captured on a machine (`testdata/launchd/README.md`).
 
+The Windows driver (ADR-0034): a service is created in the SCM with a single restart recovery
+action (5 s delay) answering a non-zero exit, which is why a supervisor under `WithWindowsService`
+exits non-zero for a requested restart (`WindowsRestartExitCode`) and the driver's `Status` reads
+that as starting. Every wait on the SCM (a service marked for deletion, a stopping service) is
+bounded by `windowsWaitTimeout` and polled every `windowsPollInterval`. Windows rules for `Config`
+(`User` as an account, `ScopeUser`, `WorkingDir`) live in `config.go` and `manager.go`.
+
 The launchd driver:
 
 - Scopes. The label is `Config.Name`. `ScopeSystem` is a LaunchDaemon in the `system` domain,
@@ -289,6 +310,8 @@ The launchd driver:
 - The package handles only SIGHUP, and only under `WithReload`: the context passed to `Run` drives
   shutdown, and SIGINT and SIGTERM stay with the caller (`cli/core` owns them).
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
+- `source/daemon/.gitattributes` keeps the golden and recorded-output fixtures LF on every
+  platform; they are compared byte for byte or parsed line by line, so a CRLF checkout fails them.
 - `depguard` forbids importing `github.com/spf13/cobra` and `go.vipengele.org/cli/core` anywhere,
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
   `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and

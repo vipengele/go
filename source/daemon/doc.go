@@ -108,6 +108,13 @@
 // opened, keyed by name, and one is passed to NewHTTPServerListener to serve on it. The sockets
 // come from a .socket unit the user writes; this library generates none.
 //
+// # Windows service
+//
+// WithWindowsService has Run serve the run as a Windows service when the service control manager
+// started the process, reporting start-pending, running and stop-pending to it; it does nothing
+// elsewhere. It is the counterpart of WithSystemd, and the service side is a ScopeSystem service
+// installed by daemon/service on Windows.
+//
 // # Single instance
 //
 // The instance lock lets one instance of a tool run at a time for one runtime directory. A program
@@ -177,13 +184,19 @@
 // during shutdown whose Err wraps context.Canceled; any other exit during shutdown is a stop
 // problem. With WithInstanceLock, a lock that cannot be taken is Run's only error, an
 // *AlreadyRunningError while another instance holds it, and no Runner is started. A second Run
-// returns ErrAlreadyRan, even after a first that returned because the lock was held: Run marks
-// the Supervisor as run before it takes the lock, so a program that retries builds a new
-// Supervisor with New. A Reload that returns an error or panics is a failure of the Runner,
+// returns ErrAlreadyRan, even after a first that returned because the lock was held or because
+// the Windows service check failed: Run marks the Supervisor as run before anything else, so a
+// program that retries builds a new Supervisor with New. Under WithWindowsService a second Run
+// returns ErrAlreadyRan without going to the service control manager. A Reload that returns an error or panics is a failure of the Runner,
 // naming it, and one that overruns the round's deadline is ErrReloadTimeout naming it; a deadline
 // that passes between two Reloads is ErrReloadTimeout naming no Runner. Each begins shutdown and
 // leads the joined errors as a start failure does. A rejected configuration is not an error. A
-// failed systemd notification is logged, never returned. Match with errors.Is and errors.As.
+// failed systemd notification is logged, never returned. Under WithWindowsService, an error of the
+// IsWindowsService check is returned wrapped as "daemon: windows service:" and no Runner is
+// started; an error of the service control manager's dispatcher is wrapped the same way and joined
+// after the run's error when the run took place, and alone when it did not; a dispatcher that
+// returns without ever starting the service is an error saying so. Match with errors.Is and
+// errors.As.
 //
 // # Restart
 //
@@ -198,6 +211,13 @@
 //		return nil
 //	}
 //	return err
+//
+// On Windows, under WithWindowsService, a clean exit would leave the service stopped, so Run
+// reports a requested restart to the service control manager itself, as a stop with
+// WindowsRestartExitCode, which the recovery action installed by go.vipengele.org/daemon/service
+// relaunches. Every other ending the manager did not ask for reports WindowsFailureExitCode, and a
+// Stop or Shutdown control of the manager exits 0 (ADR-0034, "On Windows a requested restart is a
+// non-zero service exit"). The consumer's own exit status does not reach the manager.
 //
 // # Reload
 //
@@ -259,7 +279,9 @@
 // context passed to Run from its own signal handler. With WithReload, and only then, Run takes
 // SIGHUP, from once the instance lock is held until Run returns after the stop phase, so a SIGHUP
 // during start or shutdown never ends the process. On Windows the option is accepted and a reload
-// never fires.
+// never fires. Under WithWindowsService, the Stop and Shutdown controls of the service control
+// manager take the place of a signal: each cancels the context the run uses, and the package
+// still handles only SIGHUP, under WithReload.
 //
 // # Running in a container
 //
