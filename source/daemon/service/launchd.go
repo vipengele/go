@@ -146,6 +146,12 @@ func (l *launchd) requirePrivileges(method string) error {
 		ErrPrivilegesRequired, method, l.label())
 }
 
+// CheckPrivileges fails with an error wrapping ErrPrivilegesRequired when the
+// job is a LaunchDaemon and the process is not root.
+func (l *launchd) CheckPrivileges(context.Context) error {
+	return l.requirePrivileges("manage")
+}
+
 // checkAccount fails when the LaunchDaemon runs as an account that does not
 // exist, as the free checkAccount does.
 func (l *launchd) checkAccount(ctx context.Context) error {

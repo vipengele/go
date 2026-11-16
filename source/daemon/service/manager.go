@@ -24,6 +24,11 @@ type Manager interface {
 	Start(ctx context.Context) error
 	// Stop asks the service manager to stop the service.
 	Stop(ctx context.Context) error
+	// CheckPrivileges fails with an error wrapping ErrPrivilegesRequired when
+	// the process lacks the privileges Install, Uninstall, Start, Stop and
+	// Prepare need, and runs nothing else. It returns nil for a user-scope
+	// service.
+	CheckPrivileges(ctx context.Context) error
 	// Status reports the service as the service manager sees it.
 	Status(ctx context.Context) (Status, error)
 }

@@ -621,3 +621,32 @@ func TestLaunchdInstallStopsWhenThePlistCannotBeWritten(t *testing.T) {
 	}
 	tl.wantCalls(t, [][]string{{"launchctl", "print", "gui/501"}})
 }
+
+func TestLaunchdCheckPrivileges(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope Scope
+		euid  int
+		want  bool
+	}{
+		{"system as root", ScopeSystem, 0, false},
+		{"system unprivileged", ScopeSystem, 501, true},
+		{"user as root", ScopeUser, 0, false},
+		{"user unprivileged", ScopeUser, 501, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tl := newTestLaunchd(t, tc.scope, tc.euid)
+			err := tl.CheckPrivileges(context.Background())
+			if tc.want {
+				if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "manage of the LaunchDaemon demo needs root, run it with sudo") {
+					t.Fatalf("err = %v, want ErrPrivilegesRequired naming manage and suggesting sudo", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if len(tl.runner.calls) != 0 {
+				t.Fatalf("commands = %q, want none", tl.runner.calls)
+			}
+		})
+	}
+}

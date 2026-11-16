@@ -503,3 +503,32 @@ func TestCommitUnitFileJoinsEveryWriteFailureAndKeepsTheTarget(t *testing.T) {
 		t.Fatalf("temporary file = %q, %v, want it kept and empty", data, err)
 	}
 }
+
+func TestSystemdCheckPrivileges(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope Scope
+		euid  int
+		want  bool
+	}{
+		{"system as root", ScopeSystem, 0, false},
+		{"system unprivileged", ScopeSystem, 1000, true},
+		{"user as root", ScopeUser, 0, false},
+		{"user unprivileged", ScopeUser, 1000, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, f, _ := newTestSystemd(t, tc.scope, tc.euid)
+			err := s.CheckPrivileges(context.Background())
+			if tc.want {
+				if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "manage of the system unit demo.service needs root, run it with sudo") {
+					t.Fatalf("err = %v, want ErrPrivilegesRequired naming manage and suggesting sudo", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("commands = %q, want none", f.calls)
+			}
+		})
+	}
+}

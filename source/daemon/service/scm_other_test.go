@@ -40,11 +40,12 @@ func TestNewWindowsOnAnotherHostFailsEveryMethodUnsupported(t *testing.T) {
 	}
 	ctx := context.Background()
 	methods := map[string]func() error{
-		"Prepare":   func() error { return m.Prepare(ctx) },
-		"Install":   func() error { return m.Install(ctx) },
-		"Uninstall": func() error { return m.Uninstall(ctx) },
-		"Start":     func() error { return m.Start(ctx) },
-		"Stop":      func() error { return m.Stop(ctx) },
+		"Prepare":         func() error { return m.Prepare(ctx) },
+		"Install":         func() error { return m.Install(ctx) },
+		"Uninstall":       func() error { return m.Uninstall(ctx) },
+		"Start":           func() error { return m.Start(ctx) },
+		"Stop":            func() error { return m.Stop(ctx) },
+		"CheckPrivileges": func() error { return m.CheckPrivileges(ctx) },
 		"Status": func() error {
 			st, err := m.Status(ctx)
 			if st.State != StateUnknown {

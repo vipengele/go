@@ -145,6 +145,12 @@ func (s *systemd) requirePrivileges(method string) error {
 		ErrPrivilegesRequired, method, s.unitName())
 }
 
+// CheckPrivileges fails with an error wrapping ErrPrivilegesRequired when the
+// unit is a system unit and the process is not root.
+func (s *systemd) CheckPrivileges(context.Context) error {
+	return s.requirePrivileges("manage")
+}
+
 // checkAccount fails when the system unit runs as an account that does not
 // exist, as the free checkAccount does.
 func (s *systemd) checkAccount(ctx context.Context) error {

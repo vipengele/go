@@ -31,8 +31,8 @@
 //
 // systemd: a system unit is installed in /etc/systemd/system, driven by
 // systemctl, wanted by multi-user.target and ordered after
-// network-online.target. Install, Uninstall, Start, Stop and Prepare need root
-// and report ErrPrivilegesRequired otherwise. A user unit is installed in
+// network-online.target. Install, Uninstall, Start, Stop, Prepare and CheckPrivileges need
+// root and report ErrPrivilegesRequired otherwise. A user unit is installed in
 // $XDG_CONFIG_HOME/systemd/user (default $HOME/.config/systemd/user), driven
 // by systemctl --user and wanted by default.target; it needs no root, and
 // Config.User must be empty. Status reports ErrManagerUnreachable, with
@@ -43,8 +43,8 @@
 // ScopeSystem service is a LaunchDaemon in the system domain, whose property
 // list is /Library/LaunchDaemons/<Name>.plist; it starts at boot and runs as
 // Config.User, written as UserName, or as root when that is empty. Install,
-// Uninstall, Start, Stop and Prepare need root and report
-// ErrPrivilegesRequired otherwise. A ScopeUser service is a LaunchAgent in the
+// Uninstall, Start, Stop, Prepare and CheckPrivileges need root and
+// report ErrPrivilegesRequired otherwise. A ScopeUser service is a LaunchAgent in the
 // gui/<uid> domain of the user, whose property list is
 // $HOME/Library/LaunchAgents/<Name>.plist; it needs no root, and Config.User
 // must be empty. A user service is an agent because only an agent reaches the
@@ -65,8 +65,8 @@
 // NT AUTHORITY\LocalService, NT AUTHORITY\NetworkService or NT SERVICE\<Name>,
 // compared without regard to case, and no password can be given. Any other
 // User is reported as ErrInvalidConfig on every host. Install, Uninstall,
-// Start, Stop and Prepare need an elevated process and report
-// ErrPrivilegesRequired otherwise; Status needs none.
+// Start, Stop, Prepare and CheckPrivileges need an elevated process and
+// report ErrPrivilegesRequired otherwise; Status needs none.
 //
 // # Hardening
 //

@@ -339,6 +339,13 @@ func (w *windowsDriver) requirePrivileges(method string) error {
 	return nil
 }
 
+// CheckPrivileges fails with an error wrapping ErrPrivilegesRequired when the
+// process is not elevated, and returns the error of the elevation check when
+// it cannot tell.
+func (w *windowsDriver) CheckPrivileges(context.Context) error {
+	return w.requirePrivileges("manage")
+}
+
 // connect opens the SCM with access. A failure wraps ErrManagerUnreachable.
 func (w *windowsDriver) connect(access scmAccess) (scmManager, error) {
 	m, err := w.scm.connect(access)

@@ -122,7 +122,7 @@ golangci-lint run
 
 `go.vipengele.org/daemon/service` fronts the operating system's service manager (systemd on linux,
 launchd on darwin, the service control manager on windows; no other GOOS has a driver) behind the `Manager` interface: `Prepare`, `Install`,
-`Uninstall`, `Start`, `Stop` and `Status`, each taking only a context. Read its `doc.go` first and
+`Uninstall`, `Start`, `Stop`, `CheckPrivileges` and `Status`, each taking only a context. Read its `doc.go` first and
 `docs/adr/0024-service-drivers-are-selected-at-runtime.md`.
 
 - `manager.go` — `Manager` and `New(cfg, opts...)`, which checks, in order, the `WithIdentity`
@@ -188,7 +188,7 @@ The systemd driver:
 
 - Scopes. A system unit lives in `/etc/systemd/system`, is driven by `systemctl`, is `WantedBy=
   multi-user.target` with `After=`/`Wants=network-online.target`, and `Install`, `Uninstall`,
-  `Start`, `Stop` and `Prepare` need root (`ErrPrivilegesRequired`). A user unit lives in
+  `Start`, `Stop`, `Prepare` and `CheckPrivileges` need root (`ErrPrivilegesRequired`). A user unit lives in
   `$XDG_CONFIG_HOME/systemd/user` (default `$HOME/.config/systemd/user`), is driven by
   `systemctl --user`, is `WantedBy=default.target` with no network ordering, and needs no root;
   `Config.User` must be empty with `ScopeUser` on POSIX. `Type=simple` by default, `Type=notify`
@@ -253,8 +253,8 @@ The launchd driver:
 
 - Scopes. The label is `Config.Name`. `ScopeSystem` is a LaunchDaemon in the `system` domain,
   `/Library/LaunchDaemons/<Name>.plist`, with `UserName` from `Config.User` (root when empty);
-  `Prepare`, `Install`, `Uninstall`, `Start` and `Stop` need root (`ErrPrivilegesRequired`).
-  `ScopeUser` is a LaunchAgent in `gui/<uid>`, `$HOME/Library/LaunchAgents/<Name>.plist`, needing no
+  `Prepare`, `Install`, `Uninstall`, `Start`, `Stop` and `CheckPrivileges` need root
+  (`ErrPrivilegesRequired`). `ScopeUser` is a LaunchAgent in `gui/<uid>`, `$HOME/Library/LaunchAgents/<Name>.plist`, needing no
   root. A user service is an agent because only an agent reaches the user's Keychain; the `gui`
   domain exists only while the user is logged in to the GUI (not over ssh or `sudo -u`), and
   `launchctl print gui/<uid>` failing is `ErrManagerUnreachable`. System-wide agents in

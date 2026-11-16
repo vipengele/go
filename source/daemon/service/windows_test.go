@@ -1097,3 +1097,37 @@ func TestWindowsInstallTakesTheContextsEndWhileWaitingOutADeletion(t *testing.T)
 		t.Errorf("slept %d times over calls %q, want one create and one sleep", *sleeps, f.calls)
 	}
 }
+
+func TestWindowsCheckPrivileges(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		elev    bool
+		elevErr error
+		check   func(t *testing.T, err error)
+	}{
+		{"elevated", true, nil, func(t *testing.T, err error) {
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+		}},
+		{"not elevated", false, nil, func(t *testing.T, err error) {
+			if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "manage of the service demo needs administrator rights, run it from an elevated prompt") {
+				t.Fatalf("err = %v, want ErrPrivilegesRequired naming manage and an elevated prompt", err)
+			}
+		}},
+		{"elevation check fails", true, errSCMAccessDenied, func(t *testing.T, err error) {
+			if !errors.Is(err, errSCMAccessDenied) || errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "check elevation") {
+				t.Fatalf("err = %v, want the elevation check's error", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, f, _ := newTestWindows(demoWindowsConfig())
+			f.elevated, f.elevatedErr = tc.elev, tc.elevErr
+			tc.check(t, w.CheckPrivileges(t.Context()))
+			if !slices.Equal(f.calls, []string{"elevated"}) {
+				t.Errorf("calls = %q, want only the elevation check", f.calls)
+			}
+		})
+	}
+}
