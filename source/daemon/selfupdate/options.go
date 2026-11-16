@@ -47,6 +47,40 @@ func WithMaxBootAttempts(n int) Option {
 	}
 }
 
+// WithLogger sets the logger Apply reports through: a post-update hook that failed and a process
+// no service supervisor restarts. Without it Apply uses slog.Default(), read when Apply runs. A nil
+// logger is rejected by New.
+func WithLogger(logger *slog.Logger) Option {
+	return func(m *Machine) error {
+		if logger == nil {
+			return errors.New("selfupdate: nil logger")
+		}
+
+		m.logger = logger
+
+		return nil
+	}
+}
+
+// WithSupervisorCheck sets what Apply's check for a service supervisor reads: label is the name the
+// service is installed under, matched against launchd's XPC_SERVICE_NAME, and lookup reads the
+// environment as os.LookupEnv does. The check is daemon.UnderSupervisor with the process's own pid;
+// when it fails, Apply logs that nothing restarts the process into the installed binary. Without
+// this option the label is empty, so launchd never matches, and lookup is os.LookupEnv. A nil
+// lookup is rejected by New.
+func WithSupervisorCheck(label string, lookup func(string) (string, bool)) Option {
+	return func(m *Machine) error {
+		if lookup == nil {
+			return errors.New("selfupdate: nil environment lookup")
+		}
+
+		m.label = label
+		m.lookupEnv = lookup
+
+		return nil
+	}
+}
+
 // systemClock is the system clock.
 type systemClock struct{}
 
@@ -69,12 +103,13 @@ const defaultRunnerName = "selfupdate"
 // RunnerOption configures the runner that schedules a daemon's update checks. A RunnerOption that
 // rejects its argument returns an error, which the runner's constructor reports.
 //
-// The runner's clock is set with WithRunnerClock: WithClock sets a Machine's.
+// The runner's clock is set with WithRunnerClock and its logger with WithRunnerLogger: WithClock and
+// WithLogger set a Machine's.
 type RunnerOption func(*runner) error
 
-// WithLogger sets the logger the runner reports its schedule and its failed checks through. The
-// default is slog.Default(), read when the runner is built. A nil logger is rejected.
-func WithLogger(logger *slog.Logger) RunnerOption {
+// WithRunnerLogger sets the logger the runner reports its schedule and its failed checks through.
+// The default is slog.Default(), read when the runner is built. A nil logger is rejected.
+func WithRunnerLogger(logger *slog.Logger) RunnerOption {
 	return func(r *runner) error {
 		if logger == nil {
 			return errors.New("selfupdate: nil logger")

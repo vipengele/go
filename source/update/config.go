@@ -196,14 +196,22 @@ type Config struct {
 	// [terminal.Detect] probes them.
 	IsTerminal func() bool
 	// BackupGuard says whether the backup beside the executable is still needed. Nil means it
-	// never is, and [Config.RemoveStaleBackup] removes whatever backup is there.
+	// never is: [Config.RemoveStaleBackup] removes whatever backup is there, and [Config.Apply] and
+	// [Config.Install] replace it.
 	BackupGuard BackupGuard
 }
 
 // BackupGuard reports whether the backup [Config.Install] keeps beside the executable, the path
 // of [Config.Target] followed by ".old", must stay because something still depends on it, such as
-// a rollback of an update whose new build is not yet confirmed. [Config.RemoveStaleBackup] keeps
-// the backup while BackupInUse reports true, and keeps it and fails when BackupInUse fails.
+// a rollback of an update whose new build is not yet confirmed. A state machine holding the
+// record of such an update implements it by reporting true while the record is pending.
+//
+// While BackupInUse reports true, [Config.RemoveStaleBackup] keeps the backup, and [Config.Apply]
+// and [Config.Install] refuse with [ErrBackupInUse]: Apply before it makes any request, and
+// Install again immediately before its first rename, so an update another process applies in the
+// meantime leaves only the window between that check and the rename. When BackupInUse fails, each
+// of them keeps the backup and returns its error, wrapped. BackupInUse may be called from any
+// goroutine and must not block past ctx.
 type BackupGuard interface {
 	BackupInUse(ctx context.Context) (bool, error)
 }

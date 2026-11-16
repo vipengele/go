@@ -12,15 +12,23 @@
 // rollback restores the backup binary over the target before it records rolled_back: a record
 // never says rolled back while the new binary is still in place.
 //
-// The Record is written pending before the executable is swapped: Machine.Begin runs from the
-// update.BeforeInstall hook of update.Config.Apply, once the staged binary has passed every check
-// and before Install renames anything. A crash between the record and the swap leaves a pending
-// update whose binary never started, which the next Boot judges and rolls back. When the install
-// fails after Begin and the executable is as it was, Machine.Abandon records the update rolled_back
-// at once, so a later check may retry. It refuses a record that is not pending with
-// ErrNoPendingUpdate and an update pending for the running version with ErrUpdateRunning, since
-// the swap happened and Boot judges it. When the executable may hold no binary (an
-// *update.RestoreError), the record stays pending for Boot.
+// In the Runner's update check the Record is written pending before the executable is swapped:
+// Machine.Begin runs from the update.BeforeInstall hook of update.Config.Apply, once the staged
+// binary has passed every check and before Install renames anything. A crash between the record and
+// the swap leaves a pending update whose binary never started, which the next Boot judges and rolls
+// back. When the install fails after Begin and the executable is as it was, Machine.Abandon records
+// the update rolled_back at once, so a later check may retry. It refuses a record that is not
+// pending with ErrNoPendingUpdate and an update pending for the running version with
+// ErrUpdateRunning, since the swap happened and Boot judges it. When the executable may hold no
+// binary (an *update.RestoreError), the record stays pending for Boot.
+//
+// Machine.Apply installs a release through go.vipengele.org/update with the Machine as the
+// Config's BackupGuard, so no update starts while another is pending, records the update pending
+// with the backup update keeps, and returns an error wrapping daemon.ErrRestartRequired. A Runner
+// that returns that error ends Supervisor.Run with a restart, and the service supervisor starts the
+// installed binary, whose boots Boot judges. A record that cannot be stored rolls the install back.
+// A version is compared with a leading "v" ignored, so a build reporting "1.2.3" is the release
+// tagged "v1.2.3".
 //
 // NewRunner returns the Runner that schedules the checks and applies updates, and implements
 // daemon.Reloader[T]. A daemon passes it to the Supervisor with daemon.WithReload, so a SIGHUP loads

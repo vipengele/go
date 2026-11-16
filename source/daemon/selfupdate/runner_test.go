@@ -169,7 +169,7 @@ func newHarness(t *testing.T, settings Settings, pathErr error, opts ...RunnerOp
 		return testPath, nil
 	}
 
-	opts = append([]RunnerOption{WithRunnerClock(h.clock), WithLogger(logger), WithCycleTimeout(testTimeout)}, opts...)
+	opts = append([]RunnerOption{WithRunnerClock(h.clock), WithRunnerLogger(logger), WithCycleTimeout(testTimeout)}, opts...)
 	r, err := newRunner(cycle, path, settings, opts...)
 	if err != nil {
 		t.Fatalf("newRunner() error = %v", err)
@@ -835,7 +835,7 @@ func TestNewRunnerRejects(t *testing.T) {
 		{name: "nil path", cycle: cycle},
 		{name: "interval below the minimum", cycle: cycle, path: path, settings: Settings{Interval: 59 * time.Minute}},
 		{name: "negative interval", cycle: cycle, path: path, settings: Settings{Interval: -time.Hour}},
-		{name: "nil logger", cycle: cycle, path: path, opts: []RunnerOption{WithLogger(nil)}},
+		{name: "nil logger", cycle: cycle, path: path, opts: []RunnerOption{WithRunnerLogger(nil)}},
 		{name: "nil clock", cycle: cycle, path: path, opts: []RunnerOption{WithRunnerClock(nil)}},
 		{name: "blank name", cycle: cycle, path: path, opts: []RunnerOption{WithName(" ")}},
 		{name: "zero cycle timeout", cycle: cycle, path: path, opts: []RunnerOption{WithCycleTimeout(0)}},

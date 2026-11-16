@@ -177,7 +177,7 @@ func newCycleEnv(t *testing.T, o envOptions) *cycleEnv {
 	logger := slog.New(captureHandler{mu: &e.logMu, records: &e.records})
 	settings := Settings{AutoApply: o.autoApply}
 	r, err := NewRunner(e.cfg, m, settings, func(s Settings) Settings { return s },
-		WithLogger(logger), WithRunnerClock(clock))
+		WithRunnerLogger(logger), WithRunnerClock(clock))
 	if err != nil {
 		t.Fatalf("NewRunner() error = %v", err)
 	}
@@ -788,7 +788,7 @@ func TestCycleWhoseConfigDoesNotResolveWarnsAndChecksNothing(t *testing.T) {
 	cfg.Getenv = func(string) string { return "" }
 	cfg.UserHomeDir = func() (string, error) { return "", errors.New("no home directory") }
 	r, err := NewRunner(cfg, e.machine, Settings{AutoApply: true}, func(s Settings) Settings { return s },
-		WithLogger(slog.New(captureHandler{mu: &e.logMu, records: &e.records})))
+		WithRunnerLogger(slog.New(captureHandler{mu: &e.logMu, records: &e.records})))
 	if err != nil {
 		t.Fatalf("NewRunner() error = %v", err)
 	}

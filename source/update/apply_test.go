@@ -996,3 +996,117 @@ func TestApplyRunsBeforeInstallHooksInOrderUntilOneFails(t *testing.T) {
 
 	f.assertUntouched(t)
 }
+
+// sequenceGuard is a [BackupGuard] whose nth call answers inUse[n], and false once inUse runs
+// out, counting its calls.
+type sequenceGuard struct {
+	inUse []bool
+	calls atomic.Int32
+}
+
+func (g *sequenceGuard) BackupInUse(context.Context) (bool, error) {
+	n := int(g.calls.Add(1)) - 1
+	if n < len(g.inUse) {
+		return g.inUse[n], nil
+	}
+
+	return false, nil
+}
+
+func TestApplyRefusesABackupInUseBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	guard := &sequenceGuard{inUse: []bool{true}}
+	f.cfg.BackupGuard = guard
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, ErrBackupInUse) {
+		t.Fatalf("apply error = %v, want one matching ErrBackupInUse", err)
+	}
+
+	if got := guard.calls.Load(); got != 1 {
+		t.Errorf("guard calls = %d, want 1", got)
+	}
+
+	if got := f.requests(); got != 0 {
+		t.Errorf("requests = %d, want 0", got)
+	}
+
+	f.assertUntouched(t)
+}
+
+func TestApplyRefusesWhenTheBackupGuardFails(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	cause := errors.New("corrupt record")
+	f.cfg.BackupGuard = &stubGuard{err: cause}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Fatalf("apply error = %v, want one matching %v", err, cause)
+	}
+
+	if errors.Is(err, ErrBackupInUse) {
+		t.Errorf("apply error = %v, want it not to match ErrBackupInUse", err)
+	}
+
+	if got := f.requests(); got != 0 {
+		t.Errorf("requests = %d, want 0", got)
+	}
+
+	f.assertUntouched(t)
+}
+
+func TestApplyWithABackupNotInUseAsksTheGuardTwiceAndInstalls(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	guard := &sequenceGuard{}
+	f.cfg.BackupGuard = guard
+
+	f.apply(t)
+
+	if got := guard.calls.Load(); got != 2 {
+		t.Errorf("guard calls = %d, want 2: before the download and before the rename", got)
+	}
+}
+
+// A backup the guard reports in use only after the download, as when another process applies an
+// update meanwhile, is refused by Install before any rename.
+func TestApplyRefusesABackupThatComesInUseBeforeTheRename(t *testing.T) {
+	t.Parallel()
+
+	f := newApplyFixture(t)
+	store := &fakeStore{loads: []loadResult{{}}}
+	f.cfg.StateStore = store
+	f.cfg.BackupGuard = &sequenceGuard{inUse: []bool{false, true}}
+
+	installed, err := f.cfg.apply(context.Background(), f.sel, f.steps(t))
+	if installed != nil {
+		t.Errorf("apply Installed = %v, want nil", installed)
+	}
+
+	if !errors.Is(err, ErrBackupInUse) {
+		t.Fatalf("apply error = %v, want one matching ErrBackupInUse", err)
+	}
+
+	if f.srv.Requests(updatetest.TargetArchive) == 0 {
+		t.Error("archive requests = 0, want the release downloaded before the second check")
+	}
+
+	if saves := store.recordedSaves(); len(saves) != 0 {
+		t.Errorf("saves = %+v, want none", saves)
+	}
+
+	f.assertUntouched(t)
+}

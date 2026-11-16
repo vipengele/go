@@ -57,14 +57,21 @@ golangci-lint run
   `WithHTTPName` and `DefaultHTTPOrder`; it serves TLS with `ServeTLS` when the server's
   `TLSConfig` is non-nil, and `Start` fails with `ErrNoCertificate` when that config carries no
   certificate (`Certificates`, `GetCertificate` or `GetConfigForClient`).
+- `update_guard.go` — `UpdateGuard` (`Boot`, `Confirm`), the interface `*selfupdate.Machine`
+  satisfies, so the root `daemon` never imports `selfupdate`, and the `Run` steps of
+  `WithUpdateGuard`: `bootUpdate` after the instance lock and the SIGHUP subscription and before
+  the first `Start`, returning Boot's error or, for a rollback, an error wrapping
+  `ErrRestartRequired` alone (an error beside a rollback is logged, never joined, since a join
+  makes `RestartRequested` false), and `confirmUpdate` in `wait` after `READY=1`, `serviceReady`
+  and the watchdog, whose error is logged. Tests: `update_guard_test.go`.
 - `restart.go` — `RestartRequested`, true only when every leaf of an error is `ErrRestartRequired`
   and none is a `*PanicError`.
 - `reload.go` — `Reloader[T]`, the optional Runner interface for applying a new configuration, and
   `WithReload[T]`, which makes `Run` load and offer it on SIGHUP.
 - `option.go` — `WithGrace`, `WithStartTimeout`, `WithHealth`, `WithPanicPolicy` (`PanicFail`,
   the default, or `PanicIsolate`), `WithInstanceLock`, which `New` rejects for an identity that
-  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam), `WithSystemd` and
-  `WithWindowsService`. Tests: `systemd_test.go`.
+  fails `Validate`, `WithLogger`, `WithClock` (the Clock seam), `WithReady` (the Ready seam), `WithSystemd`,
+  `WithWindowsService` and `WithUpdateGuard`. Tests: `systemd_test.go`.
 - `windows_service.go` — `WithWindowsService`'s behaviour: `Run` serves under the Windows service
   control manager when the process runs as a service, and exits with `WindowsRestartExitCode` for a
   requested restart and `WindowsFailureExitCode` for every other ending the SCM did not ask for
@@ -73,6 +80,10 @@ golangci-lint run
   first two to the host's and tests replace them. `windows_service_windows.go` holds the real ones
   on `golang.org/x/sys/windows/svc`, `windows_service_other.go` the stubs for every other GOOS.
   Tests: `windows_service_test.go`, `windows_service_other_test.go`.
+- `supervised.go` — `UnderSupervisor(lookup, pid, label)`, the exact check that the process was
+  started as the service: `SYSTEMD_EXEC_PID` equals the pid, `XPC_SERVICE_NAME` equals the label, or
+  `hostIsWindowsService` reports a service (an error counts as not supervised). `underSupervisor`
+  takes that check as a parameter for the test. Tests: `supervised_test.go`.
 - `clock.go` — the `Clock` interface (`Now`, `AfterFunc`), the system clock, and `withDeadline`
   with its `clockContext`, the deadline context for any other clock. `Deadline` is the clock's
   deadline or the parent's when earlier, and `Err` is `context.DeadlineExceeded` when the clock's
@@ -117,17 +128,35 @@ golangci-lint run
   and `Status`; every `ServiceOption` is install-only. A `ManagerFunc` error matching
   `service.ErrContainer` becomes one error carrying `ContainerError.Instead`; other errors are
   returned unchanged. `testdata/service-status.keys` pins the status JSON keys; the tests run
-  against a fake `service.Manager` in `service_test.go`.
+  against a fake `service.Manager` in `service_test.go`. `update.go` holds `NewUpdate(UpdateConfig)`:
+  `updatecmd.Commands` with the `Machine` as the Config's `BackupGuard` and an
+  `updatecmd.WithInstalled` hook that records the update with `Machine.Begin` (rolling the install
+  back when that fails), then, when the installed path and `ServiceBinary` resolve to the same file
+  and the service is running, calls `Restart` and polls `Status` every 500ms on the `Clock` until
+  running or `StartTimeout` (default `DefaultStartTimeout`, 15s); a restart error, failed, not
+  installed or a timeout fails the command. Every other state, an unmanaged binary
+  (`ErrNotInstalled`, `ErrContainer`, `ErrUnsupported`, not installed, another path) and a
+  `ManagerFunc` error are messages with exit 0. Its tests (`update_test.go`, the symlink case in
+  `update_unix_test.go`) run a real update against `updatetest`, never with `t.Parallel`, and drive
+  the poll with `daemontest.Clock`.
 - `selfupdate/` — package `go.vipengele.org/daemon/selfupdate`, the state machine of a daemon's
   update of its own binary (idle, pending, confirmed, rolled_back) over a `Store`, with `FileStore`
   as the locked JSON-file implementation; read its `doc.go` and ADR-0033. A rollback restores the
   backup binary before it records `rolled_back`; `rollback_windows.go` moves the running binary
-  aside instead of overwriting it. `Machine.Begin` records the update pending from the
-  `update.BeforeInstall` hook (ADR-0035), before the swap; `Machine.Abandon` settles it as
-  `rolled_back` when the install then fails with the executable as it was
-  (`ErrNoPendingUpdate`, `ErrUpdateRunning`). `NewRunner[T]` (`cycle.go`) returns the `Runner[T]`,
-  a `daemon.Runner` and `Reloader[T]` that checks on a schedule (`runner.go`, the scheduler; `jitter.go`;
-  `settings.go`, the `interval` and `auto_apply` keys; `options.go`, `RunnerOption`) and ends with an
+  aside instead of overwriting it. Versions compare with a leading `v` ignored on both sides.
+  `apply.go` holds `(*Machine).Apply`: it sets the Config's `BackupGuard` to the Machine, runs
+  `update.Config.Apply`, records the update with `Begin` (rolling the install back when that
+  fails), runs the post-update hooks and logs their failure, logs a warning when
+  `daemon.UnderSupervisor` is false, and returns an error wrapping `ErrRestartRequired` alone.
+  `WithLogger` and `WithSupervisorCheck` (label and environment lookup) are its options. Tests that
+  run a real Apply never call `t.Parallel` (a forked staged binary fails with `ETXTBSY`) and compare
+  the installed bytes with `updatetest.ReleaseExecutable`. The Runner's cycle records the update
+  pending instead from the `update.BeforeInstall` hook (ADR-0035), before the swap: `Machine.Begin`
+  runs there, and `Machine.Abandon` settles it as `rolled_back` when the install then fails with
+  the executable as it was (`ErrNoPendingUpdate`, `ErrUpdateRunning`). `NewRunner[T]` (`cycle.go`)
+  returns the `Runner[T]`, a `daemon.Runner` and `Reloader[T]` that checks on a schedule
+  (`runner.go`, the scheduler; `jitter.go`; `settings.go`, the `interval` and `auto_apply` keys;
+  `options.go`, `RunnerOption`, with `WithRunnerLogger` and `WithRunnerClock`) and ends with an
   error matching `daemon.ErrRestartRequired` after an install, keeping the backup for the
   Machine's rollback.
   `report.go` holds `Reporter`, which turns the `Store`'s record into a `daemon.UpdateReporter` and
@@ -381,11 +410,26 @@ install, kill, reinstall, crash loop and uninstall through `service.New`. Read i
   and, in every file outside `daemoncmd/`, any `go.vipengele.org/` package but the module's own
   `daemon`, `daemon/service`, `daemon/httpserver` and `daemon/systemd`, `cli/spec`, `cli/spec/paths` and
   `filelock`. A depguard `pkg` entry matches by prefix, so a `/**` suffix matches nothing.
-- `selfupdate/` has its own depguard rule: the same list plus `cli/spec/version`, `cli/state`
-  (its file store writes through it), `daemon/daemontest`, `update` and `update/updatetest`. It
-  imports the root `daemon` for `Clock` and `Runner` (ADR-0028) and `update` for `Config.Apply`; the
-  root rule does not allow `selfupdate`, so the root `daemon` never imports it. Its tests are
-  internal (`package selfupdate`); the runner and cycle tests use `daemontest.Clock`.
+- `selfupdate/` has its own depguard rule: the same list plus `go.vipengele.org/cli/spec/version`,
+  `go.vipengele.org/cli/state`, which its file store writes through, and `go.vipengele.org/update`,
+  which `Apply` and the Runner install through; its tests also import
+  `go.vipengele.org/daemon/daemontest` and `go.vipengele.org/update/updatetest`. It imports the root
+  `daemon` for `Clock` and `Runner` (ADR-0028); the root rule allows neither `selfupdate` nor
+  `update`, so the root `daemon` never imports them. Its tests are internal (`package selfupdate`);
+  the runner and cycle tests use `daemontest.Clock`, the others their own fake clock and
+  hand-written Runners.
+- `daemoncmd/` has its own depguard rule: the module's own `daemon`, `daemon/service` and
+  `daemon/selfupdate`, `cli/spec`, `cli/spec/table`, `update` and `update/updatecmd`; its tests
+  also import `daemoncmd` itself, `daemontest`, `cli/spec/speccheck` and `update/updatetest`.
+- A consumer protects the backup of a pending update on Windows only by building one
+  `update.Config` with `BackupGuard` set to the Machine and passing it both to `NewUpdate` and to
+  the pre-run `RemoveStaleBackup` hook of `UpdateCheckHooks`; `NewUpdate` sets the guard on its own
+  copy and cannot enforce this.
+  `daemoncmd/example_test.go` (`Example_selfUpdate`) wires the whole flow: the shared Config, `NewUpdate`,
+  `WithUpdateGuard` and a Runner that stands in for `Machine.Apply` with an error of the shape
+  Apply returns (wrapping `ErrRestartRequired`), so `Run` ends with `RestartRequested` and the
+  process exits 0. A real Apply needs a signed release served over HTTP, so
+  `selfupdate/apply_test.go` exercises it, including the Supervisor case.
 - The instance lock is released only after every Runner has stopped or been abandoned at the end
   of the grace period, never between two Stops.
 - The `/status` body and the `status` command's JSON are byte-identical: both are written by

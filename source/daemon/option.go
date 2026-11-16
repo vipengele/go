@@ -97,7 +97,8 @@ func WithReady(ready func()) Option {
 // Run sends READY=1 once, at the point WithReady's callback is called, after it returns: after
 // every Runner's Start has returned, synchronously on Run's goroutine. It sends STOPPING=1 when
 // the stop phase begins, also after a failed start phase, which sends no READY=1. A Run that
-// cannot take the instance lock of WithInstanceLock sends neither.
+// cannot take the instance lock of WithInstanceLock sends neither, nor does one whose update guard
+// of WithUpdateGuard fails its Boot or reports a rollback.
 //
 // When WATCHDOG_USEC is set, and WATCHDOG_PID, if set, names this process, Run arms a watchdog
 // after READY=1: every half of WATCHDOG_USEC, on the clock of WithClock, it sends WATCHDOG=1. With
@@ -198,6 +199,34 @@ func WithInstanceLock(id spec.Identity, opts paths.Options) Option {
 			return fmt.Errorf("daemon: instance lock: %w", err)
 		}
 		s.instance = &instanceLock{id: id, opts: opts}
+		return nil
+	}
+}
+
+// WithUpdateGuard has Run guard a self-update of the binary with g, typically a
+// *selfupdate.Machine of go.vipengele.org/daemon/selfupdate. A nil g is rejected by New.
+//
+// Run calls g.Boot with its context once the instance lock of WithInstanceLock, if any, is held,
+// before the first Start, under the Windows service control manager too. A Boot that returns an
+// error and no rollback fails closed: Run returns the error, wrapped as "daemon: update guard
+// boot:", and starts no Runner. A Boot that reports a rollback makes Run return, with no Runner
+// started, an error wrapping ErrRestartRequired alone, so RestartRequested is true and the process
+// exits for the restored binary to be started; under WithWindowsService that is a stop with
+// WindowsRestartExitCode. An error Boot returns beside a rollback, the restored binary's record not
+// stored, is logged at Warn as "update rollback not recorded" and left out of what Run returns.
+//
+// Run calls g.Confirm with its context once, after the callback of WithReady, READY=1 of
+// WithSystemd and the running status of WithWindowsService, so neither waits for it. It is called
+// synchronously on Run's goroutine: until it returns, the Supervisor does not notice a Runner
+// exiting or the cancellation of Run's context. A Confirm error is logged at Error as "update
+// confirm failed" and the run goes on. Confirm is never called when the start phase fails or ends
+// early.
+func WithUpdateGuard(g UpdateGuard) Option {
+	return func(s *Supervisor) error {
+		if g == nil {
+			return errors.New("daemon: nil update guard")
+		}
+		s.updateGuard = g
 		return nil
 	}
 }

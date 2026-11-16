@@ -72,27 +72,30 @@ func BeforeInstall(hook func(ctx context.Context, plan InstallPlan) error) Apply
 //  2. [Config.CheckWritable], so an update that cannot be installed is not fetched.
 //  3. [Config.CheckDowngrade] of sel's Tag, so a release below the highest version applied or
 //     running is refused unless [AllowDowngrade] is given, which skips this step.
-//  4. [Config.Download] of sel with the options of [WithDownloadOptions], which verifies the
+//  4. [Config.BackupGuard], when set, so an update is refused with [ErrBackupInUse] while the
+//     backup of an unsettled update is in use, and with the guard's error, wrapped, when the
+//     guard fails. Install asks the guard again before it renames anything.
+//  5. [Config.Download] of sel with the options of [WithDownloadOptions], which verifies the
 //     checksums file's signature with the trusted keys and the archive against its checksum.
-//  5. [Config.Target], the file the update replaces.
-//  6. [Config.Extract] of the archive into Target's directory, so that the rename into place
+//  6. [Config.Target], the file the update replaces.
+//  7. [Config.Extract] of the archive into Target's directory, so that the rename into place
 //     stays on one filesystem.
-//  7. [Config.CheckStaged] of the staged binary against sel, which runs it with "version --json"
+//  8. [Config.CheckStaged] of the staged binary against sel, which runs it with "version --json"
 //     and then the [Config.Preflight] hooks, so a binary that is not the selected release for the
 //     platform, or that a hook vetoes, is never installed.
-//  8. The [BeforeInstall] hooks, in order, with the [InstallPlan] of Target, its backup and sel's
+//  9. The [BeforeInstall] hooks, in order, with the [InstallPlan] of Target, its backup and sel's
 //     Tag. Unlike a [Preflight] hook, which is free of side effects (ADR-0029), a BeforeInstall
 //     hook may have them: it runs once every check has passed, with only the install left.
-//  9. [Config.Install] of the staged binary.
-//  10. The record: under the Locker, the State is loaded, its HighestApplied raised to sel's Tag
+//  10. [Config.Install] of the staged binary, which asks the guard with ctx.
+//  11. The record: under the Locker, the State is loaded, its HighestApplied raised to sel's Tag
 //     when the Tag is newer in the order of [version.Newer], and the whole State saved back, so
 //     its other fields are kept.
 //
-// Steps 1 to 3 make no request, so a refused install never reaches the network. The downgrade
+// Steps 1 to 4 make no request, so a refused install never reaches the network. The downgrade
 // guard fails closed: a State that cannot be loaded refuses the install with the StateStore's
 // error, rather than guess at the floor. The record fails open: a failed lock, load or save is
 // ignored and Apply still returns the [*Installed], since the installed binary's Version floors
-// the next update as the watermark would. Nothing at the executable's path changes before step 9,
+// the next update as the watermark would. Nothing at the executable's path changes before step 10,
 // so a binary CheckStaged refuses, or an install a BeforeInstall hook refuses, leaves the installed
 // executable as it was and HighestApplied unchanged; [errors.Is] matches a hook's error through
 // its wrapping. No file Apply creates is left behind by a failure: Extract closes the archive and
@@ -134,6 +137,10 @@ func (c Config) apply(ctx context.Context, sel Selection, s fsSteps, opts ...App
 		}
 	}
 
+	if err := r.checkBackupGuard(ctx); err != nil {
+		return nil, err
+	}
+
 	arc, err := r.Download(ctx, sel, o.download...)
 	if err != nil {
 		return nil, err
@@ -160,7 +167,7 @@ func (c Config) apply(ctx context.Context, sel Selection, s fsSteps, opts ...App
 		}
 	}
 
-	installed, err := r.install(staged, s)
+	installed, err := r.installWithin(ctx, staged, s)
 	if err != nil {
 		return nil, err
 	}

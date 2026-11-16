@@ -131,8 +131,20 @@ func runCommand(t *testing.T, cfg update.Config, flags map[string]any, stdin str
 // runCommandWith is runCommand with the context and the standard input given as they are.
 func runCommandWith(t *testing.T, ctx context.Context, cfg update.Config, flags map[string]any, stdin io.Reader, terminal bool) run {
 	t.Helper()
+	return runCommandOf(t, ctx, updatecmd.Commands(cfg), flags, stdin, terminal)
+}
 
-	cmds := updatecmd.Commands(cfg)
+// runCommandWithOptions is runCommand without a terminal or standard input, of the command
+// Commands returns for cfg and opts.
+func runCommandWithOptions(t *testing.T, cfg update.Config, flags map[string]any, opts ...updatecmd.Option) run {
+	t.Helper()
+	return runCommandOf(t, context.Background(), updatecmd.Commands(cfg, opts...), flags, strings.NewReader(""), false)
+}
+
+// runCommandOf runs the one command of cmds as runCommandWith does.
+func runCommandOf(t *testing.T, ctx context.Context, cmds []*spec.Command, flags map[string]any, stdin io.Reader, terminal bool) run {
+	t.Helper()
+
 	if len(cmds) != 1 {
 		t.Fatalf("Commands returned %d commands, want 1", len(cmds))
 	}
@@ -965,5 +977,127 @@ func TestUpdateToAReleaseWithUnlistedAssetsFails(t *testing.T) {
 	}
 	if _, err := os.Stat(f.exe + ".old"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Stat of the backup = %v, want none", err)
+	}
+}
+
+func TestWithInstalledHandsTheUpdateToTheHookAndKeepsTheBackup(t *testing.T) {
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	var order []string
+	f.cfg.PostUpdate = []update.PostUpdate{func(string) error {
+		order = append(order, "post-update")
+		return nil
+	}}
+
+	var got []updatecmd.Applied
+	hook := func(_ context.Context, inv *spec.Invocation, a updatecmd.Applied) error {
+		order = append(order, "installed")
+		if inv == nil {
+			t.Error("hook ran with a nil Invocation")
+		}
+		got = append(got, a)
+		return nil
+	}
+	r := runCommandWithOptions(t, f.cfg, map[string]any{"yes": true}, updatecmd.WithInstalled(hook))
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("hook ran %d times, want 1", len(got))
+	}
+	a := got[0]
+	t.Cleanup(func() { _ = a.Installed.Discard() })
+
+	if a.From != "v1.0.0" || a.To != "v1.1.0" {
+		t.Errorf("Applied From, To = %q, %q, want %q, %q", a.From, a.To, "v1.0.0", "v1.1.0")
+	}
+	if a.Installed == nil || a.Installed.Path() != f.exe {
+		t.Fatalf("Applied.Installed = %v, want the install at %s", a.Installed, f.exe)
+	}
+	if want := []string{"post-update", "installed"}; strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+	backup, err := os.ReadFile(a.Installed.Backup())
+	if err != nil {
+		t.Fatalf("ReadFile of the backup: %v, want it kept for the hook", err)
+	}
+	if string(backup) != "old" {
+		t.Errorf("backup holds %q, want %q", backup, "old")
+	}
+	if got, want := f.binary(t), releaseBinary(t, "v1.1.0"); got != want {
+		t.Errorf("executable holds %.64q, want %.64q", got, want)
+	}
+	if !strings.Contains(r.stderr.String(), "updated atk v1.0.0 → v1.1.0") {
+		t.Errorf("stderr = %q, want the update reported", r.stderr.String())
+	}
+}
+
+func TestAFailingInstalledHookFailsTheRunWithoutASuccessLine(t *testing.T) {
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	cause := errors.New("record not saved")
+	var installed *update.Installed
+	hook := func(_ context.Context, _ *spec.Invocation, a updatecmd.Applied) error {
+		installed = a.Installed
+		return cause
+	}
+	r := runCommandWithOptions(t, f.cfg, map[string]any{"yes": true}, updatecmd.WithInstalled(hook))
+
+	if !errors.Is(r.err, cause) {
+		t.Fatalf("Run error = %v, want one matching %v", r.err, cause)
+	}
+	assertPlainError(t, r.err)
+	if installed == nil {
+		t.Fatal("hook did not run")
+	}
+	t.Cleanup(func() { _ = installed.Discard() })
+
+	if strings.Contains(r.stderr.String(), "updated atk") {
+		t.Errorf("stderr = %q, want no success line", r.stderr.String())
+	}
+	if _, err := os.Stat(installed.Backup()); err != nil {
+		t.Errorf("Stat of the backup = %v, want it left to the hook", err)
+	}
+}
+
+func TestWithANilInstalledHookDiscardsTheBackup(t *testing.T) {
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	r := runCommandWithOptions(t, f.cfg, map[string]any{"yes": true}, updatecmd.WithInstalled(nil))
+
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if _, err := os.Stat(f.exe + ".old"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat of the backup = %v, want it removed", err)
+	}
+}
+
+// guardInUse is an update.BackupGuard that always reports the backup in use.
+type guardInUse struct{}
+
+func (guardInUse) BackupInUse(context.Context) (bool, error) { return true, nil }
+
+func TestABackupInUseRefusesTheUpdateBeforeAnyDownload(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, "v1.0.0", "v1.1.0")
+	f.cfg.BackupGuard = guardInUse{}
+	var hooked bool
+	hook := func(context.Context, *spec.Invocation, updatecmd.Applied) error {
+		hooked = true
+		return nil
+	}
+	r := runCommandWithOptions(t, f.cfg, map[string]any{"yes": true}, updatecmd.WithInstalled(hook))
+
+	if !errors.Is(r.err, update.ErrBackupInUse) {
+		t.Fatalf("Run error = %v, want one matching update.ErrBackupInUse", r.err)
+	}
+	if hooked {
+		t.Error("installed hook ran for a refused update")
+	}
+	if got := f.downloads(); got != 0 {
+		t.Errorf("downloads = %d, want 0", got)
+	}
+	if got := f.binary(t); got != "old" {
+		t.Errorf("executable holds %q, want %q", got, "old")
 	}
 }
