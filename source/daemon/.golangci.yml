@@ -29,6 +29,7 @@ linters:
             - go.vipengele.org/cli/spec$
             - go.vipengele.org/cli/spec/paths$
             - go.vipengele.org/filelock$
+            - go.vipengele.org/daemon/servicetest/internal/wire$
           deny:
             - pkg: go.vipengele.org/
               desc: outside daemoncmd, daemon imports only cli/spec, cli/spec/paths and filelock among its siblings

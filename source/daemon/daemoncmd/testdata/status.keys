@@ -8,4 +8,14 @@ ready
 schema
 started_at
 status
+update.boot_attempts
+update.channel
+update.error
+update.from_version
+update.reason
+update.started_at
+update.status
+update.to_version
+update.updated_at
+update.watermark
 uptime_seconds

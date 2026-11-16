@@ -51,4 +51,9 @@
 // FileStore is the Store over one JSON file. It creates no directory, and a missing file is idle.
 // A corrupt file is an error rather than idle, so that a pending update is never forgotten; an
 // operator clears it by deleting the file.
+//
+// Reporter reports the recorded update as a daemon.UpdateStatus for the daemon's health snapshot.
+// It only reads the Store: a missing record is idle, and a record that cannot be read is unknown
+// with the cause in Error, never idle. The consumer supplies the release channel and watermark as
+// plain strings, so the package knows nothing of where releases come from.
 package selfupdate

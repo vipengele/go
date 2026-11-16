@@ -314,6 +314,7 @@ func TestLaunchdDaemonNeedsRoot(t *testing.T) {
 		"Uninstall": (*launchd).Uninstall,
 		"Start":     (*launchd).Start,
 		"Stop":      (*launchd).Stop,
+		"Restart":   (*launchd).Restart,
 	}
 	for name, method := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -354,6 +355,7 @@ func TestLaunchdMissingGUIDomainIsUnreachable(t *testing.T) {
 		"Uninstall": (*launchd).Uninstall,
 		"Start":     (*launchd).Start,
 		"Stop":      (*launchd).Stop,
+		"Restart":   (*launchd).Restart,
 	}
 	for name, method := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -405,6 +407,7 @@ func TestLaunchdHomeUnsetFailsAnAgent(t *testing.T) {
 		"Uninstall": (*launchd).Uninstall,
 		"Start":     (*launchd).Start,
 		"Stop":      (*launchd).Stop,
+		"Restart":   (*launchd).Restart,
 	}
 	for name, method := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -435,6 +438,7 @@ func TestLaunchdNotInstalled(t *testing.T) {
 		"Uninstall": (*launchd).Uninstall,
 		"Start":     (*launchd).Start,
 		"Stop":      (*launchd).Stop,
+		"Restart":   (*launchd).Restart,
 	}
 	for name, method := range methods {
 		for _, scope := range []Scope{ScopeSystem, ScopeUser} {
@@ -505,6 +509,100 @@ func TestLaunchdStartPassesLaunchctlErrorsThrough(t *testing.T) {
 			t.Fatalf("err = %v, want the bootstrap failure", err)
 		}
 	})
+}
+
+func TestLaunchdRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope Scope
+		euid  int
+	}{
+		{"agent", ScopeUser, 501},
+		{"daemon", ScopeSystem, 0},
+	} {
+		t.Run(tc.name+"/loaded", func(t *testing.T) {
+			tl := newTestLaunchd(t, tc.scope, tc.euid)
+			tl.writePlist(t)
+			if err := tl.Restart(context.Background()); err != nil {
+				t.Fatalf("Restart: %v", err)
+			}
+			var want [][]string
+			if tc.scope == ScopeUser {
+				want = append(want, []string{"launchctl", "print", "gui/501"})
+			}
+			want = append(want,
+				[]string{"launchctl", "print", tl.target()},
+				[]string{"launchctl", "kickstart", "-k", tl.target()},
+			)
+			tl.wantCalls(t, want)
+		})
+		for name, gone := range map[string]error{"not loaded": notFound(), "not loaded, exit 3": noSuchProcess()} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				tl := newTestLaunchd(t, tc.scope, tc.euid)
+				plist := tl.writePlist(t)
+				tl.runner.on("launchctl print "+tl.target(), gone)
+				if err := tl.Restart(context.Background()); err != nil {
+					t.Fatalf("Restart: %v", err)
+				}
+				var want [][]string
+				if tc.scope == ScopeUser {
+					want = append(want, []string{"launchctl", "print", "gui/501"})
+				}
+				want = append(want,
+					[]string{"launchctl", "print", tl.target()},
+					[]string{"launchctl", "bootstrap", tl.domain(), plist},
+				)
+				tl.wantCalls(t, want)
+			})
+		}
+	}
+}
+
+func TestLaunchdRestartPassesLaunchctlErrorsThrough(t *testing.T) {
+	steps := map[string]error{
+		"launchctl print system/demo":        exitStatusError{code: 1},
+		"launchctl kickstart -k system/demo": exitStatusError{code: 1},
+	}
+	for step, boom := range steps {
+		t.Run(step, func(t *testing.T) {
+			tl := newTestLaunchd(t, ScopeSystem, 0)
+			tl.writePlist(t)
+			tl.runner.on(step, boom)
+			if err := tl.Restart(context.Background()); !errors.Is(err, boom) || !strings.Contains(err.Error(), "restart demo") {
+				t.Fatalf("err = %v, want the %s failure", err, step)
+			}
+		})
+	}
+	t.Run("kickstart names its flag", func(t *testing.T) {
+		tl := newTestLaunchd(t, ScopeSystem, 0)
+		tl.writePlist(t)
+		tl.runner.on("launchctl kickstart -k system/demo", exitStatusError{code: 1})
+		if err := tl.Restart(context.Background()); err == nil || !strings.Contains(err.Error(), "restart demo: kickstart -k system/demo") {
+			t.Fatalf("err = %v, want it to name kickstart -k system/demo", err)
+		}
+	})
+	t.Run("bootstrap", func(t *testing.T) {
+		tl := newTestLaunchd(t, ScopeSystem, 0)
+		plist := tl.writePlist(t)
+		boom := exitStatusError{code: 1}
+		tl.runner.on("launchctl print system/demo", notFound())
+		tl.runner.on("launchctl bootstrap system "+plist, boom)
+		if err := tl.Restart(context.Background()); !errors.Is(err, boom) || !strings.Contains(err.Error(), "restart demo") {
+			t.Fatalf("err = %v, want the bootstrap failure", err)
+		}
+	})
+}
+
+func TestLaunchdRestartNeedsRootNamingRestart(t *testing.T) {
+	tl := newTestLaunchd(t, ScopeSystem, 501)
+	tl.writePlist(t)
+	err := tl.Restart(context.Background())
+	if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "launchd Restart of the LaunchDaemon demo") {
+		t.Fatalf("err = %v, want ErrPrivilegesRequired naming Restart", err)
+	}
+	if len(tl.runner.calls) != 0 {
+		t.Fatalf("commands = %q, want none", tl.runner.calls)
+	}
 }
 
 func TestLaunchdStop(t *testing.T) {
@@ -620,4 +718,33 @@ func TestLaunchdInstallStopsWhenThePlistCannotBeWritten(t *testing.T) {
 		t.Fatalf("err = %v, want the plist rename to fail", err)
 	}
 	tl.wantCalls(t, [][]string{{"launchctl", "print", "gui/501"}})
+}
+
+func TestLaunchdCheckPrivileges(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope Scope
+		euid  int
+		want  bool
+	}{
+		{"system as root", ScopeSystem, 0, false},
+		{"system unprivileged", ScopeSystem, 501, true},
+		{"user as root", ScopeUser, 0, false},
+		{"user unprivileged", ScopeUser, 501, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tl := newTestLaunchd(t, tc.scope, tc.euid)
+			err := tl.CheckPrivileges(context.Background())
+			if tc.want {
+				if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "manage of the LaunchDaemon demo needs root, run it with sudo") {
+					t.Fatalf("err = %v, want ErrPrivilegesRequired naming manage and suggesting sudo", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if len(tl.runner.calls) != 0 {
+				t.Fatalf("commands = %q, want none", tl.runner.calls)
+			}
+		})
+	}
 }

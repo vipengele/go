@@ -339,6 +339,13 @@ func (w *windowsDriver) requirePrivileges(method string) error {
 	return nil
 }
 
+// CheckPrivileges fails with an error wrapping ErrPrivilegesRequired when the
+// process is not elevated, and returns the error of the elevation check when
+// it cannot tell.
+func (w *windowsDriver) CheckPrivileges(context.Context) error {
+	return w.requirePrivileges("manage")
+}
+
 // connect opens the SCM with access. A failure wraps ErrManagerUnreachable.
 func (w *windowsDriver) connect(access scmAccess) (scmManager, error) {
 	m, err := w.scm.connect(access)
@@ -655,6 +662,21 @@ func (w *windowsDriver) Stop(ctx context.Context) error {
 	return w.controlled("Stop", func(_ scmManager, s scmService, _ func() error) error {
 		if err := w.stopAndWait(ctx, s); err != nil {
 			return fmt.Errorf("service: stop %s: %w", w.cfg.Name, err)
+		}
+		return nil
+	})
+}
+
+// Restart stops the installed service as Stop does, outlasting a restart
+// delay, and then starts it. A stopped service is started; a service that is
+// running again by the time the start is sent counts as restarted.
+func (w *windowsDriver) Restart(ctx context.Context) error {
+	return w.controlled("Restart", func(_ scmManager, s scmService, _ func() error) error {
+		if err := w.stopAndWait(ctx, s); err != nil {
+			return fmt.Errorf("service: restart %s: %w", w.cfg.Name, err)
+		}
+		if err := s.start(); err != nil && !errors.Is(err, errSCMServiceAlreadyRunning) {
+			return fmt.Errorf("service: restart %s: start: %w", w.cfg.Name, err)
 		}
 		return nil
 	})

@@ -38,7 +38,8 @@ type e2eService struct {
 
 // TestWindowsServiceEndToEnd installs testdata/winsvc as a service of the
 // host's service control manager and drives it through install, re-install,
-// a requested restart, a Stop inside the restart delay, Stop and Uninstall.
+// a requested restart, a Stop inside the restart delay, Restart, Stop and
+// Uninstall.
 // It needs an elevated process: it skips without one, and fails under CI,
 // whose Windows runners are elevated.
 func TestWindowsServiceEndToEnd(t *testing.T) {
@@ -130,12 +131,18 @@ func TestWindowsServiceEndToEnd(t *testing.T) {
 	}
 	e.stayStopped(e2eQuiet)
 
-	// Stop stops a running service with exit code 0, which Status reads as
-	// stopped.
+	// Restart replaces a running service's process with a new one.
 	if err := e.m.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	e.waitRunning("running after Start", 0)
+	started := e.waitRunning("running after Start", 0)
+	if err := e.m.Restart(ctx); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	e.waitRunning("running with a new PID after Restart", started.PID)
+
+	// Stop stops a running service with exit code 0, which Status reads as
+	// stopped.
 	if err := e.m.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}

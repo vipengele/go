@@ -338,6 +338,13 @@ and then recording that it was done. It happens when the **Boot attempt**s run o
 reports its own failure. It does not lower the **Watermark** (ADR-0027, ADR-0033).
 _Avoid_: revert, downgrade (a downgrade is a chosen older version), undo
 
+**Update status**:
+The operator's view of a daemon's **Pending update** record: where its self-update stands (idle,
+pending, confirmed, rolled back, or unknown when the record cannot be read), the versions and
+**Boot attempt**s it holds, and the release **Channel** and **Watermark** the tool follows. It is
+shown beside the **Health snapshot** and never changes it (ADR-0036).
+_Avoid_: update state (what `update` remembers between checks), update health, self-update report
+
 **Runner**:
 One unit of long-running work in a daemon (the HTTP server, a scheduled task, the update check)
 with a start that returns once it is ready, an exit it reports once its work has ended, and a stop

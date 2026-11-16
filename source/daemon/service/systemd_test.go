@@ -116,6 +116,7 @@ func TestSystemdSystemUnitNeedsRoot(t *testing.T) {
 		"Uninstall": (*systemd).Uninstall,
 		"Start":     (*systemd).Start,
 		"Stop":      (*systemd).Stop,
+		"Restart":   (*systemd).Restart,
 	}
 	for name, method := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -141,7 +142,7 @@ func TestSystemdUserUnitNeedsNoRoot(t *testing.T) {
 	s, _, dir := newTestSystemd(t, ScopeUser, 1000)
 	writeUnitFile(t, dir)
 	ctx := context.Background()
-	for name, err := range map[string]error{"Start": s.Start(ctx), "Stop": s.Stop(ctx)} {
+	for name, err := range map[string]error{"Start": s.Start(ctx), "Stop": s.Stop(ctx), "Restart": s.Restart(ctx)} {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -188,6 +189,7 @@ func TestSystemdNotInstalled(t *testing.T) {
 		"Uninstall": (*systemd).Uninstall,
 		"Start":     (*systemd).Start,
 		"Stop":      (*systemd).Stop,
+		"Restart":   (*systemd).Restart,
 	}
 	for name, method := range methods {
 		for _, scope := range []Scope{ScopeSystem, ScopeUser} {
@@ -217,6 +219,41 @@ func TestSystemdStartStop(t *testing.T) {
 	want := [][]string{{"systemctl", "start", "demo.service"}, {"systemctl", "stop", "demo.service"}}
 	if !slices.EqualFunc(f.calls, want, slices.Equal[[]string]) {
 		t.Fatalf("commands = %q, want %q", f.calls, want)
+	}
+}
+
+func TestSystemdRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope Scope
+		euid  int
+		want  []string
+	}{
+		{"system", ScopeSystem, 0, []string{"systemctl", "restart", "demo.service"}},
+		{"user", ScopeUser, 1000, []string{"systemctl", "--user", "restart", "demo.service"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, f, dir := newTestSystemd(t, tc.scope, tc.euid)
+			writeUnitFile(t, dir)
+			if err := s.Restart(context.Background()); err != nil {
+				t.Fatalf("Restart: %v", err)
+			}
+			if want := [][]string{tc.want}; !slices.EqualFunc(f.calls, want, slices.Equal[[]string]) {
+				t.Fatalf("commands = %q, want %q", f.calls, want)
+			}
+		})
+	}
+}
+
+func TestSystemdRestartNeedsRootNamingRestart(t *testing.T) {
+	s, f, dir := newTestSystemd(t, ScopeSystem, 1000)
+	writeUnitFile(t, dir)
+	err := s.Restart(context.Background())
+	if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "systemd Restart of the system unit demo.service") {
+		t.Fatalf("err = %v, want ErrPrivilegesRequired naming Restart", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("commands = %q, want none", f.calls)
 	}
 }
 
@@ -326,6 +363,7 @@ func TestSystemdUnknownUserUnitDirFailsEveryMethod(t *testing.T) {
 		"Uninstall": (*systemd).Uninstall,
 		"Start":     (*systemd).Start,
 		"Stop":      (*systemd).Stop,
+		"Restart":   (*systemd).Restart,
 	}
 	for name, method := range methods {
 		t.Run(name, func(t *testing.T) {
@@ -399,8 +437,9 @@ func TestSystemdInstallStopsAtTheFirstFailingSystemctl(t *testing.T) {
 
 func TestSystemdControlPassesSystemctlErrorsThrough(t *testing.T) {
 	methods := map[string]func(*systemd, context.Context) error{
-		"start": (*systemd).Start,
-		"stop":  (*systemd).Stop,
+		"start":   (*systemd).Start,
+		"stop":    (*systemd).Stop,
+		"restart": (*systemd).Restart,
 	}
 	for verb, method := range methods {
 		t.Run(verb, func(t *testing.T) {
@@ -501,5 +540,34 @@ func TestCommitUnitFileJoinsEveryWriteFailureAndKeepsTheTarget(t *testing.T) {
 	}
 	if data, err := os.ReadFile(f.Name()); err != nil || len(data) != 0 {
 		t.Fatalf("temporary file = %q, %v, want it kept and empty", data, err)
+	}
+}
+
+func TestSystemdCheckPrivileges(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope Scope
+		euid  int
+		want  bool
+	}{
+		{"system as root", ScopeSystem, 0, false},
+		{"system unprivileged", ScopeSystem, 1000, true},
+		{"user as root", ScopeUser, 0, false},
+		{"user unprivileged", ScopeUser, 1000, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, f, _ := newTestSystemd(t, tc.scope, tc.euid)
+			err := s.CheckPrivileges(context.Background())
+			if tc.want {
+				if !errors.Is(err, ErrPrivilegesRequired) || !strings.Contains(err.Error(), "manage of the system unit demo.service needs root, run it with sudo") {
+					t.Fatalf("err = %v, want ErrPrivilegesRequired naming manage and suggesting sudo", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("commands = %q, want none", f.calls)
+			}
+		})
 	}
 }

@@ -17,6 +17,10 @@
 # suite on windows-latest (ADR-0030). Every other project's suite exercises no
 # Windows-only code, so the Windows job is gated to the affected projects that
 # hold one and skips when there are none.
+#
+# When daemon is affected, test-supervisor also runs its servicetest suite with
+# SERVICETEST=1, which boots podman containers with systemd as PID 1. A failed
+# job fails this workflow, and with it the test stage ci-gate checks.
 name: ci-test
 
 on:
@@ -116,3 +120,56 @@ jobs:
           go-version-file: source/${{ matrix.project }}/go.mod
           cache-dependency-path: source/${{ matrix.project }}/go.sum
       - run: go test -race -shuffle=on ./...
+
+  test-supervisor:
+    name: test-supervisor
+    needs: detect
+    # contains() on an array matches whole elements, so only the daemon
+    # project selects this job.
+    if: contains(fromJSON(needs.detect.outputs.projects), 'daemon')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: source/daemon
+    env:
+      SERVICETEST: "1"
+      # "podman" or "sudo podman", the two values servicetest accepts; the
+      # steps below expand it as a command line. ubuntu-latest ships podman, so nothing is installed.
+      # Rootless podman runs systemd in a container only where the runner
+      # delegates a cgroup v2 subtree to its user; set "sudo podman" to run it
+      # rootful instead.
+      SERVICETEST_PODMAN: podman
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/daemon/go.mod
+          cache-dependency-path: source/daemon/go.sum
+      # Records the podman version, its cgroup version and manager and whether
+      # it runs rootless, which decide whether systemd can boot in a container.
+      - name: show podman
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # the command line is split on purpose
+          $SERVICETEST_PODMAN version
+          # shellcheck disable=SC2086
+          $SERVICETEST_PODMAN info
+      # go test exits 0 when the test is skipped or matched nothing, so the
+      # log has to show the test passing.
+      - name: test supervisor
+        run: |
+          set -euo pipefail
+          go test -v -run '^TestSupervisor$' ./servicetest/ 2>&1 | tee supervisor.log
+          if ! grep -q -- '--- PASS: TestSupervisor' supervisor.log; then
+            echo "::error::TestSupervisor did not pass"
+            exit 1
+          fi
+      - name: remove servicetest containers
+        if: always()
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC2086 # the command line is split on purpose
+          $SERVICETEST_PODMAN ps -aq --filter label=servicetest | xargs -r $SERVICETEST_PODMAN rm -f
