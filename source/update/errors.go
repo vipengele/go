@@ -17,6 +17,10 @@ const maxErrorBody = 1 << 10
 // on the [Stable] channel, which receives no pre-release.
 var ErrPrerelease = errors.New("update: latest release is a pre-release")
 
+// ErrNoRelease reports a source that holds no release the channel receives. A [Source] returns it,
+// possibly wrapped, so a caller can tell "nothing published yet" from a failed lookup.
+var ErrNoRelease = errors.New("update: no release the channel receives")
+
 // ErrAssetsNotListed reports a release whose assets the source did not list, from a [Source] that
 // cannot say where an asset of a given name is downloaded from: it is not an [AssetLocator].
 var ErrAssetsNotListed = errors.New("update: release assets are not listed")

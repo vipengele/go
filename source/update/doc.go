@@ -103,7 +103,10 @@
 // every channel. [Config.Channel] selects the channel, which a tool reads from its own
 // configuration through [ParseChannel], and every [Source] receives it in Latest. The
 // [GitHubSource] reads the latest-release redirect and then the API for Stable, and the release
-// list page by page for Beta and Edge. Following a lower channel never downgrades: a Stable tool
+// list page by page for Beta and Edge. A Source with no release the channel receives returns an
+// error matching [ErrNoRelease]; the GitHubSource also returns it for a 404 from the Stable
+// latest-release endpoint, so a misnamed or private repository is indistinguishable from one with no
+// release yet. Following a lower channel never downgrades: a Stable tool
 // running a beta stays on it until a stable release sorts above it.
 //
 // The State records HighestApplied, the highest version [Config.Apply] has installed, and the
