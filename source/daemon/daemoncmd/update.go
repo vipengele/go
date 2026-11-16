@@ -165,14 +165,10 @@ func (u *updater) restart(ctx context.Context, inv *spec.Invocation, version, ta
 		return nil
 	}
 
-	st, err := mgr.Status(ctx)
-	if err != nil {
-		if unmanagedError(err) {
-			unmanaged(inv, target)
-			return nil
-		}
-		st.State = service.StateUnknown
-		st.Detail = joinDetail(st.Detail, err.Error())
+	st, err := readStatus(ctx, mgr)
+	if unmanagedError(err) {
+		unmanaged(inv, target)
+		return nil
 	}
 
 	switch st.State {
@@ -201,15 +197,12 @@ func (u *updater) restartRunning(ctx context.Context, inv *spec.Invocation, mgr 
 
 	deadline := u.clock.Now().Add(u.timeout)
 	for {
-		st, err := mgr.Status(ctx)
-		switch {
-		case err != nil:
-			st.State = service.StateUnknown
-			st.Detail = joinDetail(st.Detail, err.Error())
-		case st.State == service.StateRunning:
+		st, err := readStatus(ctx, mgr)
+		switch st.State {
+		case service.StateRunning:
 			inv.Info("the service is restarted and runs %s", version)
 			return nil
-		case st.State == service.StateFailed, st.State == service.StateNotInstalled:
+		case service.StateFailed, service.StateNotInstalled:
 			return notRunning(version, "it is "+describe(st)+" after the restart", nil)
 		}
 
@@ -222,6 +215,16 @@ func (u *updater) restartRunning(ctx context.Context, inv *spec.Invocation, mgr 
 				fmt.Sprintf("the wait for it ended while it was %s: %v", describe(st), err), err)
 		}
 	}
+}
+
+// readStatus returns the status mgr reports. When mgr fails, it returns an unknown status whose
+// detail is the error, together with that error, and never the status mgr returned beside it.
+func readStatus(ctx context.Context, mgr service.Manager) (service.Status, error) {
+	st, err := mgr.Status(ctx)
+	if err != nil {
+		return service.Status{State: service.StateUnknown, Detail: err.Error()}, err
+	}
+	return st, nil
 }
 
 // sleep waits d on the clock, or until ctx is done.
@@ -269,50 +272,26 @@ func describe(st service.Status) string {
 	return st.State.String() + " (" + st.Detail + ")"
 }
 
-// joinDetail joins two details with "; ", leaving out an empty one.
-func joinDetail(a, b string) string {
-	switch {
-	case a == "":
-		return b
-	case b == "":
-		return a
-	}
-	return a + "; " + b
-}
-
 // samePath reports whether a and b name the same file once each has its symbolic links followed
 // and is made absolute. A path whose links cannot be followed, a missing file among them, is
-// compared as it is, made absolute; an empty path matches nothing. Windows compares paths without
-// regard to case, as its file systems do.
+// compared as it is, made absolute. An empty path resolves to the working directory, a directory,
+// so it never names the installed binary. Windows compares paths without regard to case, as its
+// file systems do.
 func samePath(a, b string) bool {
-	ra, ok := resolvePath(a)
-	if !ok {
-		return false
-	}
-	rb, ok := resolvePath(b)
-	if !ok {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(ra, rb)
-	}
-	return ra == rb
+	ra, rb := resolvePath(a), resolvePath(b)
+	return ra == rb || runtime.GOOS == "windows" && strings.EqualFold(ra, rb)
 }
 
-// resolvePath returns p with its symbolic links followed, when they can be, made absolute, and
-// false when p is empty or cannot be made absolute.
-func resolvePath(p string) (string, bool) {
-	if p == "" {
-		return "", false
-	}
+// resolvePath returns p with its symbolic links followed when they can be, made absolute when it
+// can be.
+func resolvePath(p string) string {
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		p = resolved
 	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", false
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
 	}
-	return abs, true
+	return p
 }
 
 // systemClock is the system clock.

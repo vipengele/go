@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -340,6 +341,78 @@ func TestUpdateFailsWhenTheRestartedServiceDoesNotRun(t *testing.T) {
 	}
 }
 
+// failsAfterRestart is a fakeManager whose Status reports a running service until Restart is
+// called and fails with err from then on.
+type failsAfterRestart struct {
+	*fakeManager
+	err error
+}
+
+func (s *failsAfterRestart) Status(context.Context) (service.Status, error) {
+	restarted := slices.Contains(s.calls, "Restart")
+	s.calls = append(s.calls, "Status")
+	if restarted {
+		return service.Status{State: service.StateRunning, Detail: "stale"}, s.err
+	}
+	return service.Status{State: service.StateRunning}, nil
+}
+
+// managerFunc returns a ManagerFunc that records its call and returns s.
+func (s *failsAfterRestart) managerFunc() daemoncmd.ManagerFunc {
+	return func(context.Context, *spec.Invocation) (service.Manager, error) {
+		return s, s.call("manager")
+	}
+}
+
+func TestUpdateFailsWhenTheStatusCannotBeReadAfterTheRestart(t *testing.T) {
+	f := newUpdateFixture(t)
+	errRead := errors.New("systemctl show: exit 1")
+	mgr := &failsAfterRestart{fakeManager: &fakeManager{}, err: errRead}
+	cfg := f.config(mgr.managerFunc())
+	cfg.StartTimeout = time.Second
+
+	r := runUpdate(t, cfg, f.clock)
+	if !errors.Is(r.err, errRead) {
+		t.Fatalf("Run error = %v, want one matching the Status error", r.err)
+	}
+	assertContains(t, "error", r.err.Error(), toVersion+" is installed",
+		"it is still unknown ("+errRead.Error()+") 1s after the restart")
+	if strings.Contains(r.err.Error(), "stale") {
+		t.Errorf("error = %q, want no detail of the status returned beside the error", r.err)
+	}
+	assertCalls(t, mgr.fakeManager, "manager", "Status", "Restart", "Status", "Status", "Status")
+	f.assertInstalled(t)
+	assertPending(t, f)
+}
+
+func TestUpdateFailsWhenTheWaitIsCancelled(t *testing.T) {
+	f := newUpdateFixture(t)
+	mgr := newSequence(nil, service.StateRunning, service.StateStarting)
+	cmds := daemoncmd.NewUpdate(f.config(mgr.managerFunc()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	inv := spec.NewInvocation(&spec.Env{Stdout: &stdout, Stderr: &stderr}, nil, map[string]any{"yes": true})
+	inv.Output = spec.NewOutput(spec.OutputOptions{NoColorStdout: true, NoColorStderr: true})
+	done := make(chan error, 1)
+	go func() { done <- cmds[0].Run(ctx, inv) }()
+
+	if err := f.clock.BlockUntilTimers(t.Context(), 1); err != nil {
+		t.Fatalf("BlockUntilTimers: %v", err)
+	}
+	cancel()
+
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want one matching context.Canceled", err)
+	}
+	assertContains(t, "error", err.Error(), toVersion+" is installed", "the wait for it ended while it was starting")
+	assertCalls(t, mgr.fakeManager, "manager", "Status", "Restart", "Status")
+	f.assertInstalled(t)
+	assertPending(t, f)
+}
+
 func TestUpdateTimesOutAfterTheStartTimeout(t *testing.T) {
 	f := newUpdateFixture(t)
 	mgr := newSequence(nil, service.StateRunning, service.StateStarting)
@@ -454,6 +527,44 @@ func TestUpdateRestartsNothingForAnotherBinary(t *testing.T) {
 		t.Fatalf("Run error = %v, want nil", r.err)
 	}
 	assertCalls(t, mgr.fakeManager)
+}
+
+func TestUpdateRestartsAServiceWhoseBinaryIsTheInstalledOneByARelativePath(t *testing.T) {
+	f := newUpdateFixture(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	rel, err := filepath.Rel(wd, f.exe)
+	if err != nil {
+		t.Skipf("no relative path from %s to %s: %v", wd, f.exe, err)
+	}
+	mgr := newSequence(nil, service.StateRunning)
+	cfg := f.config(mgr.managerFunc())
+	cfg.ServiceBinary = rel
+
+	if r := runUpdate(t, cfg, f.clock); r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	assertCalls(t, mgr.fakeManager, "manager", "Status", "Restart", "Status")
+}
+
+func TestUpdateComparesTheServiceBinaryWithoutRegardToCaseOnlyOnWindows(t *testing.T) {
+	f := newUpdateFixture(t)
+	mgr := newSequence(nil, service.StateRunning)
+	cfg := f.config(mgr.managerFunc())
+	cfg.ServiceBinary = filepath.Join(filepath.Dir(f.exe), strings.ToUpper(updateName))
+
+	r := runUpdate(t, cfg, f.clock)
+	if r.err != nil {
+		t.Fatalf("Run error = %v, want nil", r.err)
+	}
+	if runtime.GOOS == "windows" {
+		assertCalls(t, mgr.fakeManager, "manager", "Status", "Restart", "Status")
+		return
+	}
+	assertCalls(t, mgr.fakeManager)
+	assertContains(t, "stderr", r.stderr, "no service manager runs "+f.exe)
 }
 
 func TestUpdateWarnsWhenTheManagerFuncFails(t *testing.T) {

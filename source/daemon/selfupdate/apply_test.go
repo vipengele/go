@@ -370,6 +370,29 @@ func TestApplyWarnsWhenNoSupervisorRestartsTheProcess(t *testing.T) {
 	}
 }
 
+func TestApplyLogsThroughTheDefaultLoggerWithoutWithLogger(t *testing.T) {
+	logger, buf := textLogger()
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	f := newApplyFixture(t)
+	m, err := New(NewFileStore(recordPath(t)), oldVersion,
+		WithClock(fakeClock{now: testTime()}), WithSupervisorCheck("org.example.atk", unsupervised))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := m.Apply(t.Context(), f.cfg, f.sel); !daemon.RestartRequested(err) {
+		t.Fatalf("Apply error = %v, want one for which RestartRequested is true", err)
+	}
+
+	log := buf.String()
+	if !strings.Contains(log, "level=WARN") || !strings.Contains(log, msgNotSupervised) {
+		t.Errorf("default log = %q, want the warning %q", log, msgNotSupervised)
+	}
+}
+
 // applyRunner is a daemon.Runner whose work is one Machine.Apply, after which it exits with
 // Apply's error.
 type applyRunner struct {
