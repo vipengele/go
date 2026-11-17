@@ -67,9 +67,9 @@ func prodDeps() deps {
 const pathsLayout = paths.LayoutXDG
 
 // newApp returns the App of the tool: its identity, the build information "version" prints, the
-// configuration [config] describes, the directory layout [pathsLayout], the background update
-// check around every command not annotated [spec.SkipUpdateCheck], and the commands "hello" and
-// "update".
+// configuration [config] describes, with the overlay file [projectFile] names, which may set only
+// "greeting", the directory layout [pathsLayout], the background update check around every
+// command not annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
 func newApp(d deps) *cli.App {
 	updateCfg := updateConfig(d)
 	checkBefore, checkAfter, err := updateCfg.UpdateCheckHooks()
@@ -80,6 +80,7 @@ func newApp(d deps) *cli.App {
 	app := cli.New(identity(),
 		cli.WithBuildInfo(d.Build),
 		cli.WithConfig(defaultConfig()),
+		cli.WithConfigOverlay(projectFile, "greeting"),
 		cli.WithPathsLayout(pathsLayout),
 		cli.WithPreRun(checkBefore),
 		cli.WithPostRun(checkAfter),
@@ -89,6 +90,19 @@ func newApp(d deps) *cli.App {
 		app.Add(cmd)
 	}
 	return app
+}
+
+// snippet:end
+
+// snippet:start overlay
+
+// projectFile returns the path of the tool's overlay file: the value of GREET_PROJECT_FILE, or ""
+// when it is unset or empty, which gives no overlay. A relative path is relative to the working
+// directory of the process. The environment layer looks up only the variables derived from the
+// configuration's keys, so it never reads this one as a key.
+func projectFile(lookup func(string) (string, bool)) (string, error) {
+	path, _ := lookup("GREET_PROJECT_FILE")
+	return path, nil
 }
 
 // snippet:end

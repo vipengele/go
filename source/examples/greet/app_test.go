@@ -63,6 +63,13 @@ type result struct {
 // stream a terminal.
 func run(t *testing.T, d deps, home string, args ...string) result {
 	t.Helper()
+	return runWith(t, d, home, nil, args...)
+}
+
+// runWith executes the App of deps with args, GREET_HOME set to home, the variables of vars set,
+// no other variable set and no stream a terminal.
+func runWith(t *testing.T, d deps, home string, vars map[string]string, args ...string) result {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
 	env := &spec.Env{
 		Stdout:  &stdout,
@@ -72,7 +79,8 @@ func run(t *testing.T, d deps, home string, args ...string) result {
 			if key == "GREET_HOME" {
 				return home, true
 			}
-			return "", false
+			value, ok := vars[key]
+			return value, ok
 		},
 		Terminal: func(spec.Stream) bool { return false },
 	}
@@ -210,5 +218,111 @@ func TestUpdateStateFollowsTheXDGLayoutOnDarwin(t *testing.T) {
 	got := resolvedStateDir(t, "darwin", map[string]string{"XDG_STATE_HOME": stateHome})
 	if want := filepath.Join(stateHome, identity().DirName); got != want {
 		t.Errorf("StateDir = %q, want %q", got, want)
+	}
+}
+
+// writeConfig writes content to config.yaml in the configuration directory GREET_HOME=home
+// resolves to.
+func writeConfig(t *testing.T, home, content string) {
+	t.Helper()
+	path := filepath.Join(home, "config", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+// writeOverlay writes content to a file named project.yaml in a new directory and returns its
+// path.
+func writeOverlay(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "project.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
+// The overlay is the example project.yaml the guide quotes, which sets greeting to Howdy.
+func TestOverlayGreetingBeatsTheConfigFile(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, home, "greeting: Hi\n")
+	overlay, err := filepath.Abs("project.yaml")
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	vars := map[string]string{"GREET_PROJECT_FILE": overlay}
+	got := runWith(t, testDeps(t, newServer(t)), home, vars, "hello", "Ada")
+	if want := (result{code: 0, stdout: "Howdy, Ada!\n"}); got != want {
+		t.Errorf("ExecuteArgs = %+v, want %+v", got, want)
+	}
+}
+
+func TestEnvironmentBeatsTheOverlay(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, home, "greeting: Hi\n")
+	vars := map[string]string{
+		"GREET_PROJECT_FILE": writeOverlay(t, "greeting: Howdy\n"),
+		"GREET_GREETING":     "Hey",
+	}
+	got := runWith(t, testDeps(t, newServer(t)), home, vars, "hello", "Ada")
+	if want := (result{code: 0, stdout: "Hey, Ada!\n"}); got != want {
+		t.Errorf("ExecuteArgs = %+v, want %+v", got, want)
+	}
+}
+
+func TestOverlayRefusesAnotherKey(t *testing.T) {
+	vars := map[string]string{"GREET_PROJECT_FILE": writeOverlay(t, "greeting: Howdy\ncolour: red\n")}
+	got := runWith(t, testDeps(t, newServer(t)), t.TempDir(), vars, "hello", "Ada")
+	if got.code != cli.ExitError || got.stdout != "" {
+		t.Fatalf("ExecuteArgs = %+v, want exit %d and no stdout", got, cli.ExitError)
+	}
+	if want := `project.yaml:2: unknown key "colour"`; !strings.Contains(got.stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", got.stderr, want)
+	}
+}
+
+func TestNoOverlayWithoutAProjectFile(t *testing.T) {
+	tests := []struct {
+		name string
+		vars map[string]string
+	}{
+		{name: "unset"},
+		{name: "empty", vars: map[string]string{"GREET_PROJECT_FILE": ""}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeConfig(t, home, "greeting: Hi\n")
+			got := runWith(t, testDeps(t, newServer(t)), home, tt.vars, "hello", "Ada")
+			if want := (result{code: 0, stdout: "Hi, Ada!\n"}); got != want {
+				t.Errorf("ExecuteArgs = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestProjectFile(t *testing.T) {
+	tests := []struct {
+		name string
+		vars map[string]string
+		want string
+	}{
+		{name: "unset", want: ""},
+		{name: "empty", vars: map[string]string{"GREET_PROJECT_FILE": ""}, want: ""},
+		{name: "set", vars: map[string]string{"GREET_PROJECT_FILE": "project.yaml"}, want: "project.yaml"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := projectFile(func(key string) (string, bool) {
+				v, ok := tt.vars[key]
+				return v, ok
+			})
+			if err != nil || got != tt.want {
+				t.Errorf("projectFile = %q, %v, want %q, nil", got, err, tt.want)
+			}
+		})
 	}
 }

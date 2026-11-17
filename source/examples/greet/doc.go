@@ -11,10 +11,13 @@
 //
 // which greets name, "world" when it is omitted, with the word the configuration key "greeting"
 // holds, "Hello" by default, in capitals under --shout and in lower case under --whisper, never
-// both. "hi" is an alias of "hello". It also holds the "config" group of
-// go.vipengele.org/cli/core, the "update" command of go.vipengele.org/update/updatecmd and
-// "version", and runs a background update check around every command that does not carry the
-// spec.SkipUpdateCheck annotation, which "update" and "version" do.
+// both. The key is read from config.yaml in the tool's configuration directory, then from the
+// overlay file GREET_PROJECT_FILE names, which may set only "greeting", then from the variable
+// GREET_GREETING, each over the one before. "hi" is an alias of "hello". It also holds the
+// "config" group of go.vipengele.org/cli/core, the "update" command of
+// go.vipengele.org/update/updatecmd and "version", and runs a background update check around
+// every command that does not carry the spec.SkipUpdateCheck annotation, which "update" and
+// "version" do.
 //
 // Regions of the source between a "snippet:start <name>" comment and the next "snippet:end"
 // comment are the excerpts the guide quotes, with the blank lines at their edges and their common

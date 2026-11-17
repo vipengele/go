@@ -72,9 +72,9 @@ The example's `newApp` is the whole App, each piece of which the steps below exp
 const pathsLayout = paths.LayoutXDG
 
 // newApp returns the App of the tool: its identity, the build information "version" prints, the
-// configuration [config] describes, the directory layout [pathsLayout], the background update
-// check around every command not annotated [spec.SkipUpdateCheck], and the commands "hello" and
-// "update".
+// configuration [config] describes, with the overlay file [projectFile] names, which may set only
+// "greeting", the directory layout [pathsLayout], the background update check around every
+// command not annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
 func newApp(d deps) *cli.App {
 	updateCfg := updateConfig(d)
 	checkBefore, checkAfter, err := updateCfg.UpdateCheckHooks()
@@ -85,6 +85,7 @@ func newApp(d deps) *cli.App {
 	app := cli.New(identity(),
 		cli.WithBuildInfo(d.Build),
 		cli.WithConfig(defaultConfig()),
+		cli.WithConfigOverlay(projectFile, "greeting"),
 		cli.WithPathsLayout(pathsLayout),
 		cli.WithPreRun(checkBefore),
 		cli.WithPostRun(checkAfter),
@@ -225,6 +226,62 @@ key, its value and its origin:
 $ GREET_GREETING=" " greet hello
 greet: load config
   → greeting: must not be empty: " " from env GREET_GREETING
+```
+
+### A project overlay
+
+`cli.WithConfigOverlay` adds one more file to the configuration, above `config.yaml` and below the
+environment. Its first argument resolves the file's path from the environment of each execution,
+and the keys after it are the only ones the file may set. greet reads the path from
+`GREET_PROJECT_FILE` and allows `greeting` alone (step 1), so a project can carry its own greeting
+without editing the user's `config.yaml`:
+
+<!-- snippet: project.yaml#overlay-file -->
+
+```yaml
+# An overlay of greet's configuration, layered above config.yaml when GREET_PROJECT_FILE names
+# it. It may set only "greeting".
+greeting: Howdy
+```
+
+<!-- snippet: app.go#overlay -->
+
+```go
+// projectFile returns the path of the tool's overlay file: the value of GREET_PROJECT_FILE, or ""
+// when it is unset or empty, which gives no overlay. A relative path is relative to the working
+// directory of the process. The environment layer looks up only the variables derived from the
+// configuration's keys, so it never reads this one as a key.
+func projectFile(lookup func(string) (string, bool)) (string, error) {
+	path, _ := lookup("GREET_PROJECT_FILE")
+	return path, nil
+}
+```
+
+The layers apply in order, each over the one before: the defaults, `config.yaml`, the overlay, and
+`GREET_GREETING`. An empty path, or one that names no file, adds no layer; an error the resolver
+returns stops the command as a configuration that does not load does.
+
+```bash
+$ GREET_PROJECT_FILE=project.yaml greet hello
+Howdy, world!
+$ GREET_PROJECT_FILE=project.yaml GREET_GREETING=Hey greet hello
+Hey, world!
+```
+
+The overlay is strict as `config.yaml` is: a key the configuration does not have stops the command
+with exit code 1, naming the file and the line. A key the configuration has but the allow-list
+omits is refused the same way, as "not settable in project.yaml"; greet allows its one key, so
+it never refuses one that way.
+
+```bash
+$ cat project.yaml
+greeting: Howdy
+colour: red
+$ GREET_PROJECT_FILE=project.yaml greet hello
+greet: load config
+  → project.yaml:2: unknown key "colour"
+$ echo $?
+1
 ```
 
 ## 4. Wire update
