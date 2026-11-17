@@ -1,6 +1,8 @@
 # A sibling is developed through a directory `replace` and released dependency-first
 
-Status: supersedes ADR-0002.
+Status: supersedes ADR-0002. Amended by `0037-a-release-is-the-merge-of-its-notes.md`, which
+replaces the tag pushed after the release pull request and the `tag` job of `release.yml` in the
+Release section: merging the notes tags the merge commit.
 
 A project that uses another project's packages requires that project's module in its `go.mod`. While
 the two are developed together, the dependent also replaces the module with the sibling's own

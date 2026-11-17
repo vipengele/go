@@ -1,7 +1,8 @@
 # Each project is a Go module, released by its own path-prefixed tag
 
 Status: amended by ADR-0004, which replaces the rule that a module path equals its directory and
-the rule that a project sits one level under `source/`.
+the rule that a project sits one level under `source/`. Its rule that a human pushes the tag is
+superseded by `0037-a-release-is-the-merge-of-its-notes.md`: the workflow tags when the notes merge.
 
 The repo is `vipengele/go`: the Go libraries of the vipengele platform. Inside it, each **project**
 lives in `source/<project>/` as its own Go module — its own `go.mod`, `go.sum`, linter config and
