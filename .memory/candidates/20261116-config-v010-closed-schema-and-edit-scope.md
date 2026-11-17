@@ -16,6 +16,7 @@ saw:
   `<Dirs.Config()>/config.yaml` (cli/core/config.go); there is no `--config` flag, by ADR-0017's
   design. `show` reads the context's result, the full stack.
 - `edit` renames through `state.Replace` (go.vipengele.org/cli/state, edit.go), as ADR-0017 says.
-- cli/core's go.mod requires `go.vipengele.org/config v0.1.0` with `replace => ../../config` while
-  it uses the unreleased `FileProvider.Allow`: releasing cli/core first needs config tagged at a
-  version carrying `Allow`, then the replace dropped (ADR-0006).
+- cli/core's go.mod requires `go.vipengele.org/config` with `replace => ../../config` on `main`,
+  at config's pending or tagged version. It is released from the same pull request as config:
+  `auto-release.yml` tags config first, then cli/core on a release commit that drops the `replace`
+  and tidies against config's tag (ADR-0038, `.github/scripts/release/pending.sh` for the tiers).
