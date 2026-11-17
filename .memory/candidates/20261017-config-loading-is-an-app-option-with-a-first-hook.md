@@ -22,5 +22,6 @@ Facts that break silently if changed:
   package `cli` (cycle: `cli` imports it to mount the group). `cli.ConfigFrom` only wraps `config.From`.
 - The path is computed per execution in `App.configFor` from `paths.Resolve(identity, ..., paths.Config)`; when the
   directory cannot be resolved every non-skipped command and every `config` subcommand fails with that error.
-- `validate` and `edit` load the defaults-under-file layer only (`Options.loadFile`, `cfg.Load` in `edit.go`); only
-  `show`, via the hook's `Options.Load`, adds the environment layer.
+- No `config` subcommand reads the environment layer but `show`, which reads the hook's `Options.Load` result.
+  `validate` loads defaults, the user file and the overlay (`validate.go`); `edit` loads defaults under its copy of
+  the user file alone (`cfg.Load` in `edit.go`), so it cannot see a problem the overlay brings.
