@@ -18,7 +18,8 @@ type EnvProvider struct {
 // The variable of a key is derived from prefix, not from the prefix the Schema was built with: the
 // key upper-cased with "." replaced by "_", after prefix and an underscore when prefix is not
 // empty, so "server.max_retries" under "APP" is APP_SERVER_MAX_RETRIES. Only these names are
-// looked up, so other variables that start with prefix are ignored.
+// looked up, so other variables that start with prefix are ignored. A collection, a key of Kind
+// KindList or KindMap, has no variable and is never looked up.
 //
 // A variable that is set, even to the empty string, is a value. A key of slice type arrives as the
 // single comma-separated text of its variable; it is not split here.
@@ -34,7 +35,7 @@ func Env(prefix string, lookup func(string) (string, bool)) *EnvProvider {
 func (p *EnvProvider) Strict() bool { return false }
 
 // Load looks up the variable of every key of the Schema and returns an Entry for each one that is
-// set, in the order of the Schema's fields.
+// set, in the order of the Schema's fields, collections skipped.
 func (p *EnvProvider) Load(schema *Schema) ([]Entry, error) {
 	if p.lookup == nil {
 		return nil, errors.New("config env: lookup is nil")
@@ -44,6 +45,9 @@ func (p *EnvProvider) Load(schema *Schema) ([]Entry, error) {
 	}
 	var entries []Entry
 	for _, f := range schema.fields {
+		if f.kind != KindValue {
+			continue
+		}
 		name := envName(p.prefix, f.key)
 		value, ok := p.lookup(name)
 		if !ok {

@@ -137,7 +137,7 @@ func TestSchemaLookup(t *testing.T) {
 
 type badPointer struct{ Port *int }
 
-type badMap struct{ Labels map[string]string }
+type badMap struct{ Labels map[int]string }
 
 type badInterface struct{ Value any }
 
@@ -145,7 +145,7 @@ type badComplex struct{ Value complex128 }
 
 type badNestedSlice struct{ Matrix [][]int }
 
-type badStructSlice struct{ Servers []schemaServer }
+type badStructSlice struct{ Servers []*schemaServer }
 
 type badArray struct{ Pair [2]int }
 
@@ -186,11 +186,11 @@ func TestNewSchemaFieldErrors(t *testing.T) {
 		want   string
 	}{
 		{name: "pointer field", target: badPointer{}, want: "field badPointer.Port: pointer fields are not supported"},
-		{name: "map field", target: badMap{}, want: "field badMap.Labels: maps are not supported"},
+		{name: "map with a non-string key", target: badMap{}, want: "field badMap.Labels: type map[int]string is not supported: a map key is a string"},
 		{name: "interface field", target: badInterface{}, want: "field badInterface.Value: type interface {} is not supported"},
 		{name: "complex field", target: badComplex{}, want: "field badComplex.Value: type complex128 is not supported"},
 		{name: "slice of slices", target: badNestedSlice{}, want: "field badNestedSlice.Matrix: type [][]int is not supported"},
-		{name: "slice of structs", target: badStructSlice{}, want: "field badStructSlice.Servers: type []config.schemaServer is not supported"},
+		{name: "slice of struct pointers", target: badStructSlice{}, want: "field badStructSlice.Servers: type []*config.schemaServer is not supported"},
 		{name: "array", target: badArray{}, want: "field badArray.Pair: type [2]int is not supported"},
 		{name: "struct with no exported fields", target: badTime{}, want: "field badTime.At: type time.Time is not supported"},
 		{name: "struct whose fields are all skipped", target: badEmptyNested{}, want: "field badEmptyNested.Inner: type struct { Skipped int \"config:\\\"-\\\"\" } is not supported"},
@@ -349,7 +349,7 @@ func TestNewSchemaCollisions(t *testing.T) {
 
 type everyProblem struct {
 	Port    *int
-	Labels  map[string]string
+	Labels  map[int]string
 	Server  int
 	Nested  struct{ Port int } `config:"server"`
 	BadTag  int                `config:"a.b"`
@@ -367,7 +367,7 @@ func TestNewSchemaReportsEveryProblemTogether(t *testing.T) {
 	wants := []string{
 		`environment prefix "bad"`,
 		"field everyProblem.Port: pointer fields are not supported",
-		"field everyProblem.Labels: maps are not supported",
+		"field everyProblem.Labels: type map[int]string is not supported: a map key is a string",
 		`field everyProblem.BadTag: name "a.b" is not a valid key segment`,
 		"field everyProblem.Value: type complex64 is not supported",
 		"field everyProblem.schemaServer: embedded fields are not supported",
@@ -649,6 +649,431 @@ func TestNewSchemaRejectsRemovedKeys(t *testing.T) {
 				if !strings.HasPrefix(got[i], "config: invalid schema: "+w) {
 					t.Errorf("problem %d = %q, want it to start with %q", i, got[i], w)
 				}
+			}
+		})
+	}
+}
+
+type collMeta struct {
+	Owner string
+	Level int
+}
+
+type collProfile struct {
+	Name  string            `doc:"Name of the profile."`
+	Env   map[string]string `doc:"Variables of the profile."`
+	Hooks []string
+	Meta  collMeta `doc:"Ownership."`
+}
+
+type collTemplate struct {
+	ID   string `config:"id"`
+	Body string
+}
+
+type collConfig struct {
+	Verbose   bool
+	Profiles  []collProfile `merge:"Name" doc:"Named profiles."`
+	Templates []collTemplate
+	Labels    map[string]string `merge:"keys"`
+	Paths     map[string][]string
+	Timeouts  map[string]time.Duration
+	Servers   map[string]schemaServer
+	Nested    map[string]map[string]collTemplate
+	Deep      map[string]map[string]int
+	Owned     []collProfile `merge:"meta.owner"`
+	Group     struct {
+		Rules []collTemplate `merge:"id"`
+	}
+}
+
+func TestNewSchemaCollections(t *testing.T) {
+	s, err := NewSchema(collConfig{}, "APP")
+	if err != nil {
+		t.Fatalf("NewSchema: %v", err)
+	}
+	type want struct {
+		key      string
+		env      string
+		kind     Kind
+		merge    string
+		elemKeys []string
+	}
+	profileKeys := []string{"name", "env", "hooks", "meta.owner", "meta.level"}
+	templateKeys := []string{"id", "body"}
+	wants := []want{
+		{key: "verbose", env: "APP_VERBOSE", kind: KindValue},
+		{key: "profiles", kind: KindList, merge: "name", elemKeys: profileKeys},
+		{key: "templates", kind: KindList, elemKeys: templateKeys},
+		{key: "labels", kind: KindMap, merge: "keys"},
+		{key: "paths", kind: KindMap},
+		{key: "timeouts", kind: KindMap},
+		{key: "servers", kind: KindMap, elemKeys: []string{"host", "port", "max_retries", "read_timeout"}},
+		{key: "nested", kind: KindMap, elemKeys: templateKeys},
+		{key: "deep", kind: KindMap},
+		{key: "owned", kind: KindList, merge: "meta.owner", elemKeys: profileKeys},
+		{key: "group.rules", kind: KindList, merge: "id", elemKeys: templateKeys},
+	}
+	fields := s.Fields()
+	if len(fields) != len(wants) {
+		t.Fatalf("Fields() has %d fields, want %d", len(fields), len(wants))
+	}
+	root := reflect.TypeFor[collConfig]()
+	for i, w := range wants {
+		f := fields[i]
+		if f.Key() != w.key || f.Env() != w.env || f.Kind() != w.kind || f.Merge() != w.merge {
+			t.Errorf("field %d = {%q env %q %v merge %q}, want {%q env %q %v merge %q}",
+				i, f.Key(), f.Env(), f.Kind(), f.Merge(), w.key, w.env, w.kind, w.merge)
+		}
+		if w.kind != KindValue && f.Flag() != "" {
+			t.Errorf("field %q Flag() = %q, want none", w.key, f.Flag())
+		}
+		if got := root.FieldByIndex(f.index).Type; got != f.Type() {
+			t.Errorf("field %q index %v reaches %v, want %v", w.key, f.index, got, f.Type())
+		}
+		if w.elemKeys == nil {
+			if f.Elem() != nil {
+				t.Errorf("field %q Elem() = %v, want nil", w.key, f.Elem())
+			}
+			continue
+		}
+		if f.Elem() == nil {
+			t.Fatalf("field %q Elem() = nil, want a Schema", w.key)
+		}
+		var keys []string
+		for _, ef := range f.Elem().Fields() {
+			keys = append(keys, ef.Key())
+			if ef.Env() != "" || ef.Flag() != "" {
+				t.Errorf("element field %q of %q has env %q and flag %q, want neither", ef.Key(), w.key, ef.Env(), ef.Flag())
+			}
+		}
+		if !reflect.DeepEqual(keys, w.elemKeys) {
+			t.Errorf("field %q element keys = %q, want %q", w.key, keys, w.elemKeys)
+		}
+	}
+}
+
+func TestSchemaCollectionElement(t *testing.T) {
+	s, err := NewSchema(collConfig{}, "APP")
+	if err != nil {
+		t.Fatalf("NewSchema: %v", err)
+	}
+	profiles, ok := s.Lookup("profiles")
+	if !ok {
+		t.Fatal("Lookup(profiles) found no field")
+	}
+	if got := profiles.Doc(); got != "Named profiles." {
+		t.Errorf("profiles Doc() = %q, want %q", got, "Named profiles.")
+	}
+	elem := profiles.Elem()
+	env, ok := elem.Lookup("ENV")
+	if !ok {
+		t.Fatal("element Lookup(ENV) found no field")
+	}
+	if env.Kind() != KindMap || env.Elem() != nil || env.Merge() != "" || env.Doc() != "Variables of the profile." {
+		t.Errorf("element field env = {%v elem %v merge %q doc %q}, want a map of single values documented", env.Kind(), env.Elem(), env.Merge(), env.Doc())
+	}
+	owner, ok := elem.Lookup("meta.owner")
+	if !ok {
+		t.Fatal("element Lookup(meta.owner) found no field")
+	}
+	if got := reflect.TypeFor[collProfile]().FieldByIndex(owner.index).Name; got != "Owner" {
+		t.Errorf("element field meta.owner index %v reaches %s, want Owner, relative to the element", owner.index, got)
+	}
+	if got := elem.GroupDoc("meta"); got != "Ownership." {
+		t.Errorf("element GroupDoc(meta) = %q, want %q", got, "Ownership.")
+	}
+	for _, key := range []string{"profiles.name", "profiles[0].name", "labels.x", "nested.id"} {
+		if f, ok := s.Lookup(key); ok {
+			t.Errorf("Lookup(%q) = %q, want no field below a collection", key, f.Key())
+		}
+	}
+	if _, ok := s.Lookup("group.rules"); !ok {
+		t.Error("Lookup(group.rules) found no field")
+	}
+}
+
+func TestKindString(t *testing.T) {
+	for k, want := range map[Kind]string{KindValue: "value", KindList: "list", KindMap: "map"} {
+		if got := k.String(); got != want {
+			t.Errorf("Kind(%d).String() = %q, want %q", int(k), got, want)
+		}
+	}
+}
+
+type collKeysElement struct {
+	Keys string
+}
+
+func TestNewSchemaMergeKeysOnAListNamesAnElementField(t *testing.T) {
+	s, err := NewSchema(struct {
+		L []collKeysElement `merge:"keys"`
+	}{}, "")
+	if err != nil {
+		t.Fatalf("NewSchema: %v", err)
+	}
+	if got := s.Fields()[0].Merge(); got != "keys" {
+		t.Errorf("Merge() = %q, want keys", got)
+	}
+}
+
+type collRecursive struct {
+	Name     string
+	Children []collRecursive
+}
+
+type collRecursiveMap struct {
+	Name string
+	Sub  map[string]map[string]collRecursiveMap
+}
+
+type collEmbedded struct {
+	collMeta
+	Name string
+}
+
+func TestNewSchemaCollectionErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		target any
+		want   []string
+	}{
+		{
+			name:   "non-string map key",
+			target: struct{ M map[int]string }{},
+			want:   []string{"field struct { M map[int]string }.M: type map[int]string is not supported: a map key is a string"},
+		},
+		{
+			name:   "non-string key of a nested map",
+			target: struct{ M map[string]map[bool]int }{},
+			want:   []string{"field struct { M map[string]map[bool]int }.M: type map[string]map[bool]int is not supported: a map key is a string"},
+		},
+		{
+			name:   "map of pointers",
+			target: struct{ M map[string]*int }{},
+			want:   []string{"field struct { M map[string]*int }.M: type map[string]*int is not supported"},
+		},
+		{
+			name:   "map of struct pointers",
+			target: struct{ M map[string]*collTemplate }{},
+			want:   []string{"field struct { M map[string]*config.collTemplate }.M: type map[string]*config.collTemplate is not supported"},
+		},
+		{
+			name:   "map of slices of structs",
+			target: struct{ M map[string][]collTemplate }{},
+			want:   []string{"field struct { M map[string][]config.collTemplate }.M: type map[string][]config.collTemplate is not supported"},
+		},
+		{
+			name:   "map of slices of maps",
+			target: struct{ M map[string][]map[string]int }{},
+			want:   []string{"field struct { M map[string][]map[string]int }.M: type map[string][]map[string]int is not supported"},
+		},
+		{
+			name:   "map of interfaces",
+			target: struct{ M map[string]any }{},
+			want:   []string{"field struct { M map[string]interface {} }.M: type map[string]interface {} is not supported"},
+		},
+		{
+			name:   "slice of maps",
+			target: struct{ L []map[string]string }{},
+			want:   []string{"field struct { L []map[string]string }.L: a slice of maps is not supported"},
+		},
+		{
+			name:   "slice of struct pointers",
+			target: struct{ L []*collTemplate }{},
+			want:   []string{"field struct { L []*config.collTemplate }.L: type []*config.collTemplate is not supported"},
+		},
+		{
+			name:   "element with no keys",
+			target: struct{ L []struct{ x int } }{L: []struct{ x int }{{x: 1}}},
+			want:   []string{"field struct { L []struct { x int } }.L: type struct { x int } is not supported: an element struct needs at least one key"},
+		},
+		{
+			name:   "map value with no keys",
+			target: struct{ M map[string]time.Time }{},
+			want:   []string{"field struct { M map[string]time.Time }.M: type time.Time is not supported: an element struct needs at least one key"},
+		},
+		{
+			name:   "unsupported field of an element",
+			target: struct{ L []struct{ P *int } }{},
+			want:   []string{"field struct { L []struct { P *int } }.L[].P: pointer fields are not supported"},
+		},
+		{
+			name:   "embedded field of an element",
+			target: struct{ L []collEmbedded }{},
+			want:   []string{"field struct { L []config.collEmbedded }.L[].collMeta: embedded fields are not supported; give the field a name"},
+		},
+		{
+			name: "unsupported field of a map value nested in an element",
+			target: struct {
+				L []struct {
+					M map[string]struct{ C complex64 }
+				}
+			}{},
+			want: []string{"field struct { L []struct { M map[string]struct { C complex64 } } }.L[].M[].C: type complex64 is not supported"},
+		},
+		{
+			name:   "colliding keys of an element, with no environment variable or flag to share",
+			target: struct{ L []keyCollision }{},
+			want: []string{
+				`key "maxretries", ignoring case, "-" and "_", is shared by struct { L []config.keyCollision }.L[].MaxRetries (key "max_retries"), struct { L []config.keyCollision }.L[].Retries (key "max_retries")`,
+			},
+		},
+		{
+			name:   "a key of an element that is also a group",
+			target: struct{ L []groupCollision }{},
+			want: []string{
+				`struct { L []config.groupCollision }.L[].Server (key "server") is a value and also the group of struct { L []config.groupCollision }.L[].Nested.Port (key "server.port")`,
+			},
+		},
+		{
+			name: "colliding collections, with no environment variable or flag to share",
+			target: struct {
+				A map[string]int `config:"a_b"`
+				B []collTemplate `config:"a-b"`
+			}{},
+			want: []string{
+				"key \"ab\", ignoring case, \"-\" and \"_\", is shared by struct { A map[string]int \"config:\\\"a_b\\\"\"; B []config.collTemplate \"config:\\\"a-b\\\"\" }.A (key \"a_b\"), struct { A map[string]int \"config:\\\"a_b\\\"\"; B []config.collTemplate \"config:\\\"a-b\\\"\" }.B (key \"a_b\")",
+			},
+		},
+		{
+			name:   "list holding its own element",
+			target: collRecursive{},
+			want:   []string{"field collRecursive.Children[].Children: type config.collRecursive is not supported: the element holds itself"},
+		},
+		{
+			name:   "nested map holding its own element",
+			target: collRecursiveMap{},
+			want:   []string{"field collRecursiveMap.Sub[].Sub: type config.collRecursiveMap is not supported: the element holds itself"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewSchema(tc.target, "APP")
+			if !errors.Is(err, ErrSchema) {
+				t.Fatalf("NewSchema error = %v, want ErrSchema", err)
+			}
+			want := make([]string, len(tc.want))
+			for i, w := range tc.want {
+				want[i] = "config: invalid schema: " + w
+			}
+			if got := problems(err); !reflect.DeepEqual(got, want) {
+				t.Errorf("problems =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+type mergeOnValue struct {
+	Port int `merge:"keys"`
+}
+
+type mergeOnScalarSlice struct {
+	Tags []string `merge:"keys"`
+}
+
+type mergeOnGroup struct {
+	Server struct{ Port int } `merge:"keys"`
+}
+
+type mergeOnSkipped struct {
+	Port    int
+	Skipped map[string]int `config:"-" merge:"keys"`
+}
+
+type mergeOnUnexported struct {
+	Port   int
+	hidden map[string]int `merge:"keys"`
+}
+
+type mergeMapByName struct {
+	Labels map[string]string `merge:"name"`
+}
+
+type mergeMapEmpty struct {
+	Labels map[string]string `merge:""`
+}
+
+type mergeListUnknown struct {
+	Profiles []collProfile `merge:"nope"`
+}
+
+type mergeListEmpty struct {
+	Profiles []collProfile `merge:""`
+}
+
+type mergeListInt struct {
+	Owned []collProfile `merge:"meta.level"`
+}
+
+type mergeListMap struct {
+	Profiles []collProfile `merge:"env"`
+}
+
+type mergeListScalarSlice struct {
+	Profiles []collProfile `merge:"hooks"`
+}
+
+type mergeListGroup struct {
+	Profiles []collProfile `merge:"meta"`
+}
+
+type mergeListKeys struct {
+	Profiles []collProfile `merge:"keys"`
+}
+
+type mergeInElementMap struct {
+	Profiles []struct {
+		Name string
+		Env  map[string]string `merge:"keys"`
+	}
+}
+
+type mergeInElementList struct {
+	Servers map[string]struct {
+		Routes []collTemplate `merge:"id"`
+	}
+}
+
+type mergeInElementValue struct {
+	Profiles []struct {
+		Name string `merge:"name"`
+	}
+}
+
+func TestNewSchemaMergeTagErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		target any
+		want   string
+	}{
+		{name: "single value", target: mergeOnValue{}, want: "field mergeOnValue.Port: a merge tag is only allowed on a map or a slice of structs"},
+		{name: "slice of single values", target: mergeOnScalarSlice{}, want: "field mergeOnScalarSlice.Tags: a merge tag is only allowed on a map or a slice of structs"},
+		{name: "nested struct", target: mergeOnGroup{}, want: "field mergeOnGroup.Server: a merge tag is only allowed on a map or a slice of structs"},
+		{name: "config:\"-\" field", target: mergeOnSkipped{}, want: `field mergeOnSkipped.Skipped: a merge tag on a field tagged config:"-" describes no key`},
+		{name: "unexported field", target: mergeOnUnexported{hidden: map[string]int{}}, want: "field mergeOnUnexported.hidden: a merge tag on an unexported field describes no key"},
+		{name: "map merged by an element key", target: mergeMapByName{}, want: `field mergeMapByName.Labels: merge "name" on a map is not supported; a map takes merge:"keys"`},
+		{name: "map with an empty merge tag", target: mergeMapEmpty{}, want: `field mergeMapEmpty.Labels: merge "" on a map is not supported; a map takes merge:"keys"`},
+		{name: "list merged by an unknown key", target: mergeListUnknown{}, want: `field mergeListUnknown.Profiles: merge "nope" names no string field of the element config.collProfile`},
+		{name: "list with an empty merge tag", target: mergeListEmpty{}, want: `field mergeListEmpty.Profiles: merge "" names no string field of the element config.collProfile`},
+		{name: "list merged by an int field", target: mergeListInt{}, want: `field mergeListInt.Owned: merge "meta.level" names no string field of the element config.collProfile`},
+		{name: "list merged by a map field", target: mergeListMap{}, want: `field mergeListMap.Profiles: merge "env" names no string field of the element config.collProfile`},
+		{name: "list merged by a slice field", target: mergeListScalarSlice{}, want: `field mergeListScalarSlice.Profiles: merge "hooks" names no string field of the element config.collProfile`},
+		{name: "list merged by a group", target: mergeListGroup{}, want: `field mergeListGroup.Profiles: merge "meta" names no string field of the element config.collProfile`},
+		{name: "list merged by keys, with no keys field", target: mergeListKeys{}, want: `field mergeListKeys.Profiles: merge "keys" names no string field of the element config.collProfile`},
+		{name: "map in a list element", target: mergeInElementMap{}, want: "field mergeInElementMap.Profiles[].Env: a merge tag is not allowed on a field of a collection element"},
+		{name: "list in a map value", target: mergeInElementList{}, want: "field mergeInElementList.Servers[].Routes: a merge tag is not allowed on a field of a collection element"},
+		{name: "single value in a list element", target: mergeInElementValue{}, want: "field mergeInElementValue.Profiles[].Name: a merge tag is only allowed on a map or a slice of structs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewSchema(tc.target, "")
+			if !errors.Is(err, ErrSchema) {
+				t.Fatalf("NewSchema error = %v, want ErrSchema", err)
+			}
+			want := []string{"config: invalid schema: " + tc.want}
+			if got := problems(err); !reflect.DeepEqual(got, want) {
+				t.Errorf("problems =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 		})
 	}

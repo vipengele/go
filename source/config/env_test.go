@@ -180,3 +180,44 @@ func TestEnvErrors(t *testing.T) {
 		})
 	}
 }
+
+type envProfile struct {
+	Name string
+	Env  map[string]string
+}
+
+type envCollections struct {
+	Name     string
+	Profiles []envProfile
+	Labels   map[string]string
+	Server   struct {
+		Routes map[string]int
+		Host   string
+	}
+}
+
+func TestEnvSkipsCollections(t *testing.T) {
+	s, err := NewSchema(envCollections{}, "APP")
+	if err != nil {
+		t.Fatalf("NewSchema: %v", err)
+	}
+	var asked []string
+	got, err := Env("APP", func(name string) (string, bool) {
+		asked = append(asked, name)
+		return "x", true
+	}).Load(s)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantAsked := []string{"APP_NAME", "APP_SERVER_HOST"}
+	if !reflect.DeepEqual(asked, wantAsked) {
+		t.Errorf("looked up %v, want %v", asked, wantAsked)
+	}
+	want := []Entry{
+		{Key: "name", Value: "x", Origin: "env APP_NAME"},
+		{Key: "server.host", Value: "x", Origin: "env APP_SERVER_HOST"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("entries = %#v, want %#v", got, want)
+	}
+}

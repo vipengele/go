@@ -326,7 +326,7 @@ func TestSeedSchemaErrors(t *testing.T) {
 		{"pointer", func() (bool, error) { return Seed(path, &docConfig{}) }},
 		{"not a struct", func() (bool, error) { return Seed(path, 3) }},
 		{"unsupported field", func() (bool, error) {
-			return Seed(path, struct{ M map[string]int }{})
+			return Seed(path, struct{ M map[int]int }{})
 		}},
 	}
 	for _, tc := range tests {
