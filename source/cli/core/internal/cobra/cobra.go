@@ -20,9 +20,9 @@ import (
 )
 
 // UsageError reports a command line the tree does not accept: an unknown flag or a flag value
-// that does not parse, an unknown subcommand, or a number of positional arguments the command's
-// [spec.ArgPolicy] rejects. Every other error [Run] returns comes from a run function, or from
-// writing help.
+// that does not parse, an unknown subcommand, a number of positional arguments the command's
+// [spec.ArgPolicy] rejects, or a set of flags one of the command's [spec.FlagGroup]s rejects. Every other error
+// [Run] returns comes from a run function, or from writing help.
 type UsageError struct {
 	// Path is the space-separated names of the command that rejected the command line, the
 	// root's name left out: "" for the root, "remote add" for a grandchild.
@@ -138,6 +138,7 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 	path := append(slices.Clone(parents), c.Name)
 	cmd := &spf.Command{
 		Use:           c.Name,
+		Aliases:       slices.Clone(c.Aliases),
 		Short:         c.Summary,
 		Long:          c.Description,
 		Hidden:        c.Hidden,
@@ -197,6 +198,7 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 	}
 
 	policy, hasCommands, run, annotations := c.Args, len(c.Commands) > 0, c.Run, c.Annotations
+	groups := slices.Clone(c.FlagGroups)
 	cmd.Args = func(cmd *spf.Command, args []string) error {
 		err := policy.Check(args)
 		if err == nil {
@@ -211,6 +213,9 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 		values, set, err := read(cmd.Flags(), visible)
 		if err != nil {
 			return err
+		}
+		if err := checkGroups(cmd.Flags(), groups); err != nil {
+			return &UsageError{Path: relPath(cmd), Err: err}
 		}
 		inv := spec.NewInvocation(env, args, values, spec.ExplicitFlags(set...))
 		if cfg.Output != nil {
@@ -372,6 +377,36 @@ func read(fs *pflag.FlagSet, flags []spec.Flag) (map[string]any, []string, error
 		}
 	}
 	return values, set, nil
+}
+
+// checkGroups returns the first violation of groups, checked in order, by the flags the command
+// line sets in fs. A flag counts as set when pflag reports it changed, so a default never counts
+// and an explicit value equal to the default does. fs is the flag set of the command that runs,
+// which holds the flags it inherits once cobra has parsed the command line. Flags are named in
+// their declaration order within the group: the first two set flags of a mutually exclusive
+// group, and the first set and the first unset flag of a group required together.
+func checkGroups(fs *pflag.FlagSet, groups []spec.FlagGroup) error {
+	for _, g := range groups {
+		var set, unset []string
+		for _, name := range g.Flags {
+			if fs.Changed(name) {
+				set = append(set, name)
+			} else {
+				unset = append(unset, name)
+			}
+		}
+		switch g.Kind {
+		case spec.MutuallyExclusive:
+			if len(set) > 1 {
+				return fmt.Errorf("--%s and --%s are mutually exclusive", set[0], set[1])
+			}
+		case spec.RequiredTogether:
+			if len(set) > 0 && len(unset) > 0 {
+				return fmt.Errorf("--%s requires --%s", set[0], unset[0])
+			}
+		}
+	}
+	return nil
 }
 
 // relPath returns the command path of cmd without the root's name.

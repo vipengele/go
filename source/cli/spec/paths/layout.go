@@ -1,18 +1,66 @@
 package paths
 
 import (
+	"fmt"
 	"path/filepath"
 )
 
-// layout resolves the kinds want marks, indexed by Kind - 1, for r's GOOS, below no home root.
+// Layout is the set of directory conventions the kinds are resolved under. The zero value,
+// [LayoutDefault], chooses the layout from the target operating system.
+type Layout int
+
+const (
+	// LayoutDefault chooses the layout from Options.GOOS: darwin and windows have their own, and
+	// every other GOOS takes the XDG layout.
+	LayoutDefault Layout = iota
+	// LayoutXDG is the XDG layout on every operating system, honouring the XDG_* variables.
+	LayoutXDG
+	// LayoutDarwin is the macOS layout, under ~/Library, on every operating system.
+	LayoutDarwin
+	// LayoutWindows is the Windows layout, under %AppData% and %LocalAppData%, on every operating
+	// system.
+	LayoutWindows
+)
+
+// String returns the layout's name, as in "xdg", "default" for [LayoutDefault], and "Layout(n)"
+// for a value that is not a layout.
+func (l Layout) String() string {
+	switch l {
+	case LayoutDefault:
+		return "default"
+	case LayoutXDG:
+		return "xdg"
+	case LayoutDarwin:
+		return "darwin"
+	case LayoutWindows:
+		return "windows"
+	}
+	return fmt.Sprintf("Layout(%d)", int(l))
+}
+
+// Valid reports whether l is [LayoutDefault] or one of the named layouts.
+func (l Layout) Valid() bool {
+	return l >= LayoutDefault && l <= LayoutWindows
+}
+
+// layout resolves the kinds want marks, indexed by Kind - 1, for r's layout, below no home root.
 // explicit holds the explicit option of each kind, indexed the same way, and a kind's default is
 // resolved only when its option is "". A kind want does not mark is left "".
 func (r *resolver) layout(explicit [numKinds]string, want [numKinds]bool) ([numKinds]string, error) {
+	chosen := r.chosen
+	if chosen == LayoutDefault {
+		switch r.goos {
+		case "darwin":
+			chosen = LayoutDarwin
+		case "windows":
+			chosen = LayoutWindows
+		}
+	}
 	var def defaultDir
-	switch r.goos {
-	case "darwin":
+	switch chosen {
+	case LayoutDarwin:
 		def = r.darwin
-	case "windows":
+	case LayoutWindows:
 		def = r.windows
 	default:
 		def = r.xdg

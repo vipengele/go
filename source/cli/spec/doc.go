@@ -18,6 +18,11 @@
 // decided for the standard output and the standard error separately by [ColorAllowed]. The
 // [Styler] of a stream writes the glyphs and coloured text that decision allows.
 //
+// A command can be selected by further words, its Aliases, and the flags of one command line can be
+// constrained by [FlagGroup]s: [MutuallyExclusive] flags allow at most one of them and
+// [RequiredTogether] flags require all of them once any is set. [Command.Validate] checks both;
+// the adapter that runs the tree resolves the aliases and enforces the groups.
+//
 // A flag's value and a command's positional arguments can be given a [Completion], built by
 // [CompleteChoices], [CompleteFiles], [CompleteDirs] or [CompleteFunc]: [Complete] attaches it to
 // a flag and [Command].ArgCompletion sets it for the arguments. It describes what a shell

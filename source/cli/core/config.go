@@ -40,11 +40,11 @@ type configOverlay struct {
 //
 // The configuration file is config.yaml in the tool's configuration directory, the Config
 // directory the cli/spec/paths package resolves for the App's [spec.Identity] from the
-// environment of each execution. No flag and no environment variable names another file. The
-// layers are defaults, under the file, under the environment variables named by the identity's
-// EnvPrefix, looked up through [spec.Env.LookupEnv], with the overlay file of [WithConfigOverlay]
-// between the file and the environment. A missing file is valid: the defaults and the
-// environment apply.
+// environment of each execution, in the layout of [WithPathsLayout] when the App has one. No
+// flag and no environment variable names another file. The layers are defaults, under the file,
+// under the environment variables named by the identity's EnvPrefix, looked up through
+// [spec.Env.LookupEnv], with the overlay file of [WithConfigOverlay] between the file and the
+// environment. A missing file is valid: the defaults and the environment apply.
 //
 // Before every run function, ahead of every [WithPreRun] hook whatever the order of the options,
 // a pre-run hook loads the configuration and stores it in the context, where [ConfigFrom] reads
@@ -121,6 +121,29 @@ func ConfigFrom[T any](ctx context.Context) (cfg.Result[T], bool) {
 	return config.From[T](ctx)
 }
 
+// pathsLayoutKey is the context key of the layout [WithPathsLayout] gives the App.
+type pathsLayoutKey struct{}
+
+// PathsLayoutFrom returns the [paths.Layout] of [WithPathsLayout] for the App that runs, from the
+// context its run function, a [PreRunHook] or a [PostRunHook] receives, whether or not the App has
+// [WithConfig] and whatever the command's annotations. It returns [paths.LayoutDefault] when the
+// App has no [WithPathsLayout] and for a context that does not come from an App's execution, the
+// package-level [Execute] and [ExecuteArgs] included.
+func PathsLayoutFrom(ctx context.Context) paths.Layout {
+	if layout, ok := ctx.Value(pathsLayoutKey{}).(paths.Layout); ok {
+		return layout
+	}
+	return paths.LayoutDefault
+}
+
+// layoutHook returns the pre-run hook that stores the layout of s in the context, ahead of the
+// configuration hook, for every command.
+func (s settings) layoutHook() PreRunHook {
+	return func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+		return context.WithValue(ctx, pathsLayoutKey{}, s.pathsLayout), nil
+	}
+}
+
 // configFor binds the App's configuration for one execution against lookup, the environment the
 // configuration directory is resolved from. It returns the zero binding when the App has no
 // [WithConfig]. When the directory cannot be resolved, the hook and every run function of the
@@ -129,7 +152,7 @@ func (a *App) configFor(lookup func(string) (string, bool)) configBinding {
 	if a.settings.config == nil {
 		return configBinding{}
 	}
-	dirs, err := paths.Resolve(a.identity, paths.Options{LookupEnv: lookup}, paths.Config)
+	dirs, err := paths.Resolve(a.identity, a.settings.pathsOptions(lookup), paths.Config)
 	if err != nil {
 		err = fmt.Errorf("config: %w", err)
 		b := a.settings.config("", a.identity.EnvPrefix, a.settings.configOverlay)

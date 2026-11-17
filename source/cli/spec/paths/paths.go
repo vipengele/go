@@ -62,8 +62,12 @@ type Options struct {
 	// as [Kind.String] names it. It takes precedence over the <PREFIX>_HOME variable. "" leaves
 	// it to that variable.
 	Home string
-	// GOOS selects the layout, as a value of runtime.GOOS. "" means runtime.GOOS.
+	// GOOS is the target operating system, as a value of runtime.GOOS. "" means runtime.GOOS. It
+	// selects the layout unless Layout names one.
 	GOOS string
+	// Layout selects the directory layout regardless of GOOS. [LayoutDefault], the zero value,
+	// chooses it from GOOS. Resolve fails for a value that is not a [Layout].
+	Layout Layout
 	// LookupEnv returns an environment variable's value and whether it is set, as os.LookupEnv
 	// does. Nil means os.LookupEnv. A variable set to "" counts as unset.
 	LookupEnv func(key string) (string, bool)
@@ -119,7 +123,8 @@ func New(id spec.Identity, opts Options) (Dirs, error) {
 // to derive its child and is left unresolved itself. Repeating a kind is harmless.
 //
 // Resolve returns an error wrapping id's [spec.Identity.Validate] error for an invalid id, an
-// error naming a value of kinds that is not a Kind, and one wrapping [ErrNoHomeDir] when a
+// error naming a value of kinds that is not a Kind, one for an Options.Layout that is not a
+// [Layout], checked before any home root is consulted, and one wrapping [ErrNoHomeDir] when a
 // requested kind, or a kind it derives from, needs the home directory and Options.UserHomeDir
 // fails or returns "". It touches nothing on the file system.
 func Resolve(id spec.Identity, opts Options, kinds ...Kind) (Dirs, error) {
@@ -133,6 +138,9 @@ func Resolve(id spec.Identity, opts Options, kinds ...Kind) (Dirs, error) {
 	want, err := requested(kinds)
 	if err != nil {
 		return Dirs{}, err
+	}
+	if !opts.Layout.Valid() {
+		return Dirs{}, fmt.Errorf("paths: invalid layout %v", opts.Layout)
 	}
 
 	r := newResolver(id.DirName, opts)
@@ -187,6 +195,7 @@ func requested(kinds []Kind) ([numKinds]bool, error) {
 // and only on first use, and the application directory name.
 type resolver struct {
 	goos        string
+	chosen      Layout
 	app         string
 	lookupEnv   func(string) (string, bool)
 	userHomeDir func() (string, error)
@@ -199,6 +208,7 @@ type resolver struct {
 func newResolver(app string, opts Options) *resolver {
 	r := &resolver{
 		goos:        opts.GOOS,
+		chosen:      opts.Layout,
 		app:         app,
 		lookupEnv:   opts.LookupEnv,
 		userHomeDir: opts.UserHomeDir,

@@ -115,6 +115,12 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   hooks as plain funcs and the `Completion` switch for cobra's `completion` command; each invocation names the flags `pflag` reports `Changed` with
   `spec.ExplicitFlags`; a post-run error after a successful run is a `*HookError`, never a
   `*UsageError`.
+- `WithPathsLayout(paths.Layout)` makes every directory the App resolves (the `WithConfig`
+  directory) follow one layout on every OS (ADR-0039); an invalid layout is an invalid command tree.
+  `PathsLayoutFrom(ctx)` returns it to run functions and hooks, `LayoutDefault` outside an App.
+  The adapter dispatches `spec.Command.Aliases` through cobra's aliases and enforces
+  `spec.Command.FlagGroups` after parsing as `*cobra.UsageError` (exit 2), counting a flag as set
+  only when pflag reports it `Changed`.
 - `buildinfo` — `Read()` returns an `Info` (version, commit, date, Go version, OS, arch). `Info.IsDev`
   delegates to `cli/spec/version`. `Info.String()` is the one-line text form; `Info.MarshalJSON()` is the
   JSON object without `schema`; `command/version` writes it with `spec.WriteJSON(inv.Env.Stdout, 1, info)`,

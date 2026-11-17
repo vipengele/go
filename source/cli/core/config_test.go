@@ -15,6 +15,7 @@ import (
 
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 )
 
 // toolConfig is the configuration the App of these tests loads: keys "name", "port" and
@@ -541,6 +542,70 @@ func TestConfigPath(t *testing.T) {
 	}
 }
 
+// runDarwin executes app with args against an environment that holds vars and no TOOL_HOME,
+// resolving its directories for darwin under the home directory home.
+func runDarwin(t *testing.T, home string, vars map[string]string, app func(...cli.Option) *cli.App,
+	args ...string,
+) result {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		WorkDir: t.TempDir(),
+		LookupEnv: func(key string) (string, bool) {
+			v, ok := vars[key]
+			return v, ok
+		},
+		Terminal: func(spec.Stream) bool { return false },
+	}
+	code := app(cli.WithPathsPlatform("darwin", func() (string, error) { return home, nil })).ExecuteArgs(env, args)
+	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+func TestWithPathsLayoutPlacesTheConfigurationFile(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(t.TempDir(), "xdg")
+	vars := map[string]string{"XDG_CONFIG_HOME": xdg}
+	tests := []struct {
+		name string
+		opts []cli.Option
+		want string
+	}{
+		{"xdg", []cli.Option{cli.WithPathsLayout(paths.LayoutXDG)}, filepath.Join(xdg, "tool", "config.yaml")},
+		{"default", []cli.Option{cli.WithPathsLayout(paths.LayoutDefault)},
+			filepath.Join(home, "Library", "Application Support", "tool", "config.yaml")},
+		{"without the option", nil, filepath.Join(home, "Library", "Application Support", "tool", "config.yaml")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s seen
+			app := func(platform ...cli.Option) *cli.App { return configApp(&s, append(platform, tt.opts...)...) }
+			got := runDarwin(t, home, vars, app, "config", "path")
+			if want := (result{code: cli.ExitOK, stdout: tt.want + "\n"}); got != want {
+				t.Errorf("config path = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestWithPathsLayoutRefusesAnUnknownLayout(t *testing.T) {
+	var s seen
+	app := func(platform ...cli.Option) *cli.App {
+		return configApp(&s, append(platform, cli.WithPathsLayout(paths.Layout(99)))...)
+	}
+	for _, args := range [][]string{{"read"}, {"config", "path"}, {"version"}} {
+		got := runDarwin(t, t.TempDir(), nil, app, args...)
+		want := result{code: cli.ExitError, stderr: "tool: invalid command tree\n  → WithPathsLayout: unknown layout Layout(99)\n"}
+		if got != want {
+			t.Errorf("%v: ExecuteArgs = %+v, want %+v", args, got, want)
+		}
+	}
+	if s.called {
+		t.Error("the run function was called")
+	}
+}
+
 func TestConfigValidate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -646,5 +711,54 @@ func TestConfigEditRefusesANonTerminal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(e.path())); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("config directory: Stat = %v, want it not created", err)
+	}
+}
+
+// layoutApp returns an App with opts holding "layout" and, annotated SkipConfig, "skip", which
+// record in got what PathsLayoutFrom returns.
+func layoutApp(got *paths.Layout, opts ...cli.Option) *cli.App {
+	app := cli.New(identity(), append(opts, cli.WithBuildInfo(versionInfo()))...)
+	run := func(ctx context.Context, _ *spec.Invocation) error {
+		*got = cli.PathsLayoutFrom(ctx)
+		return nil
+	}
+	app.Add(&spec.Command{Name: "layout", Summary: "Read the layout", Run: run})
+	app.Add(&spec.Command{
+		Name: "skip", Summary: "Read the layout", Run: run,
+		Annotations: map[string]string{spec.SkipConfig: ""},
+	})
+	return app
+}
+
+func TestPathsLayoutFromReturnsTheLayoutOfTheApp(t *testing.T) {
+	cases := []struct {
+		name string
+		opts []cli.Option
+		want paths.Layout
+	}{
+		{"xdg", []cli.Option{cli.WithPathsLayout(paths.LayoutXDG)}, paths.LayoutXDG},
+		{"xdg with config", []cli.Option{cli.WithPathsLayout(paths.LayoutXDG), cli.WithConfig(toolDefaults())}, paths.LayoutXDG},
+		{"unset", nil, paths.LayoutDefault},
+		{"unset with config", []cli.Option{cli.WithConfig(toolDefaults())}, paths.LayoutDefault},
+	}
+	for _, tc := range cases {
+		for _, command := range []string{"layout", "skip"} {
+			t.Run(tc.name+"/"+command, func(t *testing.T) {
+				got := paths.Layout(-1)
+				r := newConfigEnv(t, "").run(t, layoutApp(&got, tc.opts...), command)
+				if r.code != 0 {
+					t.Fatalf("code = %d, stderr %q", r.code, r.stderr)
+				}
+				if got != tc.want {
+					t.Errorf("PathsLayoutFrom = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+func TestPathsLayoutFromWithoutAnAppRunIsTheDefault(t *testing.T) {
+	if got := cli.PathsLayoutFrom(context.Background()); got != paths.LayoutDefault {
+		t.Errorf("PathsLayoutFrom = %v, want %v", got, paths.LayoutDefault)
 	}
 }

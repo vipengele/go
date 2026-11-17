@@ -121,6 +121,12 @@ type Config struct {
 	// that variable is set. Only the state directory is resolved, so the home directory is needed
 	// only when the state directory itself falls back to it. An explicit StateDir is used as given.
 	StateDir string
+	// PathsLayout is the directory layout the default StateDir is resolved under, forwarded to
+	// [paths.Options].Layout. The zero value, [paths.LayoutDefault], chooses the layout from GOOS;
+	// another value applies on every GOOS, so [paths.LayoutXDG] on "darwin" resolves under
+	// $XDG_STATE_HOME. It does not change the asset extension, the ".exe" binary name or container
+	// detection, which GOOS alone decides. A value that is not [paths.Layout.Valid] is invalid.
+	PathsLayout paths.Layout
 	// Source reports the releases the tool can update to. Nil means the [GitHubSource] for the
 	// Identity's Owner and Repo, making its requests through HTTPClient, authenticating with Token
 	// and keeping its REST API responses in the file "github-cache.json" in the resolved StateDir
@@ -166,7 +172,7 @@ type Config struct {
 	// Now returns the current time. Nil means [time.Now].
 	Now func() time.Time
 	// GOOS is the target operating system. Empty means [runtime.GOOS]. It also selects the
-	// directory layout the default StateDir is resolved for.
+	// directory layout the default StateDir is resolved for, unless PathsLayout names one.
 	GOOS string
 	// GOARCH is the target architecture. Empty means [runtime.GOARCH].
 	GOARCH string
@@ -248,6 +254,7 @@ func (c Config) Validate() error {
 		checkDetectors(c.Detectors),
 		checkSignaturePolicy(c.TrustedKeys, c.AllowUnsigned),
 		checkChannel(c.Channel),
+		checkPathsLayout(c.PathsLayout),
 		checkInterval("CheckInterval", c.CheckInterval),
 		checkWait(c.CheckWait),
 	)
@@ -260,6 +267,18 @@ func checkChannel(ch Channel) error {
 			Field: "Channel",
 			Value: strconv.Itoa(int(ch)),
 			Err:   fmt.Errorf("%w: must be Stable, Beta or Edge", validate.ErrInvalid),
+		}
+	}
+	return nil
+}
+
+// checkPathsLayout rejects a layout that is not [paths.Layout.Valid].
+func checkPathsLayout(l paths.Layout) error {
+	if !l.Valid() {
+		return &validate.FieldError{
+			Field: "PathsLayout",
+			Value: l.String(),
+			Err:   fmt.Errorf("%w: must be a defined paths.Layout", validate.ErrInvalid),
 		}
 	}
 	return nil
@@ -483,8 +502,8 @@ func (c Config) Resolved() (Config, error) {
 
 // resolve validates c and returns a copy with every zero field set to its production default.
 // It never modifies c. An empty StateDir is the state directory [paths.Resolve] resolves, for the
-// [paths.State] kind alone, for the Identity with the resolved GOOS, Getenv and UserHomeDir, so a
-// substituted seam decides it too; resolve fails when StateDir is empty and the state directory
+// [paths.State] kind alone, for the Identity with the resolved GOOS, PathsLayout, Getenv and
+// UserHomeDir, so a substituted seam decides it too; resolve fails when StateDir is empty and the state directory
 // needs a home directory the resolver cannot find.
 // An explicit StateDir is kept without consulting the resolver. A nil InContainer is likewise
 // built over the resolved GOOS and Getenv, and a nil Token reads the environment through the
@@ -552,6 +571,7 @@ func (c Config) resolve() (Config, error) {
 	if r.StateDir == "" {
 		dirs, err := paths.Resolve(r.Identity, paths.Options{
 			GOOS:        r.GOOS,
+			Layout:      r.PathsLayout,
 			LookupEnv:   lookupEnvOf(r.Getenv),
 			UserHomeDir: r.UserHomeDir,
 		}, paths.State)

@@ -1638,3 +1638,318 @@ func TestExecuteNeverHasCompletion(t *testing.T) {
 		t.Errorf("Execute(completion bash)\n got: %+v\nwant: %+v", got, want)
 	}
 }
+
+// aliasedRoot is a tool whose commands carry aliases, one of them nested.
+func aliasedRoot(rootAliases ...string) *spec.Command {
+	say := func(word string) func(context.Context, *spec.Invocation) error {
+		return func(_ context.Context, inv *spec.Invocation) error {
+			_, _ = fmt.Fprintln(inv.Env.Stdout, word)
+			return nil
+		}
+	}
+	return &spec.Command{
+		Name:    "tool",
+		Summary: "A tool to test aliases",
+		Commands: []*spec.Command{
+			{Name: "deploy", Summary: "Deploy", Aliases: rootAliases, Run: say("deployed")},
+			{
+				Name:    "remote",
+				Summary: "Manage remotes",
+				Commands: []*spec.Command{
+					{Name: "remove", Summary: "Remove a remote", Aliases: []string{"rm"}, Run: say("removed")},
+				},
+			},
+		},
+	}
+}
+
+func TestExecuteArgsRunsACommandByItsAlias(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "top level", args: []string{"ship"}, want: "deployed\n"},
+		{name: "nested", args: []string{"remote", "rm"}, want: "removed\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runTree(t, aliasedRoot("ship"), tt.args...)
+			if want := (result{code: cli.ExitOK, stdout: tt.want}); got != want {
+				t.Errorf("ExecuteArgs(%v)\n got: %+v\nwant: %+v", tt.args, got, want)
+			}
+		})
+	}
+}
+
+func TestExecuteArgsHelpListsTheAliases(t *testing.T) {
+	got := runTree(t, aliasedRoot("ship", "push"), "deploy", "--help")
+	if got.code != cli.ExitOK || !strings.Contains(got.stdout, "Aliases:\n  deploy, ship, push\n") {
+		t.Errorf("deploy --help = %+v, want 0 and an Aliases line naming ship and push", got)
+	}
+}
+
+func TestExecuteArgsRefusesTheCompletionAliasWithCompletion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{Stdout: &stdout, Stderr: &stderr, WorkDir: t.TempDir()}
+	app := cli.New(identity(), cli.WithCompletion())
+	for _, c := range aliasedRoot("completion").Commands {
+		app.Add(c)
+	}
+	code := app.ExecuteArgs(env, []string{"completion"})
+	if code != cli.ExitError || !strings.Contains(stderr.String(), "invalid command tree") || stdout.Len() != 0 {
+		t.Errorf("code %d, stdout %q, stderr %q; want 1, no stdout and an invalid command tree",
+			code, stdout.String(), stderr.String())
+	}
+}
+
+func TestExecuteArgsReportsANilChildWithCompletion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{Stdout: &stdout, Stderr: &stderr, WorkDir: t.TempDir()}
+	app := cli.New(identity(), cli.WithCompletion())
+	app.Add(nil)
+	code := app.ExecuteArgs(env, []string{"completion"})
+	if code != cli.ExitError || !strings.Contains(stderr.String(), "invalid command tree") || stdout.Len() != 0 {
+		t.Errorf("code %d, stdout %q, stderr %q; want 1, no stdout and an invalid command tree",
+			code, stdout.String(), stderr.String())
+	}
+}
+
+func TestExecuteArgsAllowsTheCompletionAliasWithoutCompletion(t *testing.T) {
+	got := runTree(t, aliasedRoot("completion"), "completion")
+	if want := (result{code: cli.ExitOK, stdout: "deployed\n"}); got != want {
+		t.Errorf("completion alias\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// Cobra's command-name completion lists names only, so a prefix only an alias matches offers
+// nothing, while the arguments of a command typed by its alias complete as the command's do.
+func TestCompleteResolvesAnAliasButDoesNotOfferIt(t *testing.T) {
+	root := aliasedRoot("ship")
+	root.Commands[0].Args = spec.ExactArgs(1)
+	root.Commands[0].ArgCompletion = spec.CompleteChoices("red", "green")
+
+	got := runTree(t, root, "__complete", "sh")
+	if got.code != cli.ExitOK || got.stdout != ":4\n" {
+		t.Errorf("__complete sh = %+v, want 0 and no candidate", got)
+	}
+	got = runTree(t, root, "__complete", "ship", "")
+	if got.code != cli.ExitOK || got.stdout != "red\ngreen\n:4\n" {
+		t.Errorf("__complete ship \"\" = %+v, want 0 and red, green", got)
+	}
+}
+
+// groupApp returns an App, with -v/--verbose, --json and a pre-run hook recording its call in c
+// as "pre", whose command "remote add" records its run in c as "run". "remote" declares the
+// inherited --profile, and "add" declares --name, --url, --token and --user and lists groups.
+func groupApp(c *calls, groups ...spec.FlagGroup) *cli.App {
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithJSON(), preHook(c, "", nil))
+	app.Add(&spec.Command{
+		Name:    "remote",
+		Summary: "Manage remotes",
+		Flags:   []spec.Flag{spec.StringFlag("profile", "the profile to use", spec.Inherited())},
+		Commands: []*spec.Command{{
+			Name:    "add",
+			Summary: "Add a remote",
+			Flags: []spec.Flag{
+				spec.StringFlag("name", "the remote's name"),
+				spec.StringFlag("url", "the remote's URL"),
+				spec.StringFlag("token", "the token to authenticate with"),
+				spec.StringFlag("user", "the user to authenticate as"),
+			},
+			FlagGroups: groups,
+			Run: func(context.Context, *spec.Invocation) error {
+				c.add("run")
+				return nil
+			},
+		}},
+	})
+	return app
+}
+
+func TestExecuteArgsFlagGroups(t *testing.T) {
+	exclusive := func(flags ...string) spec.FlagGroup {
+		return spec.FlagGroup{Kind: spec.MutuallyExclusive, Flags: flags}
+	}
+	together := func(flags ...string) spec.FlagGroup {
+		return spec.FlagGroup{Kind: spec.RequiredTogether, Flags: flags}
+	}
+	tests := []struct {
+		name    string
+		groups  []spec.FlagGroup
+		args    []string
+		want    result
+		wantLog string
+	}{
+		{
+			name:    "mutually exclusive, two set",
+			groups:  []spec.FlagGroup{exclusive("name", "url", "token")},
+			args:    []string{"remote", "add", "--token", "t", "--url", "u"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --url and --token are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "mutually exclusive, all set, names the first two in declaration order",
+			groups:  []spec.FlagGroup{exclusive("name", "url", "token")},
+			args:    []string{"remote", "add", "--token", "t", "--url", "u", "--name", "n"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --name and --url are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "mutually exclusive, an explicit default counts as set",
+			groups:  []spec.FlagGroup{exclusive("name", "url")},
+			args:    []string{"remote", "add", "--name=", "--url="},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --name and --url are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "mutually exclusive, one set",
+			groups:  []spec.FlagGroup{exclusive("name", "url")},
+			args:    []string{"remote", "add", "--url", "u"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "mutually exclusive, none set",
+			groups:  []spec.FlagGroup{exclusive("name", "url")},
+			args:    []string{"remote", "add"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "required together, one missing",
+			groups:  []spec.FlagGroup{together("token", "user")},
+			args:    []string{"remote", "add", "--user", "u"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --user requires --token\n"},
+			wantLog: "",
+		},
+		{
+			name:    "required together, names the first set and the first unset",
+			groups:  []spec.FlagGroup{together("name", "url", "token", "user")},
+			args:    []string{"remote", "add", "--user", "u", "--url", "x"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --url requires --name\n"},
+			wantLog: "",
+		},
+		{
+			name:    "required together, none set",
+			groups:  []spec.FlagGroup{together("token", "user")},
+			args:    []string{"remote", "add"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "required together, all set",
+			groups:  []spec.FlagGroup{together("token", "user")},
+			args:    []string{"remote", "add", "--token", "t", "--user", "u"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "groups are checked in order and the first violation is reported",
+			groups:  []spec.FlagGroup{together("token", "user"), exclusive("name", "url")},
+			args:    []string{"remote", "add", "--name", "n", "--url", "u", "--token", "t"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --token requires --user\n"},
+			wantLog: "",
+		},
+		{
+			name:    "an inherited flag set after the subcommand",
+			groups:  []spec.FlagGroup{exclusive("profile", "token")},
+			args:    []string{"remote", "add", "--profile", "p", "--token", "t"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --profile and --token are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "an inherited flag set before the subcommand",
+			groups:  []spec.FlagGroup{together("profile", "user")},
+			args:    []string{"remote", "--profile", "p", "add"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --profile requires --user\n"},
+			wantLog: "",
+		},
+		{
+			name:    "a standard flag",
+			groups:  []spec.FlagGroup{exclusive("json", "url")},
+			args:    []string{"--json", "remote", "add", "--url", "u"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --json and --url are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "a standard flag set alone",
+			groups:  []spec.FlagGroup{together("verbose", "user")},
+			args:    []string{"remote", "add", "-v"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --verbose requires --user\n"},
+			wantLog: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &calls{}
+			got := runApp(t, groupApp(c, tt.groups...), tt.args...)
+			if got != tt.want {
+				t.Errorf("ExecuteArgs(%q)\n got: %+v\nwant: %+v", tt.args, got, tt.want)
+			}
+			if c.String() != tt.wantLog {
+				t.Errorf("ExecuteArgs(%q) calls %q, want %q", tt.args, c.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
+func TestExecuteArgsFlagGroupsLeaveHelpAlone(t *testing.T) {
+	c := &calls{}
+	app := groupApp(c, spec.FlagGroup{Kind: spec.MutuallyExclusive, Flags: []string{"name", "url"}})
+	args := []string{"remote", "add", "--name", "n", "--url", "u", "--help"}
+	got := runApp(t, app, args...)
+	if got.code != cli.ExitOK || got.stderr != "" || !strings.Contains(got.stdout, "Add a remote") || c.String() != "" {
+		t.Errorf("ExecuteArgs(%q) = %+v, calls %q; want help on stdout, exit 0 and no calls", args, got, c.String())
+	}
+}
+
+func TestExecuteArgsFlagGroupsApplyToTheirOwnCommand(t *testing.T) {
+	c := &calls{}
+	app := cli.New(identity())
+	app.Add(&spec.Command{
+		Name:    "remote",
+		Summary: "Manage remotes",
+		Flags: []spec.Flag{
+			spec.StringFlag("profile", "the profile to use", spec.Inherited()),
+			spec.StringFlag("token", "the token", spec.Inherited()),
+		},
+		FlagGroups: []spec.FlagGroup{{Kind: spec.MutuallyExclusive, Flags: []string{"profile", "token"}}},
+		Run: func(context.Context, *spec.Invocation) error {
+			c.add("remote")
+			return nil
+		},
+		Commands: []*spec.Command{{
+			Name:    "add",
+			Summary: "Add a remote",
+			Run: func(context.Context, *spec.Invocation) error {
+				c.add("add")
+				return nil
+			},
+		}},
+	})
+	args := []string{"remote", "add", "--profile", "p", "--token", "t"}
+	if got := runApp(t, app, args...); got != (result{code: cli.ExitOK}) || c.String() != "add" {
+		t.Errorf("ExecuteArgs(%q) = %+v, calls %q; want exit 0 and calls \"add\"", args, got, c.String())
+	}
+}
+
+func TestExecuteArgsRefusesFlagGroupsOnACommandWithoutRun(t *testing.T) {
+	app := cli.New(identity())
+	app.Add(&spec.Command{
+		Name:       "remote",
+		Summary:    "Manage remotes",
+		Flags:      []spec.Flag{spec.StringFlag("profile", "the profile to use"), spec.StringFlag("token", "the token")},
+		FlagGroups: []spec.FlagGroup{{Kind: spec.MutuallyExclusive, Flags: []string{"profile", "token"}}},
+		Commands: []*spec.Command{{
+			Name:    "add",
+			Summary: "Add a remote",
+			Run:     func(context.Context, *spec.Invocation) error { return nil },
+		}},
+	})
+	got := runApp(t, app, "remote", "add")
+	if got.code != cli.ExitError || got.stdout != "" || !strings.HasPrefix(got.stderr, "tool: invalid command tree\n") ||
+		!strings.Contains(got.stderr, "FlagGroups on a command with no Run") {
+		t.Errorf("ExecuteArgs = %+v, want ExitError, no stdout and an invalid command tree naming the groups", got)
+	}
+}

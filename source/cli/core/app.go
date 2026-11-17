@@ -11,6 +11,7 @@ import (
 	"go.vipengele.org/cli/core/internal/errrender"
 	"go.vipengele.org/cli/core/logging"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 )
 
 // App is the shell of one tool: its [spec.Identity] and the commands it runs. A tool builds one
@@ -76,6 +77,20 @@ type settings struct {
 	configOverlay *configOverlay
 	// completion gives every root the "completion" command of [WithCompletion].
 	completion bool
+	// pathsLayout is the layout [WithPathsLayout] gives every directory the App resolves, and
+	// [paths.LayoutDefault] without that option.
+	pathsLayout paths.Layout
+	// goos and userHomeDir are the target operating system and the home directory lookup every
+	// directory the App resolves is resolved for: "" and nil mean the running system's, as
+	// [paths.Options] reads them. Only the package's tests set them.
+	goos        string
+	userHomeDir func() (string, error)
+}
+
+// pathsOptions returns the [paths.Options] of every directory the App resolves, against lookup,
+// the environment of the execution.
+func (s settings) pathsOptions(lookup func(string) (string, bool)) paths.Options {
+	return paths.Options{Layout: s.pathsLayout, GOOS: s.goos, LookupEnv: lookup, UserHomeDir: s.userHomeDir}
 }
 
 // Option configures an [App] when [New] builds it.
@@ -171,6 +186,27 @@ func WithErrorRenderer[E error](fn func(E) string) Option {
 	}
 }
 
+// WithPathsLayout makes every directory the App resolves follow layout, as the cli/spec/paths
+// package resolves a directory for a [paths.Layout], instead of the layout of the operating
+// system the tool runs on: [paths.LayoutXDG] honours the XDG variables on macOS and Windows as
+// well. It applies to the configuration directory of [WithConfig]. [paths.LayoutDefault] chooses
+// the layout from the operating system, as an App without the option does. Given more than once,
+// the last one decides.
+//
+// A layout that is not a [paths.Layout] the package names is refused: [App.ExecuteArgs] returns
+// [ExitError] after writing "invalid command tree".
+func WithPathsLayout(layout paths.Layout) Option {
+	return func(s *settings) { s.pathsLayout = layout }
+}
+
+// pathsProblem reports an App given a [WithPathsLayout] that is not a valid [paths.Layout].
+func pathsProblem(s settings) error {
+	if !s.pathsLayout.Valid() {
+		return fmt.Errorf("WithPathsLayout: unknown layout %v", s.pathsLayout)
+	}
+	return nil
+}
+
 // Add adds cmd as a subcommand of the root, after the commands added before it. It checks
 // nothing: a nil command, an invalid one, or a name another added command already has is
 // reported by [App.ExecuteArgs] as an invalid command tree.
@@ -200,8 +236,8 @@ func (a *App) Execute() int {
 // included, returns [ExitError] after writing "<name>: invalid command tree" to env.Stderr,
 // followed by one row per problem found. So does a command that declares a flag with the name or
 // the shorthand of a standard flag the App takes, and an App given [WithLogging] without both
-// [WithVerbose] and [WithQuiet], [WithRedaction] without [WithLogging], or [WithConfigOverlay]
-// without [WithConfig].
+// [WithVerbose] and [WithQuiet], [WithRedaction] without [WithLogging], [WithConfigOverlay]
+// without [WithConfig], or a [WithPathsLayout] that names no layout.
 //
 // Every error is written to env.Stderr as [ExecuteArgs] writes one, with each error of its tree
 // offered to the renderers [WithErrorRenderer] adds, in the order they were added.
@@ -229,7 +265,7 @@ func (a *App) Execute() int {
 // [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept, and for
 // an error that carries a [spec.UsageError]; [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
-	if err := errors.Join(loggingProblem(a.settings), configProblem(a.settings)); err != nil {
+	if err := errors.Join(loggingProblem(a.settings), configProblem(a.settings), pathsProblem(a.settings)); err != nil {
 		errrender.Render(env.Resolved().Stderr, a.identity.Name,
 			fmt.Errorf("invalid command tree: %w", err), a.settings.errorRenderers)
 		return ExitError
@@ -238,7 +274,7 @@ func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	logFlags := newLoggingFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	conf := a.configFor(env.Resolved().LookupEnv)
-	pre, post := a.settings.hookFuncs(chainHooks(conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
+	pre, post := a.settings.hookFuncs(chainHooks(a.settings.layoutHook(), conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post, Completion: a.settings.completion}
 	return executeArgsEnded(context.Background(), env, a.root(flags, logFlags, conf.group), args, cfg,
 		logFlags.flush, a.settings.exitMatchers, a.settings.errorRenderers...)

@@ -70,3 +70,32 @@ func ExampleResolve() {
 	// /var/lib/state/agentic-toolkit
 	// ""
 }
+
+func ExampleLayout() {
+	id := spec.Identity{
+		Name:      "atk",
+		Owner:     "pedromvgomes",
+		Repo:      "agentic-toolkit",
+		EnvPrefix: "ATK",
+		DirName:   "agentic-toolkit",
+	}
+	env := map[string]string{"XDG_CONFIG_HOME": "/etc/xdg"}
+
+	// The layout is chosen independently of the target operating system: darwin with the XDG
+	// layout honours XDG_CONFIG_HOME.
+	dirs, err := paths.Resolve(id, paths.Options{
+		GOOS:        "darwin",
+		Layout:      paths.LayoutXDG,
+		LookupEnv:   func(key string) (string, bool) { v, ok := env[key]; return v, ok },
+		UserHomeDir: func() (string, error) { return "/Users/ada", nil },
+	}, paths.Config, paths.Cache)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(filepath.ToSlash(dirs.Config()))
+	fmt.Println(filepath.ToSlash(dirs.Cache()))
+	// Output:
+	// /etc/xdg/agentic-toolkit
+	// /Users/ada/.cache/agentic-toolkit
+}

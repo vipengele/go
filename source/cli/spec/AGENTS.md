@@ -69,7 +69,7 @@ golangci-lint run
   passed as `inv.Info("%s", msg)`. A nil `Env` discards. See
   `docs/adr/0013-stdout-carries-data-stderr-carries-messages.md`.
 - `paths/` — `paths.Resolve(spec.Identity, paths.Options, kinds...)` resolves the requested config,
-  state, cache, data, log and runtime directories per OS layout (XDG, darwin, windows), honouring
+  state, cache, data, log and runtime directories per layout (XDG, darwin, windows), honouring
   `<PREFIX>_HOME`, `Options.Home` and explicit per-kind options, and `paths.New` resolves all six.
   A kind not requested stays "" and nothing is looked up for it, so a caller that needs only state
   does not fail on a home directory only the other kinds need; a requested kind still resolves the
@@ -110,7 +110,14 @@ golangci-lint run
 
 - Environment and home directory reach `paths` only through `Options` seams (`LookupEnv`,
   `UserHomeDir`, `GOOS`), never `os.Getenv` directly in the resolving code, so tests substitute them.
-  The layout is selected by `Options.GOOS`, not by build tags.
+  The layout is `Options.Layout` (`paths.Layout`: `LayoutXDG`, `LayoutDarwin`, `LayoutWindows`, any
+  on every OS); its zero value `LayoutDefault` takes it from `Options.GOOS`, never from build tags
+  (ADR-0039).
+- `Command.Aliases` are extra words selecting a command: slugs distinct from the name, the other
+  aliases and the siblings' names, and never on the root. `Command.FlagGroups` (`FlagGroup` with
+  `MutuallyExclusive` or `RequiredTogether`, in `flaggroup.go`) name two or more flags the command
+  declares or inherits, and only a command with a `Run` may list one; the adapter that runs the
+  command enforces them (`cli/core` as usage errors), `Validate` only checks the declaration.
 - No package-level mutable state: `gochecknoglobals` is enabled.
 - `depguard` forbids `github.com/spf13/cobra` here; the cobra adapter lives in `cli/core/internal/cobra`.
   It also forbids `golang.org/x/term` outside `cli/spec/terminal`.

@@ -42,6 +42,15 @@ func WatchInterrupts(interrupts <-chan struct{}, cancel context.CancelFunc) (
 	return watchInterrupts(interrupts, cancel)
 }
 
+// WithPathsPlatform makes every directory the App resolves be resolved for the operating system
+// goos, with home as the user's home directory lookup.
+func WithPathsPlatform(goos string, home func() (string, error)) Option {
+	return func(s *settings) {
+		s.goos = goos
+		s.userHomeDir = home
+	}
+}
+
 // NewUsageError returns err as the error of a command line the tree does not accept.
 func NewUsageError(err error) error {
 	return &cobra.UsageError{Err: err}

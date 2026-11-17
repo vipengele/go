@@ -805,3 +805,139 @@ func TestResolveRejectsInvalidKind(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveLayoutIsIndependentOfGOOS(t *testing.T) {
+	roaming, local := "/w/roaming", "/w/local"
+	tests := []struct {
+		name   string
+		goos   string
+		layout paths.Layout
+		env    map[string]string
+		want   want
+	}{
+		{"default under darwin", "darwin", paths.LayoutDefault, xdgEnv(), darwinDefaults()},
+		{"default under windows", "windows", paths.LayoutDefault, windowsEnv(), windowsLayout(roaming, local)},
+		{"default under linux", "linux", paths.LayoutDefault, nil, linuxDefaults()},
+		{"xdg under linux", "linux", paths.LayoutXDG, nil, linuxDefaults()},
+		{"xdg under windows", "windows", paths.LayoutXDG, nil, linuxDefaults()},
+		{"darwin under linux", "linux", paths.LayoutDarwin, xdgEnv(), darwinDefaults()},
+		{"darwin under windows", "windows", paths.LayoutDarwin, nil, darwinDefaults()},
+		{"darwin under darwin", "darwin", paths.LayoutDarwin, nil, darwinDefaults()},
+		{"windows under linux", "linux", paths.LayoutWindows, windowsEnv(), windowsLayout(roaming, local)},
+		{"windows under darwin", "darwin", paths.LayoutWindows, windowsEnv(), windowsLayout(roaming, local)},
+		{"windows under linux without AppData", "linux", paths.LayoutWindows, nil,
+			windowsLayout(j(fakeHome, "AppData", "Roaming"), j(fakeHome, "AppData", "Local"))},
+		{"xdg under darwin honours XDG variables", "darwin", paths.LayoutXDG, xdgEnv(), want{
+			config:  j("/xdg/config", app),
+			state:   j("/xdg/state", app),
+			cache:   j("/xdg/cache", app),
+			data:    j("/xdg/data", app),
+			log:     j("/xdg/state", app, "log"),
+			runtime: j("/xdg/state", app, "runtime"),
+		}},
+		{"xdg under darwin without XDG_CONFIG_HOME", "darwin", paths.LayoutXDG, nil, linuxDefaults()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := paths.New(identity(), paths.Options{
+				GOOS:        tc.goos,
+				Layout:      tc.layout,
+				LookupEnv:   lookup(tc.env),
+				UserHomeDir: homeDir(fakeHome),
+			})
+			if err != nil {
+				t.Fatalf("New() = %v, want nil", err)
+			}
+			if got := dirsOf(d); got != tc.want {
+				t.Errorf("New() =\n  %+v\nwant\n  %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveXDGLayoutUnderDarwinConfig(t *testing.T) {
+	opts := paths.Options{GOOS: "darwin", Layout: paths.LayoutXDG, UserHomeDir: homeDir(fakeHome)}
+
+	opts.LookupEnv = lookup(map[string]string{"XDG_CONFIG_HOME": "/xdg/config"})
+	d, err := paths.Resolve(identity(), opts, paths.Config)
+	if err != nil {
+		t.Fatalf("Resolve() = %v, want nil", err)
+	}
+	if got, want := d.Config(), j("/xdg/config", app); got != want {
+		t.Errorf("Config() = %q, want %q", got, want)
+	}
+
+	opts.LookupEnv = lookup(nil)
+	d, err = paths.Resolve(identity(), opts, paths.Config)
+	if err != nil {
+		t.Fatalf("Resolve() = %v, want nil", err)
+	}
+	if got, want := d.Config(), j(fakeHome, ".config", app); got != want {
+		t.Errorf("Config() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveHomeRootBeatsTheLayout(t *testing.T) {
+	for _, l := range []paths.Layout{paths.LayoutDefault, paths.LayoutXDG, paths.LayoutDarwin, paths.LayoutWindows} {
+		t.Run(l.String(), func(t *testing.T) {
+			d, err := paths.New(identity(), paths.Options{
+				GOOS:        "linux",
+				Layout:      l,
+				LookupEnv:   lookup(map[string]string{homeVar: "/env/home"}),
+				UserHomeDir: noHomeDir(t),
+			})
+			if err != nil {
+				t.Fatalf("New() = %v, want nil", err)
+			}
+			if got := dirsOf(d); got != under("/env/home") {
+				t.Errorf("New() = %+v, want %+v", got, under("/env/home"))
+			}
+		})
+	}
+}
+
+func TestResolveRejectsUnknownLayout(t *testing.T) {
+	for _, l := range []paths.Layout{-1, paths.LayoutWindows + 1} {
+		for name, opts := range map[string]paths.Options{
+			"plain":                {},
+			"with <PREFIX>_HOME":   {LookupEnv: lookup(map[string]string{homeVar: "/env/home"})},
+			"with Options.Home":    {Home: "/opt/home"},
+			"with explicit option": explicitOptions(),
+		} {
+			t.Run(l.String()+" "+name, func(t *testing.T) {
+				opts.Layout = l
+				opts.GOOS = "linux"
+				if opts.LookupEnv == nil {
+					opts.LookupEnv = lookup(nil)
+				}
+				opts.UserHomeDir = homeDir(fakeHome)
+				if _, err := paths.New(identity(), opts); err == nil {
+					t.Errorf("New() with Layout %v = nil error, want an error", l)
+				}
+			})
+		}
+	}
+}
+
+func TestLayoutStringAndValid(t *testing.T) {
+	tests := []struct {
+		l     paths.Layout
+		str   string
+		valid bool
+	}{
+		{paths.LayoutDefault, "default", true},
+		{paths.LayoutXDG, "xdg", true},
+		{paths.LayoutDarwin, "darwin", true},
+		{paths.LayoutWindows, "windows", true},
+		{paths.Layout(9), "Layout(9)", false},
+		{paths.Layout(-1), "Layout(-1)", false},
+	}
+	for _, tc := range tests {
+		if got := tc.l.String(); got != tc.str {
+			t.Errorf("Layout(%d).String() = %q, want %q", int(tc.l), got, tc.str)
+		}
+		if got := tc.l.Valid(); got != tc.valid {
+			t.Errorf("Layout(%d).Valid() = %v, want %v", int(tc.l), got, tc.valid)
+		}
+	}
+}
