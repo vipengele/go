@@ -34,6 +34,12 @@ other type is `ErrSchema`. `doc.go` and ADR-0037 describe the behaviour.
   `key.go`.
 - A file is strict inside struct values and accepts any key beneath a map.
 
+## File allow-list
+
+`File(path).Allow(keys...)` checks only top-level Schema keys, in `pair` on the configuration's
+scope. An element's keys and a map's keys are governed by their collection's key, so the scope of an
+element never sets `settable`. A key outside the list is a problem at its line, never a silent drop.
+
 ## Conventions
 
 - No package-level mutable state: `gochecknoglobals` is enabled (sentinel errors are allowed).
