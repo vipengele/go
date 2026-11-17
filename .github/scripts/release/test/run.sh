@@ -749,6 +749,190 @@ test_suite_fails() {
 }
 register "release-project: test fails a module whose suite fails" test_suite_fails
 
+# --- release commit -----------------------------------------------------------
+
+# chain_released <name>: a fixture with origin where sibling a and dependent b
+# are released by one merge to main. b replaces a by its directory and
+# requires a v0.2.0, a's pending version; the notes of a v0.2.0 and of
+# b v0.1.0 are on main, and the earlier tier has pushed source/a/v0.2.0 on
+# main's head. Sets $main to main's head. With `proxy`, a file:// GOPROXY
+# serves a v0.2.0.
+chain_released() {
+  fixture_repo "$1"
+  fixture_origin
+  mkdir -p "$FIXTURE/source/a"
+  printf 'module go.vipengele.org/a\n\ngo 1.25.0\n' > "$FIXTURE/source/a/go.mod"
+  fixture_go_source a
+  fixture_go_dependent b a v0.2.0
+  fixture_notes a v0.2.0
+  fixture_notes b v0.1.0
+  fixture_commit "a and b"
+  fixture_tag source/a/v0.2.0
+  fixture_push refs/tags/source/a/v0.2.0
+  main="$(fixture_git rev-parse HEAD)"
+  [[ "${2:-}" != proxy ]] || fixture_proxy a v0.2.0
+}
+
+# output_value <key>: the value of the key=value line of $out.
+output_value() {
+  sed -n "s/^$1=//p" <<< "$out"
+}
+
+release_commit_chain() {
+  chain_released release-commit-chain proxy
+  fixture_worker b
+  local bare="$FIXTURE.origin.git" tag=source/b/v0.1.0 branches commit dir="$FIXTURE.release-commit"
+  local gomod changed
+  branches="$(git -C "$bare" for-each-ref refs/heads)"
+
+  # verify: the release commit, validated and tested in its checkout.
+  release_project prepare b v0.1.0 "$main" "$dir"
+  expect_ok || return 1
+  commit="$(output_value commit)"
+  [[ "$(output_value artifact)" == release-commit-b-v0.1.0 ]] || fail "artifact name: $out" || return 1
+  [[ -n "$commit" && "$commit" != "$main" ]] || fail "no release commit: $out" || return 1
+  [[ "$(fixture_git rev-parse HEAD)" == "$commit" ]] || fail "the checkout is not at $commit" || return 1
+  [[ -f "$dir/go.mod" && -f "$dir/go.sum" ]] || fail "go.mod and go.sum are not in $dir" || return 1
+  release_project validate b v0.1.0 "$commit"
+  expect_ok || return 1
+  release_project test b
+  expect_ok || return 1
+
+  # tag: a fresh checkout of origin, a second later, rebuilds the same commit.
+  sleep 1
+  local verify_fixture="$FIXTURE"
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git clone -q "$bare" "$WORK/release-commit-chain-tag"
+  FIXTURE="$WORK/release-commit-chain-tag"
+  release_project tag b v0.1.0 "$main" https://github.com/vipengele/go/actions/runs/42 "$dir" "$commit"
+  expect_ok || return 1
+  FIXTURE="$verify_fixture"
+
+  [[ "$(git -C "$bare" cat-file -t "refs/tags/$tag")" == tag ]] || fail "$tag on origin is not an annotated tag" || return 1
+  [[ "$(git -C "$bare" rev-parse "refs/tags/$tag^{commit}")" == "$commit" ]] || fail "$tag on origin is not at $commit" || return 1
+  [[ "$(git -C "$bare" rev-parse "$commit^@")" == "$main" ]] || fail "$commit's parents are not $main alone" || return 1
+  [[ "$(git -C "$bare" log -1 --format='%s|%an|%cn' "$commit")" == 'chore(release): b v0.1.0|github-actions[bot]|github-actions[bot]' ]] \
+    || fail "subject or identity:" "$(git -C "$bare" log -1 --format='%s|%an|%cn' "$commit")" || return 1
+  gomod="$(git -C "$bare" show "$commit:source/b/go.mod")"
+  ! grep -q replace <<< "$gomod" || fail "the release commit's go.mod replaces:" "$gomod" || return 1
+  grep -qE '^require go\.vipengele\.org/a v0\.2\.0$' <<< "$gomod" || fail "a is not required at v0.2.0:" "$gomod" || return 1
+  changed="$(git -C "$bare" diff-tree -r --no-renames --name-only "$main" "$commit")"
+  [[ "$changed" == $'source/b/go.mod\nsource/b/go.sum' ]] || fail "the release commit changes:" "$changed" || return 1
+  [[ "$(git -C "$bare" for-each-ref refs/heads)" == "$branches" ]] || fail "a branch on origin moved" || return 1
+  [[ -z "$(git -C "$bare" branch --contains "$commit")" ]] || fail "$commit is on a branch of origin" || return 1
+
+  # finish: the tag on a release commit checks out and announces.
+  fixture_git checkout -q main
+  release_project finish-check "$tag"
+  expect_ok || return 1
+  release_project announce "$tag"
+  expect_ok || return 1
+  grep -qx 'go list -m go.vipengele.org/b@v0.1.0' "$STUB_LOG" || fail "the proxy is not asked for b:" "$(cat "$STUB_LOG")"
+}
+register "release-commit: a dependent replacing its sibling is tagged on a release commit, and no branch moves" release_commit_chain
+
+release_commit_mismatch() {
+  chain_released release-commit-mismatch proxy
+  local dir="$FIXTURE.release-commit" commit
+  release_project prepare b v0.1.0 "$main" "$dir"
+  expect_ok || return 1
+  commit="$(output_value commit)"
+  printf '\n// changed after verify\n' >> "$dir/go.mod"
+  release_project tag b v0.1.0 "$main" https://github.com/vipengele/go/actions/runs/42 "$dir" "$commit"
+  expect_fail "not $commit, the commit that was validated" || return 1
+  [[ -z "$(git -C "$FIXTURE.origin.git" tag -l source/b/v0.1.0)" ]] || fail "source/b/v0.1.0 was pushed"
+}
+register "release-commit: tag fails when the go.mod handed to it is not the one validated" release_commit_mismatch
+
+release_commit_sibling_unreleased() {
+  chain_released release-commit-sibling-unreleased
+  release_project prepare b v0.1.0 "$main" "$FIXTURE.release-commit"
+  expect_fail 'go mod tidy of b without its sibling replaces failed'
+}
+register "release-commit: prepare fails when the sibling does not resolve at the version required" release_commit_sibling_unreleased
+
+release_commit_none() {
+  releasable release-commit-none
+  local sha
+  sha="$(fixture_git rev-parse HEAD)"
+  release_project prepare cli/core v0.1.0 "$sha" "$FIXTURE.release-commit"
+  expect_ok || return 1
+  [[ "$out" == "commit=$sha"$'\n'"artifact=release-commit-cli_core-v0.1.0" ]] || fail "want commit=$sha and the artifact name, got: $out" || return 1
+  [[ ! -e "$FIXTURE.release-commit" ]] || fail "go.mod and go.sum were written for a project replacing nothing"
+}
+register "release-commit: prepare releases the commit itself when no sibling is replaced" release_commit_none
+
+# release_candidate <name> <file...>: on releasable's main head, a commit not
+# on main that changes cli/core's go.sum and each given file. Sets $candidate.
+release_candidate() {
+  releasable "$1"
+  shift
+  local file
+  fixture_git checkout -q --detach
+  printf 'go.vipengele.org/commons v0.1.0/go.mod h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n' > "$FIXTURE/source/cli/core/go.sum"
+  for file in "$@"; do
+    mkdir -p "$(dirname "$FIXTURE/$file")"
+    printf 'changed\n' >> "$FIXTURE/$file"
+  done
+  fixture_commit "chore(release): cli/core v0.1.0"
+  candidate="$(fixture_git rev-parse HEAD)"
+}
+
+release_commit_candidate_valid() {
+  release_candidate release-commit-candidate-valid
+  fixture_worker cli/core
+  release_project validate cli/core v0.1.0 "$candidate"
+  expect_ok
+}
+register "release-commit: validate passes a commit on main's head changing only the project's go.sum" release_commit_candidate_valid
+
+release_commit_other_file() {
+  local file
+  for file in README.md source/commons/go.sum source/cli/core/core.go; do
+    release_candidate "release-commit-other-file-${file//\//-}" "$file"
+    release_project validate cli/core v0.1.0 "$candidate"
+    expect_fail "is not on origin/main, nor a release commit of cli/core: against its parent .* it changes ${file//./\\.}; a release commit changes only" || return 1
+  done
+}
+register "release-commit: validate fails a commit off main that changes any other file" release_commit_other_file
+
+release_commit_parent_off_main() {
+  releasable release-commit-parent-off-main
+  fixture_git checkout -q -b feature
+  fixture_commit "off main"
+  fixture_push feature
+  printf 'go.vipengele.org/commons v0.1.0/go.mod h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n' > "$FIXTURE/source/cli/core/go.sum"
+  fixture_commit "chore(release): cli/core v0.1.0"
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'is not on origin/main, nor a release commit whose single parent is'
+}
+register "release-commit: validate fails a go.mod-only commit whose parent is not on main" release_commit_parent_off_main
+
+release_commit_merge() {
+  releasable release-commit-merge
+  local main_head one
+  main_head="$(fixture_git rev-parse HEAD)"
+  fixture_git checkout -q --detach
+  printf 'x\n' > "$FIXTURE/source/cli/core/go.sum"
+  fixture_commit "one"
+  one="$(fixture_git rev-parse HEAD)"
+  fixture_git checkout -q --detach "$main_head"
+  printf 'y\n' > "$FIXTURE/README.md"
+  fixture_commit "two"
+  fixture_git merge -q --no-edit -m merge "$one" > /dev/null
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'nor a release commit whose single parent is'
+}
+register "release-commit: validate fails a merge commit off main" release_commit_merge
+
+release_commit_empty() {
+  releasable release-commit-empty
+  fixture_git checkout -q --detach
+  fixture_commit "empty"
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'changes nothing against its parent'
+}
+register "release-commit: validate fails a commit off main that changes nothing" release_commit_empty
+
 # resolve <mode> <project> <version> <sha> <tag>: run release-project.sh
 # resolve with those inputs, from an empty directory that is no repository.
 # Sets $out, $err and $status.
