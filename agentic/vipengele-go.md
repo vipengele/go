@@ -3,7 +3,8 @@
 The `vipengele/go` repo: the Go libraries of the vipengele platform, holding **projects** — each a
 self-contained Go module in a directory at any depth under `source/` (ADR-0004), with the vanity
 module path `go.vipengele.org/<path>`, where `<path>` is its directory relative to `source/`. A
-project is released alone, by the tag `source/<path>/vX.Y.Z` (ADR-0001). See `CONTEXT.md` for the
+project is released alone, by the tag `source/<path>/vX.Y.Z` (ADR-0001), which `auto-release`
+creates when the notes merge (ADR-0037). See `CONTEXT.md` for the
 glossary (Project, Grouping directory, Package, Release, Prefixed tag, Workspace, Sibling) before
 naming things.
 
@@ -47,7 +48,7 @@ under `source/`; the repository's own tooling that is not a Go project lives und
   `source/update/vX.Y.Z`, the version of its `update` require, written `@<sha> # source/update/vX.Y.Z`,
   so a change to it reaches tools only through an `update` release.
   `release-tool-selftest.yml` is its dry run against `source/update/testdata/releasefixture`; it is
-  not a merge gate (ADR-0033). This repository's own releases stay with `release.yml`.
+  not a merge gate (ADR-0033). This repository's own releases stay with `auto-release.yml` and `release.yml`.
 - `.github/actions/verify-sibling-deps` — checks every project's `go.mod`. A project is in strict
   mode while some `docs/release-notes/<path>/v<version>.md` has no tag `source/<path>/v<version>`:
   it then fails any `replace` of a sibling and any sibling version with no tag. Otherwise it accepts
@@ -57,8 +58,8 @@ under `source/`; the repository's own tooling that is not a Go project lives und
   project directory holding another `go.mod`, and a module path other than
   `go.vipengele.org/<path>` for its directory `source/<path>`.
 - `docs/adr/` — architecture decision records. Read before revisiting a decision recorded there.
-- `docs/release-notes/<path>/vX.Y.Z.md` — one file per release tag. The release workflow refuses
-  to run without it.
+- `docs/release-notes/<path>/vX.Y.Z.md` — one file per release tag. Merging it to `main` releases
+  the project, and the release workflow refuses to run without it.
 
 ## Commands (run from `source/<path>`)
 
@@ -90,26 +91,35 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
   podman. It fails unless the log shows `--- PASS: TestSupervisor`, since a skipped test exits 0, and
   an `always()` step removes the containers labelled `servicetest`. It gates merges through the test
   stage.
+- `release-selftest.yml` is the offline self-test of the release scripts and workflows;
+  `ci-orchestration.yml` calls it unconditionally and `ci-gate` needs it.
 - A change to a shared CI file (`ci-*.yml`, the actions, `.lydite/`) selects every project; a change
   that touches no project (docs, agentic instructions) selects none and the stages skip.
 - A new project needs a component in `.lydite/components.yml`, a `gomod` entry in `.gt-repo.yaml`
   followed by `gt repo sync`, and a `use` line in `go.work`, each at its full nested directory
   (`./source/cli/core`). It resolves through `go.vipengele.org` once its `go.mod` has merged and
-  `publish-vanity-modules.yml` has run; check it before its first tag.
+  `publish-vanity-modules.yml` has run; release validation waits for it.
 
 ## Release
 
-A release is one project, one tag, pushed by a human (ADR-0001). The tag is
-`source/<path>/vX.Y.Z`; a consumer never types it and runs `go get go.vipengele.org/<path>@vX.Y.Z`.
-The release pull request carries the notes, drops the sibling `replace`s and requires each sibling
-at its tag, and the tag goes on its merge commit; release order is dependency-first at release time
-only. The `release` skill walks the whole sequence. `release.yml`: `tag` validates the tag form,
-that the project exists, that the commit is on `main`, that
-`docs/release-notes/<path>/<version>.md` exists, and that the tagged project's `go.mod` carries no
-`replace` and requires every sibling at a tagged version — no other project's `go.mod` is read, so
-a sibling under development elsewhere never blocks the release; `test` runs, with `GOWORK=off`,
-`go mod tidy` failing on any change to `go.mod` or `go.sum`, `go build`, `GOOS=windows go vet` when
-the project holds a `*_windows.go` or `*_windows_test.go` file, `go vet` and the module's suite;
-`announce` asks the module proxy to fetch the version, which resolves through `go.vipengele.org`,
-and creates the GitHub Release. Re-running finishes a partial release, including one whose `announce` failed while the
-Worker did not answer.
+A release is one project, one tag (ADR-0001), made by `auto-release.yml` when the pull request that
+adds `docs/release-notes/<path>/vX.Y.Z.md` merges to `main` (ADR-0037). The tag is
+`source/<path>/vX.Y.Z`, an unsigned annotated tag created as `github-actions[bot]`; a consumer never
+types it and runs `go get go.vipengele.org/<path>@vX.Y.Z`. The release pull request carries the
+notes, drops the sibling `replace`s and requires each sibling at its tag. A dependent needs its
+sibling tagged first, so a chain of projects needs one pull request per tier; release order is
+dependency-first at release time only. The `release` skill walks the whole sequence.
+
+`auto-release.yml` runs on every push to `main`: it plans the pending projects (notes exist, tag
+does not) as dependency tiers and calls `release.yml` for each, tier by tier. `release.yml` has no
+tag-push trigger; a tag pushed by hand runs nothing. Its jobs: `verify` (read-only) validates the
+version, the project, the notes and the commit, that the project's `go.mod` carries no `replace` and
+requires every sibling at a tagged version — no other project's `go.mod` is read, so a sibling under
+development elsewhere never blocks the release — and that `go.vipengele.org/<path>?go-get=1`
+answers, retrying the Worker for up to 5 minutes, then runs, with `GOWORK=off`, `go mod tidy`
+failing on any change to `go.mod` or `go.sum`, `go build`, `GOOS=windows go vet` when the project
+holds a `*_windows.go` or `*_windows_test.go` file, `go vet` and the module's suite; `tag` (write)
+creates the tag in release mode; `announce` (write) asks the module proxy to fetch the version,
+which resolves through `go.vipengele.org`, and creates the GitHub Release. A partial release is
+finished by dispatching `release.yml` with the tag as its `tag` input; each run also announces any
+tag that has no GitHub Release.

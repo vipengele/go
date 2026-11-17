@@ -4,7 +4,9 @@ The Go libraries of the vipengele platform: reusable modules for building Go ser
 command-line tools. The repo holds **projects**, each a self-contained Go module under
 `source/<project>/`, at any depth. A project is released alone, by its own tag
 `source/<project>/vX.Y.Z`
-([ADR-0001](docs/adr/0001-each-project-is-a-go-module-released-by-its-own-prefixed-tag.md)).
+([ADR-0001](docs/adr/0001-each-project-is-a-go-module-released-by-its-own-prefixed-tag.md)),
+which the workflow creates when the pull request adding the project's release notes merges
+([ADR-0037](docs/adr/0037-a-release-is-the-merge-of-its-notes.md)).
 
 | Project | Module path |
 |---------|-------------|
@@ -37,7 +39,7 @@ golangci-lint run
 To work on a project and a sibling it requires together, require the sibling and replace it with
 the sibling's own directory (`replace go.vipengele.org/commons => ../commons`), in the same pull
 request as the sibling's change. The project's release drops the `replace` and requires the
-sibling at its tag
+sibling at its tag, and the sibling's tag exists before the dependent's pull request merges
 ([ADR-0006](docs/adr/0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md)).
 CI builds each project with `GOWORK=off`; the root `go.work` lists every project for local
 development.
@@ -48,7 +50,8 @@ development.
 2. Add a component to [`.lydite/components.yml`](.lydite/components.yml), a `gomod` entry to
    [`.gt-repo.yaml`](.gt-repo.yaml), and a `use` line to `go.work`.
 3. Run `gt repo sync`.
-4. Deploy the `go.vipengele.org` Worker with the new `go.mod` before the project's first tag
+4. Merge the new `go.mod`: `publish-vanity-modules.yml` adds the project to the `go.vipengele.org`
+   Worker's module list, and a release waits for the Worker to answer
    ([ADR-0004](docs/adr/0004-projects-nest-and-take-vanity-module-paths.md)).
 
 ## Licence

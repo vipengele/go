@@ -40,14 +40,17 @@ _Avoid_: project index, manifest, registry
 
 **Release**:
 One project at one version, identified by its tag. The tag is the publication: the module proxy
-serves the version from it, and the `release` workflow only validates, tests and announces it.
+serves the version from it. A release happens when the pull request adding its notes merges to
+`main`: `auto-release` validates and tests the project, tags it as `github-actions[bot]` and
+announces it (ADR-0037).
 _Avoid_: publish (nothing is uploaded)
 
 **Prefixed tag**:
 The tag form `source/<path>/vX.Y.Z`. Go resolves a module in a subdirectory only from a tag
 that starts with its directory path, so the tag names the repository directory, `source/`
 included, and not the **Vanity path**: the project `go.vipengele.org/cli/core` is tagged
-`source/cli/core/vX.Y.Z`. A consumer names the module path and a version, never the tag.
+`source/cli/core/vX.Y.Z`. The workflow creates it as an unsigned annotated tag; a consumer names
+the module path and a version, never the tag.
 _Avoid_: version tag (a bare `vX.Y.Z` is not a release here)
 
 **Workspace**:

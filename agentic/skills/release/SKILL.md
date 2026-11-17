@@ -4,7 +4,7 @@ description: >-
   Use this skill when the user asks to release, publish, cut or tag a version of
   a project in this repo (e.g. "release cli 0.2.0", "cut a patch of cli").
   Covers choosing the version, the release order when projects depend on each
-  other, writing the release notes, tagging, and verifying the release.
+  other, writing the release notes, merging them, and verifying the release.
 ---
 
 # Release a project
@@ -16,7 +16,9 @@ names the repository directory. The tag is the publication — the Go module pro
 from it, resolving the path through `go.vipengele.org` — so there is no upload step and no
 credential.
 
-There is no release tooling that bumps files. The tag is the only input, and a human pushes it.
+There is no release tooling that bumps files. The input is the merge of the pull request that adds the
+release notes: `auto-release.yml` then tags the project as `github-actions[bot]` (an unsigned
+annotated tag) and announces it (ADR-0037). No one pushes the tag.
 
 ## 1 — Decide the version
 
@@ -35,12 +37,13 @@ of them released at a version that contains what the project uses. Release first
 skill, every sibling whose latest release lacks something the project uses. The order matters only
 here: no sibling is ever released so that a dependent can be developed, and a project nothing
 unreleased feeds — a patch, or a project no sibling uses — is released on its own whenever it is
-ready.
+ready. A dependent's release pull request is merged after its sibling's tag exists, so a chain
+needs one pull request per tier.
 
 ## 3 — Write the release notes
 
-`docs/release-notes/<project>/v<version>.md`. **The workflow fails without it**, before it
-announces anything. Say what changed and what a consumer has to do about it. A breaking change names
+`docs/release-notes/<project>/v<version>.md`. **It is the release: merging it to `main` releases the
+project, and the workflow fails without it**, before it tags anything. Say what changed and what a consumer has to do about it. A breaking change names
 the old and new spelling; "various fixes" is not release notes.
 
 The notes put the project into strict mode until its tag exists: `verify-sibling-deps` then fails
@@ -61,13 +64,12 @@ go mod tidy
 
 The notes, the dropped `replace`s, the raised `require`s and the tidied `go.sum` are one release
 pull request, `chore(<project>): release <version>`. Its `GOWORK=off` CI compiles the project
-against the released siblings, as a consumer of the tag will. Nothing is released on merge.
+against the released siblings, as a consumer of the tag will. Merging it releases the project.
 
-## 5 — Check it locally, merge it, and check the merge commit again
+## 5 — Check it locally, then merge it
 
-This check is mandatory, on the release branch before merging and on the merge commit before the
-tag. A `GOWORK=off` build honours the project's own `replace`, so only reading `go.mod` catches a
-leftover one, and a pushed tag is permanent:
+This check is mandatory, on the release branch before merging. A `GOWORK=off` build honours the
+project's own `replace`, so only reading `go.mod` catches a leftover one, and a tag is permanent:
 
 ```bash
 cd source/<project>
@@ -81,51 +83,42 @@ go vet ./...
 go test -race -shuffle=on ./...
 ```
 
-Every command must pass. Then merge the pull request.
+Every command must pass. Then merge the pull request; the merge is the release.
 
-## 6 — Check the Worker answers for the project's path
+## 6 — The workflow validates and tags
 
-`go.vipengele.org` is a Cloudflare Worker that reads its module list from an R2 object, which
-`publish-vanity-modules.yml` writes from `source/**/go.mod` when a `go.mod` merges to `main`. No
-Worker tag is needed. Check what the Worker answers:
+`auto-release.yml` runs on the push of the merge to `main`, plans the pending projects (notes exist,
+tag does not) as dependency tiers and calls `release.yml` for each. The Worker check is part of its
+validation: `go.vipengele.org` is a Cloudflare Worker whose module list `publish-vanity-modules.yml`
+writes from `source/**/go.mod` when a `go.mod` merges to `main`, and validation retries
+`https://go.vipengele.org/<project>?go-get=1` for up to 5 minutes before tagging. A project added
+together with its notes waits for that workflow. A tag is final: the module proxy and the checksum
+database keep it permanently, so a wrong release is superseded by a new version, never moved.
 
-```bash
-curl -s 'https://go.vipengele.org/<project>?go-get=1'
-```
-
-The answer must carry a `go-import` meta tag naming the project
-(`go.vipengele.org/<project> git https://github.com/vipengele/go source/<project>`). The Worker
-caches the list for about a minute. Until the answer carries the tag, push no tag: confirm the
-`publish-vanity-modules` run for the merge commit succeeded, and re-run it if it did not.
-
-## 7 — Tag the merged commit
+## 7 — Watch it
 
 ```bash
-git fetch origin
-git checkout --detach <merge-commit>   # run the step 5 checks here
-git tag source/<project>/v<version> <merge-commit>
-git push origin source/<project>/v<version>
-```
-
-The tag must point at the release pull request's merge commit on `main`, not at the branch, and
-only after the step 5 checks pass there. A pushed tag is final: the module proxy and the checksum
-database keep it permanently, so a wrong tag is superseded by a new version, never moved. A tag
-pushed while the Worker does not answer is permanent too: `announce` fails, and once the Worker
-answers, re-running the workflow finishes the release. If the tag itself was wrong, the next attempt
-is a new version.
-
-## 8 — Watch it
-
-```bash
-gh run list --workflow release --limit 3
+gh run list --workflow auto-release --limit 3
 gh run watch <run-id>
 ```
 
-The jobs are `tag` (validates the tag, the project, the commit and the notes, and that the tagged
-project's `go.mod` carries no `replace` and requires only tagged siblings), `test` (with
-`GOWORK=off`, `go mod tidy` with no diff, `go build`, `GOOS=windows go vet` when the project holds a
-`*_windows.go` file, `go vet` and the module's suite) and `announce` (asks the module proxy for the
-version, then creates the GitHub Release). Re-running finishes a partial release.
+`release.yml` has three jobs: `verify` (read-only; validates the version, the project, the notes and
+the commit, that the project's `go.mod` carries no `replace` and requires only tagged siblings, and
+the Worker answer, then runs with `GOWORK=off` `go mod tidy` with no diff, `go build`,
+`GOOS=windows go vet` when the project holds a `*_windows.go` file, `go vet` and the module's
+suite), `tag` (write; creates the tag) and `announce` (write; asks the module proxy for the version,
+then creates the GitHub Release).
+
+## 8 — Finish a partial release
+
+A failure rolls nothing back. A later push to `main` sweeps again and finishes what is pending or
+unannounced. To finish one at once, dispatch `release.yml` with the existing tag:
+
+```bash
+gh workflow run release.yml -f tag=source/<project>/v<version>
+```
+
+A tag pushed by hand runs nothing.
 
 ## 9 — Verify
 
