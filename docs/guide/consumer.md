@@ -124,14 +124,20 @@ function. It depends on `cli/spec` alone, never on the framework that parses the
 
 ```go
 // helloCommand returns "hello [name]", which greets name, or "world" without one, with the
-// configured greeting, in capitals under --shout.
+// configured greeting, in capitals under --shout and in lower case under --whisper. It is also
+// invoked as "hi", and refuses both flags together.
 func helloCommand() *spec.Command {
 	shout := spec.BoolFlag("shout", "greet in capitals")
+	whisper := spec.BoolFlag("whisper", "greet in lower case")
 	return &spec.Command{
 		Name:    "hello",
+		Aliases: []string{"hi"},
 		Summary: "Greet someone",
 		Args:    spec.RangeArgs(0, 1),
-		Flags:   []spec.Flag{shout},
+		Flags:   []spec.Flag{shout, whisper},
+		FlagGroups: []spec.FlagGroup{
+			{Kind: spec.MutuallyExclusive, Flags: []string{"shout", "whisper"}},
+		},
 		Run: func(ctx context.Context, inv *spec.Invocation) error {
 			name := "world"
 			if len(inv.Args) == 1 {
@@ -145,15 +151,30 @@ func helloCommand() *spec.Command {
 			if shout.Get(inv) {
 				line = strings.ToUpper(line)
 			}
+			if whisper.Get(inv) {
+				line = strings.ToLower(line)
+			}
 			return inv.Data("%s\n", line)
 		},
 	}
 }
 ```
 
-The flag handle `shout` reads its value from the `Invocation` with `Get`. `inv.Data` writes to the
-standard output, which carries the command's data; messages go to the standard error. A command
-nests others through its `Commands` field, and the App checks the whole tree before every run.
+The flag handles `shout` and `whisper` read their values from the `Invocation` with `Get`. `Aliases`
+names `hi` as a second way to invoke the command. `FlagGroups` declares that `--shout` and
+`--whisper` are mutually exclusive: the App refuses a command line that sets both before the run
+function starts, with a usage error and exit code 2.
+
+```bash
+$ greet hi --shout --whisper
+greet: hello: --shout and --whisper are mutually exclusive
+$ echo $?
+2
+```
+
+`inv.Data` writes to the standard output, which carries the command's data; messages go to the
+standard error. A command nests others through its `Commands` field, and the App checks the whole
+tree before every run.
 
 ## 3. Add configuration
 

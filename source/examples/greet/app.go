@@ -120,14 +120,20 @@ func (c *config) Validate() error {
 // snippet:start commands
 
 // helloCommand returns "hello [name]", which greets name, or "world" without one, with the
-// configured greeting, in capitals under --shout.
+// configured greeting, in capitals under --shout and in lower case under --whisper. It is also
+// invoked as "hi", and refuses both flags together.
 func helloCommand() *spec.Command {
 	shout := spec.BoolFlag("shout", "greet in capitals")
+	whisper := spec.BoolFlag("whisper", "greet in lower case")
 	return &spec.Command{
 		Name:    "hello",
+		Aliases: []string{"hi"},
 		Summary: "Greet someone",
 		Args:    spec.RangeArgs(0, 1),
-		Flags:   []spec.Flag{shout},
+		Flags:   []spec.Flag{shout, whisper},
+		FlagGroups: []spec.FlagGroup{
+			{Kind: spec.MutuallyExclusive, Flags: []string{"shout", "whisper"}},
+		},
 		Run: func(ctx context.Context, inv *spec.Invocation) error {
 			name := "world"
 			if len(inv.Args) == 1 {
@@ -140,6 +146,9 @@ func helloCommand() *spec.Command {
 			line := greeting + ", " + name + "!"
 			if shout.Get(inv) {
 				line = strings.ToUpper(line)
+			}
+			if whisper.Get(inv) {
+				line = strings.ToLower(line)
 			}
 			return inv.Data("%s\n", line)
 		},

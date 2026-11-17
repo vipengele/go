@@ -90,6 +90,9 @@ func TestHello(t *testing.T) {
 		{name: "default", args: []string{"hello"}, want: "Hello, world!\n"},
 		{name: "name", args: []string{"hello", "Ada"}, want: "Hello, Ada!\n"},
 		{name: "shout", args: []string{"hello", "--shout", "Ada"}, want: "HELLO, ADA!\n"},
+		{name: "alias", args: []string{"hi", "Ada"}, want: "Hello, Ada!\n"},
+		{name: "whisper", args: []string{"hello", "--whisper", "Ada"}, want: "hello, ada!\n"},
+		{name: "whisper through the alias", args: []string{"hi", "--whisper"}, want: "hello, world!\n"},
 		{name: "config file", config: "greeting: Hi\n", args: []string{"hello", "Ada"}, want: "Hi, Ada!\n"},
 	}
 	for _, tt := range tests {
@@ -118,6 +121,18 @@ func TestHelloRefusesTwoNames(t *testing.T) {
 	got := run(t, testDeps(t, newServer(t)), t.TempDir(), "hello", "Ada", "Grace")
 	if got.code != 2 {
 		t.Errorf("ExecuteArgs = %+v, want exit code 2", got)
+	}
+}
+
+func TestHelloRefusesShoutWithWhisper(t *testing.T) {
+	for _, name := range []string{"hello", "hi"} {
+		t.Run(name, func(t *testing.T) {
+			got := run(t, testDeps(t, newServer(t)), t.TempDir(), name, "--shout", "--whisper")
+			want := result{code: 2, stderr: "greet: hello: --shout and --whisper are mutually exclusive\n"}
+			if got != want {
+				t.Errorf("ExecuteArgs = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 
