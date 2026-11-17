@@ -64,3 +64,59 @@ func TestSourcesIsACopy(t *testing.T) {
 		t.Errorf("Sources()[0] = %+v after changing an earlier copy", again[0])
 	}
 }
+
+func TestSourcesOfCollections(t *testing.T) {
+	file := writeFile(t, "config.yaml", `name: app
+profiles:
+  - name: dev
+    env:
+      ZED: "1"
+      ALPHA: two
+  - name: ci
+    tags: [x, y]
+    env: {}
+labels: {}
+matrix:
+  b:
+    z: 1
+    a: 2
+  a: {}
+`)
+	defaults := mergeConfig{
+		Profiles: []mergeProfile{{Name: "prod", Env: map[mergeEnvName]string{"K": "v"}, Hosts: []mergeHost{{Addr: "p"}}}},
+		Services: map[string]mergeHost{},
+	}
+	res, err := Load(defaults, File(file))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []Source{
+		{Key: "name", Value: "app", Origin: "config.yaml:1"},
+		{Key: "profiles[0].name", Value: "prod", Origin: "default"},
+		{Key: "profiles[0].meta.owner", Value: "", Origin: "default"},
+		{Key: `profiles[0].env["K"]`, Value: "v", Origin: "default"},
+		{Key: "profiles[0].hosts[0].addr", Value: "p", Origin: "default"},
+		{Key: "profiles[0].hosts[0].port", Value: "0", Origin: "default"},
+		{Key: "profiles[0].tags", Value: "", Origin: "default"},
+		{Key: "profiles[1].name", Value: "dev", Origin: "config.yaml:3"},
+		{Key: "profiles[1].meta.owner", Value: "", Origin: "config.yaml:3"},
+		{Key: `profiles[1].env["ALPHA"]`, Value: "two", Origin: "config.yaml:6"},
+		{Key: `profiles[1].env["ZED"]`, Value: "1", Origin: "config.yaml:5"},
+		{Key: "profiles[1].hosts", Value: "[]", Origin: "config.yaml:3"},
+		{Key: "profiles[1].tags", Value: "", Origin: "config.yaml:3"},
+		{Key: "profiles[2].name", Value: "ci", Origin: "config.yaml:7"},
+		{Key: "profiles[2].meta.owner", Value: "", Origin: "config.yaml:7"},
+		{Key: "profiles[2].env", Value: "{}", Origin: "config.yaml:9"},
+		{Key: "profiles[2].hosts", Value: "[]", Origin: "config.yaml:7"},
+		{Key: "profiles[2].tags", Value: "x,y", Origin: "config.yaml:8"},
+		{Key: "labels", Value: "{}", Origin: "config.yaml:10"},
+		{Key: "services", Value: "{}", Origin: "default"},
+		{Key: "steps", Value: "[]", Origin: "default"},
+		{Key: `matrix["a"]`, Value: "{}", Origin: "config.yaml:15"},
+		{Key: `matrix["b"]["a"]`, Value: "2", Origin: "config.yaml:14"},
+		{Key: `matrix["b"]["z"]`, Value: "1", Origin: "config.yaml:13"},
+	}
+	if got := res.Sources(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Sources() =\n%+v\nwant\n%+v", got, want)
+	}
+}

@@ -329,3 +329,230 @@ func TestLoadSchemaErrors(t *testing.T) {
 		})
 	}
 }
+
+type mergeMeta struct {
+	Owner string
+}
+
+type mergeHost struct {
+	Addr string
+	Port int
+}
+
+type mergeEnvName string
+
+type mergeProfile struct {
+	Name  string
+	Meta  mergeMeta
+	Env   map[mergeEnvName]string
+	Hosts []mergeHost
+	Tags  []string
+}
+
+type mergeConfig struct {
+	Name     string
+	Profiles []mergeProfile `merge:"name"`
+	Labels   map[string]string
+	Services map[string]mergeHost `merge:"keys"`
+	Steps    []mergeHost
+	Matrix   map[string]map[string]int
+}
+
+func mergeDefaults() mergeConfig {
+	return mergeConfig{
+		Name: "app",
+		Profiles: []mergeProfile{
+			{Name: "dev", Env: map[mergeEnvName]string{"FOO": "1"}, Tags: []string{"a"}},
+			{Name: "prod", Hosts: []mergeHost{{Addr: "p", Port: 1}}},
+		},
+		Labels:   map[string]string{"x": "1", "y": "2"},
+		Services: map[string]mergeHost{"web": {Addr: "w", Port: 80}, "db": {Addr: "d", Port: 5432}},
+		Steps:    []mergeHost{{Addr: "a", Port: 1}, {Addr: "b", Port: 2}},
+		Matrix:   map[string]map[string]int{"m": {"n": 1}},
+	}
+}
+
+func TestLoadCollectionReplacesWithoutMergeTag(t *testing.T) {
+	tests := []struct {
+		name   string
+		layers []string
+		want   func(c *mergeConfig)
+	}{
+		{
+			name:   "list replaced whole",
+			layers: []string{"steps:\n  - addr: c\n"},
+			want:   func(c *mergeConfig) { c.Steps = []mergeHost{{Addr: "c"}} },
+		},
+		{
+			name:   "map replaced whole",
+			layers: []string{"labels:\n  z: \"3\"\n"},
+			want:   func(c *mergeConfig) { c.Labels = map[string]string{"z": "3"} },
+		},
+		{
+			name:   "nested map replaced whole",
+			layers: []string{"matrix:\n  o:\n    p: 2\n"},
+			want:   func(c *mergeConfig) { c.Matrix = map[string]map[string]int{"o": {"p": 2}} },
+		},
+		{
+			name:   "later layer replaces earlier layer",
+			layers: []string{"steps:\n  - addr: c\nlabels:\n  z: \"3\"\n", "steps:\n  - addr: d\n    port: 4\nlabels:\n  w: \"5\"\n"},
+			want: func(c *mergeConfig) {
+				c.Steps = []mergeHost{{Addr: "d", Port: 4}}
+				c.Labels = map[string]string{"w": "5"}
+			},
+		},
+		{
+			name:   "empty later collections replace",
+			layers: []string{"steps:\n  - addr: c\n", "steps: []\nlabels: {}\nmatrix: {}\n"},
+			want: func(c *mergeConfig) {
+				c.Steps = []mergeHost{}
+				c.Labels = map[string]string{}
+				c.Matrix = map[string]map[string]int{}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var providers []Provider
+			for i, body := range tt.layers {
+				providers = append(providers, File(writeFile(t, "layer"+string(rune('0'+i))+".yaml", body)))
+			}
+			res, err := Load(mergeDefaults(), providers...)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			want := mergeDefaults()
+			tt.want(&want)
+			if got := res.Value(); !reflect.DeepEqual(got, want) {
+				t.Errorf("Value() =\n%+v\nwant\n%+v", got, want)
+			}
+		})
+	}
+}
+
+func TestLoadListMergedByKey(t *testing.T) {
+	user := writeFile(t, "user.yaml", "profiles:\n  - name: ci\n    tags: [c]\n  - name: dev\n    meta.owner: ann\n")
+	project := writeFile(t, "project.yaml", "profiles:\n  - name: qa\n  - name: prod\n    tags: [p]\n")
+	res, err := Load(mergeDefaults(), File(user), File(project))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []mergeProfile{
+		{Name: "dev", Meta: mergeMeta{Owner: "ann"}},
+		{Name: "prod", Tags: []string{"p"}},
+		{Name: "ci", Tags: []string{"c"}},
+		{Name: "qa"},
+	}
+	if got := res.Value().Profiles; !reflect.DeepEqual(got, want) {
+		t.Errorf("Profiles =\n%+v\nwant\n%+v", got, want)
+	}
+	origins := map[string]string{}
+	for _, s := range res.Sources() {
+		origins[s.Key] = s.Origin
+	}
+	wantOrigins := map[string]string{
+		"profiles[0].name":       "user.yaml:4",
+		"profiles[0].meta.owner": "user.yaml:5",
+		"profiles[0].env":        "user.yaml:4",
+		"profiles[1].tags":       "project.yaml:4",
+		"profiles[1].hosts":      "project.yaml:3",
+		"profiles[2].tags":       "user.yaml:3",
+		"profiles[3].name":       "project.yaml:2",
+	}
+	for key, want := range wantOrigins {
+		if got := origins[key]; got != want {
+			t.Errorf("origin of %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestLoadMapMergedByKeys(t *testing.T) {
+	user := writeFile(t, "user.yaml", "services:\n  web:\n    addr: w2\n  cache:\n    addr: c\n    port: 6379\n")
+	project := writeFile(t, "project.yaml", "services: {}\n")
+	res, err := Load(mergeDefaults(), File(user), File(project))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := map[string]mergeHost{
+		"web":   {Addr: "w2"},
+		"db":    {Addr: "d", Port: 5432},
+		"cache": {Addr: "c", Port: 6379},
+	}
+	if got := res.Value().Services; !reflect.DeepEqual(got, want) {
+		t.Errorf("Services = %+v, want %+v", got, want)
+	}
+	wantSources := []Source{
+		{Key: `services["cache"].addr`, Value: "c", Origin: "user.yaml:5"},
+		{Key: `services["cache"].port`, Value: "6379", Origin: "user.yaml:6"},
+		{Key: `services["db"].addr`, Value: "d", Origin: "default"},
+		{Key: `services["db"].port`, Value: "5432", Origin: "default"},
+		{Key: `services["web"].addr`, Value: "w2", Origin: "user.yaml:3"},
+		{Key: `services["web"].port`, Value: "0", Origin: "user.yaml:3"},
+	}
+	var got []Source
+	for _, s := range res.Sources() {
+		if strings.HasPrefix(s.Key, "services") {
+			got = append(got, s)
+		}
+	}
+	if !reflect.DeepEqual(got, wantSources) {
+		t.Errorf("services Sources =\n%+v\nwant\n%+v", got, wantSources)
+	}
+}
+
+func TestLoadCollectionsShareNothingWithDefaults(t *testing.T) {
+	file := writeFile(t, "config.yaml", "services:\n  cache:\n    addr: c\nprofiles:\n  - name: qa\n")
+	defaults := mergeDefaults()
+	res, err := Load(defaults, File(file))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(defaults, mergeDefaults()) {
+		t.Fatalf("Load changed defaults: %+v", defaults)
+	}
+
+	value := res.Value()
+	value.Profiles[0].Env["FOO"] = "changed"
+	value.Profiles[0].Tags[0] = "changed"
+	value.Profiles[1].Hosts[0].Addr = "changed"
+	value.Labels["x"] = "changed"
+	value.Services["web"] = mergeHost{Addr: "changed"}
+	value.Steps[0].Addr = "changed"
+	value.Matrix["m"]["n"] = 9
+	if !reflect.DeepEqual(defaults, mergeDefaults()) {
+		t.Errorf("changing the loaded value changed defaults: %+v", defaults)
+	}
+
+	again, err := Load(defaults, File(file))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(defaults, mergeDefaults()) {
+		t.Errorf("a second Load changed defaults: %+v", defaults)
+	}
+	if _, ok := again.Value().Services["cache"]; !ok {
+		t.Errorf("Services = %+v, want the cache entry", again.Value().Services)
+	}
+	defaults.Profiles[0].Env["FOO"] = "later"
+	if got := again.Value().Profiles[0].Env["FOO"]; got != "1" {
+		t.Errorf("changing defaults changed the loaded value: FOO = %q", got)
+	}
+}
+
+func TestLoadDefaultsMergeKeys(t *testing.T) {
+	defaults := mergeConfig{Profiles: []mergeProfile{{Name: "dev"}, {}, {Name: "dev"}}}
+	res, err := Load(defaults)
+	if err == nil {
+		t.Fatal("Load: no error")
+	}
+	want := strings.Join([]string{
+		`profiles[1]: merge key "name" is empty in defaults; every element of profiles needs one`,
+		`profiles[2]: merge key "name" is "dev" in defaults, as for profiles[0]`,
+	}, "\n")
+	if got := err.Error(); got != want {
+		t.Errorf("error =\n%s\nwant\n%s", got, want)
+	}
+	if !reflect.DeepEqual(res, Result[mergeConfig]{}) {
+		t.Errorf("Result = %+v, want the zero Result", res)
+	}
+}

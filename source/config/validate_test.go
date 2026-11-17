@@ -297,3 +297,55 @@ func TestFieldErrorUnwrap(t *testing.T) {
 		t.Errorf("Unwrap() = %v, want %v", got, bad)
 	}
 }
+
+// validCollections validates itself with check. check is not exported, so it is not a key.
+type validCollections struct {
+	Profiles []mergeProfile `merge:"name"`
+	check    func(validCollections) error
+}
+
+func (c validCollections) Validate() error { return c.check(c) }
+
+func TestLoadValidatePathWithinCollection(t *testing.T) {
+	file := writeFile(t, "config.yaml", "profiles:\n  - name: ci\n    env:\n      FOO: bar\n")
+	tests := []struct {
+		name string
+		key  string
+		want FieldError // without Err
+	}{
+		{name: "map", key: "profiles[2].env", want: FieldError{Key: "profiles[2].env", Origin: "config.yaml:4"}},
+		{name: "map entry", key: `Profiles[2].Env["FOO"]`, want: FieldError{Key: `profiles[2].env["FOO"]`, Value: "bar", Origin: "config.yaml:4"}},
+		{name: "element", key: "profiles[2]", want: FieldError{Key: "profiles[2]", Origin: "config.yaml:2"}},
+		{name: "element field it does not write", key: "profiles[2].meta.owner", want: FieldError{Key: "profiles[2].meta.owner", Origin: "config.yaml:2"}},
+		{name: "default element", key: "profiles[0].name", want: FieldError{Key: "profiles[0].name", Value: "dev", Origin: "default"}},
+		{name: "list", key: "profiles", want: FieldError{Key: "profiles", Origin: "config.yaml:2"}},
+		{name: "index past the end", key: "profiles[3].env", want: FieldError{Key: "profiles[3].env"}},
+		{name: "map key matched exactly", key: `profiles[2].env["foo"]`, want: FieldError{Key: `profiles[2].env["foo"]`}},
+		{name: "not a path", key: "profiles[2", want: FieldError{Key: "profiles[2"}},
+		{name: "unknown element field", key: "profiles[2].nope", want: FieldError{Key: "profiles[2].nope"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			problem := errors.New("is wrong")
+			defaults := validCollections{
+				Profiles: []mergeProfile{{Name: "dev"}, {Name: "prod"}},
+				check: func(validCollections) error {
+					return fmt.Errorf("checking: %w", &FieldError{Key: tt.key, Err: problem})
+				},
+			}
+			_, err := Load(defaults, File(file))
+			var fe *FieldError
+			if !errors.As(err, &fe) {
+				t.Fatalf("errors.As(%v, *FieldError) = false", err)
+			}
+			want := tt.want
+			want.Err = problem
+			if *fe != want {
+				t.Errorf("FieldError = %+v, want %+v", *fe, want)
+			}
+			if got, wantMsg := err.Error(), "checking: "+want.Error(); got != wantMsg {
+				t.Errorf("error = %q, want %q", got, wantMsg)
+			}
+		})
+	}
+}
