@@ -23,7 +23,8 @@
 #                 and is neither inside nor around another project; <sha> is
 #                 on $RELEASE_MAIN_REF; the notes
 #                 docs/release-notes/<project>/<version>.md exist; the go.mod
-#                 declares go.vipengele.org/<project>, replaces nothing, and
+#                 declares go.vipengele.org/<project>, with the suffix /vN
+#                 when <version> is vN.x.y for N >= 2, replaces nothing, and
 #                 requires every sibling at a version tagged on origin, never a
 #                 pseudo-version; the tag does not exist on origin; and the
 #                 vanity Worker answers for the module.
@@ -35,9 +36,10 @@
 #   tag           Creates the unsigned annotated tag on <sha> as
 #                 github-actions[bot], with <run-url> in its message, and
 #                 pushes that tag alone to origin. A rejected push fails.
-#   announce      Asks the module proxy for the tagged version, then creates
-#                 the GitHub Release from the notes in the tag's commit. An
-#                 existing Release counts as success.
+#   announce      Asks the module proxy for the tagged version of the module
+#                 path the tag's go.mod declares, then creates the GitHub
+#                 Release from the notes in the tag's commit. An existing
+#                 Release counts as success.
 #   finish-check  Runs validate's checks at the commit of <tag>, requiring the
 #                 tag on origin at that commit instead of its absence.
 #
@@ -199,10 +201,19 @@ check() {
     release_die "$gomod does not parse: ${json//$'\n'/ }"
   fi
 
+  # Go's import compatibility rule: a module at major version 2 or above
+  # carries the suffix /vN in its path, and one at v0 or v1 carries none. The
+  # tag stays source/<project>/<version> either way.
+  local major
   want="${RELEASE_MODULE_PREFIX}${project}"
+  major="${version%%.*}"
+  major="${major#v}"
+  if ((10#$major >= 2)); then
+    want="${want}/v$((10#$major))"
+  fi
   have="$(jq -r .Module.Path <<< "$json")"
   if [[ "$have" != "$want" ]]; then
-    release_error "$gomod: module path is ${have}, expected ${want}"
+    release_error "$gomod: module path is ${have}, expected ${want} for ${version}; a module at v2 or above ends in /vN for its major version N, one at v0 or v1 has no suffix"
     status=1
   fi
 
@@ -224,10 +235,19 @@ check() {
     [[ -n "$name" ]] && remote["$name"]="$sha"
   done < "$tmp/remote-tags"
 
-  local path required sibling
-  while read -r path required; do
+  # A sibling's tag is named by the project owning the required path, which
+  # drops a major-version suffix: go.vipengele.org/a/v2 v2.1.0 is released by
+  # source/a/v2.1.0. A path no project at the commit owns is looked up with
+  # only its suffix dropped.
+  local all path required sibling
+  all="$(git -C "$root" ls-tree -r --name-only "$commit" -- source/ \
+    | sed -n -e 's|^source/\(.*\)/go\.mod$|\1|p' | jq -R . | jq -sc .)"
+  while read -r path required sibling; do
     [[ -n "$path" ]] || continue
-    sibling="${path#"$RELEASE_MODULE_PREFIX"}"
+    if [[ -z "$sibling" ]]; then
+      sibling="${path#"$RELEASE_MODULE_PREFIX"}"
+      [[ "$sibling" =~ ^(.+)/v([0-9]+)$ ]] && ((10#${BASH_REMATCH[2]} >= 2)) && sibling="${BASH_REMATCH[1]}"
+    fi
     if [[ "$required" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-.*[0-9]{14}-[0-9a-f]{12}$ ]]; then
       release_error "$gomod: ${path} is required at the pseudo-version ${required}; a released go.mod requires every sibling at a tagged release"
       status=1
@@ -235,8 +255,9 @@ check() {
       release_error "$gomod: ${path} ${required} has no tag source/${sibling}/${required} on origin; release ${sibling} first, then require that tag"
       status=1
     fi
-  done < <(jq -r --arg prefix "$RELEASE_MODULE_PREFIX" \
-    '(.Require // [])[] | select(.Path | startswith($prefix)) | "\(.Path) \(.Version)"' <<< "$json")
+  done < <(jq -r --arg prefix "$RELEASE_MODULE_PREFIX" --argjson all "$all" "${RELEASE_JQ_OWNER}"'
+    (.Require // [])[] | select(.Path | startswith($prefix))
+    | "\(.Path) \(.Version) \(owner(.Path | ltrimstr($prefix)) // "")"' <<< "$json")
 
   ((status == 0)) || exit 1
 
@@ -254,6 +275,9 @@ check() {
       ;;
   esac
 
+  # The Worker serves the unsuffixed path, which is also the go-import prefix
+  # of a /vN module: the Go command finds go.vipengele.org/<project>/vN inside
+  # the repository root that go.vipengele.org/<project> names.
   worker_answers "$project" \
     || release_die "${vanity_base}/${project}?go-get=1 does not answer for ${RELEASE_MODULE_PREFIX}${project} after ${worker_timeout}s. It answers once the project's go.mod is merged and publish-vanity-modules has published the list: check that run, then re-run this one (ADR-0004, ADR-0016)"
 
@@ -336,9 +360,18 @@ cmd_announce() {
   (($# == 1)) || usage
   local tag="$1" project version module attempt notes output
   project_version "$tag"
-  module="${RELEASE_MODULE_PREFIX}${project}"
   local_tag "$tag"
   cd "$root"
+
+  # The proxy is asked for the module path the tagged go.mod declares, which
+  # carries a /vN suffix at v2 and above.
+  mkdir -p "$tmp/gomod"
+  git -C "$root" show "refs/tags/${tag}^{commit}:source/${project}/go.mod" > "$tmp/gomod/go.mod" 2> /dev/null \
+    || release_die "source/${project}/go.mod is missing at $tag"
+  module="$(cd "$tmp/gomod" && go mod edit -json go.mod | jq -r .Module.Path)" \
+    || release_die "source/${project}/go.mod at $tag does not parse"
+  [[ -n "$module" && "$module" != null ]] \
+    || release_die "source/${project}/go.mod at $tag declares no module path"
 
   # Asking the proxy for the version makes it fetch the tag now, so the first
   # consumer does not wait for it, and proves the module path and the tag

@@ -399,6 +399,93 @@ validate_module_path() {
 }
 register "release-project: validate fails a module path off the vanity map" validate_module_path
 
+# major_project <name> <module>: a fixture with origin, where source/a declares
+# <module> and the notes of a v2.0.0 and a v1.1.0 are on main.
+major_project() {
+  fixture_repo "$1"
+  fixture_origin
+  mkdir -p "$FIXTURE/source/a"
+  printf 'module %s\n\ngo 1.25.0\n' "$2" > "$FIXTURE/source/a/go.mod"
+  fixture_notes a v2.0.0
+  fixture_notes a v1.1.0
+  fixture_commit "a"
+  fixture_push
+}
+
+validate_major_suffix() {
+  major_project validate-major-suffix go.vipengele.org/a/v2
+  fixture_worker a
+  release_project validate a v2.0.0 "$(fixture_git rev-parse HEAD)"
+  expect_ok
+}
+register "release-project: validate passes a /v2 module path at v2.0.0" validate_major_suffix
+
+validate_major_suffix_at_v1() {
+  major_project validate-major-suffix-at-v1 go.vipengele.org/a/v2
+  release_project validate a v1.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'module path is go.vipengele.org/a/v2, expected go.vipengele.org/a for v1.1.0'
+}
+register "release-project: validate fails a /v2 module path at v1.x" validate_major_suffix_at_v1
+
+validate_major_suffix_missing() {
+  major_project validate-major-suffix-missing go.vipengele.org/a
+  release_project validate a v2.0.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'module path is go.vipengele.org/a, expected go.vipengele.org/a/v2 for v2.0.0'
+}
+register "release-project: validate fails a v2.0.0 module path without /v2" validate_major_suffix_missing
+
+validate_major_sibling() {
+  fixture_repo validate-major-sibling
+  fixture_origin
+  mkdir -p "$FIXTURE/source/commons"
+  printf 'module go.vipengele.org/commons/v2\n\ngo 1.25.0\n' > "$FIXTURE/source/commons/go.mod"
+  fixture_notes commons v2.0.0
+  fixture_commit "commons"
+  fixture_tag source/commons/v2.0.0
+  fixture_project cli/core commons/v2
+  fixture_notes cli/core v0.1.0
+  fixture_commit "cli/core"
+  fixture_push refs/tags/source/commons/v2.0.0
+  fixture_worker cli/core
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_ok
+}
+register "release-project: validate passes a sibling required at /v2 and tagged source/<sibling>/v2.0.0" validate_major_sibling
+
+validate_major_sibling_untagged() {
+  fixture_repo validate-major-sibling-untagged
+  fixture_origin
+  mkdir -p "$FIXTURE/source/commons"
+  printf 'module go.vipengele.org/commons/v2\n\ngo 1.25.0\n' > "$FIXTURE/source/commons/go.mod"
+  fixture_project cli/core commons/v2
+  fixture_notes cli/core v0.1.0
+  fixture_commit "cli/core"
+  fixture_push
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'go.vipengele.org/commons/v2 v2.0.0 has no tag source/commons/v2.0.0 on origin'
+}
+register "release-project: validate fails a /v2 sibling untagged on origin" validate_major_sibling_untagged
+
+validate_missing_gomod() {
+  releasable validate-missing-gomod
+  fixture_notes absent v0.1.0
+  fixture_commit "notes without a project"
+  fixture_push
+  release_project validate absent v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'source/absent/go.mod does not exist at'
+}
+register "release-project: validate fails a project with no go.mod at the commit" validate_missing_gomod
+
+validate_inside_module() {
+  releasable validate-inside-module
+  fixture_project cli
+  fixture_commit "enclosing module"
+  fixture_push
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'source/cli/core is nested inside the module at source/cli'
+}
+register "release-project: validate fails a project inside another module" validate_inside_module
+
 validate_missing_notes() {
   releasable validate-missing-notes
   release_project validate cli/core v0.2.0 "$(fixture_git rev-parse HEAD)"
@@ -524,6 +611,22 @@ announce_stable() {
     || fail "no stable create:" "$(cat "$STUB_LOG")"
 }
 register "release-project: announce creates a full release for v1+" announce_stable
+
+announce_major_suffix() {
+  fixture_repo announce-major-suffix
+  fixture_origin
+  mkdir -p "$FIXTURE/source/a"
+  printf 'module go.vipengele.org/a/v2\n\ngo 1.25.0\n' > "$FIXTURE/source/a/go.mod"
+  fixture_notes a v2.0.0
+  fixture_commit
+  fixture_tag source/a/v2.0.0
+  fixture_push refs/tags/source/a/v2.0.0
+  release_project announce source/a/v2.0.0
+  expect_ok || return 1
+  [[ "$(head -1 "$STUB_LOG")" == 'go list -m go.vipengele.org/a/v2@v2.0.0' ]] \
+    || fail "the proxy is not asked for the /v2 module path:" "$(cat "$STUB_LOG")"
+}
+register "release-project: announce asks the proxy for the /v2 module path of a v2 tag" announce_major_suffix
 
 announce_already_exists() {
   announceable exists v0.1.0
