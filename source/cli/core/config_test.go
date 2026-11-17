@@ -15,6 +15,7 @@ import (
 
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 )
 
 // toolConfig is the configuration the App of these tests loads: keys "name", "port" and
@@ -538,6 +539,70 @@ func TestConfigPath(t *testing.T) {
 	}
 	if doc.Schema != 1 || doc.Path != e.path() || doc.Exists {
 		t.Errorf("config path --json = %+v, want schema 1, path %q and no file", doc, e.path())
+	}
+}
+
+// runDarwin executes app with args against an environment that holds vars and no TOOL_HOME,
+// resolving its directories for darwin under the home directory home.
+func runDarwin(t *testing.T, home string, vars map[string]string, app func(...cli.Option) *cli.App,
+	args ...string,
+) result {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		WorkDir: t.TempDir(),
+		LookupEnv: func(key string) (string, bool) {
+			v, ok := vars[key]
+			return v, ok
+		},
+		Terminal: func(spec.Stream) bool { return false },
+	}
+	code := app(cli.WithPathsPlatform("darwin", func() (string, error) { return home, nil })).ExecuteArgs(env, args)
+	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+func TestWithPathsLayoutPlacesTheConfigurationFile(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(t.TempDir(), "xdg")
+	vars := map[string]string{"XDG_CONFIG_HOME": xdg}
+	tests := []struct {
+		name string
+		opts []cli.Option
+		want string
+	}{
+		{"xdg", []cli.Option{cli.WithPathsLayout(paths.LayoutXDG)}, filepath.Join(xdg, "tool", "config.yaml")},
+		{"default", []cli.Option{cli.WithPathsLayout(paths.LayoutDefault)},
+			filepath.Join(home, "Library", "Application Support", "tool", "config.yaml")},
+		{"without the option", nil, filepath.Join(home, "Library", "Application Support", "tool", "config.yaml")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s seen
+			app := func(platform ...cli.Option) *cli.App { return configApp(&s, append(platform, tt.opts...)...) }
+			got := runDarwin(t, home, vars, app, "config", "path")
+			if want := (result{code: cli.ExitOK, stdout: tt.want + "\n"}); got != want {
+				t.Errorf("config path = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestWithPathsLayoutRefusesAnUnknownLayout(t *testing.T) {
+	var s seen
+	app := func(platform ...cli.Option) *cli.App {
+		return configApp(&s, append(platform, cli.WithPathsLayout(paths.Layout(99)))...)
+	}
+	for _, args := range [][]string{{"read"}, {"config", "path"}, {"version"}} {
+		got := runDarwin(t, t.TempDir(), nil, app, args...)
+		want := result{code: cli.ExitError, stderr: "tool: invalid command tree\n  → WithPathsLayout: unknown layout Layout(99)\n"}
+		if got != want {
+			t.Errorf("%v: ExecuteArgs = %+v, want %+v", args, got, want)
+		}
+	}
+	if s.called {
+		t.Error("the run function was called")
 	}
 }
 

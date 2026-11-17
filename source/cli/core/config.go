@@ -40,11 +40,11 @@ type configOverlay struct {
 //
 // The configuration file is config.yaml in the tool's configuration directory, the Config
 // directory the cli/spec/paths package resolves for the App's [spec.Identity] from the
-// environment of each execution. No flag and no environment variable names another file. The
-// layers are defaults, under the file, under the environment variables named by the identity's
-// EnvPrefix, looked up through [spec.Env.LookupEnv], with the overlay file of [WithConfigOverlay]
-// between the file and the environment. A missing file is valid: the defaults and the
-// environment apply.
+// environment of each execution, in the layout of [WithPathsLayout] when the App has one. No
+// flag and no environment variable names another file. The layers are defaults, under the file,
+// under the environment variables named by the identity's EnvPrefix, looked up through
+// [spec.Env.LookupEnv], with the overlay file of [WithConfigOverlay] between the file and the
+// environment. A missing file is valid: the defaults and the environment apply.
 //
 // Before every run function, ahead of every [WithPreRun] hook whatever the order of the options,
 // a pre-run hook loads the configuration and stores it in the context, where [ConfigFrom] reads
@@ -129,7 +129,7 @@ func (a *App) configFor(lookup func(string) (string, bool)) configBinding {
 	if a.settings.config == nil {
 		return configBinding{}
 	}
-	dirs, err := paths.Resolve(a.identity, paths.Options{LookupEnv: lookup}, paths.Config)
+	dirs, err := paths.Resolve(a.identity, a.settings.pathsOptions(lookup), paths.Config)
 	if err != nil {
 		err = fmt.Errorf("config: %w", err)
 		b := a.settings.config("", a.identity.EnvPrefix, a.settings.configOverlay)

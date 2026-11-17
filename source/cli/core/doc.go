@@ -59,6 +59,11 @@
 // at its line. It needs [WithConfig], and the last call wins. "config validate" checks the
 // defaults, config.yaml and the overlay together, without the environment.
 //
+// [WithPathsLayout] makes every directory the App resolves, the configuration directory of
+// [WithConfig] among them, follow one layout of the cli/spec/paths package on every operating
+// system, such as the XDG layout on macOS. Without it the operating system chooses the layout. A
+// layout the package does not name makes every execution an invalid command tree, exit code 1.
+//
 // [WithLogging] gives the App the flags --log-level and --log-format, and a hook that installs the
 // process-wide [log/slog] logger, built by the logging package, before every run function. The
 // level is info, debug under -v and error under -q, or the one --log-level names; --log-level
