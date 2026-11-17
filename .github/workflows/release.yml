@@ -1,289 +1,278 @@
-# release — validates and announces one project's release.
+# release — releases one project's version, or finishes a partial release.
 #
-# A human pushes the tag; nothing else starts this. The tag is the decision and
-# the only input: `source/<project>/vX.Y.Z` releases the Go module under
-# `source/<project>` at that version, and no other project (ADR-0001). The tag
-# is the publication — the Go module proxy serves a module from the tag itself,
-# so there is no registry to upload to and no credential in this repository.
+# A release is the merge of its notes (ADR-0037): `auto-release.yml` calls this
+# workflow for every pending project, and nothing else releases one. There is
+# no tag trigger. A tag pushed with GITHUB_TOKEN starts no workflow (ADR-0016),
+# so a tag this workflow pushes could not start the next step, and a tag pushed
+# by hand releases nothing. The tag `source/<project>/vX.Y.Z` is the
+# publication: the Go module proxy serves a module from the tag itself, so
+# there is no registry to upload to and no credential in this repository.
 #
-# Three jobs, and the seams between them are safety properties. `tag` reads the
-# repository and decides whether this is a release at all, judging the tagged
-# project alone: what another project does with its siblings never blocks it.
-# `test` builds and runs the module's suite exactly as a consumer of the tag
-# would, with go.mod and go.sum already tidy. `announce` asks the module proxy
-# to fetch the version, which both makes it immediately resolvable and proves
-# the tag is a valid module version, then creates the GitHub Release.
+# Two modes. `release` validates the commit `sha`, tests the project there,
+# pushes the tag on it and announces it. `finish` takes a tag that already
+# exists and announces it, which completes a release whose announcement failed;
+# `auto-release.yml` calls it for every tag left unannounced, and a
+# `workflow_dispatch` naming the tag does the same by hand. `dry_run` runs
+# `verify` alone.
+#
+# Three jobs, and the seams between them are safety properties. `verify` holds
+# a read-only token, checks out without persisting it, and is the only job that
+# runs project code: it validates the release and runs the project's suite as
+# a consumer of the tag would build it. `tag` and `announce` hold
+# `contents: write` and run no project code: they check out only this
+# workflow's own scripts, and `announce` runs `go list -m` against the module
+# proxy, which builds nothing. Everything that can fail without leaving a
+# version half-released fails in `verify`, before any job can write.
+#
+# The steps themselves live in .github/scripts/release/release-project.sh, and
+# every job runs them from this workflow's commit, `github.sha`, never from the
+# commit being released: a tag on a commit that predates the scripts is
+# finished by them all the same.
 name: release
 
 on:
-  push:
-    # A tag filter is a glob, not a regex: it is the coarse gate. `**` matches
-    # across `/`, so a project at any depth under `source/` passes it. The `tag`
-    # job below applies the real pattern and fails a tag that only looks like a
-    # release.
-    tags: ['source/**/v[0-9]*.[0-9]*.[0-9]*']
+  workflow_call:
+    inputs:
+      project:
+        description: The project, its directory relative to source/ (`cli/core`).
+        type: string
+        required: true
+      version:
+        description: The version to release, vX.Y.Z.
+        type: string
+        required: true
+      sha:
+        description: The commit to tag, on main. Required in mode `release`.
+        type: string
+        required: false
+        default: ""
+      mode:
+        description: "`release` tags and announces sha; `finish` announces the existing tag."
+        type: string
+        required: true
+      dry_run:
+        description: Run verify alone, writing nothing.
+        type: boolean
+        required: false
+        default: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag whose release to finish, source/<project>/vX.Y.Z.
+        type: string
+        required: true
+      dry_run:
+        description: Run verify alone, writing nothing.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
 
-# One release at a time, and never cancel one in flight: a cancelled run leaves
-# a version tagged but unannounced.
+# One run per tag, and never cancel one in flight: a cancelled run can leave a
+# version tagged but unannounced. Keyed by the tag, so a dispatched finish and
+# a sweep never announce one tag at once. In a called workflow `github.*` names
+# the caller, so the group is built from the inputs.
 concurrency:
-  group: release
+  group: release-${{ inputs.tag || format('source/{0}/{1}', inputs.project, inputs.version) }}
   cancel-in-progress: false
 
 env:
   GOWORK: "off"
 
 jobs:
-  tag:
-    name: tag
+  verify:
+    name: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
-      project: ${{ steps.parse.outputs.project }}
-      version: ${{ steps.parse.outputs.version }}
-      module: ${{ steps.parse.outputs.module }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      project: ${{ steps.resolve.outputs.project }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      go-version: ${{ steps.setup-go.outputs.go-version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Everything that can fail without leaving anything half-released fails
-      # here: a tag that is not a project version, a project that does not
-      # exist or is nested in or around another module, a tag off the default
-      # branch, and missing release notes. The GitHub Release body is a file a
-      # human wrote and reviewed.
-      - name: The tag is a project version and carries its notes
-        id: parse
+      # The inputs are untrusted text, so they reach the script through the
+      # environment and are matched before anything uses them as a ref or a
+      # path. `mode` is required of a caller and absent from a dispatch, which
+      # is how the two are told apart: in a called workflow `github.event_name`
+      # is the caller's event.
+      - name: The inputs name a release
+        id: resolve
+        env:
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_PROJECT: ${{ inputs.project }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SHA: ${{ inputs.sha }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [[ ! "${GITHUB_REF_NAME}" =~ ^source/([a-z0-9-]+(/[a-z0-9-]+)*)/(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
-            echo "::error::${GITHUB_REF_NAME} is not source/<project>/vX.Y.Z"
+          sha=""
+          case "$INPUT_MODE" in
+            "")
+              mode=finish
+              tag="$INPUT_TAG"
+              ;;
+            release | finish)
+              mode="$INPUT_MODE"
+              tag="source/${INPUT_PROJECT}/${INPUT_VERSION}"
+              ;;
+            *)
+              echo "::error::mode is ${INPUT_MODE}, expected release or finish"
+              exit 1
+              ;;
+          esac
+
+          # The pattern is RELEASE_TAG_RE of .github/scripts/release/lib.sh,
+          # which is not checked out yet. A prerelease suffix passes here and
+          # the release script reports it as such.
+          if [[ ! "$tag" =~ ^source/([a-z0-9-]+(/[a-z0-9-]+)*)/(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::${tag} is not source/<project>/vX.Y.Z"
             exit 1
           fi
           project="${BASH_REMATCH[1]}"
           version="${BASH_REMATCH[3]}"
-
-          if [[ ! -f "source/${project}/go.mod" ]]; then
-            echo "::error::source/${project}/go.mod does not exist"
+          if [[ -n "$INPUT_MODE" && ( "$project" != "$INPUT_PROJECT" || "$version" != "$INPUT_VERSION" ) ]]; then
+            echo "::error::project ${INPUT_PROJECT} and version ${INPUT_VERSION} do not form one release tag"
             exit 1
           fi
 
-          # A project is exactly one module. A go.mod in an enclosing directory
-          # makes source/${project} a nested module of another project, and a
-          # go.mod below it carves packages out of the module being released.
-          parent="${project%/*}"
-          while [[ "$parent" != "$project" && -n "$parent" ]]; do
-            if [[ -f "source/${parent}/go.mod" ]]; then
-              echo "::error::source/${project} is nested inside the module at source/${parent}; a project may not sit inside another project"
+          if [[ "$mode" == release ]]; then
+            if [[ ! "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::sha is '${INPUT_SHA}', expected a full commit id"
               exit 1
             fi
-            [[ "$parent" == */* ]] || break
-            parent="${parent%/*}"
-          done
-          nested="$(find "source/${project}" -mindepth 2 -name go.mod -print -quit)"
-          if [[ -n "$nested" ]]; then
-            echo "::error::source/${project} contains another module at ${nested%/go.mod}; a project may not contain another project"
-            exit 1
-          fi
-
-          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
-            echo "::error::${GITHUB_REF_NAME} does not point at a commit on main"
-            exit 1
-          fi
-
-          notes="docs/release-notes/${project}/${version}.md"
-          if [[ ! -f "$notes" ]]; then
-            echo "::error::$notes is missing — write the notes for ${GITHUB_REF_NAME} before tagging"
-            exit 1
-          fi
-
-          echo "project=${project}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "module=go.vipengele.org/${project}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: source/${{ steps.parse.outputs.project }}/go.mod
-          cache: false
-
-      # The tagged go.mod is what every consumer reads, and a pushed tag is
-      # permanent (ADR-0006). A consumer ignores a replace, while a GOWORK=off
-      # build here honours it, so no build catches a leftover one: this check
-      # does. The go.mod replaces no sibling, requires every sibling at a
-      # version tagged source/<sibling>/<version>, and declares the module path
-      # the vanity Worker serves for the project (ADR-0004). Only the tagged
-      # project is read, so a sibling under development elsewhere in the
-      # repository does not block its release. A prerelease suffix fails, and
-      # tags are listed with an unauthenticated `git ls-remote`, which answers
-      # only while the repository is public.
-      - name: The tagged go.mod is what a consumer gets
-        env:
-          PROJECT: ${{ steps.parse.outputs.project }}
-          VERSION: ${{ steps.parse.outputs.version }}
-        run: |
-          set -euo pipefail
-          prefix="go.vipengele.org/"
-          gomod="source/${PROJECT}/go.mod"
-          status=0
-
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::${GITHUB_REF_NAME} carries a prerelease suffix; only source/<project>/vX.Y.Z is released"
-            exit 1
-          fi
-
-          if ! json="$(go mod edit -json "$gomod" 2>&1)"; then
-            echo "::error file=${gomod}::${gomod} does not parse: ${json//$'\n'/ }"
-            exit 1
-          fi
-
-          want="${prefix}${PROJECT}"
-          have="$(jq -r .Module.Path <<< "$json")"
-          if [[ "$have" != "$want" ]]; then
-            echo "::error file=${gomod}::module path is ${have}, expected ${want}"
-            status=1
-          fi
-
-          while IFS=$'\x1f' read -r old oldv new newv; do
-            if [[ "$old" == "$prefix"* ]]; then
-              echo "::error file=${gomod}::replace of ${old}${oldv:+ $oldv} -> ${new}${newv:+ $newv}: a consumer of ${GITHUB_REF_NAME} ignores it; drop it (go mod edit -dropreplace=${old}) and require the sibling at a tagged release"
-            else
-              echo "::error file=${gomod}::replace of ${old}${oldv:+ $oldv} -> ${new}${newv:+ $newv}: only a sibling may be replaced, and a released go.mod replaces none"
-            fi
-            status=1
-          done < <(jq -r '(.Replace // [])[] | [.Old.Path, (.Old.Version // ""), .New.Path, (.New.Version // "")] | join("\u001f")' <<< "$json")
-
-          mapfile -t requires < <(jq -r '(.Require // [])[] | select(.Path | startswith("'"$prefix"'")) | "\(.Path) \(.Version)"' <<< "$json")
-          if (( ${#requires[@]} > 0 )); then
-            remote="https://github.com/${GITHUB_REPOSITORY}.git"
-            if ! listing="$(git ls-remote --tags --refs "$remote" 2>/dev/null)"; then
-              echo "::error::git ls-remote --tags ${remote} failed; the tag lookup is unauthenticated and needs a public repository"
-              exit 1
-            fi
-            declare -A tags=()
-            while read -r _ ref; do
-              if [[ -n "$ref" ]]; then
-                tags["${ref#refs/tags/}"]=1
-              fi
-            done <<< "$listing"
-
-            for entry in "${requires[@]}"; do
-              read -r path version <<< "$entry"
-              sibling="${path#"$prefix"}"
-              if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-.*[0-9]{14}-[0-9a-f]{12}$ ]]; then
-                echo "::error file=${gomod}::${path} is required at the pseudo-version ${version}; a released go.mod requires every sibling at a tagged release"
-                status=1
-              elif [[ -z "${tags["source/${sibling}/${version}"]:-}" ]]; then
-                echo "::error file=${gomod}::${path} ${version} has no tag source/${sibling}/${version} in ${GITHUB_REPOSITORY}; release ${sibling} first, then require that tag"
-                status=1
-              fi
-            done
-          fi
-          exit "$status"
-
-  test:
-    name: test
-    needs: tag
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: source/${{ needs.tag.outputs.project }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: source/${{ needs.tag.outputs.project }}/go.mod
-          cache: false
-      # go mod tidy resolves every requirement through the module proxy, as a
-      # consumer's build does. A go.mod or go.sum that tidy changes, or a
-      # go.sum it creates, is not the module that was reviewed.
-      - name: go.mod and go.sum are tidy
-        env:
-          PROJECT: ${{ needs.tag.outputs.project }}
-        run: |
-          set -euo pipefail
-          go mod tidy
-          if [[ -n "$(git status --porcelain -- go.mod go.sum)" ]]; then
-            git --no-pager diff -- go.mod go.sum
-            echo "::error file=source/${PROJECT}/go.mod::go mod tidy changes go.mod or go.sum of ${PROJECT}; the tagged module is not tidy"
-            exit 1
-          fi
-      - run: go build ./...
-      # A project holding a `*_windows.go` or `*_windows_test.go` file, in any
-      # of its packages, runs its suite on the gated windows-latest job in
-      # ci-test (ADR-0030); a release runs no Windows tests, and this
-      # cross-compile still vets those files, writing no artefacts. A project
-      # without one skips the step.
-      - id: windows
-        name: detect *_windows.go and *_windows_test.go
-        run: |
-          if [[ -n "$(find . \( -name '*_windows.go' -o -name '*_windows_test.go' \) -not -path './vendor/*' -print -quit)" ]]; then
-            echo "files=true" >> "$GITHUB_OUTPUT"
+            sha="$INPUT_SHA"
+            ref="$sha"
           else
-            echo "files=false" >> "$GITHUB_OUTPUT"
+            ref="refs/tags/${tag}"
           fi
-      - name: GOOS=windows go vet
-        if: steps.windows.outputs.files == 'true'
-        run: GOOS=windows go vet ./...
-      - run: go vet ./...
-      - run: go test -race -shuffle=on ./...
 
-  announce:
-    name: announce
-    needs: [tag, test]
+          {
+            echo "mode=${mode}"
+            echo "project=${project}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "sha=${sha}"
+            echo "ref=${ref}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          sparse-checkout: .github/scripts/release
+          persist-credentials: false
+
+      # The full history and every branch, so that origin/main is there to
+      # prove the commit is on it. Checking out a tag that does not exist fails
+      # here, which is what stops a dispatch naming an unknown tag.
+      - name: Check out the commit to release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+          path: release
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: release/source/${{ steps.resolve.outputs.project }}/go.mod
+          cache: false
+
+      # In mode `release` the tag must not exist yet; in mode `finish` it must,
+      # at the commit checked out. Both judge the project alone: what another
+      # project does with its siblings never blocks it.
+      - name: The release is valid
+        env:
+          RELEASE_ROOT: release
+          MODE: ${{ steps.resolve.outputs.mode }}
+          PROJECT: ${{ steps.resolve.outputs.project }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" == release ]]; then
+            tooling/.github/scripts/release/release-project.sh validate "$PROJECT" "$VERSION" "$SHA"
+          else
+            tooling/.github/scripts/release/release-project.sh finish-check "$TAG"
+          fi
+
+      # The last step of this job: from here on the project's own code runs.
+      - name: The project's suite passes
+        env:
+          RELEASE_ROOT: release
+          PROJECT: ${{ steps.resolve.outputs.project }}
+        run: tooling/.github/scripts/release/release-project.sh test "$PROJECT"
+
+  tag:
+    name: tag
+    needs: verify
+    if: needs.verify.outputs.mode == 'release' && !inputs.dry_run
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Credentials persist so the tag can be pushed. The working tree holds the
+      # release scripts alone, and the full history holds the commit to tag,
+      # which verify proved is on main.
+      - name: Check out the release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts/release
+          fetch-depth: 0
+
+      - name: Push the tag
+        env:
+          PROJECT: ${{ needs.verify.outputs.project }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          SHA: ${{ needs.verify.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: .github/scripts/release/release-project.sh tag "$PROJECT" "$VERSION" "$SHA" "$RUN_URL"
+
+  announce:
+    name: announce
+    needs: [verify, tag]
+    # `tag` is skipped in mode `finish`, where the tag already exists.
+    if: >-
+      !cancelled() && !inputs.dry_run
+      && needs.verify.result == 'success'
+      && (needs.tag.result == 'success' || needs.verify.outputs.mode == 'finish')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # The full history holds the tag and the notes in its commit; the working
+      # tree holds the release scripts alone.
+      - name: Check out the release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts/release
+          fetch-depth: 0
           persist-credentials: false
+
+      # The toolchain verify installed from the project's go.mod. It runs
+      # `go list -m` against the module proxy from the repository root, which
+      # holds no go.mod, so nothing of the project is built.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version: ${{ needs.verify.outputs.go-version }}
           cache: false
 
-      # Asking the proxy for the version makes it fetch the tag now, so the
-      # first consumer does not wait for it, and proves the module path and the
-      # tag agree. The proxy resolves go.vipengele.org/<project> through the
-      # vanity Worker, which answers for a project once its go.mod is merged and
-      # publish-vanity-modules has published the list (ADR-0004, ADR-0016). The
-      # proxy can lag the push by a moment, hence the retries.
-      - name: The module proxy serves the version
-        env:
-          MODULE: ${{ needs.tag.outputs.module }}
-          VERSION: ${{ needs.tag.outputs.version }}
-          GOPROXY: https://proxy.golang.org
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3 4 5 6; do
-            if go list -m "${MODULE}@${VERSION}"; then exit 0; fi
-            echo "attempt ${attempt} failed; retrying in 10s"
-            sleep 10
-          done
-          echo "::error::${MODULE}@${VERSION} is not resolvable through the module proxy. go.vipengele.org must answer for ${MODULE} before its tag is pushed. It answers once this project's go.mod is merged and publish-vanity-modules has published the list, so a failure means the list has not been published or the Worker is down: check that run, then re-run this workflow (ADR-0004, ADR-0016)"
-          exit 1
-
-      # A release is idempotent: re-running the workflow after a partial run
-      # finishes the announcement instead of failing on what already exists.
-      - name: GitHub Release
+      - name: The module proxy serves the version and the GitHub Release exists
         env:
           GH_TOKEN: ${{ github.token }}
-          PROJECT: ${{ needs.tag.outputs.project }}
-          VERSION: ${{ needs.tag.outputs.version }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
           set -euo pipefail
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "release ${GITHUB_REF_NAME} already exists"
-            exit 0
-          fi
-          prerelease=()
-          if [[ "$VERSION" == *-* || "$VERSION" == v0.* ]]; then prerelease=(--prerelease); fi
-          gh release create "${GITHUB_REF_NAME}" \
-            --verify-tag \
-            --title "${PROJECT} ${VERSION}" \
-            --notes-file "docs/release-notes/${PROJECT}/${VERSION}.md" \
-            "${prerelease[@]}"
+          .github/scripts/release/release-project.sh announce "$TAG"
+          echo "Released [${TAG}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG})" >> "$GITHUB_STEP_SUMMARY"
