@@ -861,6 +861,77 @@ release_commit_none() {
 }
 register "release-commit: prepare releases the commit itself when no sibling is replaced" release_commit_none
 
+# chain_two_siblings <name>: chain_released, then sibling c and b's second
+# replace of it, by directory, at c's pending version v0.3.0, which is tagged
+# and pushed on main's new head. A file:// GOPROXY serves a v0.2.0 and c
+# v0.3.0. Sets $main to main's head.
+chain_two_siblings() {
+  chain_released "$1"
+  mkdir -p "$FIXTURE/source/c"
+  printf 'module go.vipengele.org/c\n\ngo 1.25.0\n' > "$FIXTURE/source/c/go.mod"
+  fixture_go_source c
+  (
+    cd "$FIXTURE/source/b"
+    go mod edit -require=go.vipengele.org/c@v0.3.0 -replace=go.vipengele.org/c=../c
+  )
+  printf 'package dependent\n\nimport other "go.vipengele.org/c"\n\n// Octuple returns eight times n.\nfunc Octuple(n int) int { return other.Double(Quadruple(n)) }\n' \
+    > "$FIXTURE/source/b/octuple.go"
+  fixture_notes c v0.3.0
+  fixture_commit "c and b's second sibling"
+  fixture_tag source/c/v0.3.0
+  fixture_push refs/tags/source/c/v0.3.0
+  main="$(fixture_git rev-parse HEAD)"
+  fixture_proxy a v0.2.0
+  fixture_proxy c v0.3.0
+}
+
+release_commit_two_siblings() {
+  chain_two_siblings release-commit-two-siblings
+  local bare="$FIXTURE.origin.git" tag=source/b/v0.1.0 commit dir="$FIXTURE.release-commit" gomod changed
+  release_project prepare b v0.1.0 "$main" "$dir"
+  expect_ok || return 1
+  commit="$(output_value commit)"
+  [[ -n "$commit" && "$commit" != "$main" ]] || fail "no release commit: $out" || return 1
+  [[ "$(fixture_git rev-parse HEAD)" == "$commit" ]] || fail "the checkout is not at $commit" || return 1
+  gomod="$(fixture_git show "$commit:source/b/go.mod")"
+  ! grep -q replace <<< "$gomod" || fail "the release commit's go.mod replaces:" "$gomod" || return 1
+  grep -qE '^(require )?[[:space:]]*go\.vipengele\.org/a v0\.2\.0$' <<< "$gomod" || fail "a is not required at v0.2.0:" "$gomod" || return 1
+  grep -qE '^(require )?[[:space:]]*go\.vipengele\.org/c v0\.3\.0$' <<< "$gomod" || fail "c is not required at v0.3.0:" "$gomod" || return 1
+  changed="$(fixture_git diff-tree -r --no-renames --name-only "$main" "$commit")"
+  [[ "$changed" == $'source/b/go.mod\nsource/b/go.sum' ]] || fail "the release commit changes:" "$changed" || return 1
+
+  sleep 1
+  local prepared_fixture="$FIXTURE"
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git clone -q "$bare" "$WORK/release-commit-two-siblings-tag"
+  FIXTURE="$WORK/release-commit-two-siblings-tag"
+  release_project tag b v0.1.0 "$main" https://github.com/vipengele/go/actions/runs/42 "$dir" "$commit"
+  expect_ok || return 1
+  FIXTURE="$prepared_fixture"
+  [[ "$(git -C "$bare" rev-parse "refs/tags/$tag^{commit}")" == "$commit" ]] || fail "$tag on origin is not at $commit" || return 1
+}
+register "release-commit: a dependent replacing two siblings is tagged on a release commit requiring both at their tags" release_commit_two_siblings
+
+release_commit_prepare_wrong_head() {
+  chain_released release-commit-prepare-wrong-head proxy
+  local head
+  head="$(fixture_git rev-parse HEAD)"
+  fixture_commit "after main"
+  release_project prepare b v0.1.0 "$head" "$FIXTURE.release-commit"
+  expect_fail "is at $(fixture_git rev-parse HEAD), not at $head"
+}
+register "release-commit: prepare fails when the checkout is not at the commit given" release_commit_prepare_wrong_head
+
+release_commit_prepare_dirty() {
+  local file
+  for file in go.mod go.sum; do
+    chain_released "release-commit-prepare-dirty-$file" proxy
+    printf '\n// edited in the checkout\n' >> "$FIXTURE/source/b/$file"
+    release_project prepare b v0.1.0 "$main" "$FIXTURE.release-commit"
+    expect_fail "source/b/go\.mod or go\.sum differs from $main in the checkout" || return 1
+  done
+}
+register "release-commit: prepare fails when the project's go.mod or go.sum is modified in the checkout" release_commit_prepare_dirty
+
 # release_candidate <name> <file...>: on releasable's main head, a commit not
 # on main that changes cli/core's go.sum and each given file. Sets $candidate.
 release_candidate() {
