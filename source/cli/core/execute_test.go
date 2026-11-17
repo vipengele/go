@@ -1738,3 +1738,198 @@ func TestCompleteResolvesAnAliasButDoesNotOfferIt(t *testing.T) {
 		t.Errorf("__complete ship \"\" = %+v, want 0 and red, green", got)
 	}
 }
+
+// groupApp returns an App, with -v/--verbose, --json and a pre-run hook recording its call in c
+// as "pre", whose command "remote add" records its run in c as "run". "remote" declares the
+// inherited --profile, and "add" declares --name, --url, --token and --user and lists groups.
+func groupApp(c *calls, groups ...spec.FlagGroup) *cli.App {
+	app := cli.New(identity(), cli.WithVerbose(), cli.WithJSON(), preHook(c, "", nil))
+	app.Add(&spec.Command{
+		Name:    "remote",
+		Summary: "Manage remotes",
+		Flags:   []spec.Flag{spec.StringFlag("profile", "the profile to use", spec.Inherited())},
+		Commands: []*spec.Command{{
+			Name:    "add",
+			Summary: "Add a remote",
+			Flags: []spec.Flag{
+				spec.StringFlag("name", "the remote's name"),
+				spec.StringFlag("url", "the remote's URL"),
+				spec.StringFlag("token", "the token to authenticate with"),
+				spec.StringFlag("user", "the user to authenticate as"),
+			},
+			FlagGroups: groups,
+			Run: func(context.Context, *spec.Invocation) error {
+				c.add("run")
+				return nil
+			},
+		}},
+	})
+	return app
+}
+
+func TestExecuteArgsFlagGroups(t *testing.T) {
+	exclusive := func(flags ...string) spec.FlagGroup {
+		return spec.FlagGroup{Kind: spec.MutuallyExclusive, Flags: flags}
+	}
+	together := func(flags ...string) spec.FlagGroup {
+		return spec.FlagGroup{Kind: spec.RequiredTogether, Flags: flags}
+	}
+	tests := []struct {
+		name    string
+		groups  []spec.FlagGroup
+		args    []string
+		want    result
+		wantLog string
+	}{
+		{
+			name:    "mutually exclusive, two set",
+			groups:  []spec.FlagGroup{exclusive("name", "url", "token")},
+			args:    []string{"remote", "add", "--token", "t", "--url", "u"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --url and --token are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "mutually exclusive, all set, names the first two in declaration order",
+			groups:  []spec.FlagGroup{exclusive("name", "url", "token")},
+			args:    []string{"remote", "add", "--token", "t", "--url", "u", "--name", "n"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --name and --url are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "mutually exclusive, an explicit default counts as set",
+			groups:  []spec.FlagGroup{exclusive("name", "url")},
+			args:    []string{"remote", "add", "--name=", "--url="},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --name and --url are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "mutually exclusive, one set",
+			groups:  []spec.FlagGroup{exclusive("name", "url")},
+			args:    []string{"remote", "add", "--url", "u"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "mutually exclusive, none set",
+			groups:  []spec.FlagGroup{exclusive("name", "url")},
+			args:    []string{"remote", "add"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "required together, one missing",
+			groups:  []spec.FlagGroup{together("token", "user")},
+			args:    []string{"remote", "add", "--user", "u"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --user requires --token\n"},
+			wantLog: "",
+		},
+		{
+			name:    "required together, names the first set and the first unset",
+			groups:  []spec.FlagGroup{together("name", "url", "token", "user")},
+			args:    []string{"remote", "add", "--user", "u", "--url", "x"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --url requires --name\n"},
+			wantLog: "",
+		},
+		{
+			name:    "required together, none set",
+			groups:  []spec.FlagGroup{together("token", "user")},
+			args:    []string{"remote", "add"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "required together, all set",
+			groups:  []spec.FlagGroup{together("token", "user")},
+			args:    []string{"remote", "add", "--token", "t", "--user", "u"},
+			want:    result{code: cli.ExitOK},
+			wantLog: "pre run",
+		},
+		{
+			name:    "groups are checked in order and the first violation is reported",
+			groups:  []spec.FlagGroup{together("token", "user"), exclusive("name", "url")},
+			args:    []string{"remote", "add", "--name", "n", "--url", "u", "--token", "t"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --token requires --user\n"},
+			wantLog: "",
+		},
+		{
+			name:    "an inherited flag set after the subcommand",
+			groups:  []spec.FlagGroup{exclusive("profile", "token")},
+			args:    []string{"remote", "add", "--profile", "p", "--token", "t"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --profile and --token are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "an inherited flag set before the subcommand",
+			groups:  []spec.FlagGroup{together("profile", "user")},
+			args:    []string{"remote", "--profile", "p", "add"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --profile requires --user\n"},
+			wantLog: "",
+		},
+		{
+			name:    "a standard flag",
+			groups:  []spec.FlagGroup{exclusive("json", "url")},
+			args:    []string{"--json", "remote", "add", "--url", "u"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --json and --url are mutually exclusive\n"},
+			wantLog: "",
+		},
+		{
+			name:    "a standard flag set alone",
+			groups:  []spec.FlagGroup{together("verbose", "user")},
+			args:    []string{"remote", "add", "-v"},
+			want:    result{code: cli.ExitUsage, stderr: "tool: remote add: --verbose requires --user\n"},
+			wantLog: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &calls{}
+			got := runApp(t, groupApp(c, tt.groups...), tt.args...)
+			if got != tt.want {
+				t.Errorf("ExecuteArgs(%q)\n got: %+v\nwant: %+v", tt.args, got, tt.want)
+			}
+			if c.String() != tt.wantLog {
+				t.Errorf("ExecuteArgs(%q) calls %q, want %q", tt.args, c.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
+func TestExecuteArgsFlagGroupsLeaveHelpAlone(t *testing.T) {
+	c := &calls{}
+	app := groupApp(c, spec.FlagGroup{Kind: spec.MutuallyExclusive, Flags: []string{"name", "url"}})
+	args := []string{"remote", "add", "--name", "n", "--url", "u", "--help"}
+	got := runApp(t, app, args...)
+	if got.code != cli.ExitOK || got.stderr != "" || !strings.Contains(got.stdout, "Add a remote") || c.String() != "" {
+		t.Errorf("ExecuteArgs(%q) = %+v, calls %q; want help on stdout, exit 0 and no calls", args, got, c.String())
+	}
+}
+
+func TestExecuteArgsFlagGroupsApplyToTheirOwnCommand(t *testing.T) {
+	c := &calls{}
+	app := cli.New(identity())
+	app.Add(&spec.Command{
+		Name:    "remote",
+		Summary: "Manage remotes",
+		Flags: []spec.Flag{
+			spec.StringFlag("profile", "the profile to use", spec.Inherited()),
+			spec.StringFlag("token", "the token", spec.Inherited()),
+		},
+		FlagGroups: []spec.FlagGroup{{Kind: spec.MutuallyExclusive, Flags: []string{"profile", "token"}}},
+		Run: func(context.Context, *spec.Invocation) error {
+			c.add("remote")
+			return nil
+		},
+		Commands: []*spec.Command{{
+			Name:    "add",
+			Summary: "Add a remote",
+			Run: func(context.Context, *spec.Invocation) error {
+				c.add("add")
+				return nil
+			},
+		}},
+	})
+	args := []string{"remote", "add", "--profile", "p", "--token", "t"}
+	if got := runApp(t, app, args...); got != (result{code: cli.ExitOK}) || c.String() != "add" {
+		t.Errorf("ExecuteArgs(%q) = %+v, calls %q; want exit 0 and calls \"add\"", args, got, c.String())
+	}
+}
