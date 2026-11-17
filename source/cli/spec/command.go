@@ -32,6 +32,10 @@ type Command struct {
 	// Flags are the flags the command declares, created by [BoolFlag], [StringFlag] and
 	// [IntFlag]. An inherited flag is also available to every descendant.
 	Flags []Flag
+	// FlagGroups constrain which of the flags visible to the command may, or must, be set
+	// together on its command line, as [FlagGroup] describes. A group applies to this command
+	// alone, not to its subcommands.
+	FlagGroups []FlagGroup
 	// Run executes the command. It may be nil only for a command that has subcommands.
 	Run func(ctx context.Context, inv *Invocation) error
 	// Commands are the subcommands.
@@ -93,7 +97,12 @@ func (e *CommandError) Unwrap() error {
 //   - a bool flag given a completion by [Complete], and a flag completion built by
 //     [CompleteFunc] with a nil function;
 //   - two flags with the same name, or the same shorthand, visible to one command: declared by
-//     it, or inherited from one of its ancestors.
+//     it, or inherited from one of its ancestors;
+//   - a flag group with a Kind other than [MutuallyExclusive] or [RequiredTogether], the zero
+//     value included, with fewer than two flags, naming a flag twice, or naming a flag not
+//     visible to its command: neither declared by it nor inherited from one of its ancestors.
+//     The standard flags of a tool built by cli/core are inherited flags of its root, so a group
+//     may name them.
 func (c *Command) Validate() error {
 	if c == nil {
 		return &CommandError{Err: fmt.Errorf("%w: command is nil", validate.ErrInvalid)}
@@ -189,6 +198,7 @@ func (c *Command) validate(parent string, inherited flagScope, errs *[]error) {
 			children = children.with(f, path)
 		}
 	}
+	c.validateFlagGroups(inherited, names, report)
 
 	claimed := map[string]claim{}
 	for i, sub := range c.Commands {
