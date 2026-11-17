@@ -137,6 +137,12 @@ layout and the environment (ADR-0009).
 _Avoid_: directory type, location, path (a resolved directory is a path, the kind is what it is
 for)
 
+**Paths layout**:
+The set of conventions that decides where each **Directory kind** is placed: the XDG layout, the
+macOS layout under `~/Library`, or the Windows layout under `%AppData%`. By default it follows the
+operating system, and a tool can choose one for every system it ships for (ADR-0039).
+_Avoid_: platform, OS layout, directory scheme
+
 **Home**:
 The single root under which every **Directory kind** is a subdirectory (`config`, `state`, `cache`,
 `data`, `log`). It is set by the `Home` option or by the environment variable `<PREFIX>_HOME`, and
