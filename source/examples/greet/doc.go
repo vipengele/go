@@ -21,10 +21,14 @@
 //
 // # Moving to a new release
 //
-// The example follows the latest release of go.vipengele.org/update. When update releases, one
+// The example follows the latest release of each project it requires. When update releases, one
 // pull request moves together: the requires in go.mod, the commit SHA in the project's
 // release.yml and the comment naming the release beside it, the project's .goreleaser.yaml,
-// re-rendered for the release, and every "@vX.Y.Z" in docs/guide/consumer.md. The project's tests
-// fail until all of them name the same release, so a Dependabot pull request that bumps go.mod
-// alone goes red by design.
+// re-rendered with "GOWORK=off go test -run TestReleaseGoreleaserConfig . -update", and in
+// docs/guide/consumer.md every "go.vipengele.org/<path>@vX.Y.Z", the quoted copies of release.yml
+// and .goreleaser.yaml, and the tag in the "git ls-remote" command that finds the pinned commit.
+// A release of another required project moves its require and its "@vX.Y.Z" in the guide. The
+// project's tests fail until go.mod, release.yml, .goreleaser.yaml and the guide's versions and
+// quoted files agree, so a Dependabot pull request that bumps go.mod alone goes red by design; no
+// test reads the "git ls-remote" tag, which is checked by hand.
 package main

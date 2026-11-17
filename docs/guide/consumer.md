@@ -18,7 +18,7 @@ Go 1.25 or later. The modules resolve through `go.vipengele.org`, which answers 
 In your tool's module, require the four modules:
 
 ```bash
-go get go.vipengele.org/cli/core@v0.1.0 go.vipengele.org/cli/spec@v0.1.0 go.vipengele.org/config@v0.1.0 go.vipengele.org/update@v0.1.0
+go get go.vipengele.org/cli/core@v0.3.0 go.vipengele.org/cli/spec@v0.2.0 go.vipengele.org/config@v0.2.0 go.vipengele.org/update@v0.2.0
 ```
 
 Releasing (step 5) also needs [minisign](https://jedisct1.github.io/minisign/) on your machine,
@@ -342,7 +342,7 @@ jobs:
     # run starts, and its publish job creates the release.
     permissions:
       contents: write
-    uses: vipengele/go/.github/workflows/release-tool.yml@415a61a829b6d2e615e0ca978023b315d7588904 # source/update/v0.1.0
+    uses: vipengele/go/.github/workflows/release-tool.yml@0f352cc248050d160db73705bb1eed9bc857f6e9 # source/update/v0.2.0
     with:
       environment: release
     secrets:
@@ -356,7 +356,7 @@ jobs:
   build job holds the signing key and a tag can be moved. Find the commit with:
 
   ```bash
-  git ls-remote https://github.com/vipengele/go 'refs/tags/source/update/v0.1.0^{}'
+  git ls-remote https://github.com/vipengele/go 'refs/tags/source/update/v0.2.0^{}'
   ```
 
   When the tool raises its `update` require, it moves the pin and the comment to the new tag and
