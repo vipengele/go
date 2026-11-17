@@ -17,7 +17,7 @@
 //     cache, data, log and runtime;
 //  3. the environment variable <PREFIX>_HOME, as [spec.Identity.EnvVar] names it with the suffix
 //     "HOME", a home root like Options.Home;
-//  4. on the XDG layout only, the kind's XDG base directory, XDG_CONFIG_HOME, XDG_STATE_HOME,
+//  4. on the XDG layout only, whatever selects it, the kind's XDG base directory, XDG_CONFIG_HOME, XDG_STATE_HOME,
 //     XDG_CACHE_HOME or XDG_DATA_HOME, with Identity.DirName appended;
 //  5. the platform default below.
 //
@@ -27,9 +27,14 @@
 //
 // # Layouts
 //
-// Options.GOOS, or runtime.GOOS when it is empty, selects the layout. It selects which
-// directories are used, not the path separator, which is always the running system's. In the
-// table <app> is Identity.DirName and ~ is the user's home directory.
+// Options.Layout selects the layout when it names one of [LayoutXDG], [LayoutDarwin] and
+// [LayoutWindows], on every operating system: LayoutXDG on darwin honours the XDG variables, and
+// LayoutDarwin on linux gives the paths below ~/Library. Otherwise, [LayoutDefault], Options.GOOS,
+// or runtime.GOOS when it is empty, selects the layout. GOOS stays the target operating system
+// for everything else, such as the permissions [Dirs.Ensure] checks. A layout selects which
+// directories are used, not the path separator, which is always the running system's. A Layout
+// that is not valid makes Resolve fail, even when <PREFIX>_HOME or Options.Home would have
+// applied. In the table <app> is Identity.DirName and ~ is the user's home directory.
 //
 // The XDG layout serves "linux" and every GOOS other than "darwin" and "windows":
 //
