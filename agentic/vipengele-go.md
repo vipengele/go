@@ -98,8 +98,8 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
   podman. It fails unless the log shows `--- PASS: TestSupervisor`, since a skipped test exits 0, and
   an `always()` step removes the containers labelled `servicetest`. It gates merges through the test
   stage.
-- `release-selftest.yml` is the offline self-test of the release scripts and workflows, and
-  actionlint over `release.yml`, `auto-release.yml`, itself and `ci-test.yml`. `ci-test.yml`'s
+- `release-selftest.yml` is the offline self-test of the release scripts and workflows, including
+  `verify-sibling-deps/verify.sh`, and actionlint over `release.yml`, `auto-release.yml`, itself and `ci-test.yml`. `ci-test.yml`'s
   `release-selftest` job calls it on every run of the test stage, so it gates `ci-gate` through that
   stage. `ci-orchestration.yml` is rendered by `gt` from `.gt-repo.yaml`, which accepts only the
   `preflight`, `build`, `test` and `end2end` stages, so the self-test is a job of the repo-owned
