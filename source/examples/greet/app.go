@@ -11,6 +11,7 @@ import (
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 	cfg "go.vipengele.org/config"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/updatecmd"
@@ -59,9 +60,16 @@ func prodDeps() deps {
 
 // snippet:start app
 
+// pathsLayout is the directory layout of every directory the tool resolves: its configuration
+// directory and the state directory of its updates. The XDG layout puts them under ~/.config and
+// ~/.local/state on every operating system, macOS included, where a command-line tool's files are
+// conventionally found, rather than under ~/Library/Application Support.
+const pathsLayout = paths.LayoutXDG
+
 // newApp returns the App of the tool: its identity, the build information "version" prints, the
-// configuration [config] describes, the background update check around every command not
-// annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
+// configuration [config] describes, the directory layout [pathsLayout], the background update
+// check around every command not annotated [spec.SkipUpdateCheck], and the commands "hello" and
+// "update".
 func newApp(d deps) *cli.App {
 	updateCfg := updateConfig(d)
 	checkBefore, checkAfter, err := updateCfg.UpdateCheckHooks()
@@ -72,6 +80,7 @@ func newApp(d deps) *cli.App {
 	app := cli.New(identity(),
 		cli.WithBuildInfo(d.Build),
 		cli.WithConfig(defaultConfig()),
+		cli.WithPathsLayout(pathsLayout),
 		cli.WithPreRun(checkBefore),
 		cli.WithPostRun(checkAfter),
 	)
@@ -147,8 +156,9 @@ func helloCommand() *spec.Command {
 const publicKey = `untrusted comment: minisign public key: ED01B5D0CD595CE5
 RWTlXFnN0LUB7TK69kkxD61cM8n6bGPEKBYTRyGqdj1OkL2II+9ipoSa`
 
-// updateConfig returns the configuration of the tool's updates. A development build, whose
-// version is not a release, starts no background check, and "update" refuses it.
+// updateConfig returns the configuration of the tool's updates, whose state directory follows
+// [pathsLayout] as the App's directories do. A development build, whose version is not a
+// release, starts no background check, and "update" refuses it.
 func updateConfig(d deps) update.Config {
 	return update.Config{
 		Identity:    identity(),
@@ -156,6 +166,7 @@ func updateConfig(d deps) update.Config {
 		TrustedKeys: []string{publicKey},
 		Source:      d.Source,
 		StateDir:    d.StateDir,
+		PathsLayout: pathsLayout,
 		HTTPClient:  d.HTTPClient,
 		Now:         d.Now,
 	}

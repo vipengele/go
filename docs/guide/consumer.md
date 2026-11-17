@@ -49,15 +49,32 @@ func identity() spec.Identity {
 
 `cli.New` builds the App from the identity and the options the tool wants, and `App.Add` adds the
 tool's commands. The App always holds `version`, which prints the build information
-`buildinfo.Read` returns; a tool never adds a command of that name. The example's `newApp` is the
-whole App, each piece of which the steps below explain:
+`buildinfo.Read` returns; a tool never adds a command of that name.
+
+`cli.WithPathsLayout` chooses the convention every directory the App resolves follows. Without it,
+the directories follow the operating system the tool runs on, which on macOS puts them under
+`~/Library/Application Support`. That is where a macOS application keeps its files, but a
+command-line tool's configuration conventionally lives in `~/.config` there as on Linux, where its
+users look for it and keep it in their dotfiles. `paths.LayoutXDG`, from
+`go.vipengele.org/cli/spec/paths`, resolves every directory under the XDG conventions on every
+operating system, honouring `XDG_CONFIG_HOME` and the other XDG variables. The example names its
+layout once, as `pathsLayout`, because its update state follows the same layout (step 4).
+
+The example's `newApp` is the whole App, each piece of which the steps below explain:
 
 <!-- snippet: app.go#app -->
 
 ```go
+// pathsLayout is the directory layout of every directory the tool resolves: its configuration
+// directory and the state directory of its updates. The XDG layout puts them under ~/.config and
+// ~/.local/state on every operating system, macOS included, where a command-line tool's files are
+// conventionally found, rather than under ~/Library/Application Support.
+const pathsLayout = paths.LayoutXDG
+
 // newApp returns the App of the tool: its identity, the build information "version" prints, the
-// configuration [config] describes, the background update check around every command not
-// annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
+// configuration [config] describes, the directory layout [pathsLayout], the background update
+// check around every command not annotated [spec.SkipUpdateCheck], and the commands "hello" and
+// "update".
 func newApp(d deps) *cli.App {
 	updateCfg := updateConfig(d)
 	checkBefore, checkAfter, err := updateCfg.UpdateCheckHooks()
@@ -68,6 +85,7 @@ func newApp(d deps) *cli.App {
 	app := cli.New(identity(),
 		cli.WithBuildInfo(d.Build),
 		cli.WithConfig(defaultConfig()),
+		cli.WithPathsLayout(pathsLayout),
 		cli.WithPreRun(checkBefore),
 		cli.WithPostRun(checkAfter),
 	)
@@ -175,9 +193,9 @@ func (c *config) Validate() error {
   missing file is valid. A run function reads the result with `cli.ConfigFrom[config](ctx)`.
 - the `config` command group: `config path`, `config show`, `config validate` and `config edit`.
 
-The configuration directory follows the platform: `$XDG_CONFIG_HOME/greet` or `~/.config/greet` on
-Linux, `~/Library/Application Support/greet` on macOS, `%AppData%\greet` on Windows, or
-`$GREET_HOME/config` when that variable is set. `greet config path` prints the file's path.
+The configuration directory follows the App's layout, `paths.LayoutXDG` (step 1):
+`$XDG_CONFIG_HOME/greet` or `~/.config/greet` on every operating system, or `$GREET_HOME/config`
+when that variable is set. `greet config path` prints the file's path.
 
 A configuration that fails to load or validate stops the command with exit code 1 and names the
 key, its value and its origin:
@@ -196,6 +214,13 @@ holds the minisign public key the releases are signed with (step 5 generates it)
 `Source`, `StateDir`, `HTTPClient` and `Now` zero takes their production defaults: the tool's
 GitHub releases, its state directory, a client of the update's own and `time.Now`.
 
+`PathsLayout` is the layout that state directory is resolved under, and it is the App's
+`pathsLayout` (step 1): a tool's state and its configuration follow one layout. With the App's
+layout alone, greet on macOS would read its configuration from `~/.config/greet` and keep its
+update state under `~/Library/Application Support/greet`; with both, the state directory is
+`$XDG_STATE_HOME/greet` or `~/.local/state/greet` on every operating system, or
+`$GREET_HOME/state` when that variable is set.
+
 <!-- snippet: app.go#update -->
 
 ```go
@@ -205,8 +230,9 @@ GitHub releases, its state directory, a client of the update's own and `time.Now
 const publicKey = `untrusted comment: minisign public key: ED01B5D0CD595CE5
 RWTlXFnN0LUB7TK69kkxD61cM8n6bGPEKBYTRyGqdj1OkL2II+9ipoSa`
 
-// updateConfig returns the configuration of the tool's updates. A development build, whose
-// version is not a release, starts no background check, and "update" refuses it.
+// updateConfig returns the configuration of the tool's updates, whose state directory follows
+// [pathsLayout] as the App's directories do. A development build, whose version is not a
+// release, starts no background check, and "update" refuses it.
 func updateConfig(d deps) update.Config {
 	return update.Config{
 		Identity:    identity(),
@@ -214,6 +240,7 @@ func updateConfig(d deps) update.Config {
 		TrustedKeys: []string{publicKey},
 		Source:      d.Source,
 		StateDir:    d.StateDir,
+		PathsLayout: pathsLayout,
 		HTTPClient:  d.HTTPClient,
 		Now:         d.Now,
 	}

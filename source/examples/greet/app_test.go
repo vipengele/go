@@ -2,14 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/updatecmd"
 	"go.vipengele.org/update/updatetest"
@@ -133,5 +136,64 @@ func TestVersion(t *testing.T) {
 	got := run(t, testDeps(t, newServer(t)), t.TempDir(), "version")
 	if want := (result{code: 0, stdout: testVersion + " build 0123456789ab\n"}); got != want {
 		t.Errorf("ExecuteArgs = %+v, want %+v", got, want)
+	}
+}
+
+// layoutSeenByCommand returns the paths layout a command of the App of deps receives in its
+// context, through a probe command added to that App and run with no variable set.
+func layoutSeenByCommand(t *testing.T, d deps) paths.Layout {
+	t.Helper()
+	var seen paths.Layout
+	app := newApp(d)
+	app.Add(&spec.Command{
+		Name:    "probe",
+		Summary: "Report the paths layout",
+		Run: func(ctx context.Context, _ *spec.Invocation) error {
+			seen = cli.PathsLayoutFrom(ctx)
+			return nil
+		},
+	})
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{
+		Stdout:    &stdout,
+		Stderr:    &stderr,
+		WorkDir:   t.TempDir(),
+		LookupEnv: func(string) (string, bool) { return "", false },
+		Terminal:  func(spec.Stream) bool { return false },
+	}
+	if code := app.ExecuteArgs(env, []string{"probe"}); code != 0 {
+		t.Fatalf("ExecuteArgs = %d, want 0; stderr %q", code, stderr.String())
+	}
+	return seen
+}
+
+// resolvedStateDir returns the state directory greet's update configuration resolves to for an
+// empty deps.StateDir, on goos, with only the variables of env set.
+func resolvedStateDir(t *testing.T, goos string, env map[string]string) string {
+	t.Helper()
+	d := testDeps(t, newServer(t))
+	d.StateDir = ""
+	c := updateConfig(d)
+	c.GOOS = goos
+	c.Getenv = func(key string) string { return env[key] }
+	c.UserHomeDir = func() (string, error) { return t.TempDir(), nil }
+	r, err := c.Resolved()
+	if err != nil {
+		t.Fatalf("Resolved: %v", err)
+	}
+	return r.StateDir
+}
+
+func TestAppResolvesDirectoriesUnderTheXDGLayout(t *testing.T) {
+	if got := layoutSeenByCommand(t, testDeps(t, newServer(t))); got != paths.LayoutXDG {
+		t.Errorf("PathsLayoutFrom = %v, want %v", got, paths.LayoutXDG)
+	}
+}
+
+func TestUpdateStateFollowsTheXDGLayoutOnDarwin(t *testing.T) {
+	stateHome := t.TempDir()
+	got := resolvedStateDir(t, "darwin", map[string]string{"XDG_STATE_HOME": stateHome})
+	if want := filepath.Join(stateHome, identity().DirName); got != want {
+		t.Errorf("StateDir = %q, want %q", got, want)
 	}
 }
