@@ -1,5 +1,5 @@
 ---
-description: A project developed with a sibling requires it and replaces it with the sibling's own directory; the release PR drops the replace and requires the sibling at a tag.
+description: A project developed with a sibling requires it and replaces it with the sibling's own directory; the release commit drops the replace and the dependent is tagged on it.
 ---
 
 # A sibling is developed by a directory replace
@@ -33,28 +33,35 @@ still honours it, so a leftover `replace` builds in this repository and breaks e
 the explicit check catches it:
 
 - **Strict mode.** While some `docs/release-notes/b/v<version>.md` exists and the repository has no
-  tag `source/b/v<version>`, `b` is in strict mode: its `go.mod` replaces no sibling and requires
-  every sibling at a version tagged `source/<sibling>/vX.Y.Z`. Notes for a version that is already
-  tagged leave `b` in development mode.
-- **The release workflow.** `release.yml`'s `verify` job repeats the strict check for the released
-  project alone, so a sibling developed elsewhere in the repository never blocks the release.
+  tag `source/b/v<version>`, `b` is in strict mode: a sibling may keep its directory `replace` if
+  `b` requires it at the sibling's pending version (its notes exist, its tag does not) or at a tag
+  of the sibling, and a sibling without a `replace` is required at a tagged version. Notes for a
+  version that is already tagged leave `b` in development mode.
+- **The release commit.** A `replace` on `main` never reaches a tag. `release.yml` builds, for `b`,
+  a commit on the merge commit that changes only `source/b/go.mod` and `go.sum`: the `replace`s
+  dropped, tidied against the siblings' tags, subject `chore(release): b <version>`. `verify`
+  validates and tests it, and `tag` rebuilds the identical commit, requires the same id and pushes
+  only the tag (ADR-0038). `main` keeps the `replace`, and `verify` fails when the tidied go.mod
+  still carries one or requires a sibling at an untagged version.
 
 ## Applies to
 
 - Starting to use a sibling: `go mod edit -require=go.vipengele.org/a@v0.0.0` (or `a`'s last
   release) and `go mod edit -replace=go.vipengele.org/a=../a`, with the path from `b`'s depth, then
   `go mod tidy`.
-- Releasing `b`: one release pull request carries the notes, `go mod edit -dropreplace`,
-  `go get go.vipengele.org/a@vX.Y.Z` and `go mod tidy`. Its `GOWORK=off` CI compiles `b` against the
-  released `a`, as a consumer of the tag will. The local check in the `release` skill is mandatory
-  before merging, because the merge of the notes is the release: `auto-release` tags the merge
-  commit.
+- Releasing `b` together with `a`: one release pull request carries the notes of both, and `b`
+  keeps its `replace` and requires `a` at `a`'s pending version
+  (`go mod edit -require=go.vipengele.org/a@vX.Y.Z`, then `go mod tidy`). `auto-release` tags `a`,
+  then `b` on a release commit that drops the `replace`. A dry run of the chain fails at `b`,
+  because it tags nothing.
+- Releasing `b` when `a` is already tagged: the same pull request carries `b`'s notes and requires
+  `a` at its tag; the `replace` may stay or be dropped with `go mod edit -dropreplace` and
+  `go mod tidy`. The local check in the `release` skill is mandatory before merging, because the
+  merge of the notes is the release.
 - Release order is dependency-first at release time only: `b`'s release needs `a` released at a
-  version that contains what `b` uses. Any project nothing unreleased feeds is released whenever it
-  is ready.
-- A project in strict mode cannot take a sibling `replace` until its tag exists. Wait for the tag,
-  or move its notes out, before developing it with an unreleased sibling.
-- A dependent is released by a pull request after its sibling's tag exists, so a chain of projects
-  needs one release pull request per tier.
+  version that contains what `b` uses, in the same pull request or before it. Any project nothing
+  unreleased feeds is released whenever it is ready.
+- A chain stopped halfway, `a` tagged and `b` failed, still passes CI, since `b` requires `a` at a
+  tag. The fix is an ordinary pull request.
 - The root `go.work` lists every project for local development. CI runs with `GOWORK=off` and never
   reads it.

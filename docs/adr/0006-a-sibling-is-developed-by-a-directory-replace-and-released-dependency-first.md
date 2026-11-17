@@ -3,6 +3,9 @@
 Status: supersedes ADR-0002. Amended by `0037-a-release-is-the-merge-of-its-notes.md`, which
 replaces the tag pushed after the release pull request and the `tag` job of `release.yml` in the
 Release section: merging the notes tags the merge commit.
+Amended by `0038-a-dependent-is-released-from-a-release-commit.md`, under which a dependent keeps its
+`replace` on `main` in strict mode, requires the sibling at its pending version, and is released from a
+release commit that drops the `replace`, so a chain is released by one pull request.
 
 A project that uses another project's packages requires that project's module in its `go.mod`. While
 the two are developed together, the dependent also replaces the module with the sibling's own

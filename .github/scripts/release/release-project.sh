@@ -5,8 +5,9 @@
 # Usage:
 #   release-project.sh resolve
 #   release-project.sh validate <project> <version> <sha>
+#   release-project.sh prepare <project> <version> <sha> <out-dir>
 #   release-project.sh test <project>
-#   release-project.sh tag <project> <version> <sha> <run-url>
+#   release-project.sh tag <project> <version> <sha> <run-url> [<dir> <commit>]
 #   release-project.sh announce <tag>
 #   release-project.sh finish-check <tag>
 #
@@ -34,13 +35,32 @@
 #                 checks: the tag source/<project>/<version> is well formed and
 #                 carries no prerelease suffix; source/<project>/go.mod exists
 #                 and is neither inside nor around another project; <sha> is
-#                 on $RELEASE_MAIN_REF; the notes
+#                 on $RELEASE_MAIN_REF, or is a release commit of <project>
+#                 (see prepare) whose single parent is on it; the notes
 #                 docs/release-notes/<project>/<version>.md exist; the go.mod
 #                 declares go.vipengele.org/<project>, with the suffix /vN
 #                 when <version> is vN.x.y for N >= 2, replaces nothing, and
 #                 requires every sibling at a version tagged on origin, never a
 #                 pseudo-version; the tag does not exist on origin; and the
 #                 vanity Worker answers for the module.
+#   prepare       Makes the commit to release from <sha>, checked out in the
+#                 working tree, and prints it as commit=<id> for
+#                 $GITHUB_OUTPUT, with artifact=<name>, a name for <out-dir>
+#                 that is unique among the releases of one workflow run
+#                 (`/` in the project becomes `_`, which no project
+#                 identifier holds). A go.mod that replaces no sibling releases
+#                 <sha> itself. A go.mod that replaces a sibling, which a
+#                 dependent released in the same pull request as its sibling
+#                 does (ADR-0006), is released from a release commit: every
+#                 sibling replace is dropped, go mod tidy resolves each sibling
+#                 at its tag through the module proxy, the resulting go.mod and
+#                 go.sum are copied to <out-dir>, and the release commit is
+#                 <sha> with those two files changed, subject
+#                 `chore(release): <project> <version>`, authored and committed
+#                 by github-actions[bot] at <sha>'s commit time. The working
+#                 tree is left checked out at the commit printed. Fails when
+#                 the checkout is not at <sha>, and when tidy cannot resolve a
+#                 sibling, which is unreleased at the version required.
 #   test          Runs the project's checks in the working tree, as a consumer
 #                 of the tag would build it: go.mod and go.sum are tidy, then
 #                 go build, GOOS=windows go vet when the project holds a
@@ -48,7 +68,12 @@
 #                 go test -race -shuffle=on.
 #   tag           Creates the unsigned annotated tag on <sha> as
 #                 github-actions[bot], with <run-url> in its message, and
-#                 pushes that tag alone to origin. A rejected push fails.
+#                 pushes that tag alone to origin. A rejected push fails. With
+#                 <dir> and <commit>, the tag is on the release commit rebuilt
+#                 from <sha> and the go.mod and go.sum in <dir>, as prepare
+#                 builds it, and the rebuilt commit must be <commit>, the one
+#                 that was validated and tested. The release commit reaches
+#                 origin with the tag alone; no branch is pushed.
 #   announce      Asks the module proxy for the tagged version of the module
 #                 path the tag's go.mod declares, then creates the GitHub
 #                 Release from the notes in the tag's commit. An existing
@@ -162,6 +187,79 @@ worker_answers() {
   done
 }
 
+# release_commit_changes <project> <parent> <commit>: succeed when <commit>
+# changes, against <parent>, source/<project>/go.mod or go.sum and nothing
+# else. That is all a release commit may change: everything else released is
+# what was reviewed and merged to main. Otherwise print why not and fail.
+release_commit_changes() {
+  local project="$1" parent="$2" commit="$3" file changed=0
+  while IFS= read -r -d '' file; do
+    case "$file" in
+      "source/${project}/go.mod" | "source/${project}/go.sum") changed=1 ;;
+      *)
+        printf '%s\n' "against its parent $parent it changes $file; a release commit changes only source/${project}/go.mod and go.sum"
+        return 1
+        ;;
+    esac
+  done < <(git -C "$root" diff-tree -r -z --no-renames --name-only "$parent" "$commit")
+  ((changed)) && return 0
+  printf '%s\n' "it changes nothing against its parent $parent; a release commit changes source/${project}/go.mod or go.sum"
+  return 1
+}
+
+# on_main <project> <commit>: die unless <commit> is on $main_ref, or is a
+# release commit of <project>: a commit with a single parent on $main_ref that
+# changes only the project's go.mod and go.sum. A release commit is on no
+# branch; only its tag is pushed.
+on_main() {
+  local project="$1" commit="$2" why
+  local -a parents
+  git -C "$root" rev-parse -q --verify "${main_ref}^{commit}" > /dev/null \
+    || release_die "$main_ref does not exist in $root; fetch it before validating"
+  git -C "$root" merge-base --is-ancestor "$commit" "$main_ref" && return 0
+  read -r -a parents <<< "$(git -C "$root" rev-list --parents -n 1 "$commit")"
+  ((${#parents[@]} == 2)) && git -C "$root" merge-base --is-ancestor "${parents[1]}" "$main_ref" \
+    || release_die "$commit is not on $main_ref, nor a release commit whose single parent is; only a commit on main, or a release commit made on one, is released"
+  why="$(release_commit_changes "$project" "${parents[1]}" "$commit")" \
+    || release_die "$commit is not on $main_ref, nor a release commit of $project: $why"
+}
+
+# build_release_commit <project> <version> <base> <dir>: write the release
+# commit of <project> on <base>, with the go.mod and go.sum in <dir>, and print
+# its id. A go.sum absent from <dir> is absent from the commit. The commit is a
+# function of its inputs alone: the bot identity, <base>'s commit time and an
+# unsigned commit, so the job that tags it rebuilds the very commit the job
+# that tested it made. The index is a temporary file, so neither the
+# repository's index nor its working tree is touched.
+build_release_commit() {
+  local project="$1" version="$2" base="$3" dir="$4"
+  local index="$tmp/release-index" file path blob tree date commit why
+  [[ -f "$dir/go.mod" ]] || release_die "$dir/go.mod does not exist; a release commit carries the project's go.mod"
+  dir="$(cd "$dir" && pwd)"
+  rm -f "$index"
+  GIT_INDEX_FILE="$index" git -C "$root" read-tree "$base"
+  for file in go.mod go.sum; do
+    path="source/${project}/${file}"
+    if [[ -f "$dir/$file" ]]; then
+      blob="$(git -C "$root" hash-object -w --no-filters -- "$dir/$file")"
+      GIT_INDEX_FILE="$index" git -C "$root" update-index --add --cacheinfo "100644,${blob},${path}"
+    else
+      GIT_INDEX_FILE="$index" git -C "$root" update-index --force-remove -- "$path"
+    fi
+  done
+  tree="$(GIT_INDEX_FILE="$index" git -C "$root" write-tree)"
+  date="$(git -C "$root" show -s --format=%ct "$base") +0000"
+  commit="$(GIT_COMMITTER_NAME="$bot_name" GIT_COMMITTER_EMAIL="$bot_email" \
+    GIT_AUTHOR_NAME="$bot_name" GIT_AUTHOR_EMAIL="$bot_email" \
+    GIT_AUTHOR_DATE="$date" GIT_COMMITTER_DATE="$date" \
+    git -C "$root" commit-tree --no-gpg-sign -p "$base" \
+    -m "chore(release): ${project} ${version}" "$tree")" \
+    || release_die "cannot create the release commit of $project $version on $base"
+  why="$(release_commit_changes "$project" "$base" "$commit")" \
+    || release_die "the release commit $commit of $project $version is not one: $why"
+  printf '%s\n' "$commit"
+}
+
 # check <project> <version> <commit> <mode>: every check of validate, against
 # the commit object. In mode `release` the tag must not exist on origin; in
 # mode `finish` it must, at <commit>.
@@ -197,10 +295,7 @@ check() {
   [[ -z "$nested" ]] \
     || release_die "source/${project} contains another module at ${nested%/go.mod}; a project may not contain another project"
 
-  git -C "$root" rev-parse -q --verify "${main_ref}^{commit}" > /dev/null \
-    || release_die "$main_ref does not exist in $root; fetch it before validating"
-  git -C "$root" merge-base --is-ancestor "$commit" "$main_ref" \
-    || release_die "$commit is not on $main_ref; only a commit on main is released"
+  on_main "$project" "$commit"
 
   notes="docs/release-notes/${project}/${version}.md"
   git -C "$root" cat-file -e "${commit}:${notes}" 2> /dev/null \
@@ -357,6 +452,55 @@ cmd_finish_check() {
   check "$project" "$version" "$commit" finish
 }
 
+cmd_prepare() {
+  (($# == 4)) || usage
+  local project="$1" version="$2" out="$4" base head dir json commit artifact
+  local -a replaced
+  tag_name "$project" "$version" > /dev/null
+  artifact="release-commit-${project//\//_}-${version}"
+  base="$(commit_of "$3")"
+  head="$(commit_of HEAD)"
+  [[ "$head" == "$base" ]] || release_die "the checkout at $root is at $head, not at $base"
+  dir="$root/source/$project"
+  [[ -f "$dir/go.mod" ]] || release_die "source/$project/go.mod does not exist"
+  [[ -z "$(git -C "$root" status --porcelain -- "source/$project/go.mod" "source/$project/go.sum")" ]] \
+    || release_die "source/$project/go.mod or go.sum differs from $base in the checkout"
+
+  json="$(cd "$dir" && go mod edit -json)" || release_die "source/$project/go.mod does not parse"
+  mapfile -t replaced < <(jq -r --arg prefix "$RELEASE_MODULE_PREFIX" \
+    '(.Replace // [])[] | select(.Old.Path | startswith($prefix))
+     | .Old.Path + (if .Old.Version then "@" + .Old.Version else "" end)' <<< "$json")
+  if ((${#replaced[@]} == 0)); then
+    echo "source/$project/go.mod replaces no sibling; $base is released as it is" >&2
+    printf 'commit=%s\nartifact=%s\n' "$base" "$artifact"
+    return 0
+  fi
+
+  # Without its replaces, go mod tidy resolves each sibling at the version
+  # required, through the module proxy, as a consumer of the tag will. That
+  # version is the sibling's tag, which an earlier tier pushed and announced.
+  local r
+  (
+    cd "$dir"
+    for r in "${replaced[@]}"; do
+      run go mod edit -dropreplace="$r"
+    done
+    run go mod tidy
+  ) >&2 || release_die "go mod tidy of $project without its sibling replaces failed; each sibling it requires must be released, at the version required, before $project"
+
+  mkdir -p "$out"
+  rm -f "$out/go.mod" "$out/go.sum"
+  cp "$dir/go.mod" "$out/go.mod"
+  [[ ! -f "$dir/go.sum" ]] || cp "$dir/go.sum" "$out/go.sum"
+  commit="$(build_release_commit "$project" "$version" "$base" "$out")"
+
+  # The working tree already holds the commit's go.mod and go.sum; checking it
+  # out makes the tree clean against HEAD, which the test step requires.
+  git -C "$root" checkout -q -f --detach "$commit"
+  echo "release commit $commit on $base drops the replace of ${replaced[*]}" >&2
+  printf 'commit=%s\nartifact=%s\n' "$commit" "$artifact"
+}
+
 # run <args...>: echo a command, then run it.
 run() {
   echo "==> $*"
@@ -392,10 +536,20 @@ cmd_test() {
 }
 
 cmd_tag() {
-  (($# == 4)) || usage
+  (($# == 4 || $# == 6)) || usage
   local project="$1" version="$2" run_url="$4" tag commit
   tag="$(tag_name "$project" "$version")"
   commit="$(commit_of "$3")"
+  if (($# == 6)); then
+    # The rebuilt commit has the id of the one validated and tested only if
+    # every byte of its go.mod and go.sum is the same, so the artifact that
+    # carried them between the jobs cannot change what is tagged.
+    local built
+    built="$(build_release_commit "$project" "$version" "$commit" "$5")"
+    [[ "$built" == "$6" ]] \
+      || release_die "the release commit rebuilt on $commit from $5 is $built, not $6, the commit that was validated"
+    commit="$built"
+  fi
 
   # The identity lives in the environment of this one command, which outranks
   # any configured user and leaves the repository's config untouched. The tag
@@ -478,6 +632,7 @@ shift
 case "$subcommand" in
   resolve) cmd_resolve "$@" ;;
   validate) cmd_validate "$@" ;;
+  prepare) cmd_prepare "$@" ;;
   test) cmd_test "$@" ;;
   tag) cmd_tag "$@" ;;
   announce) cmd_announce "$@" ;;

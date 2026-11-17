@@ -48,8 +48,16 @@ _Avoid_: project index, manifest, registry
 One project at one version, identified by its tag. The tag is the publication: the module proxy
 serves the version from it. A release happens when the pull request adding its notes merges to
 `main`: `auto-release` validates and tests the project, tags it as `github-actions[bot]` and
-announces it (ADR-0037).
+announces it (ADR-0037). One pull request can release a project and the siblings it requires: the
+workflow releases them tier by tier, and each dependent from a **Release commit**.
 _Avoid_: publish (nothing is uploaded)
+
+**Release commit**:
+The commit a dependent's tag points to: the merge commit with only the project's `go.mod` and
+`go.sum` changed, its sibling `replace`s dropped and the module tidied against the siblings' tags,
+subject `chore(release): <project> <version>`. It is built by the release workflow, deterministically,
+and is on no branch: `main` keeps the `replace` (ADR-0038).
+_Avoid_: release PR, release branch
 
 **Prefixed tag**:
 The tag form `source/<path>/vX.Y.Z`. Go resolves a module in a subdirectory only from a tag
@@ -67,9 +75,10 @@ _Avoid_: monorepo module
 
 **Sibling**:
 Another project in this repo that a project requires. While the two are developed together, the
-project's `go.mod` also replaces the sibling with the sibling's own directory; from its release
-notes to its tag, the project requires every sibling at a tagged release and replaces none
-(ADR-0006).
+project's `go.mod` also replaces the sibling with the sibling's own directory. From its release
+notes to its tag it may keep the `replace` and require the sibling at the sibling's pending or
+tagged version; the **Release commit** drops it, so no tagged `go.mod` carries one (ADR-0006,
+ADR-0038).
 _Avoid_: local dependency
 
 **Tools directory**:

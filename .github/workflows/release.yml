@@ -9,11 +9,17 @@
 # there is no registry to upload to and no credential in this repository.
 #
 # Two modes. `release` validates the commit `sha`, tests the project there,
-# pushes the tag on it and announces it. `finish` takes a tag that already
-# exists and announces it, which completes a release whose announcement failed;
-# `auto-release.yml` calls it for every tag left unannounced, and a
-# `workflow_dispatch` naming the tag does the same by hand. `dry_run` runs
-# `verify` alone.
+# pushes the tag on it and announces it. A project whose go.mod on main
+# replaces a sibling, released in the same pull request as that sibling, is
+# released from a release commit instead: `sha` with only the project's go.mod
+# and go.sum changed, its sibling replaces dropped and each sibling resolved at
+# the tag an earlier tier of `auto-release.yml` pushed. `verify` makes, checks
+# and tests it, and hands its go.mod and go.sum to `tag` as an artifact; `tag`
+# rebuilds the identical commit and pushes the tag on it, and no branch.
+# `finish` takes a tag that already exists and announces it, which completes a
+# release whose announcement failed; `auto-release.yml` calls it for every tag
+# left unannounced, and a `workflow_dispatch` naming the tag does the same by
+# hand. `dry_run` runs `verify` alone.
 #
 # Three jobs, and the seams between them are safety properties. `verify` holds
 # a read-only token, checks out without persisting it, and is the only job that
@@ -93,6 +99,8 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
       sha: ${{ steps.resolve.outputs.sha }}
+      commit: ${{ steps.prepare.outputs.commit }}
+      artifact: ${{ steps.prepare.outputs.artifact }}
       go-version: ${{ steps.setup-go.outputs.go-version }}
     steps:
       - name: Check out the release scripts
@@ -135,6 +143,32 @@ jobs:
           go-version-file: release/source/${{ steps.resolve.outputs.project }}/go.mod
           cache: false
 
+      # The commit to release: `sha`, or the release commit on it when the
+      # project's go.mod replaces a sibling. go mod tidy fetches modules and
+      # runs none of their code. The step's outputs are final before any
+      # project code runs: a later step cannot rewrite them.
+      - name: The commit to release
+        id: prepare
+        if: steps.resolve.outputs.mode == 'release'
+        env:
+          RELEASE_ROOT: release
+          PROJECT: ${{ steps.resolve.outputs.project }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: >-
+          tooling/.github/scripts/release/release-project.sh prepare
+          "$PROJECT" "$VERSION" "$SHA" "${RUNNER_TEMP}/release-commit" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the release commit's go.mod and go.sum to tag
+        if: steps.resolve.outputs.mode == 'release' && steps.prepare.outputs.commit != steps.resolve.outputs.sha
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.prepare.outputs.artifact }}
+          path: ${{ runner.temp }}/release-commit/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
       # In mode `release` the tag must not exist yet; in mode `finish` it must,
       # at the commit checked out. Both judge the project alone: what another
       # project does with its siblings never blocks it.
@@ -144,12 +178,12 @@ jobs:
           MODE: ${{ steps.resolve.outputs.mode }}
           PROJECT: ${{ steps.resolve.outputs.project }}
           VERSION: ${{ steps.resolve.outputs.version }}
-          SHA: ${{ steps.resolve.outputs.sha }}
+          COMMIT: ${{ steps.prepare.outputs.commit }}
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           if [[ "$MODE" == release ]]; then
-            tooling/.github/scripts/release/release-project.sh validate "$PROJECT" "$VERSION" "$SHA"
+            tooling/.github/scripts/release/release-project.sh validate "$PROJECT" "$VERSION" "$COMMIT"
           else
             tooling/.github/scripts/release/release-project.sh finish-check "$TAG"
           fi
@@ -170,8 +204,8 @@ jobs:
       contents: write
     steps:
       # Credentials persist so the tag can be pushed. The working tree holds the
-      # release scripts alone, and the full history holds the commit to tag,
-      # which verify proved is on main.
+      # release scripts alone, and the full history holds `sha`, which verify
+      # proved is on main.
       - name: Check out the release scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,13 +213,30 @@ jobs:
           sparse-checkout: .github/scripts/release
           fetch-depth: 0
 
+      - name: Receive the release commit's go.mod and go.sum
+        if: needs.verify.outputs.commit != needs.verify.outputs.sha
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.verify.outputs.artifact }}
+          path: ${{ runner.temp }}/release-commit
+
+      # A release commit is rebuilt here from `sha` and the two files, and is
+      # tagged only when it is the very commit verify validated and tested.
       - name: Push the tag
         env:
           PROJECT: ${{ needs.verify.outputs.project }}
           VERSION: ${{ needs.verify.outputs.version }}
           SHA: ${{ needs.verify.outputs.sha }}
+          COMMIT: ${{ needs.verify.outputs.commit }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: .github/scripts/release/release-project.sh tag "$PROJECT" "$VERSION" "$SHA" "$RUN_URL"
+        run: |
+          set -euo pipefail
+          if [[ "$COMMIT" == "$SHA" ]]; then
+            .github/scripts/release/release-project.sh tag "$PROJECT" "$VERSION" "$SHA" "$RUN_URL"
+          else
+            .github/scripts/release/release-project.sh tag "$PROJECT" "$VERSION" "$SHA" "$RUN_URL" \
+              "${RUNNER_TEMP}/release-commit" "$COMMIT"
+          fi
 
   announce:
     name: announce

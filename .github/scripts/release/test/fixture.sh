@@ -160,3 +160,49 @@ exec "$real_go" "\$@"
 SHIM
   chmod +x "$bin/gh" "$bin/go"
 }
+
+# fixture_go_dependent <project> <sibling> <version>: source/<project> as a
+# module requiring go.vipengele.org/<sibling> at <version> and replacing it by
+# the sibling's directory, as a dependent developed with its sibling does, with
+# a package and a test that call the sibling's Double. The sibling holds
+# fixture_go_source. The go directive is the running toolchain's.
+fixture_go_dependent() {
+  local project="$1" sibling="$2" version="$3" dir up
+  dir="$FIXTURE/source/$project"
+  up="$(sed -e 's|[^/][^/]*|..|g' <<< "$project")"
+  mkdir -p "$dir"
+  printf 'module go.vipengele.org/%s\n\ngo %s\n\nrequire go.vipengele.org/%s %s\n\nreplace go.vipengele.org/%s => %s/%s\n' \
+    "$project" "$(go env GOVERSION | sed 's/^go//')" "$sibling" "$version" "$sibling" "$up" "$sibling" \
+    > "$dir/go.mod"
+  printf 'package dependent\n\nimport fixture "go.vipengele.org/%s"\n\n// Quadruple returns four times n.\nfunc Quadruple(n int) int { return fixture.Double(fixture.Double(n)) }\n' \
+    "$sibling" > "$dir/dependent.go"
+  printf 'package dependent\n\nimport "testing"\n\nfunc TestQuadruple(t *testing.T) {\n\tif Quadruple(2) != 8 {\n\t\tt.Fatal("Quadruple(2) != 8")\n\t}\n}\n' \
+    > "$dir/dependent_test.go"
+}
+
+# fixture_proxy <project> <version>: a module proxy in the file system beside
+# $FIXTURE serving go.vipengele.org/<project> at <version> from the files of
+# source/<project> in the working tree, laid out as GOPROXY's protocol names
+# them. Exports GOPROXY as its file:// URL, with GOSUMDB off, since no
+# checksum database knows the module, and a module cache of its own under
+# $WORK, writable so that $WORK can be removed.
+fixture_proxy() {
+  local project="$1" version="$2" proxy="$FIXTURE.proxy"
+  local dir="$proxy/go.vipengele.org/$project/@v"
+  mkdir -p "$dir"
+  printf '%s\n' "$version" >> "$dir/list"
+  printf '{"Version":"%s","Time":"2026-11-17T00:00:00Z"}\n' "$version" > "$dir/$version.info"
+  cp "$FIXTURE/source/$project/go.mod" "$dir/$version.mod"
+  python3 -I -c '
+import os, sys, zipfile
+src, prefix, out = sys.argv[1], sys.argv[2], sys.argv[3]
+with zipfile.ZipFile(out, "w") as z:
+    for base, dirs, files in os.walk(src):
+        dirs.sort()
+        for name in sorted(files):
+            path = os.path.join(base, name)
+            z.write(path, prefix + "/" + os.path.relpath(path, src))
+' "$FIXTURE/source/$project" "go.vipengele.org/$project@$version" "$dir/$version.zip"
+  export GOPROXY="file://$proxy" GOSUMDB=off GOMODCACHE="$WORK/modcache" \
+    GOFLAGS="-mod=mod -modcacherw"
+}
