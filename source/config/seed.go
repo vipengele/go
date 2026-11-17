@@ -169,7 +169,7 @@ func collectionNode(t reflect.Type, elem *Schema, v reflect.Value, docs bool) *y
 			mapping.Style = yaml.FlowStyle
 		}
 		keys := v.MapKeys()
-		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() }) // [lydite:exclude_from_mutation][the keys of a map are distinct strings, so < and <= order every pair of them alike]
 		for i, k := range keys {
 			key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: k.String()}
 			mapping.Content = append(mapping.Content, key, collectionNode(t.Elem(), elem, v.MapIndex(k), docs && i == 0))

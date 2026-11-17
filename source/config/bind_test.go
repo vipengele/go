@@ -261,6 +261,26 @@ func TestBindCollectionErrors(t *testing.T) {
 			},
 		},
 		{
+			name:  "map node for a list of elements",
+			entry: Entry{Key: "steps", Node: stubMap("o:1"), Origin: "o:1"},
+			want:  []string{"steps: a map node from o:1, but it holds a list of config.mergeHost"},
+		},
+		{
+			name:  "scalar node for an element",
+			entry: Entry{Key: "steps", Origin: "o:1", Node: stubList("o:1", stubScalar("x", "o:2"))},
+			want:  []string{"steps[0]: a scalar node from o:2, but it holds the keys of config.mergeHost"},
+		},
+		{
+			name: "map node for a list of single values within an element",
+			entry: Entry{Key: "profiles", Origin: "o:1", Node: stubList("o:1",
+				stubMap("o:2",
+					NodeEntry{Key: "name", Node: stubScalar("a", "o:2")},
+					NodeEntry{Key: "tags", Node: stubMap("o:3")},
+				),
+			)},
+			want: []string{"profiles[0].tags: a map node from o:3, but it holds a list of string"},
+		},
+		{
 			name:  "list item with no node",
 			entry: Entry{Key: "steps", Origin: "o:1", Node: &Node{Kind: NodeList, Items: []*Node{nil}, Origin: "o:1"}},
 			want:  []string{"steps[0]: no node from o:1"},

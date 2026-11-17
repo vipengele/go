@@ -203,6 +203,30 @@ func TestLoadKeepsNilAndEmptySlicesDistinct(t *testing.T) {
 	}
 }
 
+// cloneItem is a collection element with an unexported field, which is not a key.
+type cloneItem struct {
+	Name string
+	note string
+}
+
+func TestLoadKeepsUnexportedFieldsOfDefaultElements(t *testing.T) {
+	type cloneConfig struct {
+		Items []cloneItem
+		ByKey map[string]cloneItem
+	}
+	defaults := cloneConfig{
+		Items: []cloneItem{{Name: "a", note: "kept"}},
+		ByKey: map[string]cloneItem{"k": {Name: "b", note: "kept too"}},
+	}
+	res, err := Load(defaults)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := res.Value(); !reflect.DeepEqual(got, defaults) {
+		t.Errorf("Value() = %+v, want the defaults %+v", got, defaults)
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	bad := writeFile(t, "config.yaml", "server:\n  port: abc\n  bogus: 1\n")
 	good := writeFile(t, "good.yaml", "server:\n  port: abc\n")
@@ -497,6 +521,27 @@ func TestLoadMapMergedByKeys(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, wantSources) {
 		t.Errorf("services Sources =\n%+v\nwant\n%+v", got, wantSources)
+	}
+}
+
+func TestLoadMergesALaterLayerLargerThanTheEarlier(t *testing.T) {
+	file := writeFile(t, "config.yaml", "services:\n  a:\n    port: 1\n  b:\n    port: 2\n  c:\n    port: 3\n"+
+		"profiles:\n  - name: dev\n    tags: [d]\n  - name: qa\n  - name: ci\n")
+	defaults := mergeConfig{
+		Services: map[string]mergeHost{"a": {Addr: "x"}},
+		Profiles: []mergeProfile{{Name: "dev"}},
+	}
+	res, err := Load(defaults, File(file))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantServices := map[string]mergeHost{"a": {Port: 1}, "b": {Port: 2}, "c": {Port: 3}}
+	if got := res.Value().Services; !reflect.DeepEqual(got, wantServices) {
+		t.Errorf("Services = %+v, want %+v", got, wantServices)
+	}
+	wantProfiles := []mergeProfile{{Name: "dev", Tags: []string{"d"}}, {Name: "qa"}, {Name: "ci"}}
+	if got := res.Value().Profiles; !reflect.DeepEqual(got, wantProfiles) {
+		t.Errorf("Profiles = %+v, want %+v", got, wantProfiles)
 	}
 }
 

@@ -210,6 +210,9 @@ func TestFileProblems(t *testing.T) {
 		{"syntax.yaml", []string{
 			`config.yaml: yaml:`,
 		}},
+		{"complex_key.yaml", []string{
+			`config.yaml:2: a key below "server" is a list, not a name`,
+		}},
 		{"top_list.yaml", []string{
 			`config.yaml: line 1: the top level is a list, not a mapping of keys`,
 		}},
@@ -478,6 +481,10 @@ func TestFileCollectionProblems(t *testing.T) {
 			`config.yaml:10: key "services" is null; give it a value or remove it`,
 			`config.yaml:13: by_owner[0].tags[0] is a list, not a single value`,
 			`config.yaml:13: by_owner[0].tags[1] is null; give it a value or remove it`,
+		}},
+		// A key beneath a map is taken verbatim, but only a scalar is a key: a list or a mapping is not.
+		{"collection_complex_key.yaml", []string{
+			`config.yaml:2: labels: a key is a list, not a name`,
 		}},
 	}
 	for _, tt := range tests {

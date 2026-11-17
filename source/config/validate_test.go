@@ -323,6 +323,7 @@ func TestLoadValidatePathWithinCollection(t *testing.T) {
 		{name: "map key matched exactly", key: `profiles[2].env["foo"]`, want: FieldError{Key: `profiles[2].env["foo"]`}},
 		{name: "not a path", key: "profiles[2", want: FieldError{Key: "profiles[2"}},
 		{name: "unknown element field", key: "profiles[2].nope", want: FieldError{Key: "profiles[2].nope"}},
+		{name: "key within a map value that is no element", key: `profiles[2].env["FOO"].x`, want: FieldError{Key: `profiles[2].env["FOO"].x`}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

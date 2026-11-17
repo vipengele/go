@@ -1041,6 +1041,21 @@ type mergeInElementValue struct {
 	}
 }
 
+type mergeMapIntKey struct {
+	Labels map[int]string `merge:"name"`
+}
+
+type mergeMapOfPointers struct {
+	Labels map[string]*int `merge:"name"`
+}
+
+type mergeListBadElement struct {
+	Profiles []struct {
+		Name  string
+		Owner *string
+	} `merge:"name"`
+}
+
 func TestNewSchemaMergeTagErrors(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1064,6 +1079,10 @@ func TestNewSchemaMergeTagErrors(t *testing.T) {
 		{name: "map in a list element", target: mergeInElementMap{}, want: "field mergeInElementMap.Profiles[].Env: a merge tag is not allowed on a field of a collection element"},
 		{name: "list in a map value", target: mergeInElementList{}, want: "field mergeInElementList.Servers[].Routes: a merge tag is not allowed on a field of a collection element"},
 		{name: "single value in a list element", target: mergeInElementValue{}, want: "field mergeInElementValue.Profiles[].Name: a merge tag is only allowed on a map or a slice of structs"},
+		// An unsupported collection is reported once, for its type, and its merge tag is not checked.
+		{name: "map with a non-string key", target: mergeMapIntKey{}, want: "field mergeMapIntKey.Labels: type map[int]string is not supported: a map key is a string"},
+		{name: "map of an unsupported value", target: mergeMapOfPointers{}, want: "field mergeMapOfPointers.Labels: type map[string]*int is not supported"},
+		{name: "list of an unsupported element", target: mergeListBadElement{}, want: "field mergeListBadElement.Profiles[].Owner: pointer fields are not supported"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

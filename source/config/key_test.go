@@ -275,3 +275,29 @@ func TestParsePathErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBracketErrorSpansNoBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		want string
+	}{
+		{name: "unterminated map key", s: `["x]`, want: "a map key is not a double-quoted string"},
+		{name: "map key not closed", s: `["x"y]`, want: `the map key "x" is not followed by "]"`},
+		{name: "neither index nor map key", s: "[x]", want: "a bracket holds neither an index nor a double-quoted map key"},
+		{name: "leading zero", s: "[01]", want: "the index 01 has a leading zero"},
+		{name: "index not closed", s: "[1x]", want: `the index 1 is not followed by "]"`},
+		{name: "index out of range", s: "[99999999999999999999]", want: "the index 99999999999999999999: "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			step, n, err := parseBracket(tc.s)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("parseBracket(%q) error = %v, want it to contain %q", tc.s, err, tc.want)
+			}
+			if n != 0 || step != (pathStep{}) {
+				t.Errorf("parseBracket(%q) = %#v, %d alongside its error, want the zero step and 0", tc.s, step, n)
+			}
+		})
+	}
+}

@@ -1,0 +1,4 @@
+server:
+  ? [x, y]
+  : 1
+  port: 80

@@ -143,7 +143,7 @@ func mergeMap(field reflect.Value, old *originTree, v reflect.Value, tree *origi
 	if field.IsNil() {
 		field.Set(reflect.MakeMapWithSize(field.Type(), v.Len()))
 	}
-	merged := &originTree{origin: tree.origin, entries: make(map[string]*originTree, field.Len()+v.Len())}
+	merged := &originTree{origin: tree.origin, entries: make(map[string]*originTree, field.Len()+v.Len())} // [lydite:exclude_from_mutation][the size hint only reserves space: the runtime treats a negative map hint as 0, and the merged entries are the same at any hint]
 	for it := field.MapRange(); it.Next(); {
 		merged.entries[it.Key().String()] = old.entry(it.Key().String())
 	}
@@ -164,7 +164,7 @@ func mergeList(field reflect.Value, old *originTree, v reflect.Value, tree *orig
 		out = reflect.MakeSlice(field.Type(), 0, v.Len())
 	}
 	merged := &originTree{origin: tree.origin, items: make([]*originTree, out.Len())}
-	at := make(map[string]int, out.Len()+v.Len())
+	at := make(map[string]int, out.Len()+v.Len()) // [lydite:exclude_from_mutation][the size hint only reserves space: the runtime treats a negative map hint as 0, and the indexes are the same at any hint]
 	for j := range out.Len() {
 		merged.items[j] = old.item(j)
 		at[key(out.Index(j))] = j
