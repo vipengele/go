@@ -490,6 +490,75 @@ func TestLoadListMergedByKey(t *testing.T) {
 	}
 }
 
+type mergeOwned struct {
+	Label string
+	Meta  mergeMeta
+}
+
+type mergeOwnedConfig struct {
+	Owned []mergeOwned `merge:"meta.owner"`
+}
+
+func TestLoadListMergedByNestedKey(t *testing.T) {
+	defaults := mergeOwnedConfig{Owned: []mergeOwned{
+		{Label: "base-ann", Meta: mergeMeta{Owner: "ann"}},
+		{Label: "base-bob", Meta: mergeMeta{Owner: "bob"}},
+	}}
+
+	t.Run("layers match elements by the nested field", func(t *testing.T) {
+		user := writeFile(t, "user.yaml", "owned:\n  - label: user-bob\n    meta:\n      owner: bob\n")
+		project := writeFile(t, "project.yaml", "owned:\n  - label: project-cy\n    meta:\n      owner: cy\n")
+		res, err := Load(defaults, File(user), File(project))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := []mergeOwned{
+			{Label: "base-ann", Meta: mergeMeta{Owner: "ann"}},
+			{Label: "user-bob", Meta: mergeMeta{Owner: "bob"}},
+			{Label: "project-cy", Meta: mergeMeta{Owner: "cy"}},
+		}
+		if got := res.Value().Owned; !reflect.DeepEqual(got, want) {
+			t.Errorf("Owned =\n%+v\nwant\n%+v", got, want)
+		}
+		origins := map[string]string{}
+		for _, s := range res.Sources() {
+			origins[s.Key] = s.Origin
+		}
+		wantOrigins := map[string]string{
+			"owned[0].label":      "default",
+			"owned[0].meta.owner": "default",
+			"owned[1].label":      "user.yaml:2",
+			"owned[1].meta.owner": "user.yaml:4",
+			"owned[2].label":      "project.yaml:2",
+			"owned[2].meta.owner": "project.yaml:4",
+		}
+		for key, want := range wantOrigins {
+			if got := origins[key]; got != want {
+				t.Errorf("origin of %s = %q, want %q", key, got, want)
+			}
+		}
+	})
+
+	t.Run("defaults repeat or omit the nested key", func(t *testing.T) {
+		bad := mergeOwnedConfig{Owned: []mergeOwned{
+			{Meta: mergeMeta{Owner: "ann"}},
+			{},
+			{Meta: mergeMeta{Owner: "ann"}},
+		}}
+		_, err := Load(bad)
+		if err == nil {
+			t.Fatal("Load: no error")
+		}
+		want := strings.Join([]string{
+			`owned[1]: merge key "meta.owner" is empty in defaults; every element of owned needs one`,
+			`owned[2]: merge key "meta.owner" is "ann" in defaults, as for owned[0]`,
+		}, "\n")
+		if got := err.Error(); got != want {
+			t.Errorf("error =\n%s\nwant\n%s", got, want)
+		}
+	})
+}
+
 func TestLoadMapMergedByKeys(t *testing.T) {
 	user := writeFile(t, "user.yaml", "services:\n  web:\n    addr: w2\n  cache:\n    addr: c\n    port: 6379\n")
 	project := writeFile(t, "project.yaml", "services: {}\n")
