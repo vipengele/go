@@ -1,0 +1,24 @@
+name: app
+profiles:
+  - name: dev
+    meta:
+      owner: ann
+    env:
+      FOO: "1"
+      a.b: two
+    tags: [x, y]
+  - {name: prod, meta.owner: bob, env: {}}
+  - name: ci
+    hosts:
+      - addr: h1
+      - {}
+labels: {}
+matrix:
+  a:
+    b: 1
+  c: {}
+services:
+  web.app:
+    addr: w
+  empty: {}
+steps: []
