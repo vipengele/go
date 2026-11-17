@@ -16,6 +16,14 @@
 # tools/ holds repository tooling rather than projects (ADR-0004); each tool under it is a component
 # of its own, run by the runner of its language. vanity-worker is a TypeScript Worker tested with
 # vitest, and its coverage provider is a pinned devDependency of the tool.
+#
+# .github/scripts/release/ holds the bash scripts the release workflows run and their self-test,
+# test/run.sh. lydite has no runner for a bash suite, so the directory is excluded, and
+# .github/workflows/release-selftest.yml runs the self-test on every pull request and push to main
+# that touches it. The self-test needs go, git, jq, python3 and curl on the runner.
+excludes:
+  - ".github/scripts/release/**"
+
 components:
   - name: cli-core
     dir: source/cli/core

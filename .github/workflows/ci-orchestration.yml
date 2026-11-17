@@ -144,18 +144,6 @@ jobs:
     if: needs.attest.outputs.validated != 'true'
     uses: pedromvgomes/gt/.github/workflows/reusable-governance.yml@v2
 
-  # The release scripts and workflows belong to no project under source/, so
-  # preflight never selects them: this runs on every change whatever it
-  # touches, offline and quick. It skips only on an already-validated tree,
-  # which passed it in the run that validated it, as conventional-commits and
-  # governance do.
-  release-selftest:
-    needs: [attest]
-    if: needs.attest.outputs.validated != 'true'
-    uses: ./.github/workflows/release-selftest.yml
-    permissions:
-      contents: read
-
   lydite:
     needs: [attest]
     # No skip guard, unlike the stages above: this job is the only publisher
@@ -202,7 +190,7 @@ jobs:
   # was skipped, and a skipped stage passes — that is the point of preflight.
   ci-gate:
     name: ci-gate
-    needs: [attest, preflight, build, test, conventional-commits, governance, release-selftest, lydite]
+    needs: [attest, preflight, build, test, conventional-commits, governance, lydite]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

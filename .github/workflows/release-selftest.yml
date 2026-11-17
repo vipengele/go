@@ -4,20 +4,40 @@
 # repository, bare `origin` and stub Worker in a temporary directory and runs
 # one release script against it. It is offline: no fetch from GitHub, no module
 # proxy, no toolchain download, so it is quick and cannot flake on the network.
-# `actionlint` checks the release workflows and the orchestrator that calls
-# this one.
+# `actionlint` checks the release workflows and this one.
 #
-# ci-orchestration.yml calls this on every pull request whatever it changes,
-# and ci-gate needs it: the release scripts and workflows belong to no project
-# under source/, so no project's build or test stage would run them, and a
-# broken release script is otherwise only found by the release it breaks.
+# It runs on every pull request and every push to main that touches the release
+# scripts or workflows. They belong to no project under source/, so no project's
+# build or test stage runs them, and a broken release script is otherwise only
+# found by the release it breaks. It is a path-triggered check, not a stage of
+# ci-orchestration.yml: gt renders that file from .gt-repo.yaml, so a stage
+# there is a .gt-repo.yaml change. A failure shows on the pull request but does
+# not block its merge: a pull request outside these paths never reports the
+# check, so branch protection cannot require it.
 name: release-selftest
 
 on:
-  workflow_call:
+  pull_request:
+    paths:
+      - '.github/scripts/release/**'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/auto-release.yml'
+      - '.github/workflows/release-selftest.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/scripts/release/**'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/auto-release.yml'
+      - '.github/workflows/release-selftest.yml'
 
-permissions:
-  contents: read
+permissions: {}
+
+# A newer push to the same pull request supersedes the run in flight; each
+# push to main runs in a group of its own.
+concurrency:
+  group: release-selftest-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   scripts:
@@ -85,8 +105,7 @@ jobs:
           for f in \
             .github/workflows/release.yml \
             .github/workflows/auto-release.yml \
-            .github/workflows/release-selftest.yml \
-            .github/workflows/ci-orchestration.yml; do
+            .github/workflows/release-selftest.yml; do
             if [[ -f "$f" ]]; then
               files+=("$f")
             else
