@@ -19,8 +19,14 @@
 # hold one and skips when there are none.
 #
 # When daemon is affected, test-supervisor also runs its servicetest suite with
-# SERVICETEST=1, which boots podman containers with systemd as PID 1. A failed
-# job fails this workflow, and with it the test stage ci-gate checks.
+# SERVICETEST=1, which boots podman containers with systemd as PID 1.
+#
+# release-selftest runs the offline self-test of the release scripts and
+# workflows (release-selftest.yml) on every run of this stage, whichever
+# projects are affected.
+#
+# A failed job, including one of a called workflow, fails this workflow, and
+# with it the test stage ci-gate checks.
 name: ci-test
 
 on:
@@ -34,6 +40,12 @@ env:
   GOWORK: "off"
 
 jobs:
+  release-selftest:
+    name: release-selftest
+    uses: ./.github/workflows/release-selftest.yml
+    permissions:
+      contents: read
+
   detect:
     name: detect
     runs-on: ubuntu-latest

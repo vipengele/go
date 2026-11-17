@@ -91,12 +91,16 @@ go mod tidy           # CI fails when this changes go.mod or go.sum
   podman. It fails unless the log shows `--- PASS: TestSupervisor`, since a skipped test exits 0, and
   an `always()` step removes the containers labelled `servicetest`. It gates merges through the test
   stage.
-- `release-selftest.yml` is the offline self-test of the release scripts and workflows. It runs on
-  every pull request and push to `main` that touches `.github/scripts/release/`, `release.yml`,
-  `auto-release.yml` or itself; it is not a `ci-gate` stage, because `ci-orchestration.yml` is
-  rendered by `gt` from `.gt-repo.yaml`.
-- A change to a shared CI file (`ci-*.yml`, the actions, `.lydite/`) selects every project; a change
-  that touches no project (docs, agentic instructions) selects none and the stages skip.
+- `release-selftest.yml` is the offline self-test of the release scripts and workflows, and
+  actionlint over `release.yml`, `auto-release.yml`, itself and `ci-test.yml`. `ci-test.yml`'s
+  `release-selftest` job calls it on every run of the test stage, so it gates `ci-gate` through that
+  stage. `ci-orchestration.yml` is rendered by `gt` from `.gt-repo.yaml`, which accepts only the
+  `preflight`, `build`, `test` and `end2end` stages, so the self-test is a job of the repo-owned
+  test stage.
+- A change to a shared CI file (`ci-*.yml`, the actions, `.lydite/`, the release scripts under
+  `.github/scripts/release/`, `release.yml`, `auto-release.yml`, `release-selftest.yml`) selects
+  every project; a change that touches no project (docs, agentic instructions) selects none and the
+  stages skip.
 - A new project needs a component in `.lydite/components.yml`, a `gomod` entry in `.gt-repo.yaml`
   followed by `gt repo sync`, and a `use` line in `go.work`, each at its full nested directory
   (`./source/cli/core`). It resolves through `go.vipengele.org` once its `go.mod` has merged and

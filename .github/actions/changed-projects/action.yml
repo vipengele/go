@@ -23,7 +23,10 @@
 #
 # A change to a file every project's CI depends on (the CI stages, this action,
 # the coverage config) selects all of them, since those can alter any project's
-# result. Anything else — docs, agentic instructions — selects none.
+# result. The release scripts under .github/scripts/release/ and the workflows
+# release.yml, auto-release.yml and release-selftest.yml are shared CI as well:
+# the release validates and tests every project, and the test stage runs their
+# self-test. Anything else — docs, agentic instructions — selects none.
 #
 # The release-tool workflows (.github/workflows/release-tool*.yml) are owned by
 # the `update` project and are not shared CI files: a change to one selects
@@ -94,7 +97,7 @@ runs:
         changed="$(git diff --name-only "$base" HEAD)"
         echo "changed files:"; echo "$changed" | sed 's/^/  /'
 
-        if grep -qE '^(\.github/(workflows/ci-[a-z]+\.yml|actions/)|\.lydite/)' <<< "$changed"; then
+        if grep -qE '^(\.github/(workflows/(ci-[a-z]+|release|auto-release|release-selftest)\.yml|actions/|scripts/release/)|\.lydite/)' <<< "$changed"; then
           echo "a shared CI file changed; selecting every project"
           echo "projects=${all}" >> "$GITHUB_OUTPUT"
           exit 0

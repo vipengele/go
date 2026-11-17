@@ -45,9 +45,10 @@ creates the tag: the workflow, from the merge commit, and no person.
   `gh release create` failing with "already exists" counts as success.
 - **A tag that exists at release time** was made by a concurrent run. In release mode a rejected tag
   push fails that entry, and the next sweep no longer sees the project as pending.
-- **The release self-test runs on every change to the release.** `release-selftest.yml` runs on
-  every pull request and every push to `main` that touches `.github/scripts/release/`,
-  `release.yml`, `auto-release.yml` or itself. It is offline and quick.
+- **The release self-test runs on every change to the release.** `release-selftest.yml` is a job of
+  the test stage, `ci-test.yml`, and a change to `.github/scripts/release/`, `release.yml`,
+  `auto-release.yml` or `release-selftest.yml` selects every project, so the stage runs. It is
+  offline and quick.
 - **Edge cases.** More than one pending version for a project fails `plan`. Notes without a project,
   and tags without notes such as `source/spike/probe/v0.0.1`, are ignored.
 - **A dependency chain needs one pull request per tier.** A project that requires a sibling with no
@@ -85,7 +86,8 @@ creates the tag: the workflow, from the merge commit, and no person.
   releases nothing.
 - **A failed announce is retried by the next sweep.** The tag exists, its commit carries the notes
   and there is no GitHub Release, so the project is unannounced and the next run announces it.
-- **The release self-test is a path-triggered check, not a `ci-gate` stage.** `ci-orchestration.yml`
-  is rendered by `gt`, so a stage there is declared in `.gt-repo.yaml`. Without one, a failing
-  self-test shows on the pull request but does not block its merge: a pull request outside its paths
-  never reports the check, so branch protection cannot require it.
+- **The release self-test runs in the test stage and gates `ci-gate`.** `ci-orchestration.yml` is
+  rendered by `gt` from `.gt-repo.yaml`, which accepts only the `preflight`, `build`, `test` and
+  `end2end` stages, so the self-test is a job of the repo-owned test stage. A change to the release
+  scripts or workflows selects every project, since the release validates and tests every project,
+  so the test stage runs and a failing self-test blocks the merge.
