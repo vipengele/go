@@ -565,6 +565,60 @@ func TestResolveDefaultStateDirFollowsTheSeams(t *testing.T) {
 	}
 }
 
+func TestResolvePathsLayoutSelectsTheStateDirWithoutChangingGOOSDefaults(t *testing.T) {
+	t.Parallel()
+	home := filepath.Join(t.TempDir(), "home")
+	stateHome := filepath.Join(t.TempDir(), "state-home")
+	const app = "agentic-toolkit"
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"XDG_STATE_HOME", map[string]string{"XDG_STATE_HOME": stateHome}, filepath.Join(stateHome, app)},
+		{"home fallback", nil, filepath.Join(home, ".local", "state", app)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig(home)
+			c.GOOS = "darwin"
+			c.PathsLayout = paths.LayoutXDG
+			c.Getenv = envOf(tc.env)
+
+			r, err := c.resolve()
+			if err != nil {
+				t.Fatalf("resolve() error = %v, want nil", err)
+			}
+			if r.StateDir != tc.want {
+				t.Errorf("StateDir = %q, want %q", r.StateDir, tc.want)
+			}
+			if r.AssetExt != asset.DefaultExtFor("darwin") {
+				t.Errorf("AssetExt = %q, want %q", r.AssetExt, asset.DefaultExtFor("darwin"))
+			}
+			if r.GOOS != "darwin" {
+				t.Errorf("GOOS = %q, want darwin", r.GOOS)
+			}
+			if r.BinaryName != c.Name {
+				t.Errorf("BinaryName = %q, want %q", r.BinaryName, c.Name)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsAnUnknownPathsLayout(t *testing.T) {
+	t.Parallel()
+	c := Config{Identity: validIdentity(), TrustedKeys: []string{testKey()}, Source: &stubSource{}}
+	c.PathsLayout = paths.Layout(99)
+	if err := c.Validate(); !errors.Is(err, validate.ErrInvalid) {
+		t.Errorf("Validate() = %v, want one wrapping %v", err, validate.ErrInvalid)
+	}
+	if _, err := c.resolve(); !errors.Is(err, validate.ErrInvalid) {
+		t.Errorf("resolve() error = %v, want one wrapping %v", err, validate.ErrInvalid)
+	}
+}
+
 func TestResolveKeepsExplicitStateDir(t *testing.T) {
 	t.Parallel()
 	stateDir := filepath.Join(t.TempDir(), "state")
