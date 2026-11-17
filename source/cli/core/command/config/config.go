@@ -6,12 +6,15 @@
 // has no run function, so "config" alone prints its help. Its subcommands are:
 //
 //   - "path" prints the path of the configuration file. It carries [spec.SkipConfig].
-//   - "validate" loads the defaults and the file, the file parsed strictly and the result checked
-//     by T's [cfg.Validator], and reports every problem it finds. It carries [spec.SkipConfig], so
-//     it runs while the file is broken. A missing file is valid: the defaults apply.
-//   - "show" prints every key with its value and its origin: "default", the file and line, or the
-//     environment variable that set it. It reads the configuration the context carries, stored by
-//     [With], so the code that runs before it loads it.
+//   - "validate" loads the defaults, the file and the overlay file, each parsed strictly and the
+//     result checked by T's [cfg.Validator], without the environment, and reports every problem it
+//     finds. On success it names the full path of each file it covered. It carries
+//     [spec.SkipConfig], so it runs while a file is broken. A missing file is valid: the defaults
+//     apply.
+//   - "show" names each layer, defaults, file, overlay and env, with its path, then prints every
+//     key with its value and its origin: "default", the file and line, or the environment variable
+//     that set it. It reads the configuration the context carries, stored by [With], so the code
+//     that runs before it loads it.
 //   - "edit" opens a copy of the file in an editor and moves it over the file only once the copy
 //     is valid, checked as "validate" checks the file; the file it writes has mode 0600. It needs
 //     a terminal on the standard input and carries [spec.SkipConfig], so it repairs a broken file.
@@ -24,6 +27,10 @@ package config
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 
 	cfg "go.vipengele.org/config"
 
@@ -49,6 +56,14 @@ type Options[T any] struct {
 	// LookupEnv looks up the environment variables of the environment layer, as os.LookupEnv
 	// does. Nil reads the LookupEnv of the invocation's Env.
 	LookupEnv func(key string) (string, bool)
+	// Overlay resolves the path of the overlay file, a layer between the file at Path and the
+	// environment, given the lookup of the environment layer. It runs on every [Options.Load], so
+	// each execution resolves it afresh. A path that is "" or names no file gives no overlay
+	// layer. Nil gives no overlay.
+	Overlay func(lookup func(key string) (string, bool)) (string, error)
+	// OverlayAllow lists the keys the overlay file may set, as [cfg.FileProvider.Allow] takes
+	// them: any other key the overlay sets is a problem at its line. Empty allows every key.
+	OverlayAllow []string
 	// Editor is the editor "config edit" opens the copy of the file in. Nil runs the program
 	// $VISUAL names, else the one $EDITOR names, as the invocation's Env looks them up, split on
 	// whitespace and given the copy's path as its last argument, with the invocation's standard
@@ -58,20 +73,67 @@ type Options[T any] struct {
 }
 
 // Load returns the configuration of every layer: Defaults, under the file at Path, under the
-// environment variables of EnvPrefix. inv supplies the environment when LookupEnv is nil. The
-// error is the one [cfg.Load] returns, every problem of every layer joined.
+// overlay file Overlay resolves, restricted to OverlayAllow, under the environment variables of
+// EnvPrefix. inv supplies the environment when LookupEnv is nil. The error is the one of
+// [Options.files] when the overlay does not resolve, and otherwise the one [cfg.Load] returns,
+// every problem of every layer joined.
 func (o Options[T]) Load(inv *spec.Invocation) (cfg.Result[T], error) {
-	lookup := o.LookupEnv
-	if lookup == nil {
-		lookup = inv.Env.LookupEnv
+	files, err := o.files(inv)
+	if err != nil {
+		return cfg.Result[T]{}, err
 	}
-	return cfg.Load(o.Defaults, cfg.File(o.Path), cfg.Env(o.EnvPrefix, lookup))
+	return cfg.Load(o.Defaults, append(files, cfg.Env(o.EnvPrefix, o.lookup(inv)))...)
 }
 
-// loadFile returns the configuration of Defaults under the file at Path, without the environment
-// layer: what the file itself makes of the configuration.
-func (o Options[T]) loadFile() (cfg.Result[T], error) {
-	return cfg.Load(o.Defaults, cfg.File(o.Path))
+// lookup returns the lookup of the environment layer: LookupEnv, or the LookupEnv of inv's Env
+// when it is nil.
+func (o Options[T]) lookup(inv *spec.Invocation) func(string) (string, bool) {
+	if o.LookupEnv != nil {
+		return o.LookupEnv
+	}
+	return inv.Env.LookupEnv
+}
+
+// OverlayPath returns the path of the overlay file for inv, as [Options.Load] resolves it, or ""
+// when there is no overlay layer. Each call runs Overlay afresh; its error is the one Load returns
+// when the overlay does not resolve.
+func (o Options[T]) OverlayPath(inv *spec.Invocation) (string, error) {
+	path, _, err := o.overlay(inv)
+	return path, err
+}
+
+// files returns the file layers, lowest first, without the environment layer: the file at Path,
+// followed by the overlay file when [Options.overlay] finds one.
+func (o Options[T]) files(inv *spec.Invocation) ([]cfg.Provider, error) {
+	_, overlay, err := o.overlay(inv)
+	if err != nil {
+		return nil, err
+	}
+	return append([]cfg.Provider{cfg.File(o.Path)}, overlay...), nil
+}
+
+// overlay resolves the overlay file for inv and returns its path and its layer, restricted to
+// OverlayAllow. It returns "" and no layer when Overlay is nil, and when the path is "" or names
+// no file: an empty path stats as a missing file. An error of Overlay, and any error of the stat
+// but a missing file, such as a path through a regular file, is returned naming the overlay. A
+// path that stats but cannot be read, such as a directory, is the overlay layer's error when it
+// loads.
+func (o Options[T]) overlay(inv *spec.Invocation) (string, []cfg.Provider, error) {
+	if o.Overlay == nil {
+		return "", nil, nil
+	}
+	path, err := o.Overlay(o.lookup(inv))
+	if err != nil {
+		return "", nil, fmt.Errorf("config overlay: %w", err)
+	}
+	_, err = os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil, nil
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("config overlay %s: %w", path, err)
+	}
+	return path, []cfg.Provider{cfg.File(path).Allow(o.OverlayAllow...)}, nil
 }
 
 // New returns the "config" group for opts, holding the subcommands commands builds, in order.

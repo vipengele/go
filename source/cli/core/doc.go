@@ -52,7 +52,12 @@
 // runs without it, as "path", "validate", "edit" and "version" do, so a broken file can still be
 // diagnosed and repaired. A configuration that does not load stops the execution as a pre-run
 // hook's error does, with exit code 1. Without [WithConfig] the App has no "config" command and
-// reads no file.
+// reads no file. [WithConfigOverlay] adds one more file layer above config.yaml and below the
+// environment: its resolver receives the environment lookup on every execution and returns the
+// file's path, an empty path or a missing file adds no layer, and a resolver or read error fails
+// the execution. Its allow-list names the only keys the overlay may set; any other key is an error
+// at its line. It needs [WithConfig], and the last call wins. "config validate" checks the
+// defaults, config.yaml and the overlay together, without the environment.
 //
 // [WithLogging] gives the App the flags --log-level and --log-format, and a hook that installs the
 // process-wide [log/slog] logger, built by the logging package, before every run function. The

@@ -72,6 +72,11 @@
 // A file that is missing, empty or holds only comments sets nothing, and its keys keep the values
 // of the layers below. A file that is not valid YAML, or has more than one document, is an error.
 //
+// [FileProvider.Allow] limits the keys a file may set. A key outside the list, or outside a group
+// it names, is an error at its line, "key ... is not settable in <file>", never dropped; a key that
+// names a group or a collection allows all of it, and keys inside collection elements and map keys
+// are never checked. Keys match as schema keys do. Allow with no keys, or no call, allows every key.
+//
 // # Sources
 //
 // A key is converted to the type of its field from the text a provider found. Every problem is

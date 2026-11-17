@@ -150,3 +150,75 @@ func TestValidateReportsAPathItCannotStatAfterTheLoad(t *testing.T) {
 		t.Errorf("stderr = %q, want no success line", errOut.String())
 	}
 }
+
+func TestValidateListsEveryFileItCovered(t *testing.T) {
+	opts := options(t, "name: tool\n")
+	overlay := writeFile(t, "overlay.yaml", "port: 7070\n")
+	opts.Overlay = overlayAt(overlay)
+	r := run(t, context.Background(), opts, "validate", false)
+	if r.err != nil {
+		t.Fatalf("Run: %v", r.err)
+	}
+	want := "✓ " + opts.Path + " is valid\n✓ " + overlay + " is valid (overlay)\n"
+	if r.stderr != want {
+		t.Errorf("stderr = %q, want %q", r.stderr, want)
+	}
+	if r.stdout != "" {
+		t.Errorf("stdout = %q, want empty", r.stdout)
+	}
+}
+
+func TestValidateListsAMissingFileAndTheOverlay(t *testing.T) {
+	opts := options(t, "")
+	overlay := writeFile(t, "overlay.yaml", "port: 7070\n")
+	opts.Overlay = overlayAt(overlay)
+	r := run(t, context.Background(), opts, "validate", false)
+	if r.err != nil {
+		t.Fatalf("Run: %v", r.err)
+	}
+	want := "✓ " + opts.Path + " does not exist; the defaults are valid\n✓ " + overlay + " is valid (overlay)\n"
+	if r.stderr != want {
+		t.Errorf("stderr = %q, want %q", r.stderr, want)
+	}
+}
+
+func TestValidateWithoutAnOverlayListsOnlyTheFile(t *testing.T) {
+	opts := options(t, "name: tool\n")
+	opts.Overlay = overlayAt(filepath.Join(t.TempDir(), "absent.yaml"))
+	r := run(t, context.Background(), opts, "validate", false)
+	if r.err != nil {
+		t.Fatalf("Run: %v", r.err)
+	}
+	if want := "✓ " + opts.Path + " is valid\n"; r.stderr != want {
+		t.Errorf("stderr = %q, want %q", r.stderr, want)
+	}
+}
+
+func TestValidateReportsAnOverlayKeyOutsideTheAllowList(t *testing.T) {
+	opts := options(t, "name: tool\n")
+	overlay := writeFile(t, "overlay.yaml", "port: 7070\nretries: 6\n")
+	opts.Overlay = overlayAt(overlay)
+	opts.OverlayAllow = []string{"port"}
+	r := run(t, context.Background(), opts, "validate", false)
+	if r.err == nil {
+		t.Fatal("Run succeeded, want the overlay's problem")
+	}
+	for _, want := range []string{"overlay.yaml:2", opts.Path, overlay} {
+		if !strings.Contains(r.err.Error(), want) {
+			t.Errorf("error %q does not mention %q", r.err, want)
+		}
+	}
+	if r.stdout != "" || r.stderr != "" {
+		t.Errorf("stdout %q, stderr %q; want both empty", r.stdout, r.stderr)
+	}
+}
+
+func TestValidateFailsWhenTheOverlayDoesNotResolve(t *testing.T) {
+	opts := options(t, "name: tool\n")
+	errResolve := errors.New("no overlay")
+	opts.Overlay = func(func(string) (string, bool)) (string, error) { return "", errResolve }
+	r := run(t, context.Background(), opts, "validate", false)
+	if !errors.Is(r.err, errResolve) || r.stderr != "" {
+		t.Errorf("Run = %v, stderr %q; want the resolver's error and no success line", r.err, r.stderr)
+	}
+}

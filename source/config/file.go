@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -100,7 +101,8 @@ type NodeEntry struct {
 
 // FileProvider reads a YAML configuration file. File returns one.
 type FileProvider struct {
-	path string
+	path  string
+	allow []string // matchKey form of every key the file may set; empty allows every key
 }
 
 // File returns a provider reading the YAML file at path.
@@ -137,6 +139,35 @@ type FileProvider struct {
 // profiles[2].env["FOO"]. An error reading or parsing the file names path as given.
 func File(path string) *FileProvider {
 	return &FileProvider{path: path}
+}
+
+// Allow restricts the keys the file may set to keys and returns p. A key of the file that is none
+// of keys, and under none of them, is a problem at its line, "not settable in" the file's base
+// name, and is never dropped silently. Keys are matched as Schema keys are, ignoring case, "-" and
+// "_" within each segment. A key naming a group allows every key under it, and a key naming a
+// collection allows the whole collection: the keys within its elements, and its map keys, are
+// governed by that one key and are never checked against keys. With no keys, or with no call to
+// Allow, the file may set every key.
+func (p *FileProvider) Allow(keys ...string) *FileProvider {
+	p.allow = p.allow[:0:0]
+	for _, k := range keys {
+		p.allow = append(p.allow, matchKey(k))
+	}
+	return p
+}
+
+// settable reports whether the allow-list admits key, the Schema key of a top-level field.
+func (p *FileProvider) settable(key string) bool {
+	if len(p.allow) == 0 {
+		return true
+	}
+	m := matchKey(key)
+	for _, a := range p.allow {
+		if m == a || strings.HasPrefix(m, a+".") {
+			return true
+		}
+	}
+	return false
 }
 
 // Strict reports true: every key in a file must belong to the Schema.
@@ -184,7 +215,9 @@ func (p *FileProvider) Load(schema *Schema) ([]Entry, error) {
 	}
 
 	l := &fileLoader{name: filepath.Base(p.path), schema: schema, lines: make(map[*Node]int)}
-	l.mapping(newScope(schema, "", nil, l.setField), root, "")
+	s := newScope(schema, "", nil, l.setField)
+	s.settable = p.settable
+	l.mapping(s, root, "")
 	if len(l.problems) > 0 {
 		return nil, errors.Join(l.problems...)
 	}
@@ -209,6 +242,9 @@ type scope struct {
 	seen   map[string]seenKey              // matchKey form of every field key set so far
 	path   []pathStep                      // the file-local path of the element; nil for the configuration
 	set    func(Field, string, *yaml.Node) // records the value of a field, written as the given key
+	// settable reports whether the file may set the field with the given Schema key; nil admits every
+	// field. Only the configuration's scope sets it: an element's keys follow its collection's.
+	settable func(string) bool
 }
 
 func newScope(schema *Schema, key string, path []pathStep, set func(Field, string, *yaml.Node)) *scope {
@@ -287,6 +323,11 @@ func (l *fileLoader) pair(s *scope, key string, k, v *yaml.Node) {
 			}
 			l.failIn(s.path, k.Line, "unknown key %q", key)
 		}
+		return
+	}
+
+	if s.settable != nil && !s.settable(field.key) {
+		l.failIn(s.path, k.Line, "key %q is not settable in %s", key, l.name)
 		return
 	}
 

@@ -18,3 +18,5 @@ require (
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 )
+
+replace go.vipengele.org/config => ../../config

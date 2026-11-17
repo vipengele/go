@@ -1,3 +1,5 @@
+layers[].name
+layers[].path
 path
 schema
 values[].key

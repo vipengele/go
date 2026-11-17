@@ -39,6 +39,10 @@ func TestShowTextNamesEveryOrigin(t *testing.T) {
 		t.Fatalf("Run: %v", r.err)
 	}
 	want := strings.Join([]string{
+		"defaults the values of the fields",
+		"file     " + opts.Path,
+		"env      TOOL_*",
+		"",
 		"KEY          VALUE      ORIGIN",
 		"name         tool       config.yaml:1",
 		"port         9090       config.yaml:2",
@@ -58,8 +62,8 @@ func TestShowTextFollowsTheStdoutColour(t *testing.T) {
 	if err := subcommand(t, config.New(opts), "show").Run(ctx, inv); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if want := spec.Styler.Bold(inv.Output.Styler(spec.Stdout), "KEY"); !strings.HasPrefix(out.String(), want) {
-		t.Errorf("stdout = %q, want it to start with the bold header %q", out.String(), want)
+	if want := spec.Styler.Bold(inv.Output.Styler(spec.Stdout), "KEY"); !strings.Contains(out.String(), "\n\n"+want) {
+		t.Errorf("stdout = %q, want it to hold the bold header %q", out.String(), want)
 	}
 }
 
@@ -74,6 +78,10 @@ func TestShowJSONNamesEveryOrigin(t *testing.T) {
 	}
 	var got struct {
 		Path   string `json:"path"`
+		Layers []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"layers"`
 		Values []struct {
 			Key    string `json:"key"`
 			Value  string `json:"value"`
@@ -85,6 +93,14 @@ func TestShowJSONNamesEveryOrigin(t *testing.T) {
 	}
 	if got.Path != opts.Path {
 		t.Errorf("path = %q, want %q", got.Path, opts.Path)
+	}
+	wantLayers := "defaults:|file:" + opts.Path + "|env:"
+	var gotLayers []string
+	for _, l := range got.Layers {
+		gotLayers = append(gotLayers, l.Name+":"+l.Path)
+	}
+	if strings.Join(gotLayers, "|") != wantLayers {
+		t.Errorf("layers = %q, want %q", gotLayers, wantLayers)
 	}
 	origins := map[string]string{}
 	for _, v := range got.Values {
@@ -130,5 +146,104 @@ func TestShowWithoutALoadedConfigurationFails(t *testing.T) {
 				t.Errorf("stdout = %q, want empty", r.stdout)
 			}
 		})
+	}
+}
+
+// overlayed returns the Options and context of loaded with an overlay file that sets retries.
+func overlayed(t *testing.T) (config.Options[testConfig], context.Context, string) {
+	t.Helper()
+	opts, _ := loaded(t)
+	overlay := writeFile(t, "overlay.yaml", "retries: 7\n")
+	opts.Overlay = overlayAt(overlay)
+	opts.LookupEnv = func(string) (string, bool) { return "", false }
+	res, err := opts.Load(spec.NewInvocation(nil, nil, nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return opts, config.With(context.Background(), res), overlay
+}
+
+func TestShowTextNamesTheOverlay(t *testing.T) {
+	opts, ctx, overlay := overlayed(t)
+	r := run(t, ctx, opts, "show", false)
+	if r.err != nil {
+		t.Fatalf("Run: %v", r.err)
+	}
+	want := strings.Join([]string{
+		"defaults the values of the fields",
+		"file     " + opts.Path,
+		"overlay  " + overlay,
+		"env      TOOL_*",
+		"",
+		"KEY          VALUE      ORIGIN",
+		"name         tool       config.yaml:1",
+		"port         9090       config.yaml:2",
+		"retries      7          overlay.yaml:1",
+		"server.host  localhost  default",
+		"",
+	}, "\n")
+	if r.stdout != want {
+		t.Errorf("stdout =\n%s\nwant\n%s", r.stdout, want)
+	}
+}
+
+func TestShowTextWithoutAnEnvPrefix(t *testing.T) {
+	opts, ctx := loaded(t)
+	opts.EnvPrefix = ""
+	r := run(t, ctx, opts, "show", false)
+	if want := "env      variables named after their keys\n\nKEY"; !strings.Contains(r.stdout, want) {
+		t.Errorf("stdout =\n%s\nwant it to hold %q", r.stdout, want)
+	}
+}
+
+func TestShowJSONNamesTheOverlay(t *testing.T) {
+	opts, ctx, overlay := overlayed(t)
+	r := run(t, ctx, opts, "show", true)
+	if r.err != nil {
+		t.Fatalf("Run: %v", r.err)
+	}
+	var got struct {
+		Path   string `json:"path"`
+		Layers []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
+		t.Fatalf("stdout %q is not JSON: %v", r.stdout, err)
+	}
+	var gotLayers []string
+	for _, l := range got.Layers {
+		gotLayers = append(gotLayers, l.Name+":"+l.Path)
+	}
+	want := "defaults:|file:" + opts.Path + "|overlay:" + overlay + "|env:"
+	if got.Path != opts.Path || strings.Join(gotLayers, "|") != want {
+		t.Errorf("path %q, layers %q; want path %q, layers %q", got.Path, gotLayers, opts.Path, want)
+	}
+}
+
+func TestShowFailsWhenTheOverlayDoesNotResolve(t *testing.T) {
+	opts, ctx := loaded(t)
+	errResolve := errors.New("no overlay")
+	opts.Overlay = func(func(string) (string, bool)) (string, error) { return "", errResolve }
+	r := run(t, ctx, opts, "show", false)
+	if !errors.Is(r.err, errResolve) || r.stdout != "" {
+		t.Errorf("Run = %v, stdout %q; want the resolver's error and no output", r.err, r.stdout)
+	}
+}
+
+// failingWriter fails every write.
+type failingWriter struct{}
+
+var errWrite = errors.New("write failed")
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errWrite }
+
+func TestShowReportsAFailedWrite(t *testing.T) {
+	opts, ctx := loaded(t)
+	inv := spec.NewInvocation(&spec.Env{Stdout: failingWriter{}}, nil, nil)
+	inv.Output = spec.NewOutput(spec.OutputOptions{NoColorStdout: true})
+	if err := subcommand(t, config.New(opts), "show").Run(ctx, inv); !errors.Is(err, errWrite) {
+		t.Errorf("Run = %v, want the write error", err)
 	}
 }

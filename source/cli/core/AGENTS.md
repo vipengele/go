@@ -17,10 +17,15 @@ library. The `version --json` output is a contract owned by the `cli` project (A
   `Dirs.Config()` of the identity < env (`inv.Env.LookupEnv`, `Identity.EnvPrefix`) and stores the
   `Result[T]` in the context; `ConfigFrom[T](ctx)` reads it (false without `WithConfig` or on a
   `spec.SkipConfig` command). The hook runs ahead of every `WithPreRun` hook whatever the option
-  order, a load failure is a hook error (exit 1), and a missing file is valid. A directory that
-  cannot be resolved makes the hook and every group run function return that error. `version`
-  carries `SkipConfig` (set in `App.version`); annotations are per command, never inherited. No
-  `--config` flag, no per-key flags, no seeded file;
+  order, a load failure is a hook error (exit 1), and a missing file is valid.
+  `WithConfigOverlay(resolve, allow...)` (`config.go`, ADR-0017) adds one overlay file layer,
+  loading defaults < `config.yaml` < overlay < env; the last call wins and without `WithConfig` the
+  tree is invalid. `resolve(lookup)` runs every execution with the env lookup; an empty path or
+  missing file adds no layer, a resolver error or other stat/read error fails the run. `allow` is
+  `File(path).Allow(allow...)`: a key outside it is an error "not settable in <file>", never
+  dropped. A directory that cannot be resolved makes the hook and every group run function return
+  that error. `version` carries `SkipConfig` (set in `App.version`); annotations are per command,
+  never inherited. No `--config` flag, no per-key flags, no seeded file;
   `WithCompletion()` (`app.go`) is opt-in: it sets `cobra.Config.Completion`, which gives the
   root cobra's own `completion` command (`completion <shell>` writes the bash, zsh, fish or
   powershell script to stdout, exit 0; `completion <shell> --help` says how to load it; root
@@ -124,15 +129,19 @@ library. The `version --json` output is a contract owned by the `cli` project (A
 
 - `command/config` — `New(Options[T])` returns the `config` group (ADR-0017); a leaf package that
   never imports `cli` or a CLI framework. `ctx.go` holds `With` / `From`, the context accessors
-  keyed per `T`. `path` prints the path (JSON `{path, exists}`), `validate` loads defaults < file
-  only and prints a success line on stderr, `show` prints key / value / origin of the full stack
-  from the context (`ErrNotLoaded` without one), `edit` edits a copy in a `.edit-*` directory
-  beside the file and replaces the file at 0600 only when the copy validates (file layer only), with
-  a `re-edit? [Y/n]` prompt; editor `$VISUAL` then `$EDITOR`, via `Options.Editor` in tests, else
-  the default launcher, which needs `*os.File` stdio. `path`, `validate` and `edit` carry
-  `SkipConfig`; `show` does not. JSON follows `inv.Output.Format()` (no flag of its own), so `show
-  --json` needs `WithJSON` or `WithOutput`. Errors are plain (exit 1), including the non-terminal
-  refusal of `edit`: the usage-error type is in `internal/cobra`.
+  keyed per `T`. `path` prints the path (JSON `{path, exists}`), `validate` merges defaults < file <
+  overlay without env, reports problems at file:line, names both files in the error when an overlay
+  is present and lists each file it covered on stderr on success, `show` prints a header naming each
+  layer (defaults, file, overlay, env) and key / value / origin of the full stack from the context
+  (`ErrNotLoaded` without one; JSON keeps `path` and adds `layers [{name, path}]`), `edit` edits a
+  copy in a `.edit-*` directory beside the file and replaces the file at 0600 only when the copy
+  validates (user file only, so it cannot see a problem that appears only once the overlay is
+  merged; `path` is the user file too), with a `re-edit? [Y/n]` prompt; editor `$VISUAL` then
+  `$EDITOR`, via `Options.Editor` in tests, else the default launcher, which needs `*os.File` stdio.
+  `path`, `validate` and `edit` carry `SkipConfig`; `show` does not. JSON follows
+  `inv.Output.Format()` (no flag of its own), so `show --json` needs `WithJSON` or `WithOutput`.
+  Errors are plain (exit 1), including the non-terminal refusal of `edit`: the usage-error type is
+  in `internal/cobra`.
 - `logging` — `Setup(Options) (Result, error)` builds the `slog` logger (text or JSON handler,
   level, writer) and installs it as `slog.Default`; `Result` holds the `Logger` and the
   `*RedactingWriter` beneath it. One redactor, from `Options.Redaction` (`Redaction{Prefixes,

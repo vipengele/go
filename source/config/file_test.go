@@ -557,3 +557,66 @@ func TestNodeKindString(t *testing.T) {
 		}
 	}
 }
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+func TestFileAllow(t *testing.T) {
+	t.Parallel()
+	const doc = "name: app\nserver:\n  host: h\n  port: 80\ntags: [a]\n"
+	tests := []struct {
+		name  string
+		allow func(*FileProvider) *FileProvider
+		want  []string
+	}{
+		{"no call", func(p *FileProvider) *FileProvider { return p }, nil},
+		{"no keys", func(p *FileProvider) *FileProvider { return p.Allow() }, nil},
+		{"group", func(p *FileProvider) *FileProvider { return p.Allow("name", "Server", "tags") }, nil},
+		{"leaf spelled loosely", func(p *FileProvider) *FileProvider { return p.Allow("NAME", "server.host", "server.port", "t-ags") }, nil},
+		{"outside the list", func(p *FileProvider) *FileProvider { return p.Allow("name", "server.host") }, []string{
+			`config.yaml:4: key "server.port" is not settable in config.yaml`,
+			`config.yaml:5: key "tags" is not settable in config.yaml`,
+		}},
+		{"prefix of a segment is not a group", func(p *FileProvider) *FileProvider { return p.Allow("name", "serv", "tags") }, []string{
+			`config.yaml:3: key "server.host" is not settable in config.yaml`,
+			`config.yaml:4: key "server.port" is not settable in config.yaml`,
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := tt.allow(File(writeConfig(t, doc)))
+			_, err := p.Load(fileSchema(t))
+			if got := fileProblems(err); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("problems = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileAllowCollectionCoversItsContents(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data, err := os.ReadFile(filepath.Join("testdata", "collections.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	all := []string{"name", "profiles", "labels", "matrix", "services", "steps"}
+	if _, err := File(path).Allow(all...).Load(collectionsSchema(t)); err != nil {
+		t.Fatalf("Load with every collection allowed: %v", err)
+	}
+	_, err = File(path).Allow("name", "labels", "matrix", "services", "steps").Load(collectionsSchema(t))
+	want := []string{`config.yaml:2: key "profiles" is not settable in config.yaml`}
+	if got := fileProblems(err); !reflect.DeepEqual(got, want) {
+		t.Errorf("problems = %q, want %q", got, want)
+	}
+}

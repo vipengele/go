@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.vipengele.org/cli/core/buildinfo"
@@ -70,6 +71,9 @@ type settings struct {
 	// config binds the configuration [WithConfig] gives to each execution, and is nil without
 	// that option.
 	config configurer
+	// configOverlay is the overlay the last [WithConfigOverlay] gives, and is nil without that
+	// option.
+	configOverlay *configOverlay
 	// completion gives every root the "completion" command of [WithCompletion].
 	completion bool
 }
@@ -196,7 +200,8 @@ func (a *App) Execute() int {
 // included, returns [ExitError] after writing "<name>: invalid command tree" to env.Stderr,
 // followed by one row per problem found. So does a command that declares a flag with the name or
 // the shorthand of a standard flag the App takes, and an App given [WithLogging] without both
-// [WithVerbose] and [WithQuiet], or [WithRedaction] without [WithLogging].
+// [WithVerbose] and [WithQuiet], [WithRedaction] without [WithLogging], or [WithConfigOverlay]
+// without [WithConfig].
 //
 // Every error is written to env.Stderr as [ExecuteArgs] writes one, with each error of its tree
 // offered to the renderers [WithErrorRenderer] adds, in the order they were added.
@@ -224,7 +229,7 @@ func (a *App) Execute() int {
 // [WithExitCodeAs] that matches; [ExitUsage] for a command line the tree does not accept, and for
 // an error that carries a [spec.UsageError]; [ExitError] otherwise.
 func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
-	if err := loggingProblem(a.settings); err != nil {
+	if err := errors.Join(loggingProblem(a.settings), configProblem(a.settings)); err != nil {
 		errrender.Render(env.Resolved().Stderr, a.identity.Name,
 			fmt.Errorf("invalid command tree: %w", err), a.settings.errorRenderers)
 		return ExitError
