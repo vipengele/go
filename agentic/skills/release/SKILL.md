@@ -22,23 +22,46 @@ annotated tag) and announces it (ADR-0037). No one pushes the tag.
 
 ## 1 — Decide the version
 
+The tags and the full history have to be local first. A shallow clone, which every cloud checkout
+is, holds no tags and a truncated history: the tag lookup below then prints nothing and `git log`
+reads only the commits that were fetched, so the bump is chosen from the wrong commits and nothing
+fails.
+
+```bash
+git fetch --tags origin
+if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch --unshallow origin; fi
+```
+
 Read `git log` for `source/<project>/` since the project's last tag
 (`git tag --list 'source/<project>/v*' --sort=-v:refname | head -1`) and pick the bump from the
 Conventional Commit types: a `!` or `BREAKING CHANGE` is major, `feat` is minor, anything else is
-patch. Before `v1.0.0` a breaking change is a minor bump.
+patch. Before `v1.0.0` a breaking change is a minor bump. A project with no tag is released for the
+first time, and its whole history counts.
 
 A major version of `v2` or above changes the module path (`agentic/rules/module-path-matches-the-vanity-map.md`).
 Stop and confirm with the user before releasing one.
 
-## 2 — Release dependencies first, at release time only
+## 2 — Release the siblings it needs with it
 
-If the project requires siblings (`go list -m all | grep go.vipengele.org/`), its release needs each
-of them released at a version that contains what the project uses. Release first, with this same
-skill, every sibling whose latest release lacks something the project uses. The order matters only
-here: no sibling is ever released so that a dependent can be developed, and a project nothing
-unreleased feeds — a patch, or a project no sibling uses — is released on its own whenever it is
-ready. A dependent and the siblings it needs release from one pull request that carries every
-project's notes: `auto-release` releases them tier by tier (ADR-0038).
+List the siblings the project requires:
+
+```bash
+cd source/<project>
+go mod edit -json | jq -r '.Require[]? | select(.Path | startswith("go.vipengele.org/")) | "\(.Path) \(.Version)"'
+```
+
+Read the `go.mod` this way, not with `go list -m all`: that runs in workspace mode while `go.work`
+is present, and lists every project in the workspace as though it were required.
+
+The release needs each sibling released at a version that contains what the project uses. A sibling
+whose latest tag already does stays at that tag. A sibling whose latest tag lacks something the
+project uses is released together with it: decide its version and write its notes with this same
+skill, in the same pull request. `auto-release` tags it in an earlier tier than the project, and tags
+the project on a release commit that requires it at that version (ADR-0038).
+
+The order matters only at release time. No sibling is ever released so that a dependent can be
+developed, and a project nothing unreleased feeds (a patch, or a project no sibling uses) is
+released on its own whenever it is ready.
 
 ## 3 — Write the release notes
 
