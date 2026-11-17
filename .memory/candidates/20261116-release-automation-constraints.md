@@ -1,19 +1,47 @@
 ---
-about: "constraints on automating releases from main: ADR-0001 gives no reason for a human tag; release.yml is push-tag-only and reads github.ref; GITHUB_TOKEN tags do not trigger it; no tag ruleset exists"
+about: "facts behind auto-release: ADR-0037 supersedes ADR-0001's human tag; tags and dispatches made with GITHUB_TOKEN trigger nothing (so release.yml is reusable, no tag trigger); no tag ruleset is in git; a dependency chain needs one PR per tier because strict mode and validate require tagged siblings"
 saw:
   - .github/workflows/release.yml
+  - .github/workflows/auto-release.yml
+  - .github/scripts/release/pending.sh
+  - .github/scripts/release/release-project.sh
   - docs/adr/0001-each-project-is-a-go-module-released-by-its-own-prefixed-tag.md
   - docs/adr/0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md
   - docs/adr/0016-the-vanity-module-list-is-published-as-data-to-r2-from-main.md
+  - docs/adr/0033-a-tool-releases-through-the-update-release-workflow-pinned-at-the-update-tag.md
+  - docs/adr/0037-a-release-is-the-merge-of-its-notes.md
   - .github/workflows/deploy-vanity-worker.yml
   - .github/actions/verify-sibling-deps/action.yml
   - .github/actions/changed-projects/action.yml
 ---
-Explored for issue 211 (auto-release on push to main).
 
-- ADR-0001 (:25) states "A human pushes the tag" as fact; its Considered options (:51-57) are only repo-wide tag, lockstep tags, one root module. No ADR argues for or against automation of the tag. The only rejected CI-tag alternative is ADR-0016:49-51 (CI-created Worker tag: GITHUB_TOKEN tags/dispatches trigger nothing and no App/PAT exists).
-- release.yml trigger is only `push: tags: source/**/v[0-9]*...` (:18-24); no workflow_dispatch/workflow_call. Assumes github.ref: GITHUB_REF_NAME in regex (:61), GITHUB_SHA ancestor check (:91), checkout of the triggering ref (default), `gh release view/create "${GITHUB_REF_NAME}"` (:279-285). Global concurrency group `release`, cancel-in-progress false (:31-33). Permissions contents: read, announce contents: write (:26, :238).
-- Precedent for tag-input dispatch: deploy-vanity-worker.yml:27-37 (workflow_dispatch input `tag`, resolves GITHUB_REF_NAME vs input, checkout ref refs/tags/<tag>, :73-77).
-- No tag ruleset: per candidate 20261017-vanity-deploy-environment-is-tag-gated, one branch ruleset `gt` on main (PR+squash, ci-gate, lydite/referral, no bypass); tags/protection 404. Live settings, not in git. ADR-0033:156 calls a tag ruleset "a repository setting a human applies". Nothing verifies tag signatures; no doc says tags are SSH-signed (grep ssh/signed/tag -s: 0 hits outside minisign ADR-0024/0026, which sign tool release assets, not git tags).
-- verify-sibling-deps (bash, composite, no inputs) computes strict mode inline (:96-113) via one unauthenticated `git ls-remote --tags --refs` (:51) not git tags, so shallow checkouts are fine; "pending" = notes file with no tag, not exposed as an output. changed-projects (bash+jq, :124-143) builds edges from `go mod edit -json` requires, longest-prefix owner, closure of dependents; output is a JSON list, no topological order; reusable only as a pattern.
-- ADR-0006:62-66 and release skill step 4: the release PR drops the dependent's replace and raises its require to the sibling tag BEFORE merge; strict mode then demands tagged siblings in the PR's CI. So chained releases need the dependency tagged before the dependent's PR can pass CI; release.yml's tag job (:171-181) also requires every sibling require to be already tagged. A bot never needs to edit go.mod after tagging if the PR is prepared by a human.
+Re-checked 2026-11-17. The original exploration (issue 211, auto-release from main) was answered by
+ADR-0037 and the branch implementing it. What holds now:
+
+- ADR-0001 still says "A human pushes the tag" (`0001-...:26`); ADR-0037 (`:1-7`) records that it
+  supersedes that rule. A tag pushed by hand now runs nothing (`release.yml:3-9`).
+- Why the release is a called workflow: a tag or dispatch made with GITHUB_TOKEN triggers no other
+  workflow and the repo has no GitHub App or PAT (`0016-the-vanity-...:49-51`, repeated at
+  `release.yml:5-7` and `auto-release.yml:21-22`). `auto-release.yml` therefore calls
+  `release.yml` per project (tier jobs `tier-1`..`tier-8`) instead of relying on a tag trigger.
+- release.yml: `workflow_call` (project, version, sha, mode release|finish, dry_run) plus
+  `workflow_dispatch` with `tag` for finishing (`release.yml:33-68`). Concurrency group is per tag
+  (`:77-79`), auto-release's is one sweep at a time, cancel-in-progress false (`auto-release.yml:45-47`).
+  `verify` holds a read-only token and is the only job running project code; `tag` and `announce`
+  hold contents: write and run none (`release.yml:18-25`, `:214-221`, `:240-251`).
+- Precedent of a tag-input dispatch: `deploy-vanity-worker.yml:33-37`, `:64-67`.
+- Ordering: `pending.sh` emits dependency tiers (`pending.sh:29-37`), fails above 8 tiers, on cycles,
+  and on more than one pending version of a project. It orders pending projects only; it does not
+  let a dependent release in the same PR as an untagged sibling: "A dependency chain needs one pull
+  request per tier" (ADR-0037:52-54), because `validate` requires each sibling's tag on origin
+  (`release-project.sh:254-256`) and `verify-sibling-deps` strict mode demands tagged siblings in the
+  PR's CI (`verify-sibling-deps/action.yml:109-125`). Not re-run: how the tiers behave when two
+  tiers' notes land in one PR (ADR-0037 says it fails validation).
+- Tags are unsigned annotated tags by `github-actions[bot]` (`release-project.sh:337-357`); ADR-0037
+  rejects signing in CI. Nothing verifies tag signatures.
+- No tag ruleset: ADR-0037:65 calls `source/*` tag protection "repository hardening a human applies"
+  and ADR-0033:93 likewise. It is live repo settings, not in git; the earlier check
+  (tags/protection 404, one branch ruleset `gt` on main) was not repeated.
+- `changed-projects` (`action.yml:124-143`) builds edges from `go mod edit -json` requires; its
+  output is a JSON list with no topological order, so it was not reused for tiers; `pending.sh`
+  has its own owner jq (`lib.sh` `RELEASE_JQ_OWNER`).

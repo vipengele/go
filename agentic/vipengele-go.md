@@ -113,7 +113,8 @@ dependency-first at release time only. The `release` skill walks the whole seque
 `auto-release.yml` runs on every push to `main`: it plans the pending projects (notes exist, tag
 does not) as dependency tiers and calls `release.yml` for each, tier by tier. `release.yml` has no
 tag-push trigger; a tag pushed by hand runs nothing. Its jobs: `verify` (read-only) validates the
-version, the project, the notes and the commit, that the project's `go.mod` carries no `replace` and
+version, the project, the notes and the commit, that the project's `go.mod` declares
+`go.vipengele.org/<path>` (with the suffix `/vN` for a `vN.x.y` tag, N of 2 or more), carries no `replace` and
 requires every sibling at a tagged version — no other project's `go.mod` is read, so a sibling under
 development elsewhere never blocks the release — and that `go.vipengele.org/<path>?go-get=1`
 answers, retrying the Worker for up to 5 minutes, then runs, with `GOWORK=off`, `go mod tidy`

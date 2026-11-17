@@ -10,7 +10,7 @@ targets: release-tag-exists-before-validation
 verdict: now-false
 ---
 
-Re-checked 2026-11-17 against the current files. The note's claim (tag pushed by a human triggers release.yml, so the checks run after the tag is on the remote; notes merged afterwards cannot repair it because checkout is the tagged commit) is false. It also supersedes the still-true candidates 20261017-release-tag-exists-before-validation-recheck.md, 20261116-release-prerelease-note-now-false.md (its last sentence) and 20261017-release-tag-job-order-and-sibling-state.md / 20261116-release-automation-constraints.md on the trigger and the job order.
+Re-checked 2026-11-17 against the current files. The note's claim (tag pushed by a human triggers release.yml, so the checks run after the tag is on the remote; notes merged afterwards cannot repair it because checkout is the tagged commit) is false. Its former still-true companions (recheck, job-order, prerelease-note candidates) are deleted; 20261116-release-automation-constraints.md is rewritten to the post-ADR-0037 state.
 
 Current flow:
 - `release.yml:33-68` triggers are `workflow_call` (inputs project, version, sha, mode `release|finish`, dry_run) and `workflow_dispatch` (inputs `tag`, `dry_run`). No `push: tags`. Header `:3-9` says a tag pushed by hand releases nothing (GITHUB_TOKEN tags start no workflow, ADR-0016).
