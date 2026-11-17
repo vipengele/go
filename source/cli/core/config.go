@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -23,8 +24,15 @@ type configBinding struct {
 }
 
 // configurer binds the configuration [WithConfig] describes to the file at path, with the
-// environment variables of envPrefix.
-type configurer func(path, envPrefix string) configBinding
+// overlay of overlay, which may be nil, and the environment variables of envPrefix.
+type configurer func(path, envPrefix string, overlay *configOverlay) configBinding
+
+// configOverlay is the overlay file [WithConfigOverlay] describes: the resolver of its path and
+// the keys it may set.
+type configOverlay struct {
+	resolve func(lookup func(string) (string, bool)) (string, error)
+	allow   []string
+}
 
 // WithConfig gives the App a configuration of struct type T, as go.vipengele.org/config binds it,
 // starting from defaults. Without it the App has no "config" command and reads no configuration
@@ -34,7 +42,8 @@ type configurer func(path, envPrefix string) configBinding
 // directory the cli/spec/paths package resolves for the App's [spec.Identity] from the
 // environment of each execution. No flag and no environment variable names another file. The
 // layers are defaults, under the file, under the environment variables named by the identity's
-// EnvPrefix, looked up through [spec.Env.LookupEnv]. A missing file is valid: the defaults and the
+// EnvPrefix, looked up through [spec.Env.LookupEnv], with the overlay file of [WithConfigOverlay]
+// between the file and the environment. A missing file is valid: the defaults and the
 // environment apply.
 //
 // Before every run function, ahead of every [WithPreRun] hook whatever the order of the options,
@@ -50,8 +59,12 @@ type configurer func(path, envPrefix string) configBinding
 // one it adds makes the tree invalid.
 func WithConfig[T any](defaults T) Option {
 	return func(s *settings) {
-		s.config = func(path, envPrefix string) configBinding {
+		s.config = func(path, envPrefix string, overlay *configOverlay) configBinding {
 			opts := config.Options[T]{Path: path, Defaults: defaults, EnvPrefix: envPrefix}
+			if overlay != nil {
+				opts.Overlay = overlay.resolve
+				opts.OverlayAllow = overlay.allow
+			}
 			return configBinding{
 				group: config.New(opts),
 				hook: func(ctx context.Context, inv *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
@@ -67,6 +80,37 @@ func WithConfig[T any](defaults T) Option {
 			}
 		}
 	}
+}
+
+// WithConfigOverlay gives the configuration of [WithConfig] an overlay file, a layer above the
+// configuration file and below the environment variables, which may set only the keys of allow.
+// With no keys in allow it may set every key. A key outside allow that the overlay sets is a
+// problem at its line, "not settable in" the overlay's base name, and stops the execution as any
+// problem of the configuration does. Keys match as go.vipengele.org/config matches them, and a key
+// naming a group or a collection allows all of it. A collection the overlay sets, empty included,
+// replaces the one beneath it.
+//
+// resolve returns the path of the overlay file, given the lookup of the environment variables of
+// the execution, the one the environment layer reads through [spec.Env.LookupEnv]. It runs every
+// time the configuration loads, so on every execution, never when [New] builds the App. A path
+// that is "" or names no file gives no overlay layer. An error of resolve, or any error of
+// reading the overlay but a missing file, stops the execution as a configuration that does not
+// load does, naming the overlay. A nil resolve gives no overlay.
+//
+// An App has one overlay: given more than once, the last one decides. Without [WithConfig] it is
+// refused: [App.ExecuteArgs] returns [ExitError] after writing "invalid command tree".
+func WithConfigOverlay(resolve func(lookup func(string) (string, bool)) (string, error), allow ...string) Option {
+	return func(s *settings) {
+		s.configOverlay = &configOverlay{resolve: resolve, allow: append([]string(nil), allow...)}
+	}
+}
+
+// configProblem reports an App given [WithConfigOverlay] without [WithConfig].
+func configProblem(s settings) error {
+	if s.configOverlay != nil && s.config == nil {
+		return errors.New("WithConfigOverlay requires WithConfig")
+	}
+	return nil
 }
 
 // ConfigFrom returns the configuration of type T the hook of [WithConfig] loaded for the command
@@ -88,7 +132,7 @@ func (a *App) configFor(lookup func(string) (string, bool)) configBinding {
 	dirs, err := paths.Resolve(a.identity, paths.Options{LookupEnv: lookup}, paths.Config)
 	if err != nil {
 		err = fmt.Errorf("config: %w", err)
-		b := a.settings.config("", a.identity.EnvPrefix)
+		b := a.settings.config("", a.identity.EnvPrefix, a.settings.configOverlay)
 		failRuns(b.group, err)
 		b.hook = func(ctx context.Context, _ *spec.Invocation, cmd spec.CommandInfo) (context.Context, error) {
 			if _, skip := cmd.Annotation(spec.SkipConfig); skip {
@@ -98,7 +142,7 @@ func (a *App) configFor(lookup func(string) (string, bool)) configBinding {
 		}
 		return b
 	}
-	return a.settings.config(filepath.Join(dirs.Config(), configFile), a.identity.EnvPrefix)
+	return a.settings.config(filepath.Join(dirs.Config(), configFile), a.identity.EnvPrefix, a.settings.configOverlay)
 }
 
 // failRuns makes every run function of cmd and its subcommands return err.

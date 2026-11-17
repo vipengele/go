@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -333,6 +334,187 @@ func TestWithConfigUnresolvableDirectory(t *testing.T) {
 	if code := app.ExecuteArgs(env, []string{"config", "path"}); code != cli.ExitError ||
 		!strings.HasPrefix(stderr.String(), "tool: config\n  → paths: ") {
 		t.Errorf("config path: exit code = %d, stderr %q; want the configuration directory's error", code, stderr.String())
+	}
+}
+
+// writeOverlay writes content to a file named overlay.yaml in a new directory and returns its
+// path.
+func writeOverlay(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "overlay.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	return path
+}
+
+// overlayFromEnv resolves the overlay to the value of TOOL_OVERLAY, "" when it is unset, and
+// counts its calls in calls.
+func overlayFromEnv(calls *int) func(func(string) (string, bool)) (string, error) {
+	return func(lookup func(string) (string, bool)) (string, error) {
+		*calls++
+		path, _ := lookup("TOOL_OVERLAY")
+		return path, nil
+	}
+}
+
+func TestWithConfigOverlayLayersBetweenTheFileAndTheEnvironment(t *testing.T) {
+	var s seen
+	var calls int
+	e := newConfigEnv(t, "name: file\nport: 9090\nretries: 4\n")
+	e.vars["TOOL_OVERLAY"] = writeOverlay(t, "port: 7070\nretries: 6\n")
+	e.vars["TOOL_RETRIES"] = "5"
+	app := configApp(&s, cli.WithConfigOverlay(overlayFromEnv(&calls)))
+	if got := e.run(t, app, "read"); got != (result{code: cli.ExitOK}) {
+		t.Fatalf("ExecuteArgs = %+v, want success and no output", got)
+	}
+	want := seen{called: true, ok: true, value: toolConfig{Name: "file", Port: 7070, Retries: 5}}
+	if s != want {
+		t.Errorf("run saw %+v, want %+v", s, want)
+	}
+	if calls != 1 {
+		t.Errorf("resolver called %d times, want 1", calls)
+	}
+}
+
+func TestWithConfigOverlayWithoutAFileLoadsTheLayersBeneath(t *testing.T) {
+	tests := []struct {
+		name string
+		path func(t *testing.T) string
+	}{
+		{name: "empty path", path: func(*testing.T) string { return "" }},
+		{name: "missing file", path: func(t *testing.T) string { return filepath.Join(t.TempDir(), "overlay.yaml") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s seen
+			e := newConfigEnv(t, "port: 9090\n")
+			path := tt.path(t)
+			resolve := func(func(string) (string, bool)) (string, error) { return path, nil }
+			if got := e.run(t, configApp(&s, cli.WithConfigOverlay(resolve)), "read"); got != (result{code: cli.ExitOK}) {
+				t.Fatalf("ExecuteArgs = %+v, want success and no output", got)
+			}
+			want := seen{called: true, ok: true, value: toolConfig{Name: "tool", Port: 9090, Retries: 3}}
+			if s != want {
+				t.Errorf("run saw %+v, want %+v", s, want)
+			}
+		})
+	}
+}
+
+func TestWithConfigOverlayNilResolverGivesNoOverlay(t *testing.T) {
+	var s seen
+	e := newConfigEnv(t, "port: 9090\n")
+	if got := e.run(t, configApp(&s, cli.WithConfigOverlay(nil)), "read"); got != (result{code: cli.ExitOK}) {
+		t.Fatalf("ExecuteArgs = %+v, want success and no output", got)
+	}
+	want := seen{called: true, ok: true, value: toolConfig{Name: "tool", Port: 9090, Retries: 3}}
+	if s != want {
+		t.Errorf("run saw %+v, want %+v", s, want)
+	}
+}
+
+func TestWithConfigOverlayResolverErrorStopsTheRun(t *testing.T) {
+	var s seen
+	resolve := func(func(string) (string, bool)) (string, error) { return "", errors.New("no profile") }
+	got := newConfigEnv(t, "").run(t, configApp(&s, cli.WithConfigOverlay(resolve)), "read")
+	want := result{code: cli.ExitError, stderr: "tool: load config\n  → config overlay\n  → no profile\n"}
+	if got != want {
+		t.Errorf("ExecuteArgs = %+v, want %+v", got, want)
+	}
+	if s.called {
+		t.Error("the run function was called")
+	}
+}
+
+func TestWithConfigOverlayRefusesAKeyOutsideItsAllowList(t *testing.T) {
+	var s seen
+	var calls int
+	e := newConfigEnv(t, "")
+	e.vars["TOOL_OVERLAY"] = writeOverlay(t, "port: 7070\nretries: 6\n")
+	got := e.run(t, configApp(&s, cli.WithConfigOverlay(overlayFromEnv(&calls), "port")), "read")
+	if got.code != cli.ExitError || got.stdout != "" {
+		t.Fatalf("ExecuteArgs = %+v, want exit %d and no stdout", got, cli.ExitError)
+	}
+	if !strings.Contains(got.stderr, "overlay.yaml:2") || !strings.Contains(got.stderr, "not settable in overlay.yaml") {
+		t.Errorf("stderr = %q, want overlay.yaml:2 not settable in overlay.yaml", got.stderr)
+	}
+	if strings.Contains(got.stderr, "overlay.yaml:1") {
+		t.Errorf("stderr = %q, want no problem with the allowed key on line 1", got.stderr)
+	}
+	if s.called {
+		t.Error("the run function was called")
+	}
+}
+
+func TestWithConfigOverlayKeepsItsOwnAllowList(t *testing.T) {
+	var s seen
+	var calls int
+	e := newConfigEnv(t, "")
+	e.vars["TOOL_OVERLAY"] = writeOverlay(t, "port: 7070\n")
+	allow := []string{"port"}
+	app := configApp(&s, cli.WithConfigOverlay(overlayFromEnv(&calls), allow...))
+	allow[0] = "retries"
+	if got := e.run(t, app, "read"); got != (result{code: cli.ExitOK}) {
+		t.Fatalf("ExecuteArgs = %+v, want success and no output", got)
+	}
+	if s.value.Port != 7070 {
+		t.Errorf("port = %d, want 7070 from the overlay", s.value.Port)
+	}
+}
+
+func TestWithConfigOverlayRequiresWithConfig(t *testing.T) {
+	var s seen
+	var calls int
+	app := cli.New(identity(), cli.WithConfigOverlay(overlayFromEnv(&calls)))
+	app.Add(readsConfig("read", nil, &s))
+	got := newConfigEnv(t, "").run(t, app, "read")
+	want := result{code: cli.ExitError, stderr: "tool: invalid command tree\n  → WithConfigOverlay requires WithConfig\n"}
+	if got != want {
+		t.Errorf("ExecuteArgs = %+v, want %+v", got, want)
+	}
+	if s.called || calls != 0 {
+		t.Errorf("run called %v, resolver called %d times; want neither", s.called, calls)
+	}
+}
+
+func TestWithConfigOverlayLastCallWins(t *testing.T) {
+	var s seen
+	var firstCalls int
+	first := func(func(string) (string, bool)) (string, error) {
+		firstCalls++
+		return "", errors.New("first overlay")
+	}
+	second := writeOverlay(t, "port: 2222\n")
+	app := configApp(&s,
+		cli.WithConfigOverlay(first),
+		cli.WithConfigOverlay(func(func(string) (string, bool)) (string, error) { return second, nil }),
+	)
+	if got := newConfigEnv(t, "").run(t, app, "read"); got != (result{code: cli.ExitOK}) {
+		t.Fatalf("ExecuteArgs = %+v, want success and no output", got)
+	}
+	if s.value.Port != 2222 || firstCalls != 0 {
+		t.Errorf("port = %d, first resolver called %d times; want 2222 and never", s.value.Port, firstCalls)
+	}
+}
+
+func TestWithConfigOverlayResolvesOnEveryExecution(t *testing.T) {
+	var s seen
+	var calls int
+	app := configApp(&s, cli.WithConfigOverlay(overlayFromEnv(&calls)))
+	if calls != 0 {
+		t.Fatalf("New called the resolver %d times, want 0", calls)
+	}
+	e := newConfigEnv(t, "")
+	for i, port := range []int{1111, 2222} {
+		e.vars["TOOL_OVERLAY"] = writeOverlay(t, "port: "+strconv.Itoa(port)+"\n")
+		if got := e.run(t, app, "read"); got != (result{code: cli.ExitOK}) {
+			t.Fatalf("execution %d: ExecuteArgs = %+v, want success and no output", i+1, got)
+		}
+		if s.value.Port != port || calls != i+1 {
+			t.Errorf("execution %d: port = %d, resolver called %d times; want %d and %d",
+				i+1, s.value.Port, calls, port, i+1)
+		}
 	}
 }
 
