@@ -20,9 +20,12 @@
 # .github/scripts/release/ holds the bash scripts the release workflows run and their self-test,
 # test/run.sh. lydite has no runner for a bash suite, so the directory is excluded, and
 # .github/workflows/release-selftest.yml runs the self-test in the test stage, ci-test.yml, which a
-# change to it runs. The self-test needs go, git, jq, python3 and curl on the runner.
+# change to it runs. The self-test needs go, git, jq, python3 and curl on the runner. It also tests
+# .github/actions/verify-sibling-deps/verify.sh, the bash check that action runs, which is excluded
+# for the same reason.
 excludes:
   - ".github/scripts/release/**"
+  - ".github/actions/verify-sibling-deps/verify.sh"
 
 components:
   - name: cli-core
