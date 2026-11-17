@@ -36,7 +36,7 @@ the explicit check catches it:
   tag `source/b/v<version>`, `b` is in strict mode: its `go.mod` replaces no sibling and requires
   every sibling at a version tagged `source/<sibling>/vX.Y.Z`. Notes for a version that is already
   tagged leave `b` in development mode.
-- **The release workflow.** `release.yml`'s `tag` job repeats the strict check for the tagged
+- **The release workflow.** `release.yml`'s `verify` job repeats the strict check for the released
   project alone, so a sibling developed elsewhere in the repository never blocks the release.
 
 ## Applies to
@@ -46,12 +46,15 @@ the explicit check catches it:
   `go mod tidy`.
 - Releasing `b`: one release pull request carries the notes, `go mod edit -dropreplace`,
   `go get go.vipengele.org/a@vX.Y.Z` and `go mod tidy`. Its `GOWORK=off` CI compiles `b` against the
-  released `a`, as a consumer of the tag will. The local pre-tag check in the `release` skill is
-  mandatory, and the tag goes on that pull request's merge commit.
+  released `a`, as a consumer of the tag will. The local check in the `release` skill is mandatory
+  before merging, because the merge of the notes is the release: `auto-release` tags the merge
+  commit.
 - Release order is dependency-first at release time only: `b`'s release needs `a` released at a
   version that contains what `b` uses. Any project nothing unreleased feeds is released whenever it
   is ready.
-- A project in strict mode cannot take a sibling `replace` until its tag is pushed. Tag the release,
+- A project in strict mode cannot take a sibling `replace` until its tag exists. Wait for the tag,
   or move its notes out, before developing it with an unreleased sibling.
+- A dependent is released by a pull request after its sibling's tag exists, so a chain of projects
+  needs one release pull request per tier.
 - The root `go.work` lists every project for local development. CI runs with `GOWORK=off` and never
   reads it.

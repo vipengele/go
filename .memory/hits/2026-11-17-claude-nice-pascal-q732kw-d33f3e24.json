@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "notes": {
+    "changed-projects-select-all-regex": {
+      "count": 1,
+      "first": "2026-11-16T16:16:17.035436672Z",
+      "last": "2026-11-16T16:16:17.035436672Z"
+    },
+    "gt-token-cannot-touch-workflows": {
+      "count": 1,
+      "first": "2026-11-16T16:16:26.720055991Z",
+      "last": "2026-11-16T16:16:26.720055991Z"
+    },
+    "release-prerelease-tags-always-fail": {
+      "count": 2,
+      "first": "2026-11-16T16:16:17.023418377Z",
+      "last": "2026-11-17T05:04:31.307693077Z"
+    },
+    "release-tag-exists-before-validation": {
+      "count": 2,
+      "first": "2026-11-16T16:16:17.018917882Z",
+      "last": "2026-11-17T05:04:31.302427067Z"
+    },
+    "release-v2-tags-fail-announce": {
+      "count": 1,
+      "first": "2026-11-16T16:16:17.027187989Z",
+      "last": "2026-11-16T16:16:17.027187989Z"
+    },
+    "verify-sibling-deps-tag-check-unauthenticated": {
+      "count": 1,
+      "first": "2026-11-16T16:16:17.03145386Z",
+      "last": "2026-11-16T16:16:17.03145386Z"
+    }
+  }
+}
