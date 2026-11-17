@@ -858,6 +858,189 @@ ref=main' 'source/a/v1.0.0;id' 'source/$(id)/v1.0.0' ''; do
 }
 register "release-project: resolve fails a tag holding a newline or shell syntax" resolve_hostile_tag
 
+# --- verify-sibling-deps -----------------------------------------------------
+
+verify_script="$(cd "$scripts/../../actions/verify-sibling-deps" && pwd)/verify.sh"
+
+# verify_deps: run the verify-sibling-deps check on $FIXTURE against its
+# origin. Sets $out (stdout and stderr) and $status.
+verify_deps() {
+  status=0
+  out="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GITHUB_REPOSITORY= \
+    "$verify_script" "$FIXTURE" "$FIXTURE.origin.git" 2>&1)" || status=$?
+}
+
+# expect_verified: the check passed.
+expect_verified() {
+  ((status == 0)) || fail "verify.sh exited $status: $out" || return 1
+}
+
+# expect_rejected <pattern>: the check failed, with an error matching the
+# pattern.
+expect_rejected() {
+  ((status != 0)) || fail "verify.sh succeeded, printing $out" || return 1
+  grep -E '^::error' <<< "$out" | grep -qE "$1" || fail "no error matches /$1/: $out" || return 1
+}
+
+# chain_fixture <name> <commons-version> <replace-target> [mode]: commons is
+# tagged v0.1.0 on origin and has the notes of v0.2.0 untagged; cli/core
+# requires commons at <commons-version> and, unless the target is empty,
+# replaces it by <replace-target>. With mode `strict` cli/core also has
+# untagged notes; otherwise its notes are tagged.
+chain_fixture() {
+  fixture_repo "$1"
+  fixture_origin
+  fixture_project commons
+  fixture_notes commons v0.1.0
+  fixture_commit "commons v0.1.0"
+  fixture_tag source/commons/v0.1.0
+  fixture_notes commons v0.2.0
+  mkdir -p "$FIXTURE/source/cli/core"
+  {
+    printf 'module go.vipengele.org/cli/core\n\ngo 1.25.0\n\nrequire go.vipengele.org/commons %s\n' "$2"
+    [[ -z "$3" ]] || printf '\nreplace go.vipengele.org/commons => %s\n' "$3"
+  } > "$FIXTURE/source/cli/core/go.mod"
+  fixture_notes cli/core v0.1.0
+  fixture_commit "cli/core"
+  if [[ "${4:-}" != strict ]]; then
+    fixture_tag source/cli/core/v0.1.0
+  fi
+  fixture_push --tags
+}
+
+verify_strict_replace_pending() {
+  chain_fixture verify-strict-replace-pending v0.2.0 ../../commons strict
+  verify_deps
+  expect_verified
+  grep -q 'cli/core is in strict mode' <<< "$out" || fail "no strict-mode notice: $out"
+}
+register "verify-sibling-deps: strict mode accepts a directory replace at the sibling's pending version" verify_strict_replace_pending
+
+verify_strict_replace_tagged() {
+  chain_fixture verify-strict-replace-tagged v0.1.0 ../../commons strict
+  verify_deps
+  expect_verified
+}
+register "verify-sibling-deps: strict mode accepts a directory replace at the sibling's tagged version" verify_strict_replace_tagged
+
+verify_strict_replace_unrelated() {
+  chain_fixture verify-strict-replace-unrelated v0.3.0 ../../commons strict
+  verify_deps
+  expect_rejected 'go.vipengele.org/commons v0.3.0 is replaced by its project directory, but has no tag .* strict mode'
+}
+register "verify-sibling-deps: strict mode fails a directory replace at a version neither pending nor tagged" verify_strict_replace_unrelated
+
+verify_strict_replace_notes_of_another() {
+  # Notes make a version pending only for the project they belong to.
+  chain_fixture verify-strict-replace-notes-of-another v0.3.0 ../../commons strict
+  fixture_notes cli/core v0.3.0
+  fixture_commit "notes of cli/core v0.3.0"
+  fixture_push
+  verify_deps
+  expect_rejected 'go.vipengele.org/commons v0.3.0 is replaced by its project directory'
+}
+register "verify-sibling-deps: strict mode fails a replace at a version only another project has notes for" verify_strict_replace_notes_of_another
+
+verify_strict_replace_other_directory() {
+  chain_fixture verify-strict-replace-other-directory v0.2.0 ../../elsewhere strict
+  verify_deps
+  expect_rejected 'replace of go.vipengele.org/commons -> \.\./\.\./elsewhere resolves to source/elsewhere'
+}
+register "verify-sibling-deps: strict mode fails a replace by another directory" verify_strict_replace_other_directory
+
+verify_strict_replace_versioned() {
+  chain_fixture verify-strict-replace-versioned v0.2.0 '' strict
+  printf '\nreplace go.vipengele.org/commons v0.2.0 => ../../commons\n' >> "$FIXTURE/source/cli/core/go.mod"
+  fixture_commit "versioned replace"
+  fixture_push
+  verify_deps
+  expect_rejected 'replace of go.vipengele.org/commons v0.2.0 -> \.\./\.\./commons names a version'
+}
+register "verify-sibling-deps: strict mode fails a replace naming a version" verify_strict_replace_versioned
+
+verify_strict_no_replace_pending() {
+  chain_fixture verify-strict-no-replace-pending v0.2.0 '' strict
+  verify_deps
+  expect_rejected 'go.vipengele.org/commons v0.2.0 has no tag source/commons/v0.2.0 .* strict mode'
+}
+register "verify-sibling-deps: strict mode fails a sibling at its pending version without a replace" verify_strict_no_replace_pending
+
+verify_strict_no_replace_tagged() {
+  chain_fixture verify-strict-no-replace-tagged v0.1.0 '' strict
+  verify_deps
+  expect_verified
+}
+register "verify-sibling-deps: strict mode accepts a tagged sibling without a replace" verify_strict_no_replace_tagged
+
+verify_development_replace_any_version() {
+  chain_fixture verify-development-replace v0.3.0 ../../commons
+  verify_deps
+  expect_verified
+  ! grep -q 'cli/core is in strict mode' <<< "$out" || fail "reported strict mode: $out"
+}
+register "verify-sibling-deps: development mode accepts a directory replace at any version" verify_development_replace_any_version
+
+verify_development_replace_other_directory() {
+  chain_fixture verify-development-replace-other v0.1.0 ../../elsewhere
+  verify_deps
+  expect_rejected 'replace of go.vipengele.org/commons -> \.\./\.\./elsewhere resolves to source/elsewhere'
+}
+register "verify-sibling-deps: development mode fails a replace by another directory" verify_development_replace_other_directory
+
+verify_development_untagged() {
+  chain_fixture verify-development-untagged v0.2.0 ''
+  verify_deps
+  expect_rejected 'go.vipengele.org/commons v0.2.0 has no tag source/commons/v0.2.0 .* require a tagged release'
+}
+register "verify-sibling-deps: development mode fails an untagged sibling without a replace" verify_development_untagged
+
+verify_pseudo_version() {
+  for mode in development strict; do
+    chain_fixture "verify-pseudo-version-$mode" v0.0.0-20261117000000-0123456789ab ../../commons "$mode"
+    verify_deps
+    expect_rejected 'go.vipengele.org/commons is required at the pseudo-version' || return 1
+  done
+}
+register "verify-sibling-deps: a sibling at a pseudo-version fails in both modes, replaced or not" verify_pseudo_version
+
+verify_non_sibling_replace() {
+  chain_fixture verify-non-sibling-replace v0.1.0 '' strict
+  printf '\nreplace example.com/other => ../other\n' >> "$FIXTURE/source/cli/core/go.mod"
+  fixture_commit "replace a non-sibling"
+  fixture_push
+  verify_deps
+  expect_rejected 'replace of example.com/other -> \.\./other: only a sibling may be replaced'
+}
+register "verify-sibling-deps: a replace of a non-sibling fails" verify_non_sibling_replace
+
+verify_module_path() {
+  chain_fixture verify-module-path v0.1.0 ''
+  sed -i 's|^module go.vipengele.org/commons$|module go.vipengele.org/common|' "$FIXTURE/source/commons/go.mod"
+  fixture_commit "module path off the vanity map"
+  fixture_push
+  verify_deps
+  expect_rejected 'module path is go.vipengele.org/common, expected go.vipengele.org/commons'
+}
+register "verify-sibling-deps: a module path off the vanity map fails" verify_module_path
+
+verify_nested_module() {
+  chain_fixture verify-nested-module v0.1.0 ''
+  fixture_project commons/inner
+  fixture_commit "nested module"
+  fixture_push
+  verify_deps
+  expect_rejected 'source/commons/inner/go.mod is inside the project directory of source/commons/go.mod'
+}
+register "verify-sibling-deps: a project directory holding another go.mod fails" verify_nested_module
+
+verify_remote_unlisted() {
+  chain_fixture verify-remote-unlisted v0.1.0 ''
+  rm -rf "$FIXTURE.origin.git"
+  verify_deps
+  expect_rejected 'git ls-remote --tags .* failed'
+}
+register "verify-sibling-deps: a remote whose tags cannot be listed fails" verify_remote_unlisted
+
 # --- runner -------------------------------------------------------------------
 
 selected=("$@")
