@@ -1,3 +1,5 @@
+go.vipengele.org/cli/spec v0.2.0 h1:/ObaKKnaIaQm/WFmC5pmz2UgYKmeB+ggH3cWqpovWCk=
+go.vipengele.org/cli/spec v0.2.0/go.mod h1:klhkMt2H7su9BQ6PLGqrOGF8D5EnXjDe3gmMH42GaVM=
 go.vipengele.org/cli/state v0.1.0 h1:Wwu77MuYidMkgyCWjI02LKnJNIoXA0SeLvr0X3kUtKM=
 go.vipengele.org/cli/state v0.1.0/go.mod h1:6HKM+rnHhHUSNkeNkFF/bPhUGZzH7tclZDklZN30GhU=
 go.vipengele.org/commons v0.1.0 h1:pe717TcRPQb9yfg+tbsCF+W9QtaVId/tqJIDXS5dyPw=

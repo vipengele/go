@@ -14,5 +14,3 @@ require (
 )
 
 require golang.org/x/term v0.48.0 // indirect
-
-replace go.vipengele.org/cli/spec => ../cli/spec
