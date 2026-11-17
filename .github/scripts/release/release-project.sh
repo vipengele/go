@@ -3,18 +3,31 @@
 # it, tag it, announce it, and check a tag whose announcement is unfinished.
 #
 # Usage:
+#   release-project.sh resolve
 #   release-project.sh validate <project> <version> <sha>
 #   release-project.sh test <project>
 #   release-project.sh tag <project> <version> <sha> <run-url>
 #   release-project.sh announce <tag>
 #   release-project.sh finish-check <tag>
 #
-# Every subcommand acts on the git repository at $RELEASE_ROOT, the current
-# directory when unset. Its remote `origin` is the repository releases are
+# Every subcommand but resolve acts on the git repository at $RELEASE_ROOT, the
+# current directory when unset. Its remote `origin` is the repository releases are
 # pushed to: tags are listed there with `git ls-remote`, never read from the
 # local refs, so a tag pushed by a concurrent run counts even when this
 # checkout has not fetched it.
 #
+#   resolve       Reads release.yml's inputs from INPUT_MODE, INPUT_PROJECT,
+#                 INPUT_VERSION, INPUT_SHA and INPUT_TAG, and prints the release
+#                 they name as key=value lines for $GITHUB_OUTPUT: mode,
+#                 project, version, tag, sha and ref. An empty INPUT_MODE is a
+#                 dispatch and means mode finish of INPUT_TAG; mode release or
+#                 finish takes the tag source/<INPUT_PROJECT>/<INPUT_VERSION>,
+#                 which must hold exactly that project and version. Mode release
+#                 requires INPUT_SHA to be a full commit id and checks out that
+#                 commit; mode finish checks out refs/tags/<tag>. The inputs are
+#                 untrusted text: each is matched before it is printed, so no
+#                 line carries a newline, and none is ever evaluated. Reads no
+#                 repository.
 #   validate      Fails unless <sha> may be released as <project> <version>.
 #                 Files are read from the commit object <sha>, not from the
 #                 working tree, so the checkout's state does not matter. The
@@ -66,7 +79,11 @@ export GOWORK=off
 readonly bot_name='github-actions[bot]'
 readonly bot_email='41898282+github-actions[bot]@users.noreply.github.com'
 
-root="$(cd "${RELEASE_ROOT:-.}" && pwd)"
+# resolve runs before any repository is checked out, so it needs no root.
+root=""
+if [[ "${1:-}" != resolve ]]; then
+  root="$(cd "${RELEASE_ROOT:-.}" && pwd)"
+fi
 main_ref="${RELEASE_MAIN_REF:-origin/main}"
 vanity_base="${RELEASE_VANITY_BASE:-https://go.vipengele.org}"
 worker_timeout="${RELEASE_WORKER_TIMEOUT:-300}"
@@ -284,6 +301,46 @@ check() {
   echo "$tag at $commit is valid"
 }
 
+cmd_resolve() {
+  (($# == 0)) || usage
+  local input_mode="${INPUT_MODE:-}" input_project="${INPUT_PROJECT:-}"
+  local input_version="${INPUT_VERSION:-}" input_sha="${INPUT_SHA:-}"
+  local mode tag project version sha="" ref
+  case "$input_mode" in
+    "")
+      mode=finish
+      tag="${INPUT_TAG:-}"
+      ;;
+    release | finish)
+      mode="$input_mode"
+      tag="source/${input_project}/${input_version}"
+      ;;
+    *)
+      release_die "mode is ${input_mode//$'\n'/ }, expected release or finish"
+      ;;
+  esac
+
+  # A prerelease suffix passes here; validate reports it as such.
+  [[ "$tag" =~ $RELEASE_TAG_RE ]] || release_die "${tag//$'\n'/ } is not source/<project>/vX.Y.Z"
+  project="${BASH_REMATCH[1]}"
+  version="${BASH_REMATCH[3]}"
+  if [[ -n "$input_mode" && ("$project" != "$input_project" || "$version" != "$input_version") ]]; then
+    release_die "project ${input_project//$'\n'/ } and version ${input_version//$'\n'/ } do not form one release tag"
+  fi
+
+  if [[ "$mode" == release ]]; then
+    [[ "$input_sha" =~ ^[0-9a-f]{40}$ ]] \
+      || release_die "sha is '${input_sha//$'\n'/ }', expected a full commit id"
+    sha="$input_sha"
+    ref="$sha"
+  else
+    ref="refs/tags/${tag}"
+  fi
+
+  printf '%s\n' "mode=${mode}" "project=${project}" "version=${version}" \
+    "tag=${tag}" "sha=${sha}" "ref=${ref}"
+}
+
 cmd_validate() {
   (($# == 3)) || usage
   local commit
@@ -419,6 +476,7 @@ cmd_announce() {
 subcommand="$1"
 shift
 case "$subcommand" in
+  resolve) cmd_resolve "$@" ;;
   validate) cmd_validate "$@" ;;
   test) cmd_test "$@" ;;
   tag) cmd_tag "$@" ;;

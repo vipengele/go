@@ -749,6 +749,115 @@ test_suite_fails() {
 }
 register "release-project: test fails a module whose suite fails" test_suite_fails
 
+# resolve <mode> <project> <version> <sha> <tag>: run release-project.sh
+# resolve with those inputs, from an empty directory that is no repository.
+# Sets $out, $err and $status.
+resolve() {
+  local dir="$WORK/resolve"
+  mkdir -p "$dir"
+  status=0
+  out="$(cd "$dir" && env -u RELEASE_ROOT INPUT_MODE="$1" INPUT_PROJECT="$2" \
+    INPUT_VERSION="$3" INPUT_SHA="$4" INPUT_TAG="$5" \
+    "$scripts/release-project.sh" resolve 2> "$dir/err")" || status=$?
+  err="$(cat "$dir/err")"
+}
+
+# expect_resolved <lines>: resolve succeeded and printed exactly these lines.
+expect_resolved() {
+  ((status == 0)) || fail "release-project.sh exited $status: $err" || return 1
+  [[ "$out" == "$1" ]] || fail "want:" "$1" "got:" "$out" || return 1
+}
+
+readonly resolve_sha=0123456789abcdef0123456789abcdef01234567
+
+resolve_release() {
+  resolve release a v1.2.3 "$resolve_sha" ""
+  expect_resolved "mode=release
+project=a
+version=v1.2.3
+tag=source/a/v1.2.3
+sha=$resolve_sha
+ref=$resolve_sha"
+}
+register "release-project: resolve names the commit of a release" resolve_release
+
+resolve_nested() {
+  resolve release cli/core v0.1.0 "$resolve_sha" ""
+  expect_resolved "mode=release
+project=cli/core
+version=v0.1.0
+tag=source/cli/core/v0.1.0
+sha=$resolve_sha
+ref=$resolve_sha"
+}
+register "release-project: resolve names a nested project" resolve_nested
+
+resolve_dispatch() {
+  resolve "" "" "" "" source/cli/core/v0.1.0
+  expect_resolved "mode=finish
+project=cli/core
+version=v0.1.0
+tag=source/cli/core/v0.1.0
+sha=
+ref=refs/tags/source/cli/core/v0.1.0"
+}
+register "release-project: resolve finishes the tag of a dispatch" resolve_dispatch
+
+resolve_finish_call() {
+  resolve finish a v1.0.0 "" ""
+  expect_resolved "mode=finish
+project=a
+version=v1.0.0
+tag=source/a/v1.0.0
+sha=
+ref=refs/tags/source/a/v1.0.0"
+}
+register "release-project: resolve finishes the tag a caller names" resolve_finish_call
+
+resolve_not_a_tag() {
+  resolve release a v1.2 "$resolve_sha" ""
+  expect_fail 'source/a/v1\.2 is not source/<project>/vX\.Y\.Z' || return 1
+  resolve release A v1.2.3 "$resolve_sha" ""
+  expect_fail 'source/A/v1\.2\.3 is not source/<project>/vX\.Y\.Z' || return 1
+  resolve release ../a v1.2.3 "$resolve_sha" ""
+  expect_fail 'is not source/<project>/vX\.Y\.Z' || return 1
+  [[ -z "$out" ]] || fail "printed $out"
+}
+register "release-project: resolve fails a project and version that form no tag" resolve_not_a_tag
+
+resolve_split_tag() {
+  # source/a/b/v1.0.0 is a release tag, but of project a/b, not of a.
+  resolve release a b/v1.0.0 "$resolve_sha" ""
+  expect_fail 'project a and version b/v1\.0\.0 do not form one release tag'
+}
+register "release-project: resolve fails a project and version that form another project's tag" resolve_split_tag
+
+resolve_unknown_mode() {
+  resolve publish a v1.2.3 "$resolve_sha" ""
+  expect_fail 'mode is publish, expected release or finish'
+}
+register "release-project: resolve fails an unknown mode" resolve_unknown_mode
+
+resolve_malformed_sha() {
+  local sha
+  for sha in 0123456 "${resolve_sha^^}" main ""; do
+    resolve release a v1.2.3 "$sha" ""
+    expect_fail "sha is '${sha}', expected a full commit id" || return 1
+  done
+}
+register "release-project: resolve fails a sha that is not a full commit id" resolve_malformed_sha
+
+resolve_hostile_tag() {
+  local tag
+  for tag in 'source/a/v1.0.0
+ref=main' 'source/a/v1.0.0;id' 'source/$(id)/v1.0.0' ''; do
+    resolve "" "" "" "" "$tag"
+    expect_fail 'is not source/<project>/vX\.Y\.Z' || return 1
+    [[ -z "$out" ]] || fail "printed $out" || return 1
+  done
+}
+register "release-project: resolve fails a tag holding a newline or shell syntax" resolve_hostile_tag
+
 # --- runner -------------------------------------------------------------------
 
 selected=("$@")

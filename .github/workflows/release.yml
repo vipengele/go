@@ -95,6 +95,14 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       go-version: ${{ steps.setup-go.outputs.go-version }}
     steps:
+      - name: Check out the release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          sparse-checkout: .github/scripts/release
+          persist-credentials: false
+
       # The inputs are untrusted text, so they reach the script through the
       # environment and are matched before anything uses them as a ref or a
       # path. `mode` is required of a caller and absent from a dispatch, which
@@ -108,65 +116,7 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_SHA: ${{ inputs.sha }}
           INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          sha=""
-          case "$INPUT_MODE" in
-            "")
-              mode=finish
-              tag="$INPUT_TAG"
-              ;;
-            release | finish)
-              mode="$INPUT_MODE"
-              tag="source/${INPUT_PROJECT}/${INPUT_VERSION}"
-              ;;
-            *)
-              echo "::error::mode is ${INPUT_MODE}, expected release or finish"
-              exit 1
-              ;;
-          esac
-
-          # The pattern is RELEASE_TAG_RE of .github/scripts/release/lib.sh,
-          # which is not checked out yet. A prerelease suffix passes here and
-          # the release script reports it as such.
-          if [[ ! "$tag" =~ ^source/([a-z0-9-]+(/[a-z0-9-]+)*)/(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
-            echo "::error::${tag} is not source/<project>/vX.Y.Z"
-            exit 1
-          fi
-          project="${BASH_REMATCH[1]}"
-          version="${BASH_REMATCH[3]}"
-          if [[ -n "$INPUT_MODE" && ( "$project" != "$INPUT_PROJECT" || "$version" != "$INPUT_VERSION" ) ]]; then
-            echo "::error::project ${INPUT_PROJECT} and version ${INPUT_VERSION} do not form one release tag"
-            exit 1
-          fi
-
-          if [[ "$mode" == release ]]; then
-            if [[ ! "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::error::sha is '${INPUT_SHA}', expected a full commit id"
-              exit 1
-            fi
-            sha="$INPUT_SHA"
-            ref="$sha"
-          else
-            ref="refs/tags/${tag}"
-          fi
-
-          {
-            echo "mode=${mode}"
-            echo "project=${project}"
-            echo "version=${version}"
-            echo "tag=${tag}"
-            echo "sha=${sha}"
-            echo "ref=${ref}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Check out the release scripts
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          path: tooling
-          sparse-checkout: .github/scripts/release
-          persist-credentials: false
+        run: tooling/.github/scripts/release/release-project.sh resolve >> "$GITHUB_OUTPUT"
 
       # The full history and every branch, so that origin/main is there to
       # prove the commit is on it. Checking out a tag that does not exist fails
