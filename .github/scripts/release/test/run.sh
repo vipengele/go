@@ -682,6 +682,19 @@ finish_check_local_only() {
 }
 register "release-project: finish-check fails a tag missing on origin" finish_check_local_only
 
+finish_check_tag_moved() {
+  releasable finish-check-tag-moved
+  fixture_tag source/cli/core/v0.1.0
+  fixture_push refs/tags/source/cli/core/v0.1.0
+  fixture_commit "after the tag"
+  fixture_push
+  fixture_git tag -f -a -m moved source/cli/core/v0.1.0 > /dev/null
+  fixture_worker cli/core
+  release_project finish-check source/cli/core/v0.1.0
+  expect_fail 'points at .*, not at '
+}
+register "release-project: finish-check fails a tag on origin at another commit than the local tag" finish_check_tag_moved
+
 test_passes() {
   fixture_repo test-passes
   fixture_project a
@@ -709,6 +722,32 @@ test_untidy() {
   ! grep -q 'GOOS=windows' <<< "$out" || fail "Windows vet ran without a Windows file"
 }
 register "release-project: test fails a module go mod tidy changes" test_untidy
+
+test_build_fails() {
+  fixture_repo test-build-fails
+  fixture_project a
+  fixture_go_source a
+  printf 'package fixture\n\nfunc Broken() int { return "not an int" }\n' \
+    > "$FIXTURE/source/a/broken.go"
+  fixture_commit
+  release_project test a
+  ((status != 0)) || fail "release-project.sh succeeded, printing $out" || return 1
+  grep -q 'not an int' <<< "$out$err" || fail "no compile error in the output: $out $err"
+}
+register "release-project: test fails a module that does not build" test_build_fails
+
+test_suite_fails() {
+  fixture_repo test-suite-fails
+  fixture_project a
+  fixture_go_source a
+  printf 'package fixture\n\nimport "testing"\n\nfunc TestFails(t *testing.T) {\n\tt.Fatal("fails")\n}\n' \
+    > "$FIXTURE/source/a/failing_test.go"
+  fixture_commit
+  release_project test a
+  ((status != 0)) || fail "release-project.sh succeeded, printing $out" || return 1
+  grep -q 'FAIL' <<< "$out" || fail "no failing test in the output: $out"
+}
+register "release-project: test fails a module whose suite fails" test_suite_fails
 
 # --- runner -------------------------------------------------------------------
 
