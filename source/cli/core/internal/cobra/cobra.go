@@ -138,6 +138,7 @@ func build(env *spec.Env, cfg Config, c *spec.Command, inherited []spec.Flag, pa
 	path := append(slices.Clone(parents), c.Name)
 	cmd := &spf.Command{
 		Use:           c.Name,
+		Aliases:       slices.Clone(c.Aliases),
 		Short:         c.Summary,
 		Long:          c.Description,
 		Hidden:        c.Hidden,

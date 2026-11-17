@@ -1638,3 +1638,103 @@ func TestExecuteNeverHasCompletion(t *testing.T) {
 		t.Errorf("Execute(completion bash)\n got: %+v\nwant: %+v", got, want)
 	}
 }
+
+// aliasedRoot is a tool whose commands carry aliases, one of them nested.
+func aliasedRoot(rootAliases ...string) *spec.Command {
+	say := func(word string) func(context.Context, *spec.Invocation) error {
+		return func(_ context.Context, inv *spec.Invocation) error {
+			_, _ = fmt.Fprintln(inv.Env.Stdout, word)
+			return nil
+		}
+	}
+	return &spec.Command{
+		Name:    "tool",
+		Summary: "A tool to test aliases",
+		Commands: []*spec.Command{
+			{Name: "deploy", Summary: "Deploy", Aliases: rootAliases, Run: say("deployed")},
+			{
+				Name:    "remote",
+				Summary: "Manage remotes",
+				Commands: []*spec.Command{
+					{Name: "remove", Summary: "Remove a remote", Aliases: []string{"rm"}, Run: say("removed")},
+				},
+			},
+		},
+	}
+}
+
+func TestExecuteArgsRunsACommandByItsAlias(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "top level", args: []string{"ship"}, want: "deployed\n"},
+		{name: "nested", args: []string{"remote", "rm"}, want: "removed\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runTree(t, aliasedRoot("ship"), tt.args...)
+			if want := (result{code: cli.ExitOK, stdout: tt.want}); got != want {
+				t.Errorf("ExecuteArgs(%v)\n got: %+v\nwant: %+v", tt.args, got, want)
+			}
+		})
+	}
+}
+
+func TestExecuteArgsHelpListsTheAliases(t *testing.T) {
+	got := runTree(t, aliasedRoot("ship", "push"), "deploy", "--help")
+	if got.code != cli.ExitOK || !strings.Contains(got.stdout, "Aliases:\n  deploy, ship, push\n") {
+		t.Errorf("deploy --help = %+v, want 0 and an Aliases line naming ship and push", got)
+	}
+}
+
+func TestExecuteArgsRefusesTheCompletionAliasWithCompletion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{Stdout: &stdout, Stderr: &stderr, WorkDir: t.TempDir()}
+	app := cli.New(identity(), cli.WithCompletion())
+	for _, c := range aliasedRoot("completion").Commands {
+		app.Add(c)
+	}
+	code := app.ExecuteArgs(env, []string{"completion"})
+	if code != cli.ExitError || !strings.Contains(stderr.String(), "invalid command tree") || stdout.Len() != 0 {
+		t.Errorf("code %d, stdout %q, stderr %q; want 1, no stdout and an invalid command tree",
+			code, stdout.String(), stderr.String())
+	}
+}
+
+func TestExecuteArgsReportsANilChildWithCompletion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	env := &spec.Env{Stdout: &stdout, Stderr: &stderr, WorkDir: t.TempDir()}
+	app := cli.New(identity(), cli.WithCompletion())
+	app.Add(nil)
+	code := app.ExecuteArgs(env, []string{"completion"})
+	if code != cli.ExitError || !strings.Contains(stderr.String(), "invalid command tree") || stdout.Len() != 0 {
+		t.Errorf("code %d, stdout %q, stderr %q; want 1, no stdout and an invalid command tree",
+			code, stdout.String(), stderr.String())
+	}
+}
+
+func TestExecuteArgsAllowsTheCompletionAliasWithoutCompletion(t *testing.T) {
+	got := runTree(t, aliasedRoot("completion"), "completion")
+	if want := (result{code: cli.ExitOK, stdout: "deployed\n"}); got != want {
+		t.Errorf("completion alias\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// Cobra's command-name completion lists names only, so a prefix only an alias matches offers
+// nothing, while the arguments of a command typed by its alias complete as the command's do.
+func TestCompleteResolvesAnAliasButDoesNotOfferIt(t *testing.T) {
+	root := aliasedRoot("ship")
+	root.Commands[0].Args = spec.ExactArgs(1)
+	root.Commands[0].ArgCompletion = spec.CompleteChoices("red", "green")
+
+	got := runTree(t, root, "__complete", "sh")
+	if got.code != cli.ExitOK || got.stdout != ":4\n" {
+		t.Errorf("__complete sh = %+v, want 0 and no candidate", got)
+	}
+	got = runTree(t, root, "__complete", "ship", "")
+	if got.code != cli.ExitOK || got.stdout != "red\ngreen\n:4\n" {
+		t.Errorf("__complete ship \"\" = %+v, want 0 and red, green", got)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 
 	"go.vipengele.org/cli/core/internal/cobra"
@@ -210,6 +211,22 @@ func executeArgsCtx(ctx context.Context, env *spec.Env, root *spec.Command, args
 	return executeArgsEnded(ctx, env, root, args, cfg, nil, registry, renderers...)
 }
 
+// completionAliasError reports a child of root that carries the alias "completion" while cfg
+// gives the root cobra's completion command, which that alias would shadow. A child named
+// "completion" is not reported: it replaces cobra's command.
+func completionAliasError(root *spec.Command, cfg cobra.Config) error {
+	if !cfg.Completion || root == nil {
+		return nil
+	}
+	var errs []error
+	for _, c := range root.Commands {
+		if c != nil && slices.Contains(c.Aliases, "completion") {
+			errs = append(errs, fmt.Errorf("command %q: alias %q collides with the completion command", c.Name, "completion"))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // executeArgsEnded is [executeArgsCtx] that calls ended, when it is not nil, on the goroutine
 // that runs the command, once the run is over: after cobra.Run returns or while its panic
 // unwinds, and before the outcome is reported. A run abandoned on a second interrupt calls it
@@ -222,7 +239,7 @@ func executeArgsEnded(ctx context.Context, env *spec.Env, root *spec.Command, ar
 	if env.Terminal == nil {
 		env.Terminal = terminal.Detect(env.Stdin, env.Stdout, env.Stderr)
 	}
-	if err := root.Validate(); err != nil {
+	if err := errors.Join(root.Validate(), completionAliasError(root, cfg)); err != nil {
 		errrender.Render(env.Stderr, name(root), fmt.Errorf("invalid command tree: %w", err), renderers)
 		return ExitError
 	}
