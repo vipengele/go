@@ -1,6 +1,9 @@
 ---
 about: "gt 2.1.1 accepts only the ci stages preflight, build, test and end2end in .gt-repo.yaml, and ci-orchestration.yml is gt-rendered, so an extra gating job goes inside a repo-owned ci-*.yml stage, never into ci-orchestration.yml"
-saw: 2026-11-17
+saw:
+  - .gt-repo.yaml
+  - .github/workflows/ci-orchestration.yml
+  - .github/workflows/ci-test.yml
 ---
 - `gt repo sync` with `pipeline.ci.stages: [..., release-selftest]` in `.gt-repo.yaml` fails:
   `unknown stage "release-selftest" (accepted: preflight, build, test, end2end)` (gt 2.1.1, pinned by `.gt-repo.yaml:18`).

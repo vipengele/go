@@ -1,6 +1,10 @@
 ---
 about: "the changed-projects select-all regex also matches the release scripts and workflows, so a change to them selects every project and runs the test stage, where ci-test.yml calls release-selftest.yml"
-saw: 2026-11-17
+saw:
+  - .github/actions/changed-projects/action.yml
+  - .github/workflows/ci-test.yml
+  - .github/workflows/release-selftest.yml
+  - .github/workflows/ci-preflight.yml
 ---
 The select-all regex in `.github/actions/changed-projects/action.yml:100` is
 `^(\.github/(workflows/(ci-[a-z]+|release|auto-release|release-selftest)\.yml|actions/|scripts/release/)|\.lydite/)`.
