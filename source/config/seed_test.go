@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -422,5 +423,392 @@ func TestSeedCreatesAtAnUncleanPath(t *testing.T) {
 	created, err = Seed(path, seedDefaults())
 	if err != nil || created {
 		t.Fatalf("second Seed = %v, %v; want false, nil", created, err)
+	}
+}
+
+type seedGtProfile struct {
+	Name  string            `doc:"Name of the profile."`
+	Match []string          `doc:"Patterns of the repositories it applies to."`
+	Env   map[string]string `doc:"Variables to export."`
+}
+
+type seedGtTemplate struct {
+	Name   string `doc:"Name of the template."`
+	Match  []string
+	Run    string        `doc:"Command to run."`
+	Wait   time.Duration `doc:"Time to wait."`
+	Script string
+}
+
+type seedGtConfig struct {
+	WorktreeTypes []string `doc:"Prefixes of a worktree branch."`
+	SSH           struct {
+		HostAliases map[string]string            `doc:"Host of each alias."`
+		UserAliases map[string]map[string]string `doc:"User of each alias, by host."`
+	} `config:"ssh" doc:"SSH settings."`
+	Setup struct {
+		Templates []seedGtTemplate `merge:"name" doc:"Setup templates."`
+	}
+	Profiles   []seedGtProfile            `merge:"name" doc:"Named sets of environment variables."`
+	Services   map[string]seedGtTemplate  `merge:"keys" doc:"Services by name."`
+	Matrix     map[string]map[string]bool `doc:"Feature switches by group."`
+	AutoUpdate struct {
+		Enabled       bool
+		CheckInterval time.Duration
+	}
+}
+
+func seedGtDefaults() seedGtConfig {
+	var c seedGtConfig
+	c.WorktreeTypes = []string{"feature", "fix"}
+	c.SSH.HostAliases = map[string]string{"gh": "github.com", "a.b": "yes", "": "~", "<<": "null", `q"]\`: "x"}
+	c.SSH.UserAliases = map[string]map[string]string{"github.com": {"work": "me-work", "home": "me"}, "empty": {}}
+	c.Setup.Templates = []seedGtTemplate{
+		{Name: "node", Match: []string{"*-web"}, Run: "npm ci", Wait: time.Second},
+		{Name: "go", Script: "go mod download\ngo build ./..."},
+	}
+	c.Profiles = []seedGtProfile{
+		{Name: "work", Match: []string{"acme/*"}, Env: map[string]string{"GH_HOST": "acme", "TOKEN": "123"}},
+		{Name: "empty", Env: map[string]string{}},
+		{Name: "none"},
+	}
+	c.Services = map[string]seedGtTemplate{"web": {Name: "w", Run: "serve"}, "db": {}}
+	c.Matrix = map[string]map[string]bool{"b": {"y": true, "x": false}, "a": nil}
+	c.AutoUpdate.Enabled = true
+	c.AutoUpdate.CheckInterval = 24 * time.Hour
+	return c
+}
+
+// equalNilEmpty reports whether a and b, values of one type, are deeply equal, a nil and an empty
+// slice or map counting as equal at any depth.
+func equalNilEmpty(a, b reflect.Value) bool {
+	switch a.Kind() {
+	case reflect.Slice:
+		if a.Len() != b.Len() {
+			return false
+		}
+		for i := range a.Len() {
+			if !equalNilEmpty(a.Index(i), b.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if a.Len() != b.Len() {
+			return false
+		}
+		for _, k := range a.MapKeys() {
+			bv := b.MapIndex(k)
+			if !bv.IsValid() || !equalNilEmpty(a.MapIndex(k), bv) {
+				return false
+			}
+		}
+		return true
+	case reflect.Struct:
+		for i := range a.NumField() {
+			if !equalNilEmpty(a.Field(i), b.Field(i)) {
+				return false
+			}
+		}
+		return true
+	default:
+		return a.Equal(b)
+	}
+}
+
+func TestEqualNilEmpty(t *testing.T) {
+	type inner struct {
+		M map[string][]int
+	}
+	tests := []struct {
+		a, b any
+		want bool
+	}{
+		{[]inner{{}}, []inner{{M: map[string][]int{}}}, true},
+		{[]inner{{M: map[string][]int{"k": nil}}}, []inner{{M: map[string][]int{"k": {}}}}, true},
+		{[]inner{{M: map[string][]int{"k": {1}}}}, []inner{{M: map[string][]int{"k": {2}}}}, false},
+		{[]inner{{M: map[string][]int{"k": {1}}}}, []inner{{M: map[string][]int{"j": {1}}}}, false},
+		{[]inner{{M: map[string][]int{"k": nil}}}, []inner{{}}, false},
+		{[]inner{{}}, []inner{{}, {}}, false},
+	}
+	for i, tc := range tests {
+		if got := equalNilEmpty(reflect.ValueOf(tc.a), reflect.ValueOf(tc.b)); got != tc.want {
+			t.Errorf("case %d: equalNilEmpty = %v, want %v", i, got, tc.want)
+		}
+	}
+}
+
+// assertCollectionRoundTrip seeds defaults and checks that the file, loaded over the zero value of
+// T, gives defaults back, nil and empty counting as equal, with every row coming from the file.
+func assertCollectionRoundTrip[T any](t *testing.T, defaults T) {
+	t.Helper()
+	path := seedPath(t)
+	if created, err := Seed(path, defaults); err != nil || !created {
+		t.Fatalf("Seed = %v, %v; want true, nil", created, err)
+	}
+	var zero T
+	got, err := Load(zero, File(path))
+	if err != nil {
+		t.Fatalf("Load(File): %v\nfile:\n%s", err, readSeed(t, path))
+	}
+	if !equalNilEmpty(reflect.ValueOf(got.Value()), reflect.ValueOf(defaults)) {
+		t.Errorf("read back %+v\nwant %+v\nfile:\n%s", got.Value(), defaults, readSeed(t, path))
+	}
+	for _, s := range got.Sources() {
+		if !strings.HasPrefix(s.Origin, "config.yaml:") {
+			t.Errorf("row %q has origin %q, want the file", s.Key, s.Origin)
+		}
+	}
+}
+
+func TestSeedCollectionsRoundTrip(t *testing.T) {
+	empty := seedGtConfig{
+		WorktreeTypes: []string{},
+		Profiles:      []seedGtProfile{},
+		Services:      map[string]seedGtTemplate{},
+		Matrix:        map[string]map[string]bool{},
+	}
+	empty.SSH.HostAliases = map[string]string{}
+	empty.SSH.UserAliases = map[string]map[string]string{}
+	empty.Setup.Templates = []seedGtTemplate{}
+	tests := []struct {
+		name     string
+		defaults seedGtConfig
+	}{
+		{"nil collections", seedGtConfig{}},
+		{"empty collections", empty},
+		{"elements", seedGtDefaults()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCollectionRoundTrip(t, tc.defaults)
+		})
+	}
+}
+
+func TestSeedNestedListRoundTrip(t *testing.T) {
+	type step struct {
+		Run string
+	}
+	type job struct {
+		Name  string
+		Steps []step
+		Needs map[string][]string
+	}
+	type config struct {
+		Jobs map[string]map[string]job
+	}
+	assertCollectionRoundTrip(t, config{Jobs: map[string]map[string]job{
+		"ci": {
+			"test":  {Name: "t", Steps: []step{{Run: "go test"}, {Run: ""}}, Needs: map[string][]string{"b": {"x,y", "z"}}},
+			"build": {Steps: []step{}},
+		},
+	}})
+}
+
+func TestSeedEmptyCollectionLayout(t *testing.T) {
+	path := seedPath(t)
+	if _, err := Seed(path, seedGtConfig{}); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	want := `# Prefixes of a worktree branch.
+worktree_types: []
+# SSH settings.
+ssh:
+  # Host of each alias.
+  #
+  # host_aliases:
+  #   <name>: ""
+  host_aliases: {}
+  # User of each alias, by host.
+  #
+  # user_aliases:
+  #   <name>:
+  #     <name>: ""
+  user_aliases: {}
+setup:
+  # Setup templates.
+  #
+  # templates:
+  #   - # Name of the template.
+  #     name: ""
+  #     match: []
+  #     # Command to run.
+  #     run: ""
+  #     # Time to wait.
+  #     wait: 0s
+  #     script: ""
+  templates: []
+# Named sets of environment variables.
+#
+# profiles:
+#   - # Name of the profile.
+#     name: ""
+#     # Patterns of the repositories it applies to.
+#     match: []
+#     # Variables to export.
+#     env:
+#       <name>: ""
+profiles: []
+# Services by name.
+#
+# services:
+#   <name>:
+#     # Name of the template.
+#     name: ""
+#     match: []
+#     # Command to run.
+#     run: ""
+#     # Time to wait.
+#     wait: 0s
+#     script: ""
+services: {}
+# Feature switches by group.
+#
+# matrix:
+#   <name>:
+#     <name>: false
+matrix: {}
+auto_update:
+  enabled: false
+  check_interval: 0s
+`
+	if got := readSeed(t, path); got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestSeedEmptyCollectionWithoutDoc(t *testing.T) {
+	type step struct {
+		Run string
+	}
+	type config struct {
+		Steps []step
+	}
+	path := seedPath(t)
+	if _, err := Seed(path, config{}); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if got, want := readSeed(t, path), "# steps:\n#   - run: \"\"\nsteps: []\n"; got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestSeedNestedExample(t *testing.T) {
+	type host struct {
+		Addr string `doc:"Address."`
+	}
+	type profile struct {
+		Name  string
+		Hosts []host            `doc:"Hosts."`
+		Env   map[string]string `doc:"Env."`
+		Meta  struct {
+			Owner string
+		} `doc:"Metadata."`
+	}
+	type config struct {
+		Profiles []profile `doc:"Profiles."`
+	}
+	path := seedPath(t)
+	if _, err := Seed(path, config{}); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	want := `# Profiles.
+#
+# profiles:
+#   - name: ""
+#     # Hosts.
+#     hosts:
+#       - # Address.
+#         addr: ""
+#     # Env.
+#     env:
+#       <name>: ""
+#     # Metadata.
+#     meta:
+#       owner: ""
+profiles: []
+`
+	if got := readSeed(t, path); got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestSeedCollectionLayout(t *testing.T) {
+	type config struct {
+		Profiles []seedGtProfile           `doc:"Profiles."`
+		Services map[string]seedGtTemplate `doc:"Services."`
+	}
+	path := seedPath(t)
+	defaults := config{
+		Profiles: []seedGtProfile{
+			{Name: "b", Env: map[string]string{"Z": "1", "A": "yes"}},
+			{Name: "a", Match: []string{"x"}},
+		},
+		Services: map[string]seedGtTemplate{"web": {Run: "serve"}, "db": {Name: "d"}},
+	}
+	if _, err := Seed(path, defaults); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	want := `# Profiles.
+profiles:
+  - # Name of the profile.
+    name: b
+    # Patterns of the repositories it applies to.
+    match: []
+    # Variables to export.
+    env:
+      A: yes
+      Z: "1"
+  - name: a
+    match:
+      - x
+    env: {}
+# Services.
+services:
+  db:
+    # Name of the template.
+    name: d
+    match: []
+    # Command to run.
+    run: ""
+    # Time to wait.
+    wait: 0s
+    script: ""
+  web:
+    name: ""
+    match: []
+    run: serve
+    wait: 0s
+    script: ""
+`
+	if got := readSeed(t, path); got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestSeedEmptyCollectionInAnElement(t *testing.T) {
+	path := seedPath(t)
+	if _, err := Seed(path, struct {
+		Profiles []seedGtProfile
+	}{Profiles: []seedGtProfile{{Name: "a"}, {Name: "b"}}}); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	want := `profiles:
+  - # Name of the profile.
+    name: a
+    # Patterns of the repositories it applies to.
+    match: []
+    # Variables to export.
+    #
+    # env:
+    #   <name>: ""
+    env: {}
+  - name: b
+    match: []
+    env: {}
+`
+	if got := readSeed(t, path); got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
 	}
 }
