@@ -189,7 +189,7 @@ func TestExecuteArgsExitCodes(t *testing.T) {
 			args: []string{"greet", "--times", "many"},
 			want: result{code: cli.ExitUsage,
 				stderr: "tool: greet: invalid argument \"many\" for \"--times\" flag: " +
-					"strconv.ParseInt: parsing \"many\": invalid syntax\n"},
+					"must be an integer\n"},
 		},
 		{
 			name: "flag of a sibling command",
