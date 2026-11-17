@@ -28,7 +28,9 @@ golangci-lint run
   packages read the defaults from (ADR-0023). The default state dir comes from
   `paths.Resolve(..., paths.State)` in `go.vipengele.org/cli/spec/paths`, resolved through the GOOS,
   env lookup and user home dir seams; only the state kind is resolved, so the home directory is
-  needed only when the state directory itself falls back to it. `deriveFormat` maps `AssetTemplate`
+  needed only when the state directory itself falls back to it. `Config.PathsLayout`
+  (`paths.Layout`, validated by `checkPathsLayout`) is forwarded as `paths.Options.Layout`, so a
+  non-default layout applies on every GOOS; it changes nothing else GOOS decides (ADR-0039). `deriveFormat` maps `AssetTemplate`
   and `AssetExt` to the asset format (raw, tar.gz or zip), which `Validate` and `Extract` share;
   an empty `AssetExt` is `asset.DefaultExtFor` the resolved `GOOS` (`zip` on `windows`, `tar.gz`
   elsewhere), which `resolve` fills after `GOOS`; `MaxExtractBytes` (default 512 MiB) bounds extraction. `CheckWait` (default 250ms, valid 0 to 2s)
