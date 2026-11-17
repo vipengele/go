@@ -20,32 +20,34 @@ The group is made of `*spec.Command` values (ADR-0005), not cobra commands: cobr
   for the App's `spec.Identity`. No `--config` flag and no environment variable names another
   file, so every tool has one place to look and `config path` always answers it.
 - **Loading.** `WithConfig[T]` mounts the group and adds a pre-run hook that loads the layers
-  defaults, under the file, under the environment, the environment read through `inv.Env.LookupEnv`
-  with the identity's `EnvPrefix`. Config keys generate no flags. The hook seeds no default file; a
-  missing file is valid and loads as the defaults. The hook runs ahead of every `WithPreRun` hook
-  whatever the order of the options, so a user hook can read the configuration.
+  defaults, under the file, under the overlay when there is one, under the environment, the
+  environment read through `inv.Env.LookupEnv` with the identity's `EnvPrefix`. Config keys generate
+  no flags. The hook seeds no default file; a missing file is valid and loads as the defaults. The
+  hook runs ahead of every `WithPreRun` hook whatever the order of the options, so a user hook can
+  read the configuration.
 - **Exposure.** The hook stores the `cfg.Result[T]` in the context (ADR-0016). The context key and
   the accessors `config.With[T]` and `config.From[T]` live in the leaf package `command/config`,
   which never imports `cli`; `cli` imports it to mount the group and store the result, so there is
   no import cycle. `cli.ConfigFrom[T]` is a thin wrapper, so a tool need not import the package.
   `ok` is false when no configuration is loaded: the App has no `WithConfig` of type `T`, or the
   command is skipped.
-- **Scope of the checks.** `validate` and the check inside `edit` load the file layer only, the
-  defaults under the file, parsed strictly and checked by the type's `Validator`. They judge the
-  file, not the shell it is run from. `show` reports the full stack with the origin of each value:
-  `default`, the file and line, or the environment variable.
+- **Scope of the checks.** `validate` merges the defaults, the file and the overlay when there is
+  one, without the environment, parsed strictly and checked by the type's `Validator`; the check
+  inside `edit` loads the defaults under the user file alone. They judge the files, not the shell
+  they are run from. `show` reports the full stack with the origin of each value: `default`, a file
+  and line, or the environment variable.
 - **`edit`.** The editor is `$VISUAL`, then `$EDITOR`, read through `inv.Env.LookupEnv` and split on
   whitespace so `code -w` works; with neither, it fails. It needs a terminal on the standard input.
   It makes a temporary directory beside the file and edits a copy there, named `config.yaml` so
   problems read `config.yaml:3`; a missing file is seeded with the commented default. An invalid
   result prints its problems and prompts `re-edit? [Y/n]` on the same copy; declining, or leaving
   the copy unchanged, leaves the original untouched. A valid result is chmodded 0600 and renamed
-  over the file by `internal/atomicfile`, which syncs the file and its directory; the chmod follows
-  the editor because an editor that saves by rename leaves a new inode at the umask default. The
-  temporary directory is removed on every exit. The default launcher hands the editor the
-  invocation's standard streams as they are and so requires all three to be `*os.File`, because
-  `exec.Cmd` copies any other reader or writer through a pipe and the editor then has no terminal;
-  tests inject an `Editor` instead.
+  over the file by `state.Replace` of `go.vipengele.org/cli/state`, which syncs the file and its
+  directory; the chmod follows the editor because an editor that saves by rename leaves a new inode
+  at the umask default. The temporary directory is removed on every exit. The default launcher hands
+  the editor the invocation's standard streams as they are and so requires all three to be
+  `*os.File`, because `exec.Cmd` copies any other reader or writer through a pipe and the editor
+  then has no terminal; tests inject an `Editor` instead.
 - **Skips.** `path`, `validate`, `edit` and the App's `version` carry `spec.SkipConfig`. Annotations
   belong to one command and are not inherited, so each says so. `show` is not skipped: it reads the
   loaded configuration and fails on a broken file, and `validate` is the diagnostic.
@@ -55,6 +57,26 @@ The group is made of `*spec.Command` values (ADR-0005), not cobra commands: cobr
   with every problem of every layer in the error tree. The refusal of `edit` on a standard input
   that is not a terminal also exits 1, not 2: the usage-error type lives in `internal/cobra`, and
   the leaf package never imports a CLI framework.
+- **The overlay.** `cli.WithConfigOverlay(resolve func(lookup func(string) (string, bool)) (string,
+  error), allow ...string)` adds one more file layer, for a file that is not the user's, such as a
+  project file. There is one overlay and the last call wins; without `WithConfig` the command tree
+  is invalid. The resolver runs on every invocation with the environment lookup and returns the
+  path: an empty path or a missing file adds no layer, and a resolver error or any other stat or
+  read error fails the run. The order is defaults, user file, overlay, environment. The overlay is
+  read as `File(path).Allow(allow...)`: a key outside the list, or outside a group it names, is an
+  error at its line, "key ... is not settable in <file>", never silently dropped, and `Allow()` with
+  no keys allows everything. A collection in the overlay replaces or merges with the one beneath as
+  its tag says (ADR-0037), so an empty collection there replaces the one beneath. ADR-0037 records
+  the divergences from gt; the overlay makes two visible: an `auto_update` in the overlay outside
+  the allow-list is an error where gt drops it, and an empty list in the overlay replaces the user's
+  where gt keeps it.
+- **Commands with an overlay.** `show` covers the full stack and names each layer: a text header
+  lists defaults, file, overlay when present, and environment with its path or prefix, and the JSON
+  keeps `path` and gains `layers`, a list of `{name, path}`. `validate` merges the defaults, the
+  user file and the overlay without the environment, reports each problem at file:line, names both
+  files in the error when an overlay is present and lists every file it covered on success. `edit`
+  and `path` work on the user file only, so `edit` cannot see a problem that appears only once the
+  overlay is merged; `validate` is the check for that.
 
 ## Considered options
 
@@ -69,9 +91,9 @@ The group is made of `*spec.Command` values (ADR-0005), not cobra commands: cobr
   (ADR-0016).
 - **Flags generated per config key.** The set of flags would depend on the type, collide with the
   standard flags, and duplicate what the file and the environment already say.
-- **Validating the full stack in `validate` and `edit`.** A variable set in the shell would make a
-  file look broken, or hide that it is, and `edit` would refuse a valid file because of the
-  environment of whoever runs it.
+- **Validating the full stack, environment included, in `validate` and `edit`.** A variable set in
+  the shell would make a file look broken, or hide that it is, and `edit` would refuse a valid file
+  because of the environment of whoever runs it.
 - **A groups-only option.** Returning the group for the tool to add leaves the loading to every
   tool, and the hook order, the skip annotations and the context storage would be reimplemented in
   each `main`.
@@ -84,5 +106,8 @@ The group is made of `*spec.Command` values (ADR-0005), not cobra commands: cobr
   `WithJSON` or `WithOutput`.
 - **A broken file stops every command but the skipped ones.** The error exits 1 before the run
   function; `validate`, `edit`, `path` and `version` still run.
+- **`edit` cannot see an overlay-only problem.** It validates the user file alone, so a value that
+  is valid there and invalid beside the overlay passes `edit` and fails the next run; `validate`
+  reports it. This is accepted over making `edit` depend on a file the user is not editing.
 - **`cli/core` requires the config project.** It is a sibling dependency (ADR-0006); no other
   project imports the loader.
