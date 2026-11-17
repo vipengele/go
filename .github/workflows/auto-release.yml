@@ -1,0 +1,351 @@
+# auto-release — releases every pending project and announces every tag left
+# unannounced.
+#
+# A release is the merge of its notes (ADR-0037). Every push to main runs this
+# workflow, and a `workflow_dispatch` on main runs it by hand, with `dry_run` to
+# run each release's `verify` alone. Every run sweeps: it releases every
+# pending project, one whose docs/release-notes/<project>/vX.Y.Z.md exists at
+# the pushed commit and whose tag source/<project>/vX.Y.Z does not, and it
+# finishes every unannounced one, a tag whose commit holds its notes and that
+# has no GitHub Release. A failure rolls nothing back: the next push sweeps
+# again from its own commit, and a re-run sweeps again at the original one.
+#
+# `plan` is read-only and runs .github/scripts/release/pending.sh, which
+# orders the pending projects into dependency tiers: tier 1 depends on no other
+# pending project, and tier N+1 on some project of tier N. The jobs `tier-1` to
+# `tier-8` each release one tier, as a matrix of calls to release.yml, and each
+# runs after the previous one whatever its result. There are 8 because
+# pending.sh fails a plan deeper than that.
+#
+# Releases are calls to the reusable release.yml, not workflows triggered by a
+# tag: a tag pushed with GITHUB_TOKEN starts no workflow (ADR-0016), so nothing
+# downstream of a tag this workflow pushes would ever run. The permission seam
+# lives in release.yml: its `verify` job runs project code with a read-only
+# token, and only its `tag` and `announce` jobs, which run none, can write.
+name: auto-release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run each release's verify alone, writing nothing.
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+# One sweep at a time, and never cancel one in flight: a cancelled release can
+# leave a version tagged but unannounced. A run that is queued and then
+# replaced by a newer push is never missed, because the newer run sweeps
+# everything the older one would have.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tier-1: ${{ steps.split.outputs.tier-1 }}
+      tier-2: ${{ steps.split.outputs.tier-2 }}
+      tier-3: ${{ steps.split.outputs.tier-3 }}
+      tier-4: ${{ steps.split.outputs.tier-4 }}
+      tier-5: ${{ steps.split.outputs.tier-5 }}
+      tier-6: ${{ steps.split.outputs.tier-6 }}
+      tier-7: ${{ steps.split.outputs.tier-7 }}
+      tier-8: ${{ steps.split.outputs.tier-8 }}
+      unannounced: ${{ steps.split.outputs.unannounced }}
+    steps:
+      # release.yml refuses to tag a commit that is not on main, so a dispatch
+      # from another branch would plan releases that every tier then fails.
+      - name: The ref is main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" != "refs/heads/main" ]]; then
+            echo "::error::${REF} is not refs/heads/main; only main is released"
+            exit 1
+          fi
+
+      # The full history with every tag: pending.sh reads the notes of the
+      # pushed commit from the working tree, and the notes of each tag from the
+      # tag's own commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # pending.sh reads each project's sibling requires with `go mod edit`;
+      # go.work names the version local development uses.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache: false
+
+      # The tags are listed before they are fetched. pending.sh fails on a
+      # listed tag it cannot read, and a tag pushed after the listing is
+      # fetched but not listed, which is harmless: it is neither pending nor
+      # unannounced in this run, and the next run sees it. Fetching first would
+      # leave a tag pushed in between listed and missing.
+      - name: List the tags and the GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git ls-remote --tags origin > "${RUNNER_TEMP}/tags"
+          git fetch --tags --force origin
+          gh api "repos/${REPO}/releases" --paginate --jq '.[].tag_name' > "${RUNNER_TEMP}/releases"
+
+      - name: Plan the release set
+        run: |
+          set -euo pipefail
+          .github/scripts/release/pending.sh . "${RUNNER_TEMP}/tags" "${RUNNER_TEMP}/releases" > "${RUNNER_TEMP}/plan.json"
+          cat "${RUNNER_TEMP}/plan.json"
+
+      # One compact JSON array per output, `[]` for a tier with nothing in it.
+      # An unannounced tag becomes {project, version}, the inputs release.yml
+      # takes.
+      - name: Split the plan into tiers
+        id: split
+        run: |
+          set -euo pipefail
+          plan="${RUNNER_TEMP}/plan.json"
+          for i in 1 2 3 4 5 6 7 8; do
+            echo "tier-${i}=$(jq -c --argjson i "$((i - 1))" '.tiers[$i] // []' "$plan")" >> "$GITHUB_OUTPUT"
+          done
+          echo "unannounced=$(jq -c '[.unannounced[] | capture("^source/(?<project>.+)/(?<version>v[^/]+)$")]' "$plan")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise the plan
+        env:
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Release plan"
+            if [[ "$DRY_RUN" == true ]]; then echo; echo "Dry run: each release runs verify alone."; fi
+            echo
+            jq -r '
+              if (.tiers | length) == 0 then "No project is pending."
+              else .tiers | to_entries[]
+                | "- tier \(.key + 1): \(.value | map("`source/\(.project)/\(.version)`") | join(", "))"
+              end' "${RUNNER_TEMP}/plan.json"
+            echo
+            jq -r '
+              if (.unannounced | length) == 0 then "No tag is unannounced."
+              else "Unannounced: \(.unannounced | map("`\(.)`") | join(", "))"
+              end' "${RUNNER_TEMP}/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Each tier runs once the previous one has finished, whatever its result, and
+  # is skipped when it has nothing to release. No list of projects to skip is
+  # kept: a dependent of a project that failed fails its own validation,
+  # because the sibling's tag it requires does not exist. A matrix entry that
+  # fails stops nothing else in its tier.
+  #
+  # The calling job grants `contents: write` so that release.yml's `tag` and
+  # `announce` jobs can hold it; its `verify` job narrows it to read.
+  # `inputs.dry_run` is null on a push.
+  tier-1:
+    needs: [plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-1 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-1) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  tier-2:
+    needs: [plan, tier-1]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-2 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-2) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  tier-3:
+    needs: [plan, tier-2]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-3 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-3) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  tier-4:
+    needs: [plan, tier-3]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-4 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-4) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  tier-5:
+    needs: [plan, tier-4]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-5 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-5) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  tier-6:
+    needs: [plan, tier-5]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-6 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-6) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  tier-7:
+    needs: [plan, tier-6]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-7 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-7) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  tier-8:
+    needs: [plan, tier-7]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tier-8 != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.tier-8) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      sha: ${{ github.sha }}
+      mode: release
+      dry_run: ${{ inputs.dry_run || false }}
+
+  # An unannounced tag already exists, so finishing it depends on no tier and
+  # runs beside them. It never races a tier on one tag: a tier releases only a
+  # version with no tag, and release.yml's `release-<tag>` concurrency group
+  # keeps a dispatched finish of the same tag apart from this one.
+  finish:
+    needs: [plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unannounced != '[]' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.unannounced) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      project: ${{ matrix.project }}
+      version: ${{ matrix.version }}
+      mode: finish
+      dry_run: ${{ inputs.dry_run || false }}
+
+  summary:
+    name: summary
+    needs: [plan, tier-1, tier-2, tier-3, tier-4, tier-5, tier-6, tier-7, tier-8, finish]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      # The result of a tier is the result of its whole matrix: `failure` when
+      # any entry failed. Each entry's own run reports its tag. A plan that
+      # failed has no outputs, and lists nothing.
+      - name: Summarise the run
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## auto-release"
+            if [[ "$DRY_RUN" == true ]]; then echo; echo "Dry run: each release ran verify alone."; fi
+            echo
+            jq -r '
+              def entries: if . == null or . == "" then [] else fromjson end;
+              "plan: \(.plan.result)",
+              (range(1; 9) as $i | "tier-\($i)" as $job
+                | (.plan.outputs[$job] | entries) as $entries
+                | "\($job): \(.[$job].result)"
+                  + (if ($entries | length) > 0
+                     then " — " + ($entries | map("`source/\(.project)/\(.version)`") | join(", "))
+                     else "" end)),
+              ((.plan.outputs.unannounced | entries) as $entries
+                | "finish: \(.finish.result)"
+                  + (if ($entries | length) > 0
+                     then " — " + ($entries | map("`source/\(.project)/\(.version)`") | join(", "))
+                     else "" end))
+              | "- " + .' <<< "$NEEDS"
+          } >> "$GITHUB_STEP_SUMMARY"
