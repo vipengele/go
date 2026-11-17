@@ -33,7 +33,8 @@ func (k FlagGroupKind) String() string {
 // FlagGroup constrains which flags of one command line may, or must, be set together. A flag
 // counts as set when the command line gives it explicitly, as [FlagOf.IsSet] reports it, so a
 // default never counts. The constraint applies to the command that lists the group alone, not
-// to its subcommands; the adapter that runs the command enforces it.
+// to its subcommands, and only a command with a Run may list one: a command without Run never
+// runs, so its groups would never apply. The adapter that runs the command enforces it.
 type FlagGroup struct {
 	// Kind is the constraint: [MutuallyExclusive] or [RequiredTogether].
 	Kind FlagGroupKind
@@ -45,6 +46,9 @@ type FlagGroup struct {
 // validateFlagGroups reports the problems of c's flag groups. visible holds the names of the
 // flags c declares, and inherited the names of the flags its ancestors pass down to it.
 func (c *Command) validateFlagGroups(inherited flagScope, visible map[string]bool, report func(error)) {
+	if len(c.FlagGroups) > 0 && c.Run == nil {
+		report(fmt.Errorf("%w: FlagGroups on a command with no Run, which never runs to apply them", validate.ErrInvalid))
+	}
 	for i, g := range c.FlagGroups {
 		where := fmt.Sprintf("FlagGroups[%d]", i)
 		if g.Kind != MutuallyExclusive && g.Kind != RequiredTogether {

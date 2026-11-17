@@ -71,11 +71,70 @@ func TestCommandValidateAcceptsFlagGroups(t *testing.T) {
 	}
 }
 
-func TestCommandValidateAcceptsFlagGroupOnRoot(t *testing.T) {
+func TestCommandValidateAcceptsFlagGroupOnRootWithRun(t *testing.T) {
 	root := groupTree()
+	root.Run = run
 	root.FlagGroups = []spec.FlagGroup{{Kind: spec.MutuallyExclusive, Flags: []string{"verbose", "force"}}}
 	if err := root.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestCommandValidateRejectsFlagGroupsWithoutRun(t *testing.T) {
+	exclusive := spec.FlagGroup{Kind: spec.MutuallyExclusive, Flags: []string{"verbose", "json"}}
+	together := spec.FlagGroup{Kind: spec.RequiredTogether, Flags: []string{"format", "json"}}
+	tests := []struct {
+		name string
+		set  func(root *spec.Command)
+		path string
+	}{
+		{"the root", func(root *spec.Command) {
+			root.FlagGroups = []spec.FlagGroup{{Kind: spec.MutuallyExclusive, Flags: []string{"verbose", "force"}}}
+		}, "tool"},
+		{"a nested command", func(root *spec.Command) { root.Commands[0].FlagGroups = []spec.FlagGroup{exclusive} }, "tool remote"},
+		{"several groups", func(root *spec.Command) { root.Commands[0].FlagGroups = []spec.FlagGroup{exclusive, together} }, "tool remote"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := groupTree()
+			tt.set(root)
+			err := root.Validate()
+			if err == nil {
+				t.Fatal("Validate() = nil, want an error")
+			}
+			var joined interface{ Unwrap() []error }
+			if !errors.As(err, &joined) || len(joined.Unwrap()) != 1 {
+				t.Fatalf("Validate() = %v, want exactly one problem", err)
+			}
+			var ce *spec.CommandError
+			if !errors.As(err, &ce) {
+				t.Fatalf("Validate() = %v, want a *CommandError", err)
+			}
+			if ce.Path != tt.path {
+				t.Errorf("Path = %q, want %q", ce.Path, tt.path)
+			}
+			if !errors.Is(err, validate.ErrInvalid) {
+				t.Errorf("Validate() = %v, want ErrInvalid", err)
+			}
+			if !strings.Contains(err.Error(), "FlagGroups on a command with no Run") {
+				t.Errorf("Validate() = %q, want it to name FlagGroups on a command with no Run", err)
+			}
+		})
+	}
+}
+
+func TestCommandValidateRejectsFlagGroupsWithoutRunAndTheirOwnProblems(t *testing.T) {
+	root := groupTree()
+	root.FlagGroups = []spec.FlagGroup{{Kind: spec.MutuallyExclusive, Flags: []string{"verbose"}}}
+	err := root.Validate()
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) || len(joined.Unwrap()) != 2 {
+		t.Fatalf("Validate() = %v, want exactly two problems", err)
+	}
+	for _, want := range []string{"FlagGroups on a command with no Run", "FlagGroups[0] names 1 flags"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() = %q, want it to contain %q", err, want)
+		}
 	}
 }
 

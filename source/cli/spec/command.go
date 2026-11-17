@@ -34,7 +34,7 @@ type Command struct {
 	Flags []Flag
 	// FlagGroups constrain which of the flags visible to the command may, or must, be set
 	// together on its command line, as [FlagGroup] describes. A group applies to this command
-	// alone, not to its subcommands.
+	// alone, not to its subcommands, and only a command with a Run may list one.
 	FlagGroups []FlagGroup
 	// Run executes the command. It may be nil only for a command that has subcommands.
 	Run func(ctx context.Context, inv *Invocation) error
@@ -102,7 +102,9 @@ func (e *CommandError) Unwrap() error {
 //     value included, with fewer than two flags, naming a flag twice, or naming a flag not
 //     visible to its command: neither declared by it nor inherited from one of its ancestors.
 //     The standard flags of a tool built by cli/core are inherited flags of its root, so a group
-//     may name them.
+//     may name them;
+//   - FlagGroups on a command with no Run, reported once for the command however many groups
+//     it lists.
 func (c *Command) Validate() error {
 	if c == nil {
 		return &CommandError{Err: fmt.Errorf("%w: command is nil", validate.ErrInvalid)}

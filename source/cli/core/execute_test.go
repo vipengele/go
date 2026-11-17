@@ -1933,3 +1933,23 @@ func TestExecuteArgsFlagGroupsApplyToTheirOwnCommand(t *testing.T) {
 		t.Errorf("ExecuteArgs(%q) = %+v, calls %q; want exit 0 and calls \"add\"", args, got, c.String())
 	}
 }
+
+func TestExecuteArgsRefusesFlagGroupsOnACommandWithoutRun(t *testing.T) {
+	app := cli.New(identity())
+	app.Add(&spec.Command{
+		Name:       "remote",
+		Summary:    "Manage remotes",
+		Flags:      []spec.Flag{spec.StringFlag("profile", "the profile to use"), spec.StringFlag("token", "the token")},
+		FlagGroups: []spec.FlagGroup{{Kind: spec.MutuallyExclusive, Flags: []string{"profile", "token"}}},
+		Commands: []*spec.Command{{
+			Name:    "add",
+			Summary: "Add a remote",
+			Run:     func(context.Context, *spec.Invocation) error { return nil },
+		}},
+	})
+	got := runApp(t, app, "remote", "add")
+	if got.code != cli.ExitError || got.stdout != "" || !strings.HasPrefix(got.stderr, "tool: invalid command tree\n") ||
+		!strings.Contains(got.stderr, "FlagGroups on a command with no Run") {
+		t.Errorf("ExecuteArgs = %+v, want ExitError, no stdout and an invalid command tree naming the groups", got)
+	}
+}
