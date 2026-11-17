@@ -203,3 +203,87 @@ func TestFlagsUnknownKeyIsNamed(t *testing.T) {
 		t.Errorf("error = %v, want it to name Bogus.Key", err)
 	}
 }
+
+type flagProfile struct {
+	Name string
+	Env  map[string]string
+}
+
+type flagCollections struct {
+	Name     string
+	Profiles []flagProfile `merge:"name"`
+	Server   struct {
+		Routes map[string]int
+		Host   string
+	}
+}
+
+func (flagCollections) RemovedKeys() map[string]string {
+	return map[string]string{"profiles.old": "drop it"}
+}
+
+func TestFlagsRejectCollections(t *testing.T) {
+	s, err := NewSchema(flagCollections{}, "APP")
+	if err != nil {
+		t.Fatalf("NewSchema: %v", err)
+	}
+	tests := []struct {
+		name   string
+		values map[string]string
+		want   []string
+	}{
+		{
+			name:   "list of structs",
+			values: map[string]string{"profiles": "a"},
+			want:   []string{`flag --profiles: key "profiles" is a collection, which is not settable from flags`},
+		},
+		{
+			name:   "map in a group, in another spelling",
+			values: map[string]string{"Server.Routes": "a=1"},
+			want:   []string{`flag --Server.Routes: key "server.routes" is a collection, which is not settable from flags`},
+		},
+		{
+			name:   "field of an element",
+			values: map[string]string{"profiles.name": "a"},
+			want:   []string{`flag --profiles.name: key is below the collection "profiles", which is not settable from flags`},
+		},
+		{
+			name:   "map entry",
+			values: map[string]string{"server.routes.api": "1"},
+			want:   []string{`flag --server.routes.api: key is below the collection "server.routes", which is not settable from flags`},
+		},
+		{
+			name:   "removed key below a collection carries its hint",
+			values: map[string]string{"profiles.old": "1"},
+			want:   []string{"flag --profiles.old: key was removed: drop it"},
+		},
+		{
+			name:   "beside a valid key and an unknown one",
+			values: map[string]string{"name": "n", "profiles": "a", "server.nope": "1"},
+			want: []string{
+				`flag --profiles: key "profiles" is a collection, which is not settable from flags`,
+				"flag --server.nope: unknown key",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Flags(tt.values).Load(s)
+			if err == nil {
+				t.Fatalf("Load = %#v, want an error", got)
+			}
+			if problems := fileProblems(err); !reflect.DeepEqual(problems, tt.want) {
+				t.Fatalf("problems = %q, want %q", problems, tt.want)
+			}
+		})
+	}
+
+	got, err := Flags(map[string]string{"server.host": "h"}).Load(s)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []Entry{{Key: "server.host", Value: "h", Origin: "flag --server.host"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("entries = %#v, want %#v", got, want)
+	}
+}

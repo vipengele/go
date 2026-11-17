@@ -1,0 +1,13 @@
+profiles: x
+labels: [a]
+steps:
+  - addr: [1]
+  - x
+  -
+matrix:
+  a: 1
+  b: {c: 1, c: 2}
+services: ~
+by_owner:
+  - meta.owner: ann
+    tags: [[1], ~]

@@ -20,7 +20,8 @@ type FlagsProvider struct {
 // arrives as the single comma-separated text of its flag; it is not split here.
 //
 // Load reports every problem in one error, the keys in sorted order: a key with no Schema field,
-// a key the Schema lists as removed, reported with its hint, and two keys that match the same field.
+// a key the Schema lists as removed, reported with its hint, a key naming a collection or a key
+// below one, which no flag sets, and two keys that match the same field.
 // Origins name the flag by its canonical name, such as "flag --server.max-retries", however the key
 // was spelled.
 func Flags(values map[string]string) *FlagsProvider {
@@ -47,7 +48,15 @@ func (p *FlagsProvider) Load(schema *Schema) ([]Entry, error) {
 				problems = append(problems, fmt.Errorf("flag --%s: key was removed: %s", k, hint))
 				continue
 			}
+			if c, below := collectionAbove(schema, k); below {
+				problems = append(problems, fmt.Errorf("flag --%s: key is below the collection %q, which is not settable from flags", k, c.key))
+				continue
+			}
 			problems = append(problems, fmt.Errorf("flag --%s: unknown key", k))
+			continue
+		}
+		if f.kind != KindValue {
+			problems = append(problems, fmt.Errorf("flag --%s: key %q is a collection, which is not settable from flags", k, f.key))
 			continue
 		}
 		if first, dup := written[f.key]; dup {
@@ -69,4 +78,18 @@ func (p *FlagsProvider) Load(schema *Schema) ([]Entry, error) {
 		entries = append(entries, Entry{Key: f.key, Value: p.values[k], Origin: "flag --" + f.flag})
 	}
 	return entries, nil
+}
+
+// collectionAbove returns the collection field of schema whose key matches a proper prefix of key,
+// cut at a ".", and reports whether there is one.
+func collectionAbove(schema *Schema, key string) (Field, bool) {
+	for i := range len(key) {
+		if key[i] != '.' {
+			continue
+		}
+		if f, ok := schema.Lookup(key[:i]); ok && f.kind != KindValue {
+			return f, true
+		}
+	}
+	return Field{}, false
 }

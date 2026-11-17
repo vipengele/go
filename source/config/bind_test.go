@@ -166,3 +166,156 @@ func TestBindRemovedKey(t *testing.T) {
 		})
 	}
 }
+
+func stubScalar(value, origin string) *Node {
+	return &Node{Kind: NodeScalar, Value: value, Origin: origin}
+}
+
+func stubMap(origin string, entries ...NodeEntry) *Node {
+	return &Node{Kind: NodeMap, Entries: append([]NodeEntry{}, entries...), Origin: origin}
+}
+
+func stubList(origin string, items ...*Node) *Node {
+	return &Node{Kind: NodeList, Items: append([]*Node{}, items...), Origin: origin}
+}
+
+func TestBindCollectionFromNodes(t *testing.T) {
+	entries := []Entry{
+		{Key: "profiles", Origin: "s:1", Node: stubList("s:1",
+			stubMap("s:2",
+				NodeEntry{Key: "name", Node: stubScalar("ci", "s:2")},
+				NodeEntry{Key: "hosts", Node: stubList("s:3", stubMap("s:3", NodeEntry{Key: "port", Node: stubScalar("8", "s:3")}))},
+				NodeEntry{Key: "tags", Node: stubScalar("a, b", "s:4")},
+			),
+		)},
+		{Key: "matrix", Origin: "s:5", Node: stubMap("s:5", NodeEntry{Key: "a.b", Node: stubMap("s:6", NodeEntry{Key: "C", Node: stubScalar("3", "s:6")})})},
+	}
+	res, err := Load(mergeConfig{}, &stubProvider{entries: entries})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := res.Value()
+	wantProfiles := []mergeProfile{{Name: "ci", Hosts: []mergeHost{{Port: 8}}, Tags: []string{"a", "b"}}}
+	if !reflect.DeepEqual(got.Profiles, wantProfiles) {
+		t.Errorf("Profiles = %+v, want %+v", got.Profiles, wantProfiles)
+	}
+	if want := map[string]map[string]int{"a.b": {"C": 3}}; !reflect.DeepEqual(got.Matrix, want) {
+		t.Errorf("Matrix = %+v, want %+v", got.Matrix, want)
+	}
+}
+
+func TestBindCollectionErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		want  []string
+	}{
+		{
+			name:  "no node",
+			entry: Entry{Key: "steps", Value: "x", Origin: "o"},
+			want:  []string{"steps: no node from o, but it holds a list of config.mergeHost"},
+		},
+		{
+			name:  "node for a single value",
+			entry: Entry{Key: "name", Node: stubScalar("x", "o"), Origin: "o"},
+			want:  []string{"name: a scalar node from o, but it holds a single string"},
+		},
+		{
+			name:  "shape of the collection",
+			entry: Entry{Key: "labels", Node: stubList("o:1"), Origin: "o:1"},
+			want:  []string{"labels: a list node from o:1, but it holds a mapping of string"},
+		},
+		{
+			name: "every value that does not convert, by path within the layer",
+			entry: Entry{Key: "profiles", Origin: "o:1", Node: stubList("o:1",
+				stubMap("o:2", NodeEntry{Key: "name", Node: stubScalar("a", "o:2")}),
+				stubMap("o:3",
+					NodeEntry{Key: "name", Node: stubScalar("b", "o:3")},
+					NodeEntry{Key: "hosts", Node: stubList("o:4", stubMap("o:4", NodeEntry{Key: "port", Node: stubScalar("x", "o:4")}))},
+					NodeEntry{Key: "tags", Node: stubList("o:5", stubMap("o:5"))},
+					NodeEntry{Key: "nope", Node: stubScalar("1", "o:6")},
+					NodeEntry{Key: "meta.owner", Node: nil},
+				),
+			)},
+			want: []string{
+				`profiles[1].hosts[0].port: invalid int "x" from o:4`,
+				"profiles[1].tags: a list node from o:5, but it holds a list of string",
+				"profiles[1].nope: unknown key from o:3",
+				"profiles[1].meta.owner: no node from o:3",
+			},
+		},
+		{
+			name:  "bad element of comma text within an element",
+			entry: Entry{Key: "steps", Origin: "o:1", Node: stubList("o:1", stubMap("o:1", NodeEntry{Key: "port", Node: stubList("o:2", stubScalar("1", "o:2"))}))},
+			want:  []string{"steps[0].port: a list node from o:2, but it holds a single int"},
+		},
+		{
+			name: "map entry and list item with no node",
+			entry: Entry{Key: "services", Origin: "o:1", Node: stubMap("o:1",
+				NodeEntry{Key: "web", Node: nil},
+				NodeEntry{Key: "db", Node: stubMap("o:2", NodeEntry{Key: "port", Node: stubScalar("99999999999999999999", "o:2")})},
+			)},
+			want: []string{
+				`services["web"]: no node from o:1`,
+				`services["db"].port: invalid int "99999999999999999999" from o:2: out of range`,
+			},
+		},
+		{
+			name:  "map node for a list of elements",
+			entry: Entry{Key: "steps", Node: stubMap("o:1"), Origin: "o:1"},
+			want:  []string{"steps: a map node from o:1, but it holds a list of config.mergeHost"},
+		},
+		{
+			name:  "scalar node for an element",
+			entry: Entry{Key: "steps", Origin: "o:1", Node: stubList("o:1", stubScalar("x", "o:2"))},
+			want:  []string{"steps[0]: a scalar node from o:2, but it holds the keys of config.mergeHost"},
+		},
+		{
+			name: "map node for a list of single values within an element",
+			entry: Entry{Key: "profiles", Origin: "o:1", Node: stubList("o:1",
+				stubMap("o:2",
+					NodeEntry{Key: "name", Node: stubScalar("a", "o:2")},
+					NodeEntry{Key: "tags", Node: stubMap("o:3")},
+				),
+			)},
+			want: []string{"profiles[0].tags: a map node from o:3, but it holds a list of string"},
+		},
+		{
+			name:  "list item with no node",
+			entry: Entry{Key: "steps", Origin: "o:1", Node: &Node{Kind: NodeList, Items: []*Node{nil}, Origin: "o:1"}},
+			want:  []string{"steps[0]: no node from o:1"},
+		},
+		{
+			name: "merge keys of a layer",
+			entry: Entry{Key: "profiles", Origin: "o:1", Node: stubList("o:1",
+				stubMap("o:2", NodeEntry{Key: "name", Node: stubScalar("a", "o:2")}),
+				stubMap("o:3"),
+				stubMap("o:4", NodeEntry{Key: "name", Node: stubScalar("a", "o:4")}),
+			)},
+			want: []string{
+				`profiles[1]: merge key "name" is empty from o:3; every element of profiles needs one`,
+				`profiles[2]: merge key "name" is "a" from o:4, as for profiles[0]`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(mergeConfig{}, &stubProvider{entries: []Entry{tt.entry}})
+			if err == nil {
+				t.Fatal("Load: no error")
+			}
+			if got, want := err.Error(), strings.Join(tt.want, "\n"); got != want {
+				t.Errorf("error =\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+}
+
+func TestBindCollectionErrorLeavesEarlierLayer(t *testing.T) {
+	good := &stubProvider{entries: []Entry{{Key: "labels", Origin: "g", Node: stubMap("g", NodeEntry{Key: "k", Node: stubScalar("v", "g")})}}}
+	bad := &stubProvider{entries: []Entry{{Key: "labels", Origin: "b", Node: stubScalar("x", "b")}}}
+	_, err := Load(mergeConfig{}, good, bad)
+	if err == nil || !strings.Contains(err.Error(), "labels: a scalar node from b") {
+		t.Errorf("Load error = %v, want the shape of labels from b", err)
+	}
+}

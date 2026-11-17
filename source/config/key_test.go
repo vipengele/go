@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 func TestSnakeCase(t *testing.T) {
 	cases := []struct {
@@ -175,6 +179,124 @@ func TestCharacterClasses(t *testing.T) {
 			}
 			if got := isLetter(tc.c); got != tc.letter {
 				t.Errorf("isLetter(%q) = %v, want %v", tc.c, got, tc.letter)
+			}
+		})
+	}
+}
+
+func TestPathRoundTrip(t *testing.T) {
+	cases := []struct {
+		name  string
+		steps []pathStep
+		want  string
+	}{
+		{name: "key alone", steps: []pathStep{keyStep("verbose")}, want: "verbose"},
+		{name: "dotted key", steps: []pathStep{keyStep("server.max_retries")}, want: "server.max_retries"},
+		{name: "list element field and map entry", steps: []pathStep{keyStep("profiles"), indexStep(2), keyStep("env"), mapKeyStep("FOO")}, want: `profiles[2].env["FOO"]`},
+		{name: "index zero", steps: []pathStep{keyStep("profiles"), indexStep(0)}, want: "profiles[0]"},
+		{name: "large index", steps: []pathStep{keyStep("profiles"), indexStep(1234)}, want: "profiles[1234]"},
+		{name: "nested maps", steps: []pathStep{keyStep("group.nested"), mapKeyStep("a"), mapKeyStep("b"), keyStep("meta.owner")}, want: `group.nested["a"]["b"].meta.owner`},
+		{name: "empty map key", steps: []pathStep{keyStep("labels"), mapKeyStep("")}, want: `labels[""]`},
+		{name: "map key holding a quote", steps: []pathStep{keyStep("labels"), mapKeyStep(`say "hi"`)}, want: `labels["say \"hi\""]`},
+		{name: "map key holding a bracket", steps: []pathStep{keyStep("labels"), mapKeyStep("a]b[")}, want: `labels["a]b["]`},
+		{name: "map key holding a backslash", steps: []pathStep{keyStep("labels"), mapKeyStep(`C:\dir`)}, want: `labels["C:\\dir"]`},
+		{name: "map key holding dots", steps: []pathStep{keyStep("labels"), mapKeyStep("example.com.")}, want: `labels["example.com."]`},
+		{name: "map key holding every special byte", steps: []pathStep{keyStep("labels"), mapKeyStep(`"].\[`), keyStep("x")}, want: `labels["\"].\\["].x`},
+		{name: "map key kept verbatim, not normalised", steps: []pathStep{keyStep("labels"), mapKeyStep("Max-Retries_X")}, want: `labels["Max-Retries_X"]`},
+		{name: "map key with a newline and non-ASCII", steps: []pathStep{keyStep("labels"), mapKeyStep("a\nb\u00e9")}, want: `labels["a\nbé"]`},
+		{name: "map key of invalid UTF-8", steps: []pathStep{keyStep("labels"), mapKeyStep("\xff")}, want: `labels["\xff"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatPath(tc.steps)
+			if got != tc.want {
+				t.Errorf("formatPath = %s, want %s", got, tc.want)
+			}
+			steps, err := parsePath(got)
+			if err != nil {
+				t.Fatalf("parsePath(%s): %v", got, err)
+			}
+			if !reflect.DeepEqual(steps, tc.steps) {
+				t.Errorf("parsePath(%s) = %#v, want %#v", got, steps, tc.steps)
+			}
+		})
+	}
+}
+
+func TestParsePathJoinsKeySegments(t *testing.T) {
+	steps, err := parsePath(`a.b[1].c.d["k"].e`)
+	if err != nil {
+		t.Fatalf("parsePath: %v", err)
+	}
+	want := []pathStep{keyStep("a.b"), indexStep(1), keyStep("c.d"), mapKeyStep("k"), keyStep("e")}
+	if !reflect.DeepEqual(steps, want) {
+		t.Errorf("parsePath = %#v, want %#v", steps, want)
+	}
+}
+
+func TestParsePathErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "empty", path: "", want: "a key segment is missing at its end"},
+		{name: "trailing dot", path: "a.", want: "a key segment is missing at its end"},
+		{name: "trailing dot after a bracket", path: "a[0].", want: "a key segment is missing at its end"},
+		{name: "leading bracket", path: "[0]", want: `"" at offset 0 is not a key segment`},
+		{name: "leading dot", path: ".a", want: `"" at offset 0 is not a key segment`},
+		{name: "empty segment", path: "a..b", want: `"" at offset 2 is not a key segment`},
+		{name: "invalid segment", path: "a.2b", want: `"2b" at offset 2 is not a key segment`},
+		{name: "segment holding a space", path: "a b", want: `"a b" at offset 0 is not a key segment`},
+		{name: "bracket left open", path: "a[", want: "a bracket holds neither an index nor a double-quoted map key"},
+		{name: "empty brackets", path: "a[]", want: "a bracket holds neither an index nor a double-quoted map key"},
+		{name: "negative index", path: "a[-1]", want: "a bracket holds neither an index nor a double-quoted map key"},
+		{name: "unquoted map key", path: "a[FOO]", want: "a bracket holds neither an index nor a double-quoted map key"},
+		{name: "single-quoted map key", path: "a['x']", want: "a bracket holds neither an index nor a double-quoted map key"},
+		{name: "leading zero", path: "a[01]", want: "the index 01 has a leading zero"},
+		{name: "index not closed", path: "a[1", want: `the index 1 is not followed by "]"`},
+		{name: "index followed by text", path: "a[1x]", want: `the index 1 is not followed by "]"`},
+		{name: "index out of range", path: "a[99999999999999999999]", want: "the index 99999999999999999999: "},
+		{name: "map key not closed", path: `a["x"`, want: `the map key "x" is not followed by "]"`},
+		{name: "map key followed by text", path: `a["x"y]`, want: `the map key "x" is not followed by "]"`},
+		{name: "unterminated map key", path: `a["x]`, want: "a map key is not a double-quoted string"},
+		{name: "bad escape in a map key", path: `a["\q"]`, want: "a map key is not a double-quoted string"},
+		{name: "text after a bracket", path: "a[0]b", want: `'b' at offset 4 follows a "]"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps, err := parsePath(tc.path)
+			if err == nil {
+				t.Fatalf("parsePath(%q) = %#v, want an error", tc.path, steps)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseBracketErrorSpansNoBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		want string
+	}{
+		{name: "unterminated map key", s: `["x]`, want: "a map key is not a double-quoted string"},
+		{name: "map key not closed", s: `["x"y]`, want: `the map key "x" is not followed by "]"`},
+		{name: "neither index nor map key", s: "[x]", want: "a bracket holds neither an index nor a double-quoted map key"},
+		{name: "leading zero", s: "[01]", want: "the index 01 has a leading zero"},
+		{name: "index not closed", s: "[1x]", want: `the index 1 is not followed by "]"`},
+		{name: "index out of range", s: "[99999999999999999999]", want: "the index 99999999999999999999: "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			step, n, err := parseBracket(tc.s)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("parseBracket(%q) error = %v, want it to contain %q", tc.s, err, tc.want)
+			}
+			if n != 0 || step != (pathStep{}) {
+				t.Errorf("parseBracket(%q) = %#v, %d alongside its error, want the zero step and 0", tc.s, step, n)
 			}
 		})
 	}

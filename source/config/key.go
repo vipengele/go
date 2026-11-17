@@ -1,12 +1,145 @@
 package config
 
-import "strings"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // Keys are dotted paths of segments, one segment per level of struct nesting: "server.max_retries".
 // The canonical form of a segment is snake_case: lower-case ASCII letters and digits with single
 // underscores between words. Matching ignores case, "-" and "_" within a segment, so "maxRetries",
 // "MAX_RETRIES" and "max-retries" all name "max_retries"; "." always separates levels and is never
 // ignored, inserted or removed.
+
+// A path locates one value within a loaded configuration, inside collections included. It starts
+// with the key of a Schema field; each list element below it adds its index in brackets, each map
+// entry its key quoted as a Go string (strconv.Quote) in brackets, and each field of an element its
+// key relative to the element, after a ".": profiles[2].env["FOO"]. A map key is written verbatim
+// within its quotes, a "." or "]" in it included, and is never normalised as keys are matched.
+
+// pathStepKind is what one step of a path selects.
+type pathStepKind int
+
+const (
+	stepKey    pathStepKind = iota // a field, by its dotted key
+	stepIndex                      // an element of a list, by its index
+	stepMapKey                     // an entry of a map, by its key
+)
+
+// pathStep is one step of a path. Consecutive fields are one stepKey, their keys joined by ".", as
+// in a Schema key.
+type pathStep struct {
+	kind  pathStepKind
+	key   string // the dotted key of a stepKey, or the map key of a stepMapKey
+	index int    // the list index of a stepIndex
+}
+
+func keyStep(key string) pathStep    { return pathStep{kind: stepKey, key: key} }
+func indexStep(index int) pathStep   { return pathStep{kind: stepIndex, index: index} }
+func mapKeyStep(key string) pathStep { return pathStep{kind: stepMapKey, key: key} }
+
+// formatPath returns the display form of a path, such as profiles[2].env["FOO"].
+func formatPath(steps []pathStep) string {
+	var b strings.Builder
+	for i, s := range steps {
+		switch s.kind {
+		case stepKey:
+			if i > 0 {
+				b.WriteByte('.')
+			}
+			b.WriteString(s.key)
+		case stepIndex:
+			b.WriteByte('[')
+			b.WriteString(strconv.Itoa(s.index))
+			b.WriteByte(']')
+		case stepMapKey:
+			b.WriteByte('[')
+			b.WriteString(strconv.Quote(s.key))
+			b.WriteByte(']')
+		}
+	}
+	return b.String()
+}
+
+// parsePath returns the steps of path, the form formatPath writes, joining consecutive key segments
+// into one stepKey. A path starts with a key segment; each segment is a name validName accepts, an
+// index is decimal digits with no leading zero, and a map key is a double-quoted Go string.
+func parsePath(path string) ([]pathStep, error) {
+	var steps []pathStep
+	segment := true // whether a key segment is due: at the start and after a "."
+	for i := 0; i < len(path); {
+		if segment {
+			j := i
+			for j < len(path) && path[j] != '.' && path[j] != '[' {
+				j++
+			}
+			if !validName(path[i:j]) {
+				return nil, fmt.Errorf("path %q: %q at offset %d is not a key segment", path, path[i:j], i)
+			}
+			if n := len(steps); n > 0 && steps[n-1].kind == stepKey {
+				steps[n-1].key += "." + path[i:j]
+			} else {
+				steps = append(steps, keyStep(path[i:j]))
+			}
+			i, segment = j, false
+			continue
+		}
+		switch path[i] {
+		case '.':
+			i++
+			segment = true
+		case '[':
+			step, n, err := parseBracket(path[i:])
+			if err != nil {
+				return nil, fmt.Errorf("path %q: at offset %d: %w", path, i, err)
+			}
+			steps = append(steps, step)
+			i += n
+		default:
+			return nil, fmt.Errorf("path %q: %q at offset %d follows a \"]\"; want \".\" or \"[\"", path, path[i], i)
+		}
+	}
+	if segment {
+		return nil, fmt.Errorf("path %q: a key segment is missing at its end", path)
+	}
+	return steps, nil
+}
+
+// parseBracket parses the bracketed step at the start of s, which begins with "[", and returns it
+// with the number of bytes it spans.
+func parseBracket(s string) (pathStep, int, error) {
+	if len(s) > 1 && s[1] == '"' {
+		quoted, err := strconv.QuotedPrefix(s[1:])
+		if err != nil {
+			return pathStep{}, 0, fmt.Errorf("a map key is not a double-quoted string: %w", err)
+		}
+		end := 1 + len(quoted)
+		if end >= len(s) || s[end] != ']' {
+			return pathStep{}, 0, fmt.Errorf("the map key %s is not followed by \"]\"", quoted)
+		}
+		key, _ := strconv.Unquote(quoted) // QuotedPrefix returns only text Unquote accepts
+		return mapKeyStep(key), end + 1, nil
+	}
+	end := 1
+	for end < len(s) && isDigit(s[end]) {
+		end++
+	}
+	digits := s[1:end]
+	switch {
+	case digits == "":
+		return pathStep{}, 0, fmt.Errorf("a bracket holds neither an index nor a double-quoted map key")
+	case len(digits) > 1 && digits[0] == '0':
+		return pathStep{}, 0, fmt.Errorf("the index %s has a leading zero", digits)
+	case end >= len(s) || s[end] != ']':
+		return pathStep{}, 0, fmt.Errorf("the index %s is not followed by \"]\"", digits)
+	}
+	index, err := strconv.Atoi(digits)
+	if err != nil {
+		return pathStep{}, 0, fmt.Errorf("the index %s: %w", digits, err)
+	}
+	return indexStep(index), end + 1, nil
+}
 
 // validName reports whether name, a config tag or a Go field name, can become a key segment: it
 // starts with an ASCII letter and holds only ASCII letters, digits, "-" and "_".

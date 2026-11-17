@@ -22,13 +22,17 @@ type Validator interface {
 
 // FieldError is a problem a Validator found with the value of one key.
 //
-// A Validator sets Key and Err. Load resolves Key as Schema.Lookup matches it, and reports a copy of
-// the FieldError with Key replaced by the canonical key and Value and Origin set from the key's
-// Source; a Key that matches no key is reported as the Validator wrote it.
+// A Validator sets Key and Err. Load resolves Key as a key, matched as Schema.Lookup matches it, or
+// as a path within a collection, such as profiles[2].env["FOO"], its key segments matched the same
+// way, its indexes counted in the merged collection and its map keys exact. It reports a copy of the
+// FieldError with Key replaced by the canonical key or path and Value and Origin set from what Key
+// names: its Source, or for a list, a map or an element holding several values, its origin alone. A
+// Key that names nothing is reported as the Validator wrote it.
 type FieldError struct {
-	// Key is the key the problem is about, such as "server.port".
+	// Key is the key or path the problem is about, such as "server.port" or "profiles[2].env".
 	Key string
-	// Value is the bound value of the key, as Source.Value writes it.
+	// Value is the bound value of the key, as Source.Value writes it, and empty for a value that
+	// holds several.
 	Value string
 	// Origin is where the value came from, as Source.Origin names it, such as "config.yaml:12".
 	Origin string
@@ -75,22 +79,17 @@ func (e *validationError) Error() string { return e.msg }
 func (e *validationError) Unwrap() []error { return e.errs }
 
 // annotate returns err, the error Validate returned, with every *FieldError in its tree whose key
-// matches a key of schema, as Lookup matches, reported at its canonical key and with the value and
-// origin of that key's Source in sources, which hold one Source for every field of schema. The FieldErrors of err are never changed. An
-// err with no FieldError to annotate is returned as it is.
-func annotate(err error, schema *Schema, sources []Source) error {
-	byKey := make(map[string]Source, len(sources))
-	for _, s := range sources {
-		byKey[s.Key] = s
-	}
+// resolves, as resolveKey resolves it, reported at its canonical key or path and with the value and
+// origin index holds for it. The FieldErrors of err are never changed. An err with no FieldError to
+// annotate is returned as it is.
+func annotate(err error, schema *Schema, index map[string]Source) error {
 	var copies []error
 	var pairs [][2]string
 	for _, fe := range fieldErrors(err) {
-		f, ok := schema.Lookup(fe.Key)
+		s, ok := resolveKey(schema, index, fe.Key)
 		if !ok {
 			continue
 		}
-		s := byKey[f.Key()]
 		c := &FieldError{Key: s.Key, Value: s.Value, Origin: s.Origin, Err: fe.Err}
 		copies = append(copies, c)
 		pairs = append(pairs, [2]string{fe.Error(), c.Error()})
@@ -107,6 +106,37 @@ func annotate(err error, schema *Schema, sources []Source) error {
 	}
 	msg := strings.NewReplacer(oldnew...).Replace(err.Error())
 	return &validationError{msg: msg, errs: append(copies, err)}
+}
+
+// resolveKey returns the Source index holds for key: a key of schema, as Lookup matches it, or a
+// path within a collection whose key segments match a key of schema and then of each element Schema
+// it enters, as Lookup matches them. Its indexes and map keys are taken as written, and a map key is
+// never matched as a key is.
+func resolveKey(schema *Schema, index map[string]Source, key string) (Source, bool) {
+	if f, ok := schema.Lookup(key); ok {
+		s, found := index[f.key]
+		return s, found
+	}
+	steps, err := parsePath(key)
+	if err != nil {
+		return Source{}, false
+	}
+	s := schema
+	for i := range steps {
+		if steps[i].kind != stepKey {
+			continue
+		}
+		if s == nil {
+			return Source{}, false
+		}
+		f, ok := s.Lookup(steps[i].key)
+		if !ok {
+			return Source{}, false
+		}
+		steps[i].key, s = f.key, f.elem
+	}
+	src, ok := index[formatPath(steps)]
+	return src, ok
 }
 
 // fieldErrors returns every non-nil *FieldError in the tree of err, depth first through Unwrap()

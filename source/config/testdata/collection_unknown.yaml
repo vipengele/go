@@ -1,0 +1,10 @@
+profiles:
+  - name: dev
+    nmae: x
+    meta:
+      ownr: y
+    meta.owner: a
+    Meta.Owner: b
+services:
+  web:
+    port: 1
