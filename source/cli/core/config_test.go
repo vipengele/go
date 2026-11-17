@@ -713,3 +713,52 @@ func TestConfigEditRefusesANonTerminal(t *testing.T) {
 		t.Errorf("config directory: Stat = %v, want it not created", err)
 	}
 }
+
+// layoutApp returns an App with opts holding "layout" and, annotated SkipConfig, "skip", which
+// record in got what PathsLayoutFrom returns.
+func layoutApp(got *paths.Layout, opts ...cli.Option) *cli.App {
+	app := cli.New(identity(), append(opts, cli.WithBuildInfo(versionInfo()))...)
+	run := func(ctx context.Context, _ *spec.Invocation) error {
+		*got = cli.PathsLayoutFrom(ctx)
+		return nil
+	}
+	app.Add(&spec.Command{Name: "layout", Summary: "Read the layout", Run: run})
+	app.Add(&spec.Command{
+		Name: "skip", Summary: "Read the layout", Run: run,
+		Annotations: map[string]string{spec.SkipConfig: ""},
+	})
+	return app
+}
+
+func TestPathsLayoutFromReturnsTheLayoutOfTheApp(t *testing.T) {
+	cases := []struct {
+		name string
+		opts []cli.Option
+		want paths.Layout
+	}{
+		{"xdg", []cli.Option{cli.WithPathsLayout(paths.LayoutXDG)}, paths.LayoutXDG},
+		{"xdg with config", []cli.Option{cli.WithPathsLayout(paths.LayoutXDG), cli.WithConfig(toolDefaults())}, paths.LayoutXDG},
+		{"unset", nil, paths.LayoutDefault},
+		{"unset with config", []cli.Option{cli.WithConfig(toolDefaults())}, paths.LayoutDefault},
+	}
+	for _, tc := range cases {
+		for _, command := range []string{"layout", "skip"} {
+			t.Run(tc.name+"/"+command, func(t *testing.T) {
+				got := paths.Layout(-1)
+				r := newConfigEnv(t, "").run(t, layoutApp(&got, tc.opts...), command)
+				if r.code != 0 {
+					t.Fatalf("code = %d, stderr %q", r.code, r.stderr)
+				}
+				if got != tc.want {
+					t.Errorf("PathsLayoutFrom = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+func TestPathsLayoutFromWithoutAnAppRunIsTheDefault(t *testing.T) {
+	if got := cli.PathsLayoutFrom(context.Background()); got != paths.LayoutDefault {
+		t.Errorf("PathsLayoutFrom = %v, want %v", got, paths.LayoutDefault)
+	}
+}

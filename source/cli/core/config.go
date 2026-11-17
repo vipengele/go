@@ -121,6 +121,29 @@ func ConfigFrom[T any](ctx context.Context) (cfg.Result[T], bool) {
 	return config.From[T](ctx)
 }
 
+// pathsLayoutKey is the context key of the layout [WithPathsLayout] gives the App.
+type pathsLayoutKey struct{}
+
+// PathsLayoutFrom returns the [paths.Layout] of [WithPathsLayout] for the App that runs, from the
+// context its run function, a [PreRunHook] or a [PostRunHook] receives, whether or not the App has
+// [WithConfig] and whatever the command's annotations. It returns [paths.LayoutDefault] when the
+// App has no [WithPathsLayout] and for a context that does not come from an App's execution, the
+// package-level [Execute] and [ExecuteArgs] included.
+func PathsLayoutFrom(ctx context.Context) paths.Layout {
+	if layout, ok := ctx.Value(pathsLayoutKey{}).(paths.Layout); ok {
+		return layout
+	}
+	return paths.LayoutDefault
+}
+
+// layoutHook returns the pre-run hook that stores the layout of s in the context, ahead of the
+// configuration hook, for every command.
+func (s settings) layoutHook() PreRunHook {
+	return func(ctx context.Context, _ *spec.Invocation, _ spec.CommandInfo) (context.Context, error) {
+		return context.WithValue(ctx, pathsLayoutKey{}, s.pathsLayout), nil
+	}
+}
+
 // configFor binds the App's configuration for one execution against lookup, the environment the
 // configuration directory is resolved from. It returns the zero binding when the App has no
 // [WithConfig]. When the directory cannot be resolved, the hook and every run function of the

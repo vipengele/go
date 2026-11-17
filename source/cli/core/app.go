@@ -274,7 +274,7 @@ func (a *App) ExecuteArgs(env *spec.Env, args []string) int {
 	logFlags := newLoggingFlags(a.settings)
 	resolver := outputResolver{identity: &a.identity, flags: flags}
 	conf := a.configFor(env.Resolved().LookupEnv)
-	pre, post := a.settings.hookFuncs(chainHooks(conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
+	pre, post := a.settings.hookFuncs(chainHooks(a.settings.layoutHook(), conf.hook, logFlags.hook(flags.verbose, flags.quiet)))
 	cfg := cobra.Config{Output: resolver.resolve, PreRun: pre, PostRun: post, Completion: a.settings.completion}
 	return executeArgsEnded(context.Background(), env, a.root(flags, logFlags, conf.group), args, cfg,
 		logFlags.flush, a.settings.exitMatchers, a.settings.errorRenderers...)
