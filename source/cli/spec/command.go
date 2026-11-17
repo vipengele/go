@@ -14,6 +14,11 @@ import (
 type Command struct {
 	// Name is the word that selects the command: a lowercase slug as [validate.Slug] accepts.
 	Name string
+	// Aliases are further words that select the command, each a lowercase slug as [validate.Slug]
+	// accepts. An alias differs from Name, from the command's other aliases, and from the names and
+	// aliases of its siblings. The root command takes none, as no word on the command line selects
+	// it.
+	Aliases []string
 	// Summary is the one-line description shown in the parent's list of commands.
 	Summary string
 	// Description is the full description shown in the command's own help.
@@ -74,6 +79,11 @@ func (e *CommandError) Unwrap() error {
 //   - a nil command, and a nil entry in Commands or Flags;
 //   - a Name that is not a lowercase slug, as [validate.Slug] accepts;
 //   - two subcommands of one command with the same name;
+//   - an alias on the root command;
+//   - an alias that is not a lowercase slug, as [validate.Slug] accepts, an alias equal to the
+//     command's Name, and an alias listed twice by one command;
+//   - an alias of one subcommand equal to the name or an alias of another subcommand of the same
+//     command;
 //   - a command with neither Run nor Commands;
 //   - an invalid Args, as [ArgPolicy.Validate] reports it;
 //   - an ArgCompletion on a command whose Args accepts no argument or that has no Run, and an
@@ -127,6 +137,7 @@ func (c *Command) validate(parent string, inherited flagScope, errs *[]error) {
 	if err := validate.Slug("Name", c.Name); err != nil {
 		report(err)
 	}
+	c.validateAliases(parent == "", report)
 	if c.Run == nil && len(c.Commands) == 0 {
 		report(fmt.Errorf("%w: has neither Run nor Commands", validate.ErrInvalid))
 	}
@@ -179,16 +190,70 @@ func (c *Command) validate(parent string, inherited flagScope, errs *[]error) {
 		}
 	}
 
-	seen := map[string]bool{}
+	claimed := map[string]claim{}
 	for i, sub := range c.Commands {
 		if sub == nil {
 			report(fmt.Errorf("%w: Commands[%d] is nil", validate.ErrInvalid, i))
 			continue
 		}
-		if seen[sub.Name] {
+		if prior, ok := claimed[sub.Name]; !ok {
+			claimed[sub.Name] = claim{owner: sub.Name}
+		} else if prior.alias {
+			report(fmt.Errorf("%w: subcommand %q collides with an alias of subcommand %q",
+				validate.ErrInvalid, sub.Name, prior.owner))
+		} else {
 			report(fmt.Errorf("%w: subcommand %q is declared twice", validate.ErrInvalid, sub.Name))
 		}
-		seen[sub.Name] = true
+		own := map[string]bool{sub.Name: true}
+		for _, alias := range sub.Aliases {
+			// A repeat within one command, or of its own name, is the subcommand's own problem,
+			// reported under its path.
+			if own[alias] {
+				continue
+			}
+			own[alias] = true
+			prior, ok := claimed[alias]
+			switch {
+			case !ok:
+				claimed[alias] = claim{owner: sub.Name, alias: true}
+			case prior.alias:
+				report(fmt.Errorf("%w: alias %q of subcommand %q collides with an alias of subcommand %q",
+					validate.ErrInvalid, alias, sub.Name, prior.owner))
+			default:
+				report(fmt.Errorf("%w: alias %q of subcommand %q collides with subcommand %q",
+					validate.ErrInvalid, alias, sub.Name, prior.owner))
+			}
+		}
 		sub.validate(path, children, errs)
+	}
+}
+
+// claim records which subcommand selects a word among the subcommands of one command, and
+// whether the word is its alias rather than its name.
+type claim struct {
+	owner string
+	alias bool
+}
+
+// validateAliases reports the problems of c's aliases that c alone decides; a collision with a
+// sibling is reported by the parent, which sees every sibling.
+func (c *Command) validateAliases(root bool, report func(error)) {
+	if root && len(c.Aliases) > 0 {
+		report(fmt.Errorf("%w: the root command takes no Aliases", validate.ErrInvalid))
+		return
+	}
+	seen := map[string]bool{}
+	for i, alias := range c.Aliases {
+		if err := validate.Slug(fmt.Sprintf("Aliases[%d]", i), alias); err != nil {
+			report(err)
+			continue
+		}
+		switch {
+		case alias == c.Name:
+			report(fmt.Errorf("%w: alias %q is the command's own name", validate.ErrInvalid, alias))
+		case seen[alias]:
+			report(fmt.Errorf("%w: alias %q is declared twice", validate.ErrInvalid, alias))
+		}
+		seen[alias] = true
 	}
 }

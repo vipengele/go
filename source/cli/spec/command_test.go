@@ -383,6 +383,88 @@ func TestCommandValidateRejects(t *testing.T) {
 			wantInErr: "a bool flag takes no completion",
 		},
 		{
+			name: "alias on the root command",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Aliases = []string{"t"}
+				return c
+			},
+			wantPath:  "tool",
+			wantInErr: "the root command takes no Aliases",
+		},
+		{
+			name: "alias that is not a slug",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[1].Aliases = []string{"St"}
+				return c
+			},
+			wantPath:  "tool status",
+			wantInErr: "Aliases[0]",
+		},
+		{
+			name: "empty alias",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[1].Aliases = []string{"st", ""}
+				return c
+			},
+			wantPath:  "tool status",
+			wantInErr: "Aliases[1]",
+			wantEmpty: true,
+		},
+		{
+			name: "alias equal to the command's own name",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[1].Aliases = []string{"status"}
+				return c
+			},
+			wantPath:  "tool status",
+			wantInErr: `alias "status" is the command's own name`,
+		},
+		{
+			name: "alias repeated in one command",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[0].Commands[1].Aliases = []string{"ls", "ls"}
+				return c
+			},
+			wantPath:  "tool remote list",
+			wantInErr: `alias "ls" is declared twice`,
+		},
+		{
+			name: "alias collides with the name of a later sibling",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[0].Commands[0].Aliases = []string{"list"}
+				return c
+			},
+			wantPath:  "tool remote",
+			wantInErr: `subcommand "list" collides with an alias of subcommand "add"`,
+		},
+		{
+			name: "alias collides with the name of an earlier sibling",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[0].Commands[1].Aliases = []string{"add"}
+				return c
+			},
+			wantPath:  "tool remote",
+			wantInErr: `alias "add" of subcommand "list" collides with subcommand "add"`,
+		},
+		{
+			name: "alias collides with an alias of a sibling",
+			cmd: func() *spec.Command {
+				c := validTree()
+				c.Commands[0].Commands[0].Aliases = []string{"a", "new"}
+				c.Commands[0].Commands[1].Aliases = []string{"ls", "new"}
+				return c
+			},
+			wantPath:  "tool remote",
+			wantInErr: `alias "new" of subcommand "list" collides with an alias of subcommand "add"`,
+		},
+		{
 			name: "flag completion with a nil function",
 			cmd: func() *spec.Command {
 				c := validTree()
@@ -486,6 +568,54 @@ func TestCommandErrorMessage(t *testing.T) {
 	err := &spec.CommandError{Path: "tool sub", Err: errors.New("boom")}
 	if got, want := err.Error(), `command "tool sub": boom`; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestCommandValidateAcceptsAliases(t *testing.T) {
+	tree := validTree()
+	tree.Commands[0].Aliases = []string{"r", "remotes"}
+	tree.Commands[0].Commands[0].Aliases = []string{"a", "new"}
+	tree.Commands[0].Commands[1].Aliases = []string{"ls"}
+	tree.Commands[1].Aliases = []string{"st"}
+	tree.Commands = append(tree.Commands, &spec.Command{
+		Name:     "branch",
+		Aliases:  []string{"b"},
+		Commands: []*spec.Command{{Name: "show", Aliases: []string{"ls", "new"}, Run: run}},
+	})
+	if err := tree.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestCommandValidateReportsEachAliasCollisionOnce(t *testing.T) {
+	c := &spec.Command{
+		Name: "tool",
+		Commands: []*spec.Command{
+			{Name: "add", Run: run},
+			{Name: "new", Aliases: []string{"add", "add"}, Run: run},
+		},
+	}
+	err := c.Validate()
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) {
+		t.Fatalf("error %T does not join its causes", err)
+	}
+	want := map[string]string{
+		"tool":     `alias "add" of subcommand "new" collides with subcommand "add"`,
+		"tool new": `alias "add" is declared twice`,
+	}
+	causes := joined.Unwrap()
+	if len(causes) != len(want) {
+		t.Fatalf("Validate() reported %d problems, want %d: %v", len(causes), len(want), err)
+	}
+	for _, cause := range causes {
+		var ce *spec.CommandError
+		if !errors.As(cause, &ce) {
+			t.Fatalf("cause %T is not a *spec.CommandError", cause)
+		}
+		if msg, ok := want[ce.Path]; !ok || !strings.Contains(ce.Error(), msg) {
+			t.Errorf("unexpected problem at %q: %v", ce.Path, ce)
+		}
 	}
 }
 
