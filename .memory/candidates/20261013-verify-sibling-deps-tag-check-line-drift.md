@@ -1,8 +1,8 @@
 ---
-about: "the ls-remote tag check is now one cached listing at action.yml:59-72 whose failure stops the check, and a sibling replace is accepted in development mode: the note's 'any failure = no tag' and 'replace always rejected' no longer hold"
+about: "the ls-remote tag check is one cached listing in verify-sibling-deps/verify.sh whose failure stops the check, and a sibling directory replace is accepted in both modes (in strict mode at the sibling's pending or tagged version): the note's 'any failure = no tag' and 'replace always rejected' do not hold"
 saw:
-  - .github/actions/verify-sibling-deps/action.yml
+  - .github/actions/verify-sibling-deps/verify.sh
 targets: verify-sibling-deps-tag-check-unauthenticated
 verdict: now-false
 ---
-The listing is still anonymous (`git ls-remote --tags --refs`, `:62`), but a failure is an error that exits the action (`:62-65`), not "no tag"; the pseudo-version rejection is at `:160`; module path check `:103`. A sibling replace is rejected only if it names a version, resolves elsewhere than `source/<sibling>`, or the project is in strict mode. See 20261013-verify-sibling-deps-development-and-strict-modes for the full current rule.
+The listing is anonymous (`git ls-remote --tags --refs`, `has_tag`, `verify.sh:26`), and a failure is an error that exits the check, not "no tag". The pseudo-version rejection is at `verify.sh:134`; module path check `:76`. A sibling replace is rejected if it names a version (`:111`) or resolves elsewhere than `source/<sibling>` (`:122`), or, in strict mode, if the sibling is required at a version neither pending nor tagged (`:138`). See 20261013-verify-sibling-deps-development-and-strict-modes for the full rule.

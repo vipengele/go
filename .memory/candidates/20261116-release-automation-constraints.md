@@ -1,5 +1,5 @@
 ---
-about: "facts behind auto-release: ADR-0037 supersedes ADR-0001's human tag; tags and dispatches made with GITHUB_TOKEN trigger nothing (so release.yml is reusable, no tag trigger); no tag ruleset is in git; a dependency chain needs one PR per tier because strict mode and validate require tagged siblings"
+about: "facts behind auto-release: ADR-0037 supersedes ADR-0001's human tag; tags and dispatches made with GITHUB_TOKEN trigger nothing (so release.yml is reusable, no tag trigger); no tag ruleset is in git; one PR releases a dependency chain: auto-release tiers it and a dependent is tagged on a release commit that drops its sibling replace (ADR-0038)"
 saw:
   - .github/workflows/release.yml
   - .github/workflows/auto-release.yml
@@ -13,6 +13,8 @@ saw:
   - .github/workflows/deploy-vanity-worker.yml
   - .github/actions/verify-sibling-deps/action.yml
   - .github/actions/changed-projects/action.yml
+  - .github/actions/verify-sibling-deps/verify.sh
+  - docs/adr/0038-a-dependent-is-released-from-a-release-commit.md
 ---
 
 Re-checked 2026-11-17. The original exploration (issue 211, auto-release from main) was answered by
@@ -31,12 +33,17 @@ ADR-0037 and the branch implementing it. What holds now:
   hold contents: write and run none (`release.yml:18-25`, `:214-221`, `:240-251`).
 - Precedent of a tag-input dispatch: `deploy-vanity-worker.yml:33-37`, `:64-67`.
 - Ordering: `pending.sh` emits dependency tiers (`pending.sh:29-37`), fails above 8 tiers, on cycles,
-  and on more than one pending version of a project. It orders pending projects only; it does not
-  let a dependent release in the same PR as an untagged sibling: "A dependency chain needs one pull
-  request per tier" (ADR-0037:52-54), because `validate` requires each sibling's tag on origin
-  (`release-project.sh:254-256`) and `verify-sibling-deps` strict mode demands tagged siblings in the
-  PR's CI (`verify-sibling-deps/action.yml:109-125`). Not re-run: how the tiers behave when two
-  tiers' notes land in one PR (ADR-0037 says it fails validation).
+  and on more than one pending version of a project. One PR may carry a whole chain (ADR-0038, which
+  replaces ADR-0037:55's "one pull request per tier"): the dependent keeps its directory replace on
+  main and requires the sibling at its pending version, which strict mode accepts
+  (`verify-sibling-deps/verify.sh:138`). When its tier runs, `verify` runs
+  `release-project.sh prepare` (`cmd_prepare`, `:455`): it drops the sibling replaces, tidies against
+  the sibling's tag pushed by the earlier tier, and builds a deterministic release commit
+  (`build_release_commit`, `:234`: parent `sha`, only `source/<p>/go.mod`/`go.sum` changed, subject
+  `chore(release): <p> <v>`, bot identity, `sha`'s commit time). `tag` rebuilds it from the uploaded
+  go.mod/go.sum, requires the same id (`:549`) and pushes only the tag; the commit is on no branch.
+  `on_main` (`:214`) accepts a commit on main or a release commit whose single parent is. A dry run
+  of a chain fails at the dependent, since tier 1 tags nothing.
 - Tags are unsigned annotated tags by `github-actions[bot]` (`release-project.sh:337-357`); ADR-0037
   rejects signing in CI. Nothing verifies tag signatures.
 - No tag ruleset: ADR-0037:65 calls `source/*` tag protection "repository hardening a human applies"
