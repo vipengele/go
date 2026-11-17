@@ -42,9 +42,11 @@ golangci-lint run
 
 To work on a project and a sibling it requires together, require the sibling and replace it with
 the sibling's own directory (`replace go.vipengele.org/commons => ../commons`), in the same pull
-request as the sibling's change. The project's release drops the `replace` and requires the
-sibling at its tag, and the sibling's tag exists before the dependent's pull request merges
-([ADR-0006](docs/adr/0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md)).
+request as the sibling's change. A pull request that adds the notes of both releases the chain: the
+dependent requires the sibling at its pending version and keeps the `replace`, and its tag points to
+a release commit that drops it
+([ADR-0006](docs/adr/0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md),
+[ADR-0038](docs/adr/0038-a-dependent-is-released-from-a-release-commit.md)).
 CI builds each project with `GOWORK=off`; the root `go.work` lists every project for local
 development.
 

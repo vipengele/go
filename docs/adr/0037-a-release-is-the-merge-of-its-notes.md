@@ -5,7 +5,8 @@ Status: accepted. It supersedes the rule of
 and amends the release pull request and `tag` job paragraphs of
 `0006-a-sibling-is-developed-by-a-directory-replace-and-released-dependency-first.md`. It leaves the
 permission seam of `0033-a-tool-releases-through-the-update-release-workflow-pinned-at-the-update-tag.md`
-as the ground for how the release jobs hold their tokens.
+as the ground for how the release jobs hold their tokens. The rule that a dependency chain needs one
+pull request per tier is replaced by `0038-a-dependent-is-released-from-a-release-commit.md`.
 
 A project is released when a pull request that adds `docs/release-notes/<path>/vX.Y.Z.md` merges to
 `main`. The workflow `auto-release.yml` then tags the project and releases it. The tag form stays

@@ -37,8 +37,8 @@ of them released at a version that contains what the project uses. Release first
 skill, every sibling whose latest release lacks something the project uses. The order matters only
 here: no sibling is ever released so that a dependent can be developed, and a project nothing
 unreleased feeds — a patch, or a project no sibling uses — is released on its own whenever it is
-ready. A dependent's release pull request is merged after its sibling's tag exists, so a chain
-needs one pull request per tier.
+ready. A dependent and the siblings it needs release from one pull request that carries every
+project's notes: `auto-release` releases them tier by tier (ADR-0038).
 
 ## 3 — Write the release notes
 
@@ -46,35 +46,40 @@ needs one pull request per tier.
 project, and the workflow fails without it**, before it tags anything. Say what changed and what a consumer has to do about it. A breaking change names
 the old and new spelling; "various fixes" is not release notes.
 
-The notes put the project into strict mode until its tag exists: `verify-sibling-deps` then fails
-any `replace` of a sibling in its `go.mod` and any sibling version with no tag, on every change.
+The notes put the project into strict mode until its tag exists: `verify-sibling-deps` then fails,
+on every change, a sibling required at a version that is neither pending (notes exist, tag does not)
+nor tagged, and a `replace` that is not the sibling's own directory without a version.
 
-## 4 — Require the released siblings in the same change
+## 4 — Require the siblings in the same change
 
 A sibling developed together with the project is replaced by its directory
-(`agentic/rules/a-sibling-is-developed-by-a-directory-replace.md`). Drop each `replace` and require
-the sibling at its tag:
+(`agentic/rules/a-sibling-is-developed-by-a-directory-replace.md`). Keep the `replace` and require
+the sibling at the version it is released at, which is the version of its own notes in this pull
+request when it is released with the project, or its latest tag:
 
 ```bash
 cd source/<project>
-go mod edit -dropreplace=go.vipengele.org/<sibling>
-go get go.vipengele.org/<sibling>@v<sibling-version>
+go mod edit -require=go.vipengele.org/<sibling>@v<sibling-version>
 go mod tidy
 ```
 
-The notes, the dropped `replace`s, the raised `require`s and the tidied `go.sum` are one release
-pull request, `chore(<project>): release <version>`. Its `GOWORK=off` CI compiles the project
-against the released siblings, as a consumer of the tag will. Merging it releases the project.
+The notes of the project and of every sibling released with it, the raised `require`s and the tidied
+`go.sum` are one release pull request, `chore(<project>): release <version>`. `auto-release`
+releases the siblings first, then builds the project's release commit, the merge commit with only
+its `go.mod` and `go.sum` changed, the `replace`s dropped and the module tidied against the
+siblings' tags, and tags that commit. `main` keeps the `replace`. A dry run of a chain fails at the
+dependent, because the sibling's tag does not exist.
 
 ## 5 — Check it locally, then merge it
 
 This check is mandatory, on the release branch before merging. A `GOWORK=off` build honours the
-project's own `replace`, so only reading `go.mod` catches a leftover one, and a tag is permanent:
+project's own `replace`, so only reading `go.mod` catches one that is not a sibling's own directory,
+and a tag is permanent. A sibling's directory `replace` may stay: the release commit drops it.
 
 ```bash
 cd source/<project>
 export GOWORK=off
-go mod edit -json | jq -e '(.Replace // []) | length == 0'   # no replace left
+go mod edit -json | jq -e '[(.Replace // [])[] | select(.Old.Path | startswith("go.vipengele.org/") | not)] | length == 0'   # no replace of a non-sibling
 go mod tidy && test -z "$(git status --porcelain -- go.mod go.sum)"   # tidy leaves no diff
 go build ./...
 # only when the project holds a *_windows.go file, in any of its packages
@@ -103,11 +108,14 @@ gh run watch <run-id>
 ```
 
 `release.yml` has three jobs: `verify` (read-only; validates the version, the project, the notes and
-the commit, that the project's `go.mod` carries no `replace` and requires only tagged siblings, and
-the Worker answer, then runs with `GOWORK=off` `go mod tidy` with no diff, `go build`,
-`GOOS=windows go vet` when the project holds a `*_windows.go` file, `go vet` and the module's
-suite), `tag` (write; creates the tag) and `announce` (write; asks the module proxy for the version,
-then creates the GitHub Release).
+the commit, which is on `main` or a release commit whose single parent is, that the project's
+`go.mod`, once the release commit has dropped the `replace`s and tidied against the tags, carries no
+`replace` and requires only tagged siblings, and the Worker answer, then runs with `GOWORK=off`
+`go mod tidy` with no diff, `go build`, `GOOS=windows go vet` when the project holds a
+`*_windows.go` file, `go vet` and the module's suite) on the release commit, `tag` (write; rebuilds
+the identical release commit, requires the id that `verify` tested, creates the tag and pushes only
+the tag) and `announce` (write; asks the module proxy for the version, then creates the GitHub
+Release).
 
 ## 8 — Finish a partial release
 
