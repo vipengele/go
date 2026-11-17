@@ -116,8 +116,11 @@ type FileProvider struct {
 // any key is accepted, verbatim: it is never matched as keys are, and a "." in it is part of the
 // key. Within an element, a struct, keys are matched against the element's Schema as the file's
 // keys are against the Schema, nested mappings and dotted keys included, and an unknown key is a
-// problem again. An empty element, "- {}", and an empty list or mapping, "[]" or "{}", are read as
-// nodes, not skipped.
+// problem again. A key of an element the Schema lists as removed is the key of its collection
+// followed by the key within the element, dotted from the collection's field key through the key of
+// each element field on the way down, its list indexes and map keys left out: "profiles.old" for
+// "old" in an element of profiles, whether profiles is a list or a map. An empty element, "- {}",
+// and an empty list or mapping, "[]" or "{}", are read as nodes, not skipped.
 //
 // Load reports every problem in one error: a key with no Schema field, a key the Schema lists as
 // removed (reported with its hint, whatever value it holds), a key set twice under any
@@ -180,8 +183,8 @@ func (p *FileProvider) Load(schema *Schema) ([]Entry, error) {
 		return nil, fmt.Errorf("config file %s: line %d: the top level is %s, not a mapping of keys", p.path, root.Line, kindName(root))
 	}
 
-	l := &fileLoader{name: filepath.Base(p.path), lines: make(map[*Node]int)}
-	l.mapping(newScope(schema, nil, l.setField), root, "")
+	l := &fileLoader{name: filepath.Base(p.path), schema: schema, lines: make(map[*Node]int)}
+	l.mapping(newScope(schema, "", nil, l.setField), root, "")
 	if len(l.problems) > 0 {
 		return nil, errors.Join(l.problems...)
 	}
@@ -191,6 +194,7 @@ func (p *FileProvider) Load(schema *Schema) ([]Entry, error) {
 // fileLoader flattens the mapping of one file into entries, collecting every problem.
 type fileLoader struct {
 	name     string        // base name of the file, the start of every origin
+	schema   *Schema       // the Schema of the configuration, which holds every removed key
 	lines    map[*Node]int // the line of every Node read, for problems found once it is built
 	entries  []Entry
 	problems []error
@@ -200,14 +204,15 @@ type fileLoader struct {
 // collection.
 type scope struct {
 	schema *Schema                         // the Schema keys are looked up in
+	key    string                          // the Schema key of the element's collection, which removed keys start with; "" for the configuration
 	groups map[string]struct{}             // matchKey form of every key prefix that is a group of fields
 	seen   map[string]seenKey              // matchKey form of every field key set so far
 	path   []pathStep                      // the file-local path of the element; nil for the configuration
 	set    func(Field, string, *yaml.Node) // records the value of a field, written as the given key
 }
 
-func newScope(schema *Schema, path []pathStep, set func(Field, string, *yaml.Node)) *scope {
-	return &scope{schema: schema, groups: groupKeys(schema), seen: make(map[string]seenKey), path: path, set: set}
+func newScope(schema *Schema, key string, path []pathStep, set func(Field, string, *yaml.Node)) *scope {
+	return &scope{schema: schema, key: key, groups: groupKeys(schema), seen: make(map[string]seenKey), path: path, set: set}
 }
 
 // seenKey is where a field key was first set, under the spelling it was written with.
@@ -276,7 +281,7 @@ func (l *fileLoader) pair(s *scope, key string, k, v *yaml.Node) {
 		case group:
 			l.failIn(s.path, k.Line, "key %q names a group of keys, not a value; it takes a mapping, not %s", key, kindName(v))
 		default:
-			if hint, removed := s.schema.Removed(key); removed {
+			if hint, removed := l.schema.Removed(s.removedKey(key)); removed {
 				l.failIn(s.path, k.Line, "key %q was removed: %s", key, hint)
 				return
 			}
@@ -294,6 +299,14 @@ func (l *fileLoader) pair(s *scope, key string, k, v *yaml.Node) {
 	s.set(field, key, v)
 }
 
+// removedKey returns the key the configuration's removed keys name key by, key written in s.
+func (s *scope) removedKey(key string) string {
+	if s.key == "" {
+		return key
+	}
+	return s.key + "." + key
+}
+
 // setField records the value v of field, a field of the configuration written as key, as an Entry.
 func (l *fileLoader) setField(field Field, key string, v *yaml.Node) {
 	origin := l.origin(v)
@@ -301,7 +314,7 @@ func (l *fileLoader) setField(field Field, key string, v *yaml.Node) {
 	case isNull(v):
 		l.fail(v.Line, "key %q is null; give it a value or remove it", key)
 	case field.kind != KindValue:
-		if n := l.node(field, []pathStep{keyStep(field.key)}, field.typ, v); n != nil {
+		if n := l.node(field, field.key, []pathStep{keyStep(field.key)}, field.typ, v); n != nil {
 			l.entries = append(l.entries, Entry{Key: field.key, Node: n, Origin: n.Origin})
 		}
 	case v.Kind == yaml.ScalarNode:
@@ -334,8 +347,10 @@ func (l *fileLoader) setField(field Field, key string, v *yaml.Node) {
 
 // node returns the Node of v, a value of Go type t at the file-local path, within the collection
 // field, or nil after reporting every problem in it. t is field's type or a type it holds: a map, a
-// slice, the element struct, or a single value or slice of them.
-func (l *fileLoader) node(field Field, path []pathStep, t reflect.Type, v *yaml.Node) *Node {
+// slice, the element struct, or a single value or slice of them. key is the Schema key of field from
+// the top-level collection down, such as "profiles.hosts", which a removed key within an element
+// starts with.
+func (l *fileLoader) node(field Field, key string, path []pathStep, t reflect.Type, v *yaml.Node) *Node {
 	structs := t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Struct
 	single := t.Kind() != reflect.Map && t.Kind() != reflect.Struct && !structs
 	switch {
@@ -343,11 +358,11 @@ func (l *fileLoader) node(field Field, path []pathStep, t reflect.Type, v *yaml.
 		l.fail(v.Line, "%s is null; give it a value or remove it", formatPath(path))
 		return nil
 	case t.Kind() == reflect.Map && v.Kind == yaml.MappingNode:
-		return l.mapNode(field, path, t, v)
+		return l.mapNode(field, key, path, t, v)
 	case structs && v.Kind == yaml.SequenceNode:
-		return l.listNode(field, path, t, v)
+		return l.listNode(field, key, path, t, v)
 	case t.Kind() == reflect.Struct && v.Kind == yaml.MappingNode:
-		return l.elementNode(field, path, v)
+		return l.elementNode(field, key, path, v)
 	case single && v.Kind == yaml.ScalarNode:
 		return l.newNode(NodeScalar, v)
 	case single && t.Kind() == reflect.Slice && v.Kind == yaml.SequenceNode:
@@ -359,7 +374,7 @@ func (l *fileLoader) node(field Field, path []pathStep, t reflect.Type, v *yaml.
 }
 
 // mapNode returns the NodeMap of mapping v, a map of type t at path, its keys taken verbatim.
-func (l *fileLoader) mapNode(field Field, path []pathStep, t reflect.Type, v *yaml.Node) *Node {
+func (l *fileLoader) mapNode(field Field, key string, path []pathStep, t reflect.Type, v *yaml.Node) *Node {
 	n := l.newNode(NodeMap, v)
 	lines := make(map[string]int)
 	valid := true
@@ -376,7 +391,7 @@ func (l *fileLoader) mapNode(field Field, path []pathStep, t reflect.Type, v *ya
 			continue
 		}
 		lines[k.Value] = k.Line
-		child := l.node(field, append(append([]pathStep(nil), path...), mapKeyStep(k.Value)), t.Elem(), val)
+		child := l.node(field, key, append(append([]pathStep(nil), path...), mapKeyStep(k.Value)), t.Elem(), val)
 		if child == nil {
 			valid = false
 			continue
@@ -392,11 +407,11 @@ func (l *fileLoader) mapNode(field Field, path []pathStep, t reflect.Type, v *ya
 // listNode returns the NodeList of sequence v, a slice of structs of type t at path, and checks the
 // merge key of each element when field is merged by one. Only field itself is such a slice: the
 // field of an element is passed as its own field, and a map holds no slice of structs.
-func (l *fileLoader) listNode(field Field, path []pathStep, t reflect.Type, v *yaml.Node) *Node {
+func (l *fileLoader) listNode(field Field, key string, path []pathStep, t reflect.Type, v *yaml.Node) *Node {
 	n := l.newNode(NodeList, v)
 	valid := true
 	for i, item := range v.Content {
-		child := l.node(field, append(append([]pathStep(nil), path...), indexStep(i)), t.Elem(), resolve(item))
+		child := l.node(field, key, append(append([]pathStep(nil), path...), indexStep(i)), t.Elem(), resolve(item))
 		if child == nil {
 			valid = false
 			continue
@@ -452,12 +467,13 @@ func (l *fileLoader) mergeKeys(field Field, path []pathStep, n *Node) bool {
 
 // elementNode returns the NodeMap of mapping v, an element of field at path, its entries keyed by
 // the canonical key of each field of the element Schema it sets. The element is strict as the
-// configuration is: a key of no element field is a problem.
-func (l *fileLoader) elementNode(field Field, path []pathStep, v *yaml.Node) *Node {
+// configuration is: a key of no element field is a problem, reported with its hint when key, the
+// Schema key of field, followed by the key within the element is a removed key.
+func (l *fileLoader) elementNode(field Field, key string, path []pathStep, v *yaml.Node) *Node {
 	n := l.newNode(NodeMap, v)
 	before := len(l.problems)
-	s := newScope(field.elem, path, func(f Field, _ string, val *yaml.Node) {
-		if child := l.node(f, append(append([]pathStep(nil), path...), keyStep(f.key)), f.typ, val); child != nil {
+	s := newScope(field.elem, key, path, func(f Field, _ string, val *yaml.Node) {
+		if child := l.node(f, key+"."+f.key, append(append([]pathStep(nil), path...), keyStep(f.key)), f.typ, val); child != nil {
 			n.Entries = append(n.Entries, NodeEntry{Key: f.key, Node: child})
 		}
 	})

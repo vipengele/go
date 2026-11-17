@@ -1,0 +1,12 @@
+profiles:
+  - name: dev
+    old: x
+    hosts:
+      - addr: a
+        gone: y
+services:
+  web:
+    old: z
+  api:
+    Old: w
+    oldest: v

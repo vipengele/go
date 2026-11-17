@@ -501,6 +501,43 @@ func TestFileCollectionProblems(t *testing.T) {
 	}
 }
 
+type fileRemovedCollections struct {
+	Profiles []fileProfile
+	Services map[string]fileHost
+}
+
+func (fileRemovedCollections) RemovedKeys() map[string]string {
+	return map[string]string{
+		"profiles.old":        "drop it",
+		"profiles.hosts.gone": "use addr",
+		"services.old":        "use addr",
+	}
+}
+
+func TestFileCollectionRemovedKeys(t *testing.T) {
+	t.Parallel()
+	schema, err := NewSchema(fileRemovedCollections{}, "APP")
+	if err != nil {
+		t.Fatalf("NewSchema: %v", err)
+	}
+	entries, err := loadTestdataWith(t, "collection_removed.yaml", schema)
+	if entries != nil {
+		t.Errorf("Load entries = %+v alongside an error, want none", entries)
+	}
+	// A removed key within an element is the collection's key and the key within the element,
+	// whatever list index or map key the element sits at.
+	want := []string{
+		`config.yaml:3: profiles[0]: key "old" was removed: drop it`,
+		`config.yaml:6: profiles[0].hosts[0]: key "gone" was removed: use addr`,
+		`config.yaml:9: services["web"]: key "old" was removed: use addr`,
+		`config.yaml:11: services["api"]: key "Old" was removed: use addr`,
+		`config.yaml:12: services["api"]: unknown key "oldest"`,
+	}
+	if got := fileProblems(err); !reflect.DeepEqual(got, want) {
+		t.Errorf("problems:\n got %s\nwant %s", strings.Join(got, "\n     "), strings.Join(want, "\n     "))
+	}
+}
+
 func TestFileCollectionDistinctMergeKeysLoad(t *testing.T) {
 	t.Parallel()
 	schema := collectionsSchema(t)
