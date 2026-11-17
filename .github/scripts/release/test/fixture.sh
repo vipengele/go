@@ -60,3 +60,103 @@ fixture_tags_file() {
   fixture_git tag -l > "$file"
   printf '%s\n' "$file"
 }
+
+# fixture_origin: a bare repository beside $FIXTURE, as its remote `origin`.
+fixture_origin() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git -c init.defaultBranch=main init -q --bare "$FIXTURE.origin.git"
+  fixture_git remote add origin "$FIXTURE.origin.git"
+}
+
+# fixture_push [ref...]: push main, and each given ref, to origin; origin/main
+# follows.
+fixture_push() {
+  fixture_git push -q origin main "$@"
+}
+
+# fixture_go_source <project>: a package with one test in source/<project>,
+# importing nothing outside the standard library, and the go directive of its
+# go.mod set to the running toolchain, which GOTOOLCHAIN=local requires.
+fixture_go_source() {
+  local dir="$FIXTURE/source/$1"
+  mkdir -p "$dir"
+  sed -i "s/^go .*/go $(go env GOVERSION | sed 's/^go//')/" "$dir/go.mod"
+  printf 'package fixture\n\n// Double returns twice n.\nfunc Double(n int) int { return 2 * n }\n' > "$dir/fixture.go"
+  printf 'package fixture\n\nimport "testing"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal("Double(2) != 4")\n\t}\n}\n' > "$dir/fixture_test.go"
+}
+
+# fixture_worker [project...]: a stub of the vanity Worker on a free localhost
+# port, answering a go-get request for each given project with the go-import
+# page the real Worker serves and every other path with 404. Exports
+# RELEASE_VANITY_BASE. The server stops when the calling shell exits.
+fixture_worker() {
+  local dir="$FIXTURE.worker" port_file="$FIXTURE.worker-port" project i
+  mkdir -p "$dir"
+  for project in "$@"; do
+    mkdir -p "$(dirname "$dir/$project")"
+    printf '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n<meta name="go-import" content="go.vipengele.org/%s git https://github.com/vipengele/go source/%s">\n<title>go.vipengele.org/%s</title>\n</head>\n<body>go.vipengele.org/%s</body>\n</html>\n' \
+      "$project" "$project" "$project" "$project" > "$dir/$project"
+  done
+  python3 -I -c '
+import functools, http.server, os, sys
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+with open(sys.argv[2] + ".tmp", "w") as f:
+    f.write(str(server.server_address[1]))
+os.rename(sys.argv[2] + ".tmp", sys.argv[2])
+server.serve_forever()
+' "$dir" "$port_file" 2> "$FIXTURE.worker-log" &
+  FIXTURE_WORKER_PID=$!
+  trap 'kill "$FIXTURE_WORKER_PID" 2> /dev/null || true' EXIT
+  for ((i = 0; i < 100; i++)); do
+    [[ -s "$port_file" ]] && break
+    sleep 0.05
+  done
+  [[ -s "$port_file" ]] || return 1
+  export RELEASE_VANITY_BASE="http://127.0.0.1:$(cat "$port_file")"
+}
+
+# fixture_shims: stubs of gh and of `go list` in $WORK/bin, to put first on
+# PATH. Each call is appended to $STUB_LOG.
+#
+#   gh release view      exits $STUB_GH_VIEW (default 1: no Release)
+#   gh release create    copies its --notes-file to $STUB_LOG.notes; with
+#                        STUB_GH_CREATE=exists it fails as GitHub does for an
+#                        existing Release, with STUB_GH_CREATE=fail it fails
+#                        otherwise
+#   go list              exits $STUB_GO_LIST (default 0); every other go
+#                        command runs the real go
+fixture_shims() {
+  local bin="$WORK/bin" real_go
+  [[ -d "$bin" ]] && return 0
+  real_go="$(command -v go)"
+  mkdir -p "$bin"
+  cat > "$bin/gh" << 'SHIM'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$STUB_LOG"
+case "$1 $2" in
+  "release view") exit "${STUB_GH_VIEW:-1}" ;;
+  "release create")
+    while (($#)); do
+      if [[ "$1" == --notes-file ]]; then cp "$2" "$STUB_LOG.notes"; fi
+      shift
+    done
+    case "${STUB_GH_CREATE:-}" in
+      exists) echo 'HTTP 422: Validation Failed' >&2; echo 'Release.tag_name already exists' >&2; exit 1 ;;
+      fail) echo 'HTTP 500: Internal Server Error' >&2; exit 1 ;;
+    esac
+    exit 0 ;;
+esac
+echo "stub gh: unexpected call: $*" >&2
+exit 1
+SHIM
+  cat > "$bin/go" << SHIM
+#!/usr/bin/env bash
+if [[ "\$1" == list ]]; then
+  printf 'go %s\n' "\$*" >> "\$STUB_LOG"
+  exit "\${STUB_GO_LIST:-0}"
+fi
+exec "$real_go" "\$@"
+SHIM
+  chmod +x "$bin/gh" "$bin/go"
+}

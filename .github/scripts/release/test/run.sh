@@ -291,6 +291,322 @@ pending_depth_nine() {
 }
 register "pending: more than 8 tiers is an error" pending_depth_nine
 
+# --- release-project.sh -------------------------------------------------------
+
+fixture_shims
+
+# release_project <args...>: run release-project.sh on $FIXTURE, with the
+# stubs of gh and `go list` first on PATH, short retry budgets and no host git
+# config. Sets $out, $err and $status; stub calls go to $STUB_LOG.
+release_project() {
+  export STUB_LOG="$FIXTURE.calls"
+  touch "$STUB_LOG"
+  status=0
+  out="$(PATH="$WORK/bin:$PATH" RELEASE_ROOT="$FIXTURE" \
+    RELEASE_VANITY_BASE="${RELEASE_VANITY_BASE:-http://127.0.0.1:9}" \
+    RELEASE_WORKER_TIMEOUT=1 RELEASE_WORKER_INTERVAL=0.2 \
+    RELEASE_PROXY_ATTEMPTS=3 RELEASE_PROXY_INTERVAL=0 \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    "$scripts/release-project.sh" "$@" 2> "$FIXTURE.err")" || status=$?
+  err="$(cat "$FIXTURE.err")"
+}
+
+# expect_ok: release-project.sh succeeded.
+expect_ok() {
+  ((status == 0)) || fail "release-project.sh exited $status: $err" || return 1
+}
+
+# expect_fail <pattern>: release-project.sh failed and its stderr matches the
+# pattern.
+expect_fail() {
+  ((status != 0)) || fail "release-project.sh succeeded, printing $out" || return 1
+  grep -qE "$1" <<< "$err" || fail "stderr does not match /$1/: $err" || return 1
+}
+
+# expect_calls <expected>: the stub calls, one per line, are exactly these.
+expect_calls() {
+  local got
+  got="$(cat "$STUB_LOG")"
+  [[ "$got" == "$1" ]] || fail "want calls:" "$1" "got calls:" "$got" || return 1
+}
+
+# releasable: a fixture with origin, where cli/core requires commons, commons
+# is tagged v0.1.0 on origin, and the notes of cli/core v0.1.0 are on main.
+releasable() {
+  fixture_repo "$1"
+  fixture_origin
+  fixture_project commons
+  fixture_notes commons v0.1.0
+  fixture_commit "commons"
+  fixture_tag source/commons/v0.1.0
+  mkdir -p "$FIXTURE/source/cli/core"
+  printf 'module go.vipengele.org/cli/core\n\ngo 1.25.0\n\nrequire go.vipengele.org/commons v0.1.0\n' \
+    > "$FIXTURE/source/cli/core/go.mod"
+  fixture_notes cli/core v0.1.0
+  fixture_commit "cli/core"
+  fixture_push refs/tags/source/commons/v0.1.0
+}
+
+validate_passes() {
+  releasable validate-passes
+  fixture_worker cli/core
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_ok
+  grep -q 'source/cli/core/v0.1.0 at .* is valid' <<< "$out" || fail "no success line: $out"
+}
+register "release-project: validate passes a releasable commit" validate_passes
+
+validate_replace() {
+  releasable validate-replace
+  printf '\nreplace go.vipengele.org/commons => ../../commons\n' >> "$FIXTURE/source/cli/core/go.mod"
+  fixture_commit "replace"
+  fixture_push
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'replace of go.vipengele.org/commons -> \.\./\.\./commons: a consumer'
+}
+register "release-project: validate fails a replace" validate_replace
+
+validate_untagged_sibling() {
+  releasable validate-untagged-sibling
+  # The sibling's tag exists in the checkout but not on origin, which is
+  # where a consumer resolves it.
+  fixture_tag source/commons/v0.2.0
+  sed -i 's/commons v0.1.0/commons v0.2.0/' "$FIXTURE/source/cli/core/go.mod"
+  fixture_commit "require an unreleased commons"
+  fixture_push
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'go.vipengele.org/commons v0.2.0 has no tag source/commons/v0.2.0 on origin'
+}
+register "release-project: validate fails a sibling untagged on origin" validate_untagged_sibling
+
+validate_pseudo_version() {
+  releasable validate-pseudo-version
+  sed -i 's/commons v0.1.0/commons v0.1.1-0.20261117043900-0123456789ab/' "$FIXTURE/source/cli/core/go.mod"
+  fixture_commit "pseudo-version"
+  fixture_push
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'required at the pseudo-version v0.1.1-0.20261117043900-0123456789ab'
+}
+register "release-project: validate fails a sibling at a pseudo-version" validate_pseudo_version
+
+validate_module_path() {
+  releasable validate-module-path
+  sed -i 's|^module .*|module go.vipengele.org/core|' "$FIXTURE/source/cli/core/go.mod"
+  fixture_commit "wrong module path"
+  fixture_push
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'module path is go.vipengele.org/core, expected go.vipengele.org/cli/core'
+}
+register "release-project: validate fails a module path off the vanity map" validate_module_path
+
+validate_missing_notes() {
+  releasable validate-missing-notes
+  release_project validate cli/core v0.2.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'docs/release-notes/cli/core/v0.2.0.md is missing'
+}
+register "release-project: validate fails missing notes" validate_missing_notes
+
+validate_nested_module() {
+  releasable validate-nested-module
+  fixture_project cli/core/inner
+  fixture_commit "nested module"
+  fixture_push
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'source/cli/core contains another module at source/cli/core/inner'
+}
+register "release-project: validate fails a project holding another module" validate_nested_module
+
+validate_not_on_main() {
+  releasable validate-not-on-main
+  fixture_git checkout -q -b feature
+  fixture_notes cli/core v0.2.0
+  fixture_commit "notes off main"
+  fixture_push
+  release_project validate cli/core v0.2.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'is not on origin/main'
+}
+register "release-project: validate fails a commit not on main" validate_not_on_main
+
+validate_tag_exists() {
+  releasable validate-tag-exists
+  fixture_tag source/cli/core/v0.1.0
+  fixture_push refs/tags/source/cli/core/v0.1.0
+  fixture_git tag -d source/cli/core/v0.1.0 > /dev/null
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'source/cli/core/v0.1.0 already exists on origin'
+}
+register "release-project: validate fails a tag already on origin" validate_tag_exists
+
+validate_prerelease() {
+  releasable validate-prerelease
+  fixture_notes cli/core v0.2.0-rc.1
+  fixture_commit "prerelease notes"
+  fixture_push
+  release_project validate cli/core v0.2.0-rc.1 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'source/cli/core/v0.2.0-rc.1 carries a prerelease suffix'
+}
+register "release-project: validate fails a prerelease suffix" validate_prerelease
+
+validate_malformed() {
+  releasable validate-malformed
+  release_project validate cli/core 0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail 'source/cli/core/0.1.0 is not source/<project>/vX.Y.Z'
+}
+register "release-project: validate fails a version that is not vX.Y.Z" validate_malformed
+
+validate_worker_silent() {
+  releasable validate-worker-silent
+  fixture_worker commons
+  release_project validate cli/core v0.1.0 "$(fixture_git rev-parse HEAD)"
+  expect_fail '/cli/core\?go-get=1 does not answer for go.vipengele.org/cli/core after 1s'
+}
+register "release-project: validate fails when the Worker does not answer" validate_worker_silent
+
+tag_pushes() {
+  releasable tag-pushes
+  local sha bare="$FIXTURE.origin.git" tag=source/cli/core/v0.1.0 body
+  sha="$(fixture_git rev-parse HEAD)"
+  release_project tag cli/core v0.1.0 "$sha" https://github.com/vipengele/go/actions/runs/42
+  expect_ok || return 1
+  [[ "$(git -C "$bare" cat-file -t "refs/tags/$tag")" == tag ]] || fail "$tag on origin is not an annotated tag" || return 1
+  [[ "$(git -C "$bare" rev-parse "refs/tags/$tag^{commit}")" == "$sha" ]] || fail "$tag on origin is not at $sha" || return 1
+  body="$(git -C "$bare" cat-file -p "refs/tags/$tag")"
+  grep -q '^tagger github-actions\[bot\] <41898282+github-actions\[bot\]@users.noreply.github.com>' <<< "$body" \
+    || fail "tagger is not github-actions[bot]:" "$body" || return 1
+  grep -q 'https://github.com/vipengele/go/actions/runs/42' <<< "$body" || fail "no run URL:" "$body" || return 1
+  ! grep -q 'BEGIN' <<< "$body" || fail "the tag is signed:" "$body" || return 1
+  [[ -z "$(fixture_git config --get user.name || true)" ]] || fail "the bot identity was written to the config" || return 1
+
+  # The same call again fails, and so does a push of that tag from a checkout
+  # that lacks it: origin refuses to move a tag.
+  release_project tag cli/core v0.1.0 "$sha" https://github.com/vipengele/go/actions/runs/43
+  expect_fail 'cannot create the tag|rejected' || return 1
+  fixture_git tag -d "$tag" > /dev/null
+  release_project tag cli/core v0.1.0 "$(fixture_git rev-parse HEAD~1)" https://github.com/vipengele/go/actions/runs/44
+  expect_fail "origin rejected $tag" || return 1
+  [[ "$(git -C "$bare" rev-parse "refs/tags/$tag^{commit}")" == "$sha" ]] || fail "$tag on origin moved"
+}
+register "release-project: tag pushes an annotated bot tag and refuses a second" tag_pushes
+
+# announceable <name> <version>: a fixture with the tag source/a/<version> on
+# origin.
+announceable() {
+  fixture_repo "announce-$1"
+  shift
+  fixture_origin
+  fixture_project a
+  fixture_notes a "$1"
+  printf 'The notes of a %s.\n' "$1" >> "$FIXTURE/docs/release-notes/a/$1.md"
+  fixture_commit
+  fixture_tag "source/a/$1"
+  fixture_push "refs/tags/source/a/$1"
+}
+
+announce_creates_prerelease() {
+  announceable prerelease v0.3.0
+  # The checkout lacks the tag; announce fetches it from origin.
+  fixture_git tag -d source/a/v0.3.0 > /dev/null
+  release_project announce source/a/v0.3.0
+  expect_ok || return 1
+  grep -qx 'gh release create source/a/v0.3.0 --verify-tag --title a v0.3.0 --notes-file .*\.md --prerelease' "$STUB_LOG" \
+    || fail "no prerelease create:" "$(cat "$STUB_LOG")" || return 1
+  [[ "$(head -2 "$STUB_LOG")" == $'go list -m go.vipengele.org/a@v0.3.0\ngh release view source/a/v0.3.0' ]] \
+    || fail "the proxy and the Release are not checked first:" "$(cat "$STUB_LOG")" || return 1
+  grep -q 'The notes of a v0.3.0.' "$STUB_LOG.notes" || fail "the notes are not the tag's"
+}
+register "release-project: announce creates a prerelease for v0.x from the tag's notes" announce_creates_prerelease
+
+announce_stable() {
+  announceable stable v1.0.0
+  release_project announce source/a/v1.0.0
+  expect_ok || return 1
+  grep -qx 'gh release create source/a/v1.0.0 --verify-tag --title a v1.0.0 --notes-file .*\.md' "$STUB_LOG" \
+    || fail "no stable create:" "$(cat "$STUB_LOG")"
+}
+register "release-project: announce creates a full release for v1+" announce_stable
+
+announce_already_exists() {
+  announceable exists v0.1.0
+  STUB_GH_CREATE=exists release_project announce source/a/v0.1.0
+  expect_ok || return 1
+  grep -q 'already exists' <<< "$out" || fail "no already-exists line: $out"
+}
+register "release-project: announce treats an existing Release as success" announce_already_exists
+
+announce_create_fails() {
+  announceable create-fails v0.1.0
+  STUB_GH_CREATE=fail release_project announce source/a/v0.1.0
+  expect_fail 'gh release create source/a/v0.1.0 failed'
+}
+register "release-project: announce fails when the Release cannot be created" announce_create_fails
+
+announce_view_exists() {
+  announceable view-exists v0.1.0
+  STUB_GH_VIEW=0 release_project announce source/a/v0.1.0
+  expect_ok || return 1
+  expect_calls 'go list -m go.vipengele.org/a@v0.1.0
+gh release view source/a/v0.1.0'
+}
+register "release-project: announce skips create when the Release exists" announce_view_exists
+
+announce_proxy_fails() {
+  announceable proxy-fails v0.1.0
+  STUB_GO_LIST=1 release_project announce source/a/v0.1.0
+  expect_fail 'go.vipengele.org/a@v0.1.0 is not resolvable through the module proxy' || return 1
+  expect_calls 'go list -m go.vipengele.org/a@v0.1.0
+go list -m go.vipengele.org/a@v0.1.0
+go list -m go.vipengele.org/a@v0.1.0'
+}
+register "release-project: announce fails after the proxy attempts, creating nothing" announce_proxy_fails
+
+finish_check_passes() {
+  releasable finish-check-passes
+  fixture_tag source/cli/core/v0.1.0
+  fixture_push refs/tags/source/cli/core/v0.1.0
+  fixture_git tag -d source/cli/core/v0.1.0 > /dev/null
+  fixture_worker cli/core
+  release_project finish-check source/cli/core/v0.1.0
+  expect_ok
+}
+register "release-project: finish-check passes an existing tag" finish_check_passes
+
+finish_check_local_only() {
+  releasable finish-check-local-only
+  fixture_tag source/cli/core/v0.1.0
+  fixture_worker cli/core
+  release_project finish-check source/cli/core/v0.1.0
+  expect_fail 'source/cli/core/v0.1.0 does not exist on origin'
+}
+register "release-project: finish-check fails a tag missing on origin" finish_check_local_only
+
+test_passes() {
+  fixture_repo test-passes
+  fixture_project a
+  fixture_go_source a
+  printf 'package fixture\n\n// Windows reports whether the build is for Windows.\nfunc Windows() bool { return true }\n' \
+    > "$FIXTURE/source/a/os_windows.go"
+  fixture_commit
+  release_project test a
+  expect_ok || return 1
+  grep -qx '==> GOOS=windows go vet ./...' <<< "$out" || fail "no Windows vet: $out" || return 1
+  grep -qx '==> go test -race -shuffle=on ./...' <<< "$out" || fail "no test run: $out"
+}
+register "release-project: test passes a tidy module, vetting it for Windows" test_passes
+
+test_untidy() {
+  fixture_repo test-untidy
+  fixture_project a
+  fixture_go_source a
+  # go mod tidy rewrites go.mod in its canonical layout, with a blank line
+  # between the module and go lines, so this go.mod is not tidy.
+  sed -i "/^$/d" "$FIXTURE/source/a/go.mod"
+  fixture_commit
+  release_project test a
+  expect_fail 'go mod tidy changes go.mod or go.sum of a' || return 1
+  ! grep -q 'GOOS=windows' <<< "$out" || fail "Windows vet ran without a Windows file"
+}
+register "release-project: test fails a module go mod tidy changes" test_untidy
+
 # --- runner -------------------------------------------------------------------
 
 selected=("$@")

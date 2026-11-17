@@ -8,11 +8,32 @@
 # (`cli/core`). The release of version vX.Y.Z of a project is the tag
 # source/<project>/vX.Y.Z, and its notes are docs/release-notes/<project>/vX.Y.Z.md.
 
-# release_die <message>: print the message to stderr and exit non-zero.
+# release_error <message>: report an error on stderr, as a workflow error
+# annotation when running in GitHub Actions.
+release_error() {
+  if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+    printf '::error::%s\n' "$*" >&2
+  else
+    printf 'error: %s\n' "$*" >&2
+  fi
+}
+
+# release_die <message>: report the error and exit non-zero.
 release_die() {
-  printf 'error: %s\n' "$*" >&2
+  release_error "$*"
   exit 1
 }
+
+# RELEASE_TAG_RE matches a release tag, source/<project>/vX.Y.Z with an
+# optional prerelease suffix: BASH_REMATCH[1] is the project and
+# BASH_REMATCH[3] the version. A prerelease suffix matches here so that it is
+# reported as such rather than as a malformed tag.
+# shellcheck disable=SC2034 # read by the scripts that source this file
+RELEASE_TAG_RE='^source/([a-z0-9-]+(/[a-z0-9-]+)*)/(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
+
+# RELEASE_MODULE_PREFIX is the vanity prefix of every project's module path.
+# shellcheck disable=SC2034 # read by the scripts that source this file
+RELEASE_MODULE_PREFIX='go.vipengele.org/'
 
 # release_projects <root>: the project identifiers, one per line, sorted.
 release_projects() {
@@ -82,4 +103,18 @@ release_tag_has_notes() {
   project="${rest%/*}"
   version="${rest##*/}"
   git -C "$root" cat-file -e "refs/tags/${tag}^{commit}:docs/release-notes/${project}/${version}.md" 2>/dev/null
+}
+
+# release_remote_tags <root>: every tag on the remote `origin` of the
+# repository, one `<name>\t<commit>` line each, where <commit> is the commit
+# the tag points to (the peeled `^{}` entry of an annotated tag). Fails when
+# the remote cannot be listed.
+release_remote_tags() {
+  local root="$1" listing
+  listing="$(git -C "$root" ls-remote --tags origin)" || return 1
+  awk -F '\t' '
+    $2 ~ /\^\{\}$/ { name = substr($2, 11, length($2) - 13); peeled[name] = $1; next }
+    { name = substr($2, 11); direct[name] = $1; order[++n] = name }
+    END { for (i = 1; i <= n; i++) print order[i] "\t" (order[i] in peeled ? peeled[order[i]] : direct[order[i]]) }
+  ' <<< "$listing"
 }
