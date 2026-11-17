@@ -1,0 +1,5 @@
+# snippet:start overlay-file
+# An overlay of greet's configuration, layered above config.yaml when GREET_PROJECT_FILE names
+# it. It may set only "greeting".
+greeting: Howdy
+# snippet:end

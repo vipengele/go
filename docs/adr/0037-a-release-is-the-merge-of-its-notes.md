@@ -52,9 +52,9 @@ creates the tag: the workflow, from the merge commit, and no person.
   offline and quick.
 - **Edge cases.** More than one pending version for a project fails `plan`. Notes without a project,
   and tags without notes such as `source/spike/probe/v0.0.1`, are ignored.
-- **A dependency chain needs one pull request per tier.** A project that requires a sibling with no
-  tag still fails validation, so a dependent is released by a pull request after its sibling's tag
-  exists.
+- **A dependency chain is released by one pull request.** `plan` puts a dependent in a later tier
+  than the siblings it requires, and once their tags exist the dependent is tagged on a release
+  commit that drops its `replace` (ADR-0038).
 
 ## Considered options
 
@@ -80,9 +80,10 @@ creates the tag: the workflow, from the merge commit, and no person.
 
 - **Merging the notes cannot be undone by the workflow.** A tag is permanent, so a notes file that
   merges releases the project. The review of the notes is the review of the release.
-- **A pull request with notes for a project whose sibling is unreleased fails the release, not the
-  merge.** The merge succeeds and `auto-release` fails that project's validation; the fix is an
-  ordinary pull request after the sibling's tag exists.
+- **A dependent whose sibling fails to release fails the release, not the merge.** The merge
+  succeeds and `auto-release` fails the dependent's `verify`, because the sibling's tag is missing.
+  `main` still passes CI, since the dependent keeps its `replace` in strict mode; the fix is an
+  ordinary pull request, and the next sweep releases what is pending (ADR-0038).
 - **Every push to `main` runs `plan`.** A push that adds no notes finds nothing pending and
   releases nothing.
 - **A failed announce is retried by the next sweep.** The tag exists, its commit carries the notes

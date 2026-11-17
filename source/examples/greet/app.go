@@ -11,6 +11,7 @@ import (
 	cli "go.vipengele.org/cli/core"
 	"go.vipengele.org/cli/core/buildinfo"
 	"go.vipengele.org/cli/spec"
+	"go.vipengele.org/cli/spec/paths"
 	cfg "go.vipengele.org/config"
 	"go.vipengele.org/update"
 	"go.vipengele.org/update/updatecmd"
@@ -59,9 +60,16 @@ func prodDeps() deps {
 
 // snippet:start app
 
+// pathsLayout is the directory layout of every directory the tool resolves: its configuration
+// directory and the state directory of its updates. The XDG layout puts them under ~/.config and
+// ~/.local/state on every operating system, macOS included, where a command-line tool's files are
+// conventionally found, rather than under ~/Library/Application Support.
+const pathsLayout = paths.LayoutXDG
+
 // newApp returns the App of the tool: its identity, the build information "version" prints, the
-// configuration [config] describes, the background update check around every command not
-// annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
+// configuration [config] describes, with the overlay file [projectFile] names, which may set only
+// "greeting", the directory layout [pathsLayout], the background update check around every
+// command not annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
 func newApp(d deps) *cli.App {
 	updateCfg := updateConfig(d)
 	checkBefore, checkAfter, err := updateCfg.UpdateCheckHooks()
@@ -72,6 +80,8 @@ func newApp(d deps) *cli.App {
 	app := cli.New(identity(),
 		cli.WithBuildInfo(d.Build),
 		cli.WithConfig(defaultConfig()),
+		cli.WithConfigOverlay(projectFile, "greeting"),
+		cli.WithPathsLayout(pathsLayout),
 		cli.WithPreRun(checkBefore),
 		cli.WithPostRun(checkAfter),
 	)
@@ -80,6 +90,19 @@ func newApp(d deps) *cli.App {
 		app.Add(cmd)
 	}
 	return app
+}
+
+// snippet:end
+
+// snippet:start overlay
+
+// projectFile returns the path of the tool's overlay file: the value of GREET_PROJECT_FILE, or ""
+// when it is unset or empty, which gives no overlay. A relative path is relative to the working
+// directory of the process. The environment layer looks up only the variables derived from the
+// configuration's keys, so it never reads this one as a key.
+func projectFile(lookup func(string) (string, bool)) (string, error) {
+	path, _ := lookup("GREET_PROJECT_FILE")
+	return path, nil
 }
 
 // snippet:end
@@ -111,14 +134,20 @@ func (c *config) Validate() error {
 // snippet:start commands
 
 // helloCommand returns "hello [name]", which greets name, or "world" without one, with the
-// configured greeting, in capitals under --shout.
+// configured greeting, in capitals under --shout and in lower case under --whisper. It is also
+// invoked as "hi", and refuses both flags together.
 func helloCommand() *spec.Command {
 	shout := spec.BoolFlag("shout", "greet in capitals")
+	whisper := spec.BoolFlag("whisper", "greet in lower case")
 	return &spec.Command{
 		Name:    "hello",
+		Aliases: []string{"hi"},
 		Summary: "Greet someone",
 		Args:    spec.RangeArgs(0, 1),
-		Flags:   []spec.Flag{shout},
+		Flags:   []spec.Flag{shout, whisper},
+		FlagGroups: []spec.FlagGroup{
+			{Kind: spec.MutuallyExclusive, Flags: []string{"shout", "whisper"}},
+		},
 		Run: func(ctx context.Context, inv *spec.Invocation) error {
 			name := "world"
 			if len(inv.Args) == 1 {
@@ -131,6 +160,9 @@ func helloCommand() *spec.Command {
 			line := greeting + ", " + name + "!"
 			if shout.Get(inv) {
 				line = strings.ToUpper(line)
+			}
+			if whisper.Get(inv) {
+				line = strings.ToLower(line)
 			}
 			return inv.Data("%s\n", line)
 		},
@@ -147,8 +179,9 @@ func helloCommand() *spec.Command {
 const publicKey = `untrusted comment: minisign public key: ED01B5D0CD595CE5
 RWTlXFnN0LUB7TK69kkxD61cM8n6bGPEKBYTRyGqdj1OkL2II+9ipoSa`
 
-// updateConfig returns the configuration of the tool's updates. A development build, whose
-// version is not a release, starts no background check, and "update" refuses it.
+// updateConfig returns the configuration of the tool's updates, whose state directory follows
+// [pathsLayout] as the App's directories do. A development build, whose version is not a
+// release, starts no background check, and "update" refuses it.
 func updateConfig(d deps) update.Config {
 	return update.Config{
 		Identity:    identity(),
@@ -156,6 +189,7 @@ func updateConfig(d deps) update.Config {
 		TrustedKeys: []string{publicKey},
 		Source:      d.Source,
 		StateDir:    d.StateDir,
+		PathsLayout: pathsLayout,
 		HTTPClient:  d.HTTPClient,
 		Now:         d.Now,
 	}

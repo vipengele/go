@@ -23,9 +23,11 @@ projects: `.github/`, `agentic/`, `.memory/`, `.lydite/`, `.serena/`, the gt con
 A release is one tag per project, `source/<project>/vX.Y.Z`, and it releases that project alone. The
 Go toolchain resolves a module that lives in a subdirectory from a tag whose name is the
 subdirectory path followed by the version, so this is the only tag form the module proxy accepts
-for a nested module. A human pushes the tag; the `release` workflow validates it, runs the module's
-suite, asks the module proxy to fetch the version and creates the GitHub Release. There is no
-registry upload and no publishing credential, because the tag is the publication.
+for a nested module. The `auto-release` workflow makes the tag when the pull request that adds the
+project's release notes merges to `main` (ADR-0037): the `release` workflow it calls validates the
+release, runs the module's suite, pushes the tag, asks the module proxy to fetch the version and
+creates the GitHub Release. There is no registry upload and no publishing credential, because the
+tag is the publication.
 
 ## Why a module per project
 

@@ -25,7 +25,7 @@ jobs:
     # run starts, and its publish job creates the release.
     permissions:
       contents: write
-    uses: vipengele/go/.github/workflows/release-tool.yml@415a61a829b6d2e615e0ca978023b315d7588904 # source/update/v0.1.0
+    uses: vipengele/go/.github/workflows/release-tool.yml@0f352cc248050d160db73705bb1eed9bc857f6e9 # source/update/v0.2.0
     with:
       environment: release
     secrets:

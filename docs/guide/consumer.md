@@ -18,7 +18,7 @@ Go 1.25 or later. The modules resolve through `go.vipengele.org`, which answers 
 In your tool's module, require the four modules:
 
 ```bash
-go get go.vipengele.org/cli/core@v0.1.0 go.vipengele.org/cli/spec@v0.1.0 go.vipengele.org/config@v0.1.0 go.vipengele.org/update@v0.1.0
+go get go.vipengele.org/cli/core@v0.3.0 go.vipengele.org/cli/spec@v0.2.0 go.vipengele.org/config@v0.2.0 go.vipengele.org/update@v0.2.0
 ```
 
 Releasing (step 5) also needs [minisign](https://jedisct1.github.io/minisign/) on your machine,
@@ -49,15 +49,32 @@ func identity() spec.Identity {
 
 `cli.New` builds the App from the identity and the options the tool wants, and `App.Add` adds the
 tool's commands. The App always holds `version`, which prints the build information
-`buildinfo.Read` returns; a tool never adds a command of that name. The example's `newApp` is the
-whole App, each piece of which the steps below explain:
+`buildinfo.Read` returns; a tool never adds a command of that name.
+
+`cli.WithPathsLayout` chooses the convention every directory the App resolves follows. Without it,
+the directories follow the operating system the tool runs on, which on macOS puts them under
+`~/Library/Application Support`. That is where a macOS application keeps its files, but a
+command-line tool's configuration conventionally lives in `~/.config` there as on Linux, where its
+users look for it and keep it in their dotfiles. `paths.LayoutXDG`, from
+`go.vipengele.org/cli/spec/paths`, resolves every directory under the XDG conventions on every
+operating system, honouring `XDG_CONFIG_HOME` and the other XDG variables. The example names its
+layout once, as `pathsLayout`, because its update state follows the same layout (step 4).
+
+The example's `newApp` is the whole App, each piece of which the steps below explain:
 
 <!-- snippet: app.go#app -->
 
 ```go
+// pathsLayout is the directory layout of every directory the tool resolves: its configuration
+// directory and the state directory of its updates. The XDG layout puts them under ~/.config and
+// ~/.local/state on every operating system, macOS included, where a command-line tool's files are
+// conventionally found, rather than under ~/Library/Application Support.
+const pathsLayout = paths.LayoutXDG
+
 // newApp returns the App of the tool: its identity, the build information "version" prints, the
-// configuration [config] describes, the background update check around every command not
-// annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
+// configuration [config] describes, with the overlay file [projectFile] names, which may set only
+// "greeting", the directory layout [pathsLayout], the background update check around every
+// command not annotated [spec.SkipUpdateCheck], and the commands "hello" and "update".
 func newApp(d deps) *cli.App {
 	updateCfg := updateConfig(d)
 	checkBefore, checkAfter, err := updateCfg.UpdateCheckHooks()
@@ -68,6 +85,8 @@ func newApp(d deps) *cli.App {
 	app := cli.New(identity(),
 		cli.WithBuildInfo(d.Build),
 		cli.WithConfig(defaultConfig()),
+		cli.WithConfigOverlay(projectFile, "greeting"),
+		cli.WithPathsLayout(pathsLayout),
 		cli.WithPreRun(checkBefore),
 		cli.WithPostRun(checkAfter),
 	)
@@ -106,14 +125,20 @@ function. It depends on `cli/spec` alone, never on the framework that parses the
 
 ```go
 // helloCommand returns "hello [name]", which greets name, or "world" without one, with the
-// configured greeting, in capitals under --shout.
+// configured greeting, in capitals under --shout and in lower case under --whisper. It is also
+// invoked as "hi", and refuses both flags together.
 func helloCommand() *spec.Command {
 	shout := spec.BoolFlag("shout", "greet in capitals")
+	whisper := spec.BoolFlag("whisper", "greet in lower case")
 	return &spec.Command{
 		Name:    "hello",
+		Aliases: []string{"hi"},
 		Summary: "Greet someone",
 		Args:    spec.RangeArgs(0, 1),
-		Flags:   []spec.Flag{shout},
+		Flags:   []spec.Flag{shout, whisper},
+		FlagGroups: []spec.FlagGroup{
+			{Kind: spec.MutuallyExclusive, Flags: []string{"shout", "whisper"}},
+		},
 		Run: func(ctx context.Context, inv *spec.Invocation) error {
 			name := "world"
 			if len(inv.Args) == 1 {
@@ -127,15 +152,30 @@ func helloCommand() *spec.Command {
 			if shout.Get(inv) {
 				line = strings.ToUpper(line)
 			}
+			if whisper.Get(inv) {
+				line = strings.ToLower(line)
+			}
 			return inv.Data("%s\n", line)
 		},
 	}
 }
 ```
 
-The flag handle `shout` reads its value from the `Invocation` with `Get`. `inv.Data` writes to the
-standard output, which carries the command's data; messages go to the standard error. A command
-nests others through its `Commands` field, and the App checks the whole tree before every run.
+The flag handles `shout` and `whisper` read their values from the `Invocation` with `Get`. `Aliases`
+names `hi` as a second way to invoke the command. `FlagGroups` declares that `--shout` and
+`--whisper` are mutually exclusive: the App refuses a command line that sets both before the run
+function starts, with a usage error and exit code 2.
+
+```bash
+$ greet hi --shout --whisper
+greet: hello: --shout and --whisper are mutually exclusive
+$ echo $?
+2
+```
+
+`inv.Data` writes to the standard output, which carries the command's data; messages go to the
+standard error. A command nests others through its `Commands` field, and the App checks the whole
+tree before every run.
 
 ## 3. Add configuration
 
@@ -175,9 +215,9 @@ func (c *config) Validate() error {
   missing file is valid. A run function reads the result with `cli.ConfigFrom[config](ctx)`.
 - the `config` command group: `config path`, `config show`, `config validate` and `config edit`.
 
-The configuration directory follows the platform: `$XDG_CONFIG_HOME/greet` or `~/.config/greet` on
-Linux, `~/Library/Application Support/greet` on macOS, `%AppData%\greet` on Windows, or
-`$GREET_HOME/config` when that variable is set. `greet config path` prints the file's path.
+The configuration directory follows the App's layout, `paths.LayoutXDG` (step 1):
+`$XDG_CONFIG_HOME/greet` or `~/.config/greet` on every operating system, or `$GREET_HOME/config`
+when that variable is set. `greet config path` prints the file's path.
 
 A configuration that fails to load or validate stops the command with exit code 1 and names the
 key, its value and its origin:
@@ -188,6 +228,62 @@ greet: load config
   → greeting: must not be empty: " " from env GREET_GREETING
 ```
 
+### A project overlay
+
+`cli.WithConfigOverlay` adds one more file to the configuration, above `config.yaml` and below the
+environment. Its first argument resolves the file's path from the environment of each execution,
+and the keys after it are the only ones the file may set. greet reads the path from
+`GREET_PROJECT_FILE` and allows `greeting` alone (step 1), so a project can carry its own greeting
+without editing the user's `config.yaml`:
+
+<!-- snippet: project.yaml#overlay-file -->
+
+```yaml
+# An overlay of greet's configuration, layered above config.yaml when GREET_PROJECT_FILE names
+# it. It may set only "greeting".
+greeting: Howdy
+```
+
+<!-- snippet: app.go#overlay -->
+
+```go
+// projectFile returns the path of the tool's overlay file: the value of GREET_PROJECT_FILE, or ""
+// when it is unset or empty, which gives no overlay. A relative path is relative to the working
+// directory of the process. The environment layer looks up only the variables derived from the
+// configuration's keys, so it never reads this one as a key.
+func projectFile(lookup func(string) (string, bool)) (string, error) {
+	path, _ := lookup("GREET_PROJECT_FILE")
+	return path, nil
+}
+```
+
+The layers apply in order, each over the one before: the defaults, `config.yaml`, the overlay, and
+`GREET_GREETING`. An empty path, or one that names no file, adds no layer; an error the resolver
+returns stops the command as a configuration that does not load does.
+
+```bash
+$ GREET_PROJECT_FILE=project.yaml greet hello
+Howdy, world!
+$ GREET_PROJECT_FILE=project.yaml GREET_GREETING=Hey greet hello
+Hey, world!
+```
+
+The overlay is strict as `config.yaml` is: a key the configuration does not have stops the command
+with exit code 1, naming the file and the line. A key the configuration has but the allow-list
+omits is refused the same way, as "not settable in project.yaml"; greet allows its one key, so
+it never refuses one that way.
+
+```bash
+$ cat project.yaml
+greeting: Howdy
+colour: red
+$ GREET_PROJECT_FILE=project.yaml greet hello
+greet: load config
+  → project.yaml:2: unknown key "colour"
+$ echo $?
+1
+```
+
 ## 4. Wire update
 
 `update.Config` describes where the tool's releases come from and how they are trusted. The
@@ -195,6 +291,13 @@ identity names the GitHub repository, `Version` is the running build's version, 
 holds the minisign public key the releases are signed with (step 5 generates it). Leaving
 `Source`, `StateDir`, `HTTPClient` and `Now` zero takes their production defaults: the tool's
 GitHub releases, its state directory, a client of the update's own and `time.Now`.
+
+`PathsLayout` is the layout that state directory is resolved under, and it is the App's
+`pathsLayout` (step 1): a tool's state and its configuration follow one layout. With the App's
+layout alone, greet on macOS would read its configuration from `~/.config/greet` and keep its
+update state under `~/Library/Application Support/greet`; with both, the state directory is
+`$XDG_STATE_HOME/greet` or `~/.local/state/greet` on every operating system, or
+`$GREET_HOME/state` when that variable is set.
 
 <!-- snippet: app.go#update -->
 
@@ -205,8 +308,9 @@ GitHub releases, its state directory, a client of the update's own and `time.Now
 const publicKey = `untrusted comment: minisign public key: ED01B5D0CD595CE5
 RWTlXFnN0LUB7TK69kkxD61cM8n6bGPEKBYTRyGqdj1OkL2II+9ipoSa`
 
-// updateConfig returns the configuration of the tool's updates. A development build, whose
-// version is not a release, starts no background check, and "update" refuses it.
+// updateConfig returns the configuration of the tool's updates, whose state directory follows
+// [pathsLayout] as the App's directories do. A development build, whose version is not a
+// release, starts no background check, and "update" refuses it.
 func updateConfig(d deps) update.Config {
 	return update.Config{
 		Identity:    identity(),
@@ -214,6 +318,7 @@ func updateConfig(d deps) update.Config {
 		TrustedKeys: []string{publicKey},
 		Source:      d.Source,
 		StateDir:    d.StateDir,
+		PathsLayout: pathsLayout,
 		HTTPClient:  d.HTTPClient,
 		Now:         d.Now,
 	}
@@ -342,7 +447,7 @@ jobs:
     # run starts, and its publish job creates the release.
     permissions:
       contents: write
-    uses: vipengele/go/.github/workflows/release-tool.yml@415a61a829b6d2e615e0ca978023b315d7588904 # source/update/v0.1.0
+    uses: vipengele/go/.github/workflows/release-tool.yml@0f352cc248050d160db73705bb1eed9bc857f6e9 # source/update/v0.2.0
     with:
       environment: release
     secrets:
@@ -356,7 +461,7 @@ jobs:
   build job holds the signing key and a tag can be moved. Find the commit with:
 
   ```bash
-  git ls-remote https://github.com/vipengele/go 'refs/tags/source/update/v0.1.0^{}'
+  git ls-remote https://github.com/vipengele/go 'refs/tags/source/update/v0.2.0^{}'
   ```
 
   When the tool raises its `update` require, it moves the pin and the comment to the new tag and

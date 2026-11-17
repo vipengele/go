@@ -51,8 +51,10 @@ In development mode the check:
 - fails a `replace` of a module that is not a sibling, a module path other than
   `go.vipengele.org/<path>` for `source/<path>`, and a project directory holding another `go.mod`.
 
-In strict mode the project's `go.mod` carries no `replace` of any sibling, and every sibling version
-it requires has its tag.
+In strict mode the check accepts a `replace` of a sibling by its own project directory, naming no
+version, only while the sibling is required at its pending version, whose notes exist and whose tag
+does not, or at one of its tags. A sibling required without a `replace` has its tag. The failures of
+development mode apply as well.
 
 The mode is read from the repository's files and its tags, not from a diff against a base, so the
 check answers the same on `pull_request`, `merge_group`, `push` and `workflow_dispatch`. Notes for a
@@ -60,20 +62,31 @@ version that is already tagged leave the project in development mode.
 
 ## Release
 
-Release order is dependency-first, and only at release time. A dependent's release needs every
-library it requires released at a version that contains what it uses. A project that nothing
-unreleased feeds, such as a patch or a project no sibling uses, is released whenever it is ready.
+Release order is dependency-first, and only at release time: `auto-release.yml` plans the pending
+projects as dependency tiers and releases them tier by tier, so a dependent and the siblings it needs
+are released from one pull request. A dependent's release needs every library it requires released
+at a version that contains what it uses. A project that nothing unreleased feeds, such as a patch or
+a project no sibling uses, is released whenever it is ready.
 
-A release is one pull request: the notes, the `replace` dropped (`go mod edit -dropreplace`), the
-sibling raised to its tag (`go get go.vipengele.org/<sibling>@vX.Y.Z`) and `go mod tidy`. The
-notes put the project into strict mode, so the pull request's own `GOWORK=off` CI compiles it
-against the released siblings, as a consumer of the tag will. The release skill runs the same
-check locally before the tag is pushed, and the tag goes on that pull request's merge commit.
+A release is one pull request: the notes of the project and of every sibling released with it, each
+sibling required at its pending version or at an existing tag, and `go mod tidy`. The dependent keeps
+its directory `replace`, which stays on `main`. The notes put each project into strict mode until its
+tag exists. The release skill runs its check locally before the merge, and the merge is the release.
+Once `auto-release.yml` has tagged and announced the siblings, the dependent is tagged on a **release
+commit**: the merge commit with only the dependent's `go.mod` and `go.sum` changed, its sibling
+`replace`s dropped and the module tidied against the siblings' tags. The release commit is on no
+branch, and only its tag is pushed.
 
-`release.yml` repeats the strict check in its `tag` job for the tagged project only, because a pushed
-tag is permanent. A sibling that is under development elsewhere in the repository does not block
-the release. The `test` job runs `go mod tidy` and fails when it changes `go.mod` or `go.sum`, and
-runs `go build ./...` alongside `go vet` and the suite.
+`release.yml`, which `auto-release.yml` calls for each pending project, runs three jobs. `verify`
+(read-only) builds the release commit and validates it for the released project only, because a
+pushed tag is permanent: its `go.mod` carries no `replace` and requires every sibling at a tagged
+version. No other project's `go.mod` is read, so a sibling that is under development elsewhere in the
+repository does not block the release. `verify` then runs, with `GOWORK=off`, `go mod tidy`, failing
+when it changes `go.mod` or `go.sum`, and `go build ./...` alongside `go vet` and the suite, so the
+dependent is compiled against the released siblings, as a consumer of the tag will compile it. `tag`
+(write; runs no project code) rebuilds the identical release commit, requires the commit id `verify`
+tested, and pushes only the tag. `announce` asks the module proxy to fetch the version and creates
+the GitHub Release.
 
 ## Why
 
@@ -84,8 +97,8 @@ resolved: tidy asks `go.vipengele.org` for a version that does not exist, and th
 
 Every consumer ignores a `replace` in a published `go.mod`, so a leftover one builds in this
 repository and fails everywhere else. A `GOWORK=off` build still honours the main module's own
-`replace`, so building does not catch it. Strict mode does: it is on from the moment the notes land
-until the tag exists, which covers every change that could reach the tag.
+`replace`, so building does not catch it. The release commit drops the sibling `replace`s, and
+`release.yml`'s `verify` job fails a `go.mod` that still carries one, before any tag is pushed.
 
 Change detection derives a dependency edge only from a `require` of `go.vipengele.org/<path>`, and a
 change to `go.work` selects no project. The dependent keeps its `require` beside the `replace`, so a
@@ -103,9 +116,10 @@ change to the library still selects the dependent in CI.
 ## What this changes in earlier ADRs
 
 - **ADR-0002.** Superseded. A dependent uses an unreleased sibling through a directory `replace`,
-  and the rule that every sibling is required at a released version holds for a project from its
-  notes to its tag. `GOWORK=off` CI and `go.work` for local development
-  stay.
+  and the rule that every sibling is required at a released version holds for the `go.mod` at a
+  project's tag. From its notes to its tag a project requires each sibling at a tag, or at the
+  sibling's pending version under a directory `replace`. `GOWORK=off` CI and `go.work` for local
+  development stay.
 - **ADR-0003.** `daemon` requires `cli` and `update`; while they are developed together it replaces
   them with their directories. A feature spanning `update` and `daemon` is one change, and only
   their releases are ordered, `update` first.
@@ -130,19 +144,22 @@ change to the library still selects the dependent in CI.
 ## Consequences
 
 - **Notes without a tag lock the project's requires.** From the moment a project's notes land until
-  its tag is pushed, it is in strict mode, and a change that develops it together with an
-  unreleased sibling fails the check. Tag the release, or move its notes out, before such a change.
+  its tag exists, it is in strict mode, and a change that develops it together with a sibling
+  required at a version that is neither pending nor tagged fails the check. Release the sibling in
+  the same pull request, merge the release, or move its notes out, before such a change.
 - **A `replace` in a published `go.mod` is ignored by consumers.** The module would build here and
-  fail for them. Strict mode and the release workflow's `tag` job are what stop one reaching a tag;
-  nothing that only builds the module notices it.
+  fail for them. The release commit drops the sibling `replace`s, and the release workflow's
+  `verify` job, which fails a `go.mod` carrying any `replace` before `tag` runs, is what stops one
+  reaching a tag; nothing that only builds the module notices it.
 - **The tag lookup is unauthenticated.** `git ls-remote` against `https://github.com/<repository>`
   works while the repository is public and fails on a private one.
-- **Prerelease and major-version tags fail the `tag` job.** Its inline check accepts only a version
-  of the form `vX.Y.Z`, so a `-rc.N` suffix fails, and its module-path check expects
-  `go.vipengele.org/<path>`, so a `/v2` module fails.
+- **Prerelease tags fail the `verify` job, and a major-version module fails CI.** `verify` accepts
+  only a version of the form `vX.Y.Z`, so a `-rc.N` suffix fails. `verify` accepts a `/vN` module
+  path for a `vN.x.y` tag, but `verify-sibling-deps` expects `go.vipengele.org/<path>` for
+  `source/<path>`, so a `/v2` module fails CI before its notes can merge.
 - **A `/v2` sibling path does not resolve to a directory.** The check maps
   `go.vipengele.org/<path>/v2` to `source/<path>/v2`, which is not a project, and the check has no
   longest-prefix lookup of the owning project there: a sibling on a major version above `v1` is
   reported as untagged or misplaced rather than checked.
-- **A release pull request is the only place a dependent's `replace` is dropped.** A dependent that
-  is not being released keeps its `replace` for as long as it is developed with the sibling.
+- **A release commit is the only place a dependent's `replace` is dropped.** `main` keeps the
+  dependent's `replace` for as long as it is developed with the sibling, its releases included.
