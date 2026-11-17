@@ -7,7 +7,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	go.vipengele.org/cli/spec v0.1.0
 	go.vipengele.org/cli/state v0.1.0
-	go.vipengele.org/config v0.1.0
+	go.vipengele.org/config v0.2.0
 )
 
 require (
