@@ -176,3 +176,66 @@ func ExampleSeed() {
 	//   ttl: 1m0s
 	// false <nil>
 }
+
+type profile struct {
+	Name  string            `doc:"Profile name; layers merge on it."`
+	Shell string            `doc:"Shell the profile starts."`
+	Env   map[string]string `doc:"Environment of the profile."`
+}
+
+type workspaceConfig struct {
+	Profiles []profile         `merge:"name" doc:"Named profiles."`
+	Labels   map[string]string `merge:"keys" doc:"Labels, merged per key."`
+}
+
+func ExampleLoad_collections() {
+	dir, err := os.MkdirTemp("", "config-example")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	user := filepath.Join(dir, "user.yaml")
+	project := filepath.Join(dir, "project.yaml")
+	userFile := "profiles:\n  - name: dev\n    shell: bash\n    env:\n      EDITOR: vim\n  - name: ops\n    shell: sh\nlabels:\n  team: core\n  tier: \"1\"\n"
+	projectFile := "profiles:\n  - name: ops\n    shell: zsh\n    env:\n      REGION: eu\n  - name: ci\n    shell: dash\nlabels:\n  tier: \"2\"\n  a.b: dotted\n"
+	for path, data := range map[string]string{user: userFile, project: projectFile} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			fmt.Println(err)
+			return
+		}
+	}
+
+	res, err := config.Load(workspaceConfig{}, config.File(user), config.File(project))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	for _, p := range res.Value().Profiles {
+		fmt.Println(p.Name, p.Shell, p.Env)
+	}
+	fmt.Println(res.Value().Labels)
+	for _, s := range res.Sources() {
+		fmt.Printf("%s = %s (%s)\n", s.Key, s.Value, s.Origin)
+	}
+
+	// Output:
+	// dev bash map[EDITOR:vim]
+	// ops zsh map[REGION:eu]
+	// ci dash map[]
+	// map[a.b:dotted team:core tier:2]
+	// profiles[0].name = dev (user.yaml:2)
+	// profiles[0].shell = bash (user.yaml:3)
+	// profiles[0].env["EDITOR"] = vim (user.yaml:5)
+	// profiles[1].name = ops (project.yaml:2)
+	// profiles[1].shell = zsh (project.yaml:3)
+	// profiles[1].env["REGION"] = eu (project.yaml:5)
+	// profiles[2].name = ci (project.yaml:6)
+	// profiles[2].shell = dash (project.yaml:7)
+	// profiles[2].env = {} (project.yaml:6)
+	// labels["a.b"] = dotted (project.yaml:10)
+	// labels["team"] = core (user.yaml:9)
+	// labels["tier"] = 2 (project.yaml:9)
+}

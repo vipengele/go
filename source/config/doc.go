@@ -12,8 +12,9 @@
 //
 // The conventional order is defaults, then [File], then [Env], then [Flags], so that a flag
 // overrides an environment variable, which overrides a file, which overrides the defaults. Load
-// takes the providers in the order given and the last one to set a key wins; a slice is replaced
-// whole, never merged. The package reads no command line and never reads the process environment:
+// takes the providers in the order given and the last one to set a key wins; a slice of
+// single values is replaced whole, and a collection (see Collections) is replaced or merged as its
+// `merge` tag says. The package reads no command line and never reads the process environment:
 // the caller passes os.LookupEnv, or a fake, and the map of the flags that were set explicitly.
 //
 // # Keys
@@ -23,12 +24,42 @@
 // field's `config:"name"` tag or, without one, the field name; "maxRetries" and MaxRetries both
 // give "max_retries". A field tagged `config:"-"` and an unexported field have no key. A key holds
 // a bool, a signed or unsigned integer, a float, a string, a [time.Duration], or a slice of one of
-// these; a pointer, an embedded field, a map or any other type is a schema error, reported by Load
-// and by [NewSchema] as matching [ErrSchema].
+// these, or a collection; a pointer, an embedded field, a map with a key that is not a string or any
+// other type is a schema error, reported by Load and by [NewSchema] as matching [ErrSchema].
 //
 // A key is matched relaxed: case, "-" and "_" within a segment are ignored, so "max-retries",
 // "MAX_RETRIES" and "maxRetries" all name "max_retries". A "." always separates levels. In a file,
 // "server.port: 80" and a "server" mapping holding "port: 80" set the same key.
+//
+// # Collections
+//
+// A key may also hold a collection: a slice of structs, or a map with string keys whose values are
+// single values, slices of them, structs or further such maps. A collection is read from files only:
+// it and every field of its element have no environment variable and no flag, [Env] skips them and
+// [Flags] rejects a key naming one. The fields of an element are keyed as those of the configuration
+// struct are, `config` and `doc` tags included, and are as strict as the top level: an unknown
+// field is an error. A map key is the exception. It is used verbatim, as written, never normalised
+// and never split on ".", and any key, null or empty included, is accepted beneath a map.
+//
+// A `merge:"..."` tag says how the layers of a collection combine. Without one, the collection of
+// the last layer that sets it replaces the earlier ones whole. On a slice of structs,
+// `merge:"name"` matches elements on the string field whose key is "name": a matching element
+// replaces the earlier one where it stands, and an element with no match is appended in the order
+// of its layer. On a map, `merge:"keys"` merges one level deep: the later layer wins per key and
+// each value is replaced whole. The tag is allowed only on a field outside a collection element.
+// Within one file a duplicate or empty merge key is an error at its line, and in the defaults a
+// [Load] error naming "defaults". The defaults are the base layer of the merge.
+//
+// A path into a collection is written profiles[2].env["FOO"]: a list index in brackets, a map key
+// in Go string quoting. In the merged result the index is the position in the merged list; a
+// problem within a file names the position within that file, beside its line.
+//
+// In the Sources of a [Result] each leaf of a collection has a row of its own, in the order of the
+// schema's fields, then element order, with map entries sorted by key. An empty map or list is one
+// row, "{}" or "[]". A scalar slice is one row, its items joined by commas. A field of an element
+// that its layer did not write takes the origin of the element. After a keyed merge the origin of
+// each kept entry stays that of its layer, and the collection as a whole takes the origin of the
+// latest layer that set it. A [*FieldError] on an empty collection carries the value "{}" or "[]".
 //
 // # Strictness
 //
@@ -78,7 +109,8 @@
 // # Default file
 //
 // [Seed] writes a commented configuration file holding every key at its default, for a tool to
-// create on first run. It is the one write the package makes: it creates the file with mode 0600,
-// never replaces an existing one and creates no directory. A tool that wants no default file does
-// not call it.
+// create on first run. A collection that is empty is written as [] or {}, after its doc and a
+// commented example element; one with defaults is written as elements, documented on the first. It
+// is the one write the package makes: it creates the file with mode 0600, never replaces an
+// existing one and creates no directory. A tool that wants no default file does not call it.
 package config
