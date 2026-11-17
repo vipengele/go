@@ -6,12 +6,15 @@
 // has no run function, so "config" alone prints its help. Its subcommands are:
 //
 //   - "path" prints the path of the configuration file. It carries [spec.SkipConfig].
-//   - "validate" loads the defaults and the file, the file parsed strictly and the result checked
-//     by T's [cfg.Validator], and reports every problem it finds. It carries [spec.SkipConfig], so
-//     it runs while the file is broken. A missing file is valid: the defaults apply.
-//   - "show" prints every key with its value and its origin: "default", the file and line, or the
-//     environment variable that set it. It reads the configuration the context carries, stored by
-//     [With], so the code that runs before it loads it.
+//   - "validate" loads the defaults, the file and the overlay file, each parsed strictly and the
+//     result checked by T's [cfg.Validator], without the environment, and reports every problem it
+//     finds. On success it names the full path of each file it covered. It carries
+//     [spec.SkipConfig], so it runs while a file is broken. A missing file is valid: the defaults
+//     apply.
+//   - "show" names each layer, defaults, file, overlay and env, with its path, then prints every
+//     key with its value and its origin: "default", the file and line, or the environment variable
+//     that set it. It reads the configuration the context carries, stored by [With], so the code
+//     that runs before it loads it.
 //   - "edit" opens a copy of the file in an editor and moves it over the file only once the copy
 //     is valid, checked as "validate" checks the file; the file it writes has mode 0600. It needs
 //     a terminal on the standard input and carries [spec.SkipConfig], so it repairs a broken file.
@@ -131,12 +134,6 @@ func (o Options[T]) overlay(inv *spec.Invocation) (string, []cfg.Provider, error
 		return "", nil, fmt.Errorf("config overlay %s: %w", path, err)
 	}
 	return path, []cfg.Provider{cfg.File(path).Allow(o.OverlayAllow...)}, nil
-}
-
-// loadFile returns the configuration of Defaults under the file at Path, without the environment
-// layer: what the file itself makes of the configuration.
-func (o Options[T]) loadFile() (cfg.Result[T], error) {
-	return cfg.Load(o.Defaults, cfg.File(o.Path))
 }
 
 // New returns the "config" group for opts, holding the subcommands commands builds, in order.
