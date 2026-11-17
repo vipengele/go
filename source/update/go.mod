@@ -3,7 +3,7 @@ module go.vipengele.org/update
 go 1.27.4
 
 require (
-	go.vipengele.org/cli/spec v0.1.0
+	go.vipengele.org/cli/spec v0.2.0
 	go.vipengele.org/cli/state v0.1.0
 	go.vipengele.org/commons v0.1.0
 	go.vipengele.org/filelock v0.1.0
@@ -13,4 +13,6 @@ require (
 	golang.org/x/sys v0.50.0
 )
 
-require golang.org/x/term v0.47.0 // indirect
+require golang.org/x/term v0.48.0 // indirect
+
+replace go.vipengele.org/cli/spec => ../cli/spec
