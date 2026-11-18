@@ -477,3 +477,11 @@ _Avoid_: backend, provider, plugin
 The condition of a **Service** as the library reports it: unknown, not installed, stopped, starting,
 running or failed. Unknown means the service manager could not say.
 _Avoid_: status (the report as a whole), health
+
+**Clock**:
+The source of the current time and of the waits measured against it, behind the `commons/clock`
+package's `Clock` interface: `Now`, `Sleep` and `AfterFunc`. `clock.System()` is the clock of the
+operating system, and a test passes the manual clock of `commons/clock/clocktest`, which moves only
+when the test advances it (ADR-0040).
+_Avoid_: timer (one pending call of a **Clock**, not the clock), time source, scheduler (the
+**Supervisor** and the **Runner**s own that word), timeout (a bound a caller puts on a wait)
