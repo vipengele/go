@@ -1,6 +1,6 @@
 # The httpclient engine and its Transport seam
 
-Status: proposed.
+Status: accepted.
 
 `httpclient` sends a caller's requests through an **Engine**, the library that owns connections and
 speaks the wire protocol, behind a **Transport** of `httpclient`'s own: one request in, one response
@@ -871,3 +871,122 @@ share its one connection.
   `Concurrent` (pool cap 64), where plain TCP opened exactly 15. The harness does not show which
   requests dialled the extra connections. `fasthttp` opened exactly one connection per goroutine in
   every parallel workload.
+
+## Scoring
+
+Each cell gives a result on a three-step scale, **meets**, **partly** or **does not**, with the few
+words that decide it, and names what it rests on: a source key from Evidence, a row or test of the
+Benchmark, or both. Performance is scored against `net/http` as the **baseline**, as **ahead** or
+**behind**. A cell that rests on a candidate's own documentation, source or tracker says so where
+that is the only ground; the Evidence section counts the independent sources of each candidate, and
+none of the three has two independent sources on any criterion but `net/http`'s HTTP/2 pooling.
+
+### Engines
+
+| Criterion | `net/http` (HTTP/1.1 and HTTP/2) | `fasthttp` | `quic-go` HTTP/3 |
+|-----------|----------------------------------|------------|------------------|
+| Protocol support | **Meets** for HTTP/1.1 and HTTP/2 over TLS, negotiated by ALPN; **does not** offer HTTP/3 [N1, N2, N4]. Go's own documentation and source. Measured: the `nethttp-h1`, `-h1tls` and `-h2tls` rows complete every workload. | **Partly**: HTTP/1.x only, by its maintainers' statements [F4, F5] and an HTTP/2 issue open since 2016 [F6]; its own tracker. Measured: over TLS it offers no ALPN and gets HTTP/1.1 (`fasthttp-h1tls`). | **Partly**: HTTP/3 only, `https` only, no TCP fallback and no `Alt-Svc` handling [Q1, Q2, Q3, Q4]; its own documentation and source. Measured: `quicgo-h3` completes every workload against `http3.Server`. |
+| Pooling and reuse | **Meets** for HTTP/1.1: caps per host and in total, idle timeout, reuse once the body is closed [N1, N2]; measured, one connection per goroutine at `Reuse` and `Concurrent` over plain TCP, `conns` 0 in every serial row. **Partly** for HTTP/2: the pool adds a connection only at the server's stream limit [N6] and keeps using a connection that loses every packet [N7], two independent reports; measured, a warm pool shares one connection and a cold pool dials one per concurrent request (`TestH2ColdStart`, 15 for 15; `Concurrent g=64`, 43 to 64). HTTP/1.1 over TLS opened 28 to 44 connections for 15 goroutines (`Concurrent g=15`), unexplained by the harness. | **Partly**: per-host pool with caps and idle and lifetime limits, but an exhausted pool returns `ErrNoFreeConns` unless `MaxConnWaitTimeout` is set [F2], and a pooling bug is open since 2023 [F8]; its own source and tracker. Measured: exactly one connection per goroutine in every parallel row; no workload exceeded the cap, so `ErrNoFreeConns` is not exercised. | **Partly**: one connection per host over one shared UDP socket, closed by `CloseIdleConnections`; no documented per-host cap or idle timeout [Q1, Q2, Q4]; its own documentation and source. Measured: one connection serves 64 goroutines with no errors (`Concurrent g=64`). |
+| Streaming bodies | **Meets**: response body read on demand, request body an `io.Reader`, chunked when its length is unknown [N1]. Measured: 6,386 B/op for a 16 MiB download (`Large`, `nethttp-h1`). | **Partly**: responses are buffered whole unless `StreamResponseBody` is set, and the default `MaxResponseBodySize` sets no limit, so a large response "may consume unbounded memory" [F1, F2]; a request body streams through `SetBodyStream` [F1]. Its own README and source. Measured: 16.8 MB/op for a 16 MiB download at the default (`Large`, `fasthttp-h1`); the streaming mode is not measured. | **Meets**: the standard `io.Reader` and `io.ReadCloser` of `*http.Request` and `*http.Response` [Q4]; its own documentation. Measured: streams, at 5.5 MB/op and 171,433 allocs/op for a 16 MiB download, server included (`Large`, `quicgo-h3`). |
+| `context.Context` cancellation | **Meets**: the request's context cancels it, a body still being read included; `Client.Timeout` bounds the whole call [N1, N3]. Go's own documentation and source; not exercised by the benchmark. | **Does not**: no context API, only `DoTimeout` and `DoDeadline` [F2]; a `DoContext` request is open, labelled `help wanted` [F7]. Its own source and tracker; not exercised by the benchmark. | **Partly established**: the dial waits on the request's context and a request is retried only when it provably was not sent [Q1]. Its own source alone; the evidence does not show what cancelling does to a body already streaming, and the benchmark does not exercise it. |
+| TLS and proxy control | **Meets**: `TLSClientConfig`, `DialContext`, a per-request `Proxy` function and `ProxyFromEnvironment` [N2]. Go's own source. | **Partly**: `TLSConfig` [F2]; a proxy only as a `DialFunc` from `fasthttpproxy` set as the client's `Dial`, not as a function of the request [F9]. Its own source and documentation. | **Partly**: `TLSClientConfig`, session resumption, 0-RTT only by explicit method [Q2]; **does not** support a proxy, with an issue open since 2022 [Q1, Q6]. Its own documentation, source and tracker. |
+| Dependency weight and licence | **Meets**: standard library, no module dependency, BSD-style licence [N10]. | **Partly**: MIT; six requires, among them `klauspost/compress`, `molecule-man/go-brrr` and `golang.org/x/net` [F3]. Its `go 1.26.0` floor costs a Go 1.27 consumer nothing [F1, F3]. The benchmark's `go.mod` lists the same set. | **Partly**: MIT; requires `quic-go/qpack` and four `golang.org/x` modules [Q5]. Pre-1.0 at v0.65.0 [Q8], so a minor release may change the API. Its `go 1.26.0` floor costs nothing [Q5]. |
+| Maintenance and advisories | **Meets**: fixes ship in Go patch releases (go1.27.2 and go1.27.4 with `net/http` security fixes) and are published in the Go vulnerability database, which `govulncheck` reads [N5, N8]. Go's own records. | **Partly**: roughly monthly releases, last 2026-11-16 [F12]; by its stated policy it assigns no CVEs and publishes no repository advisory [F14], so the security fixes in its release notes [F13] reach no vulnerability scanner. Its own records; the one independent entry is a 2022 advisory [F15]. | **Partly**: roughly monthly releases, last 2026-11-03 [Q8]; eight advisories since 2023, three since 2025-10, one rated high, a client crash [Q7]. Its maintainers' own disclosures, published with CVEs. |
+| How it is faked in a test | **Meets**: `httptest.NewServer`, `NewTLSServer`, and `NewTestServer` on an in-memory network for `testing/synctest` [N4, N9]; the `http.RoundTripper` is replaceable [N3]. Go's own documentation. Measured: every TCP row of the benchmark runs against an in-process `net/http` server. | **Partly**: `fasthttputil.NewInmemoryListener` through the client's `Dial` [F10], and any HTTP/1.x test server over TCP; its own documentation. Measured: both `fasthttp` rows run against the in-process `net/http` server. No `testing/synctest` support is documented. | **Partly**: replaceable as an `http.RoundTripper` [Q4], with `Dial` and `TLSClientConfig` injectable [Q1]; a real exchange needs an `http3.Server` on a loopback UDP socket, since `httptest` has no HTTP/3 server [Q3, N9]. Its own documentation. Measured: the `quicgo-h3` row runs that way. |
+| Throughput, latency, allocations | **Baseline.** Small request 35.2 µs over HTTP/1.1, 48.7 µs over HTTP/2; 11.3 µs per request at `Reuse`; 75 allocs/op, server included (Benchmark, `Small`, `Reuse`). No independent client benchmark exists. | **Ahead on CPU per request, by less than claimed.** 1.33 times faster serially on small requests (1.36 over TLS), 1.00 to 1.26 times under parallel load and mostly within the spread; 1.08 times on a plain-TCP download and 1.26 times on upload; no consistent lead over TLS on 16 MiB bodies; 50 fewer allocs/op, server included (Benchmark, all rows). The author's "up to 4 times" [F1] is the candidate's own claim and is not reproduced (see below). | **Behind on this run.** 1.56 times slower than HTTP/2 on a small serial request; 91% lower download rate than HTTP/2 and 96% lower than HTTP/1.1 over TLS; faster than HTTP/2 at 64 goroutines, 11.7 µs against 17.3 µs (Benchmark, `Small`, `Large`, `Concurrent g=64`). One independent source on the protocol, not the library [Q9]. The download figure is not a basis for anything (see below). |
+
+### Client wrappers
+
+None of the four is an Engine. A cell scores a wrapper only where its design is prior art for the
+criterion; every other cell reads *prior art, not an Engine*. The ground for every cell is the
+wrapper's own source, which is authoritative for the API it offers.
+
+| Criterion | `resty` | `req` | `go-retryablehttp` | `heimdall` |
+|-----------|---------|-------|--------------------|------------|
+| Protocol support | Prior art: whatever its `http.RoundTripper` speaks, `net/http`'s by default [W1]. | Prior art: HTTP/1.1, HTTP/2 and HTTP/3 in one client, by forking the standard transport and requiring `quic-go` [W3]; moves to HTTP/3 through `Alt-Svc` [W3]. | Prior art: whatever its `*http.Client` speaks [W5]. | Prior art: whatever its `Doer` speaks [W7]. |
+| Pooling and reuse | Prior art, not an Engine. | Prior art, not an Engine. | Prior art, not an Engine. | Prior art, not an Engine. |
+| Streaming bodies | Prior art, not an Engine. | Prior art, not an Engine. | Prior art, not an Engine. | Prior art, not an Engine. |
+| `context.Context` cancellation | Prior art, not an Engine. | Prior art, not an Engine. | Prior art, not an Engine. | Prior art, not an Engine. |
+| TLS and proxy control | Prior art, not an Engine. | Prior art: its proxy, dial and TLS-handshake hooks are "only valid for HTTP1 and HTTP2" [W3], one client with two sets of rules. | Prior art, not an Engine. | Prior art, not an Engine. |
+| Dependency weight and licence | Prior art, not an Engine (MIT, `go 1.23.0` [W1]). | Prior art, not an Engine (MIT, requires `quic-go` and `utls` [W3]). | Prior art, not an Engine (MPL-2.0 [W5]). | Prior art, not an Engine (Apache-2.0 [W7]). |
+| Maintenance and advisories | Prior art, not an Engine (v3 at release candidate [W2]). | Prior art, not an Engine (v3.61.0, 2026-08-13 [W4]). | Prior art, not an Engine (v0.7.8, commit 2026-11-16 [W6]). | Prior art, not an Engine (v8.0.0, 2026-07-01 [W8]). |
+| How it is faked in a test | Prior art: `SetTransport` takes any `http.RoundTripper` [W1]. | Prior art: the Engine is not replaceable [W3]. | Prior art: `StandardClient()` hands its behaviour to code that knows only `*http.Client` [W5]. | Prior art: any `Doer`, one method [W7]. |
+| Throughput, latency, allocations | Prior art, not an Engine; not measured. | Prior art, not an Engine; not measured. | Prior art, not an Engine; not measured. | Prior art, not an Engine; not measured. |
+
+Three of the four run on `net/http` and keep the standard request and response at their seam
+[W1, W5, W7]; none requires `fasthttp` [W1, W3, W9]. `req`, the one wrapper with HTTP/3, shows what
+combining it with TCP costs the caller: proxy and dial settings that silently stop applying when
+the protocol changes.
+
+### Published claims against the measurement
+
+- **`fasthttp`'s "up to 4 times faster" [F1] against 1.00 to 1.36 times measured.** The README's
+  own TCP figures give 2.1 times, with no Go version stated; the benchmark, on go1.27.4 with method
+  and code above, gives 1.33 times serially and 1.00 to 1.26 times under parallel load. This record
+  trusts the measurement for the magnitude a caller sees, and neither figure as a prediction. Both
+  ends share one process here, so the server's cost dilutes the client difference, and the README's
+  in-memory figure isolates the client better; a real network's round trip dilutes it further. What
+  both agree on, and what the decision uses, is the direction: `fasthttp` spends less CPU and fewer
+  allocations per request.
+- **Zhang et al.'s data rate up to 45.2% lower for HTTP/3 [Q9] against 91 to 96% lower measured.**
+  This record trusts [Q9] for the protocol on real links: it is independent, peer-reviewed and
+  measured over networks. The benchmark ran both QUIC ends in one process on darwin loopback without
+  raising the UDP socket buffers, which `quic-go`'s documentation says limit high-bandwidth
+  transfers and recommends raising to about 7 MB, and on a platform without the Generic Segmentation
+  Offload it uses on Linux (https://quic-go.net/docs/quic/optimizations/, read 2026-11-18). The
+  measured gap is likely dominated by those, and the decision does not rest on the HTTP/3 throughput
+  figure.
+- **HTTP/2 pooling [N6, N7] against the cold-pool and warm-pool measurements.** On a warm pool the
+  measurement agrees with [N6]: concurrent requests share one connection. On a cold pool it shows
+  the opposite behaviour, one dial per concurrent request, which neither report describes; that
+  rests on this one machine and three repetitions of `TestH2ColdStart`. Neither [N6]'s throughput
+  limit on a real link nor [N7]'s packet loss can be reproduced on loopback, so this record takes
+  both reports as stated, as known limits of the default Engine's HTTP/2.
+
+## Decision
+
+**The default Engine is `net/http`'s `Transport`, negotiating HTTP/2 over TLS through ALPN and
+speaking HTTP/1.1 otherwise.** It is the one candidate that meets every criterion other than
+performance: streaming bodies, cancellation through the request's context, a per-request proxy
+function, no module dependency, fixes delivered through Go patch releases and visible to
+`govulncheck`, and `httptest` for tests. Its types are the types the Transport and every Filter
+already pass, so the caller meets no conversion anywhere. What the caller gives up against
+`fasthttp` is CPU per request, measured at 1.33 times on a serial small request on loopback and
+within the spread under parallel load. The limits of its HTTP/2 pool [N6, N7] are the known cost of
+HTTP/2 by default; a caller exposed to them restricts the protocols on a client of its own, below.
+
+**A caller's own `*http.Client` is accepted as the Engine.** Its behaviour is then that of the
+client's `Transport`: `net/http`'s when it is an `*http.Transport`, with whatever protocols, pool
+and proxy the caller configured, and `quic-go`'s HTTP/3 when it is an `http3.Transport`. The
+client's own redirect policy, cookie jar and `Timeout` apply inside the Engine, beneath every
+Filter, since `Client.Do` applies them [N3].
+
+**No second Engine is worth an adapter.**
+
+- **`fasthttp`.** Behind a Transport that passes `*http.Request` and `*http.Response`, every request
+  and response is converted, and the caller pays for the conversion out of the allocation advantage
+  that is `fasthttp`'s whole case; the benchmark measures `fasthttp` without that conversion, so its
+  50 fewer allocs/op is an upper bound on what an adapter keeps. The caller also loses
+  cancellation: a cancelled context cannot stop a request in flight, only a deadline fixed when the
+  call starts [F2, F7]. It loses HTTP/2, which the default negotiates [F4]. Its response bodies are
+  buffered whole unless streaming is switched on, with no size limit by default [F1, F2]; its proxy
+  is a dial function rather than a function of the request [F9]; an exhausted pool fails with
+  `ErrNoFreeConns` by default [F2]; and its security fixes reach no vulnerability scanner [F14].
+  Against all of that the measured gain is 1.00 to 1.36 times on loopback, and none consistent over
+  TLS on large bodies. The caller gets less from it than it costs.
+- **`quic-go`'s HTTP/3.** It already implements `http.RoundTripper` [Q4], so a caller who wants it
+  wraps an `http3.Transport` in its own `*http.Client` and reaches it through the default Engine;
+  an adapter project adds nothing at the seam. As a Transport it speaks HTTP/3 alone: every request
+  fails on a network that blocks UDP, since it has no TCP fallback [Q1]; it cannot use a proxy
+  [Q1, Q6]; the server must offer HTTP/3; and the module is pre-1.0 [Q8]. Those are the caller's
+  terms, taken deliberately by the caller who knows the server and the path, not a default an
+  adapter should package. An Engine that falls back from HTTP/3 to TCP is not among the candidates:
+  the one example, `req`, forks the standard transport and its proxy and dial settings stop applying
+  over HTTP/3 [W3]. This choice rests on protocol support, proxy control and pre-1.0 status, not on
+  the HTTP/3 throughput figure, which this record does not trust (see above).
+
+**The seam stands.** The best Engine is the standard library's, which the Transport's request in,
+response out carries without conversion, so nothing in the evidence makes it impractical to adapt.
+An adapter for another Engine lives in its own project under `source/httpengine/<name>`, and no
+such project exists: adding one is a decision of its own, made on evidence that a caller's need is
+not met by the default Engine or by a `*http.Client` of the caller's own.
