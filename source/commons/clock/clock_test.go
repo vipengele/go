@@ -3,6 +3,7 @@ package clock_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,6 +57,40 @@ func TestSystemSleepReturnsNilOnceTheDurationElapses(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < d {
 		t.Fatalf("Sleep returned after %v, want at least %v", elapsed, d)
+	}
+}
+
+// endingContext reports no error from its first Err call and context.Canceled from every later
+// one, with a Done channel that is already closed: the state a context is in when something
+// cancels it between a check of Err and a wait on Done.
+type endingContext struct {
+	context.Context
+	checked *atomic.Bool
+}
+
+func (c endingContext) Err() error {
+	if c.checked.Swap(true) {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (endingContext) Done() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func TestSystemSleepOfANonPositiveDurationNeverWaitsOnTheContext(t *testing.T) {
+	t.Parallel()
+
+	for _, d := range []time.Duration{0, -time.Nanosecond} {
+		for range 1000 {
+			ctx := endingContext{context.Background(), new(atomic.Bool)}
+			if err := clock.System().Sleep(ctx, d); err != nil {
+				t.Fatalf("Sleep(%v) = %v, want nil", d, err)
+			}
+		}
 	}
 }
 
