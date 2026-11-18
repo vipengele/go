@@ -990,3 +990,51 @@ response out carries without conversion, so nothing in the evidence makes it imp
 An adapter for another Engine lives in its own project under `source/httpengine/<name>`, and no
 such project exists: adding one is a decision of its own, made on evidence that a caller's need is
 not met by the default Engine or by a `*http.Client` of the caller's own.
+
+## The seam and the layering
+
+**The Transport is `httpclient`'s own declaration, in the shape of `http.RoundTripper`.** One
+request in, one response out:
+
+```go
+type Transport interface {
+	RoundTrip(*http.Request) (*http.Response, error)
+}
+```
+
+The method set is that of `http.RoundTripper` [N3], so an `http.RoundTripper` is a Transport with no
+adapter, and so is `quic-go`'s `http3.Transport` [Q4]. The interface is declared by `httpclient`
+rather than re-exported because the project owns the contract: the obligations below are written
+into its documentation, and they bind every Engine adapter and every Filter, whatever the standard
+library's interface says about itself. An implementation meets these obligations:
+
+- It honours the cancellation of the request's `context.Context`: ending the context ends the
+  request, including a response body still being read [N1, N3].
+- The caller closes the response body, and the implementation does not close it on the caller's
+  behalf. A connection is reused only after the body is read and closed [N1].
+- It does not modify the request, except to consume and close its body [N3].
+
+**A non-default Engine is an adapter in a project of its own.** The default Engine, `net/http`'s
+`Transport`, lives in `httpclient` itself and adds no module dependency. Any other Engine is
+adapted in its own project, so that its dependencies reach only the consumers who choose it; a
+dependency inside `httpclient` would reach every consumer of it [F3, Q5]. The adapter lives at
+`source/httpengine/<name>`, with the module path `go.vipengele.org/httpengine/<name>`.
+`source/httpengine` is a grouping directory: it holds projects and has no `go.mod`.
+
+**A caller's own `*http.Client` is wrapped as the Engine through `Client.Do`.** The wrapper's
+`RoundTrip` calls `Client.Do`, which is why the client's redirect policy, cookie jar and `Timeout`
+apply inside the Engine, beneath every Filter, as the Decision above states [N3]. Wrapping the
+client's `Transport` instead would skip all three.
+
+**A caller uses a fluent API; Filters and Engines pass `*http.Request` and `*http.Response`.** The
+fluent layer is the surface the caller meets and is where ease of use is decided. Below it the
+standard types are the contract.
+
+The rejected alternative is a request and response model of `httpclient`'s own all the way down,
+through the Filters and the Engine. It gives the caller nothing the fluent layer does not already
+give, since the caller never touches the layers beneath it. It costs the caller every piece of Go
+HTTP tooling that speaks the standard types: `httptest` servers and recorders [N9], `httputil`, the
+wrappers around an `http.RoundTripper` that instrument or retry a client, such as
+`go-retryablehttp`'s `StandardClient` [W5], and any Engine that is already a `RoundTripper` [Q4].
+Three of the four wrappers read as prior art keep the standard types at their Engine seam [W1, W5,
+W7]. Each such tool would need a converter in each direction.
