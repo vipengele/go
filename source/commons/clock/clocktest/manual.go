@@ -43,8 +43,8 @@ func (m *Manual) Now() time.Time {
 }
 
 // Sleep blocks until an Advance reaches now+d or ctx ends. It returns ctx.Err() when ctx ends
-// first, including when ctx has already ended, and nil when Advance wakes it. A d of zero or less
-// returns at once.
+// first, including when ctx has already ended, and nil when Advance wakes it. When both happen
+// together it returns ctx.Err(). A d of zero or less returns at once.
 func (m *Manual) Sleep(ctx context.Context, d time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -59,11 +59,8 @@ func (m *Manual) Sleep(ctx context.Context, d time.Duration) error {
 	case <-w.wake:
 		return nil
 	case <-ctx.Done():
-		if m.remove(w) {
-			return ctx.Err()
-		}
-		// Advance took the sleep before it could be removed, so it has been woken.
-		return nil
+		m.remove(w)
+		return ctx.Err()
 	}
 }
 
