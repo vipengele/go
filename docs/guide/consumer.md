@@ -12,8 +12,9 @@ tagged and is not meant for `go get`: read it, run it, and copy from it. Whereve
 
 ## Prerequisites
 
-Go 1.25 or later. The modules resolve through `go.vipengele.org`, which answers with a four-field
-`go-import` tag; earlier Go releases ignore its fourth field and cannot find the modules.
+Go 1.27 or later, the release every project's `go` directive names. The modules resolve through
+`go.vipengele.org`, which answers with a four-field `go-import` tag; Go releases before 1.25 ignore
+its fourth field and cannot find the modules.
 
 In your tool's module, require the four modules:
 

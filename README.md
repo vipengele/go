@@ -20,7 +20,7 @@ which the workflow creates when the pull request adding the project's release no
 | [`source/filelock`](source/filelock) | `go.vipengele.org/filelock` |
 | [`source/examples/greet`](source/examples/greet) | `go.vipengele.org/examples/greet`, an example tool the [consumer guide](docs/guide/consumer.md) quotes; never tagged, not for `go get` |
 
-A project's module path is `go.vipengele.org/<project>`, which needs Go 1.25 or later:
+A project's module path is `go.vipengele.org/<project>`, which needs Go 1.27 or later:
 
 ```sh
 go get go.vipengele.org/<project>@latest
