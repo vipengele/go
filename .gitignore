@@ -28,3 +28,4 @@ go.work.sum
 /.codex/
 /AGENTS.md
 /.agents/
+/.agentic-toolkit.lock.yaml
