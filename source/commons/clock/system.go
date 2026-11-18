@@ -25,11 +25,15 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now() }
 
 // Sleep waits on a timer it stops before returning, so a Sleep that ctx ends early leaves no
-// timer behind. The timer of a d of zero or less is already due, so it returns at once.
+// timer behind.
 func (systemClock) Sleep(ctx context.Context, d time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if d <= 0 {
+		return nil
+	}
+
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
