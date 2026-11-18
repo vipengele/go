@@ -19,24 +19,14 @@ type Manual struct {
 
 	mu      sync.Mutex
 	now     time.Time
-	seq     uint64
 	waiting []*wait
 }
 
 // wait is a pending timer or sleep. Exactly one of f and wake is set.
 type wait struct {
 	at   time.Time
-	seq  uint64
 	f    func()
 	wake chan struct{}
-}
-
-// before reports whether w falls due ahead of o: by deadline, then by registration order.
-func (w *wait) before(o *wait) bool {
-	if !w.at.Equal(o.at) {
-		return w.at.Before(o.at)
-	}
-	return w.seq < o.seq
 }
 
 // New returns a Manual clock reading start.
@@ -133,8 +123,6 @@ func (m *Manual) add(w *wait, d time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w.at = m.now.Add(d)
-	w.seq = m.seq
-	m.seq++
 	m.waiting = append(m.waiting, w)
 }
 
@@ -151,8 +139,9 @@ func (m *Manual) remove(w *wait) bool {
 	return false
 }
 
-// takeDue removes and returns the first wait due by end, setting the clock to its deadline. When
-// none is due it sets the clock to end and returns nil.
+// takeDue removes and returns the first wait due by end, setting the clock to its deadline: the
+// earliest deadline, and among equal deadlines the earliest registered, since waiting stays in
+// registration order. When none is due it sets the clock to end and returns nil.
 func (m *Manual) takeDue(end time.Time) *wait {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -162,7 +151,7 @@ func (m *Manual) takeDue(end time.Time) *wait {
 		if w.at.After(end) {
 			continue
 		}
-		if first < 0 || w.before(m.waiting[first]) {
+		if first < 0 || w.at.Before(m.waiting[first].at) {
 			first = i
 		}
 	}
