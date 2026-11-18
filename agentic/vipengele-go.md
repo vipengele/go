@@ -29,8 +29,9 @@ under `source/`; the repository's own tooling that is not a Go project lives und
   (`agentic/rules/module-path-matches-the-vanity-map.md`). The `go` directive names a full patch
   release (`agentic/rules/go-directive-names-a-patched-release.md`). Public packages are
   subdirectories; everything not meant for consumers lives under `internal/`.
-- Consumers need Go 1.25 or later: `go.vipengele.org` answers with the four-field `go-import` tag,
-  whose subdirectory field earlier releases ignore.
+- Consumers need Go 1.27 or later, the release every project's `go` directive names.
+  `go.vipengele.org` answers with the four-field `go-import` tag, whose subdirectory field releases
+  before 1.25 ignore, so 1.25 is the technical minimum for the vanity path.
 - `tools/vanity-worker` — the Cloudflare Worker that serves `go.vipengele.org`. It reads its module list
   from the R2 object `modules.json`, which `publish-vanity-modules.yml` writes from `source/**/go.mod`
   when a `go.mod` merges to `main`, so a new project resolves once that workflow has run, with no

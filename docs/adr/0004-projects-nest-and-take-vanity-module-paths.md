@@ -159,8 +159,9 @@ stand as written for this decision.
 - **A new project needs a Worker deploy before its first tag.** The Worker's module list is
   generated from `source/**/go.mod`, so until the deploy that includes the new `go.mod`, the
   project's path does not resolve and its release cannot be announced.
-- **Consumers need Go 1.25 or later.** Earlier releases ignore the fourth `go-import` field, look
-  for the module at the repository root and fail to resolve it.
+- **Consumers need Go 1.27 or later.** That is the release every project's `go` directive names.
+  The technical minimum for the vanity path is Go 1.25: earlier releases ignore the fourth
+  `go-import` field, look for the module at the repository root and fail to resolve it.
 - **pkg.go.dev needs its own first request.** For a module `go.vipengele.org/<dir>` in the
   repository directory `source/<dir>`, pkg.go.dev renders the package with source links under
   `.../blob/source/<dir>/<version>/source/<dir>/`. Its first request for a new module answers 404
