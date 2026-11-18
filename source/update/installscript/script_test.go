@@ -425,10 +425,26 @@ func TestScriptFailsWithoutHomeOrAnInstallDir(t *testing.T) {
 	requireNoFile(t, h.BinaryPath())
 }
 
+// shSetsShell reports whether the sh the harness runs scripts under defines SHELL when its
+// environment lacks it, as bash does when it runs as sh.
+func shSetsShell(t *testing.T) bool {
+	t.Helper()
+	cmd := exec.Command(shPath(t), "-c", `printf %s "${SHELL:-}"`)
+	cmd.Env = []string{}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("probing sh for SHELL: %v", err)
+	}
+	return len(out) > 0
+}
+
 func TestScriptWarnsWhenShellIsNotSetAndSkipsTheCompletion(t *testing.T) {
 	t.Parallel()
 	h := newSignedHarness(t, harnessOptions{})
 	delete(h.Env, "SHELL")
+	if shSetsShell(t) {
+		t.Skip("this sh sets SHELL itself, so a script it runs never sees SHELL unset")
+	}
 
 	res := mustRun(t, h)
 
