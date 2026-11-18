@@ -485,3 +485,29 @@ operating system, and a test passes the manual clock of `commons/clock/clocktest
 when the test advances it (ADR-0040).
 _Avoid_: timer (one pending call of a **Clock**, not the clock), time source, scheduler (the
 **Supervisor** and the **Runner**s own that word), timeout (a bound a caller puts on a wait)
+
+## HTTP client vocabulary
+
+These name what the `httpclient` project builds: a fluent client that sends a request through a
+chain of **Filter**s to an **Engine** (ADR-0041).
+
+**Engine**:
+The component that owns connections and speaks the wire protocol for `httpclient`. The default is
+`net/http`'s `Transport`; any other is an adapter in a project of its own under
+`source/httpengine/<name>`, and a caller's own `*http.Client` can be adopted as one. An Engine is
+the innermost **Transport**: it sends the request and returns the response (ADR-0041).
+_Avoid_: client (the fluent API is the client), stack, protocol implementation
+
+**Transport**:
+`httpclient`'s own interface, one request in and one response out: `RoundTrip(*http.Request)
+(*http.Response, error)`. An **Engine** and every **Filter** implement it, and an
+`http.RoundTripper` already is one, with no adapter (ADR-0041).
+_Avoid_: round tripper (the standard library's name for the same shape), connection (an **Engine**
+owns those)
+
+**Filter**:
+A **Transport** that holds another Transport and adds behaviour to each request and response, such
+as retry or authentication. The chain of Filters sits between the fluent client and the **Engine**,
+and it belongs to an HTTP client: a **Hook** is applied around a **Command** of an **App**, and the
+two share nothing (ADR-0041).
+_Avoid_: middleware, interceptor (a **Hook** is avoided under those names too), decorator
